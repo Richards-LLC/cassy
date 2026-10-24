@@ -1166,369 +1166,130 @@ fn is_test_or_build_input_path(path: &str) -> bool {
     )
 }
 
-/// Cargo inputs are not limited to source-code extensions: `include_str!`,
-/// `include_bytes!`, and package build scripts can consume any file beneath a
-/// crate directory. Inventory the delivered tree once so proof classification
-/// doesn't start Git once per directory or source candidate.
-fn delivered_tree_proof_inputs(
-    repo: &Path,
-    delivered_head: &str,
-    changed_paths: &BTreeSet<String>,
-) -> Option<BTreeSet<String>> {
-    if changed_paths.is_empty() {
-        return Some(BTreeSet::new());
-    }
-    let tree = DeliveredTree::load(repo, delivered_head)?;
-    let mut proof_inputs = BTreeSet::new();
-    let mut external_assets = BTreeSet::new();
-    for path in changed_paths {
+/// Read the delivered tree once per close and batch its Rust sources once.
+fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
+    if changed.is_empty() { return Some(BTreeSet::new()); }
+    let tree = DeliveredTree::load(repo, head)?;
+    let mut inputs = BTreeSet::new();
+    let external = changed.iter().filter(|path| {
         if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
-            proof_inputs.insert(path.clone());
-        } else {
-            external_assets.insert(path.clone());
-        }
-    }
-    if external_assets.is_empty() {
-        return Some(proof_inputs);
-    }
-    for (source_path, source) in
-        tree.rust_sources_with_includes(repo, delivered_head, &external_assets)?
-    {
-        let manifest_dir = tree.manifest_dir_for_source(&source_path);
-        let targets = include_targets(&source, &source_path, manifest_dir.as_deref())?;
-        for target in targets {
-            if external_assets.contains(&target) {
-                proof_inputs.insert(target);
+            inputs.insert((*path).clone()); false
+        } else { true }
+    }).cloned().collect::<Vec<_>>();
+    if external.is_empty() { return Some(inputs); }
+    for (source_path, source) in tree.rust_sources(repo)? {
+        let manifest = tree.manifest_dir_for_source(&source_path);
+        for path in &external {
+            if source_references_path(&source, &source_path, manifest.as_deref(), path) {
+                inputs.insert(path.clone());
             }
         }
     }
-    Some(proof_inputs)
+    Some(inputs)
 }
 
-struct DeliveredTree {
-    manifests: BTreeSet<String>,
-    rust_sources: BTreeMap<String, String>,
-}
+struct DeliveredTree { manifests: BTreeSet<String>, sources: Vec<(String, String)> }
 
 impl DeliveredTree {
-    fn load(repo: &Path, delivered_head: &str) -> Option<Self> {
-        let output = Command::new("git")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["ls-tree", "-r", "-z", "--full-tree", delivered_head])
-            .current_dir(repo)
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
+    fn load(repo: &Path, head: &str) -> Option<Self> {
+        let tree = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["ls-tree", "-r", "-z", "--full-tree", head]).current_dir(repo).output().ok()?;
+        if !tree.status.success() { return None; }
+        let (mut manifests, mut sources) = (BTreeSet::new(), Vec::new());
+        for row in tree.stdout.split(|b| *b == 0).filter(|row| !row.is_empty()) {
+            let tab = row.iter().position(|b| *b == b'\t')?;
+            let mut fields = row[..tab].split(|b| b.is_ascii_whitespace());
+            fields.next()?;
+            if fields.next()? != b"blob" { continue; }
+            let oid = std::str::from_utf8(fields.next()?).ok()?.to_owned();
+            let path = std::str::from_utf8(&row[tab + 1..]).ok()?.to_owned();
+            if path == "Cargo.toml" { manifests.insert(String::new()); }
+            if let Some(dir) = path.strip_suffix("/Cargo.toml") { manifests.insert(dir.to_owned()); }
+            if path.ends_with(".rs") { sources.push((path, oid)); }
         }
-        let mut manifests = BTreeSet::new();
-        let mut rust_sources = BTreeMap::new();
-        for entry in output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
-            let separator = entry.iter().position(|byte| *byte == b'\t')?;
-            let (metadata, path) = entry.split_at(separator);
-            let path = &path[1..];
-            let mut fields = metadata.split(|byte| byte.is_ascii_whitespace());
-            let _mode = fields.next()?;
-            let object_type = fields.next()?;
-            let object_id = fields.next()?;
-            let path = std::str::from_utf8(path).ok()?.to_owned();
-            if object_type != b"blob" {
-                continue;
-            }
-            if let Some(directory) = path.strip_suffix("/Cargo.toml") {
-                manifests.insert(directory.to_owned());
-            }
-            if path.ends_with(".rs") {
-                rust_sources.insert(path, std::str::from_utf8(object_id).ok()?.to_owned());
-            }
-        }
-        Some(Self { manifests, rust_sources })
+        Some(Self { manifests, sources })
     }
 
     fn is_workspace_crate_path(&self, path: &str) -> bool {
-        let Some((mut directory, _)) = path.rsplit_once('/') else {
-            return false;
-        };
+        let mut dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+        while !dir.is_empty() {
+            if self.manifests.contains(dir) { return true; }
+            dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+        }
+        false
+    }
+
+    fn manifest_dir_for_source(&self, path: &str) -> Option<String> {
+        let mut dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
         loop {
-            if self.manifests.contains(directory) {
-                return true;
+            if self.manifests.contains(dir) { return Some(dir.to_owned()); }
+            match dir.rsplit_once('/') {
+                Some((parent, _)) => dir = parent,
+                None => return self.manifests.contains("").then(String::new),
             }
-            let Some((parent, _)) = directory.rsplit_once('/') else {
-                return false;
-            };
-            directory = parent;
         }
     }
 
-    fn manifest_dir_for_source(&self, source_path: &str) -> Option<String> {
-        let Some((mut directory, _)) = source_path.rsplit_once('/') else {
-            return None;
-        };
-        loop {
-            if self.manifests.contains(directory) {
-                return Some(directory.to_owned());
-            }
-            let Some((parent, _)) = directory.rsplit_once('/') else {
-                return None;
-            };
-            directory = parent;
-        }
-    }
-
-    fn rust_sources_with_includes(
-        &self,
-        repo: &Path,
-        delivered_head: &str,
-        changed_paths: &BTreeSet<String>,
-    ) -> Option<Vec<(String, String)>> {
-        let names = changed_paths
-            .iter()
-            .map(|path| path.rsplit('/').next())
-            .collect::<Option<BTreeSet<_>>>()?;
-        if names.iter().any(|name| name.contains('\n')) {
-            return None;
-        }
-        let mut command = Command::new("git");
-        command
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["grep", "-lF", "-z"]);
-        for name in names {
-            command.arg("-e").arg(name);
-        }
-        let sources = command
-            .args([delivered_head, "--", "*.rs"])
-            .current_dir(repo)
-            .output()
-            .ok()?;
-        if !sources.status.success() && sources.status.code() != Some(1) {
-            return None;
-        }
-        let mut paths = BTreeSet::new();
-        if sources.status.success() {
-            let prefix = format!("{delivered_head}:");
-            for path in sources.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
-                let path = std::str::from_utf8(path).ok()?;
-                let path = path.strip_prefix(&prefix).unwrap_or(path);
-                if !self.rust_sources.contains_key(path) {
-                    return None;
-                }
-                paths.insert(path.to_owned());
-            }
-        }
-        if paths.is_empty() {
-            return Some(Vec::new());
-        }
-        let mut command = Command::new("git");
-        command
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["cat-file", "--batch"])
-            .current_dir(repo)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
-        let mut child = command.spawn().ok()?;
+    fn rust_sources(&self, repo: &Path) -> Option<Vec<(String, String)>> {
+        if self.sources.is_empty() { return Some(Vec::new()); }
+        let mut child = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["cat-file", "--batch"]).current_dir(repo)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().ok()?;
         {
             use std::io::Write;
-            let stdin = child.stdin.as_mut()?;
-            for path in &paths {
-                writeln!(stdin, "{}", self.rust_sources.get(path)?).ok()?;
-            }
+            let input = child.stdin.as_mut()?;
+            for (_, oid) in &self.sources { writeln!(input, "{oid}").ok()?; }
         }
         let output = child.wait_with_output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
+        if !output.status.success() { return None; }
         let mut cursor = 0;
-        let mut result = Vec::with_capacity(paths.len());
-        for path in paths {
-            let header_end = output.stdout[cursor..].iter().position(|byte| *byte == b'\n')? + cursor;
-            let mut fields = output.stdout[cursor..header_end].split(|byte| byte.is_ascii_whitespace());
-            let _object_id = fields.next()?;
-            if fields.next()? != b"blob" {
-                return None;
-            }
+        let bodies = self.sources.iter().map(|(path, oid)| {
+            let end = cursor + output.stdout.get(cursor..)?.iter().position(|b| *b == b'\n')?;
+            let mut fields = output.stdout[cursor..end].split(|b| b.is_ascii_whitespace());
+            if fields.next()? != oid.as_bytes() || fields.next()? != b"blob" { return None; }
             let size = std::str::from_utf8(fields.next()?).ok()?.parse::<usize>().ok()?;
-            cursor = header_end + 1;
-            let end = cursor.checked_add(size)?;
-            let source = std::str::from_utf8(output.stdout.get(cursor..end)?).ok()?.to_owned();
-            if output.stdout.get(end) != Some(&b'\n') {
-                return None;
-            }
             cursor = end + 1;
-            result.push((path, source));
-        }
-        (cursor == output.stdout.len()).then_some(result)
+            let body_end = cursor.checked_add(size)?;
+            let body = std::str::from_utf8(output.stdout.get(cursor..body_end)?).ok()?.to_owned();
+            if output.stdout.get(body_end) != Some(&b'\n') { return None; }
+            cursor = body_end + 1;
+            Some((path.clone(), body))
+        }).collect::<Option<Vec<_>>>()?;
+        (cursor == output.stdout.len()).then_some(bodies)
     }
 }
 
-fn include_targets(
-    source: &str,
-    source_path: &str,
-    manifest_dir: Option<&str>,
-) -> Option<Vec<String>> {
-    let mut targets = Vec::new();
-    let mut cursor = 0;
-    while let Some((end, expression)) = next_include_expression(source, cursor)? {
-        cursor = end;
-        let expression = expression.trim();
-        let uses_manifest_dir = expression.contains("CARGO_MANIFEST_DIR");
-        if !uses_manifest_dir
-            && !expression.starts_with('"')
-            && !expression.starts_with("r#")
-            && !expression.starts_with("concat!")
-        {
-            return None;
+fn source_references_path(source: &str, source_path: &str, manifest: Option<&str>, target: &str) -> bool {
+    if !source.contains("include_str") && !source.contains("include_bytes") { return false; }
+    let dir = source_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    [Some(dir), manifest].into_iter().flatten().any(|base| {
+        let Some(relative) = relative_repo_path(base, target) else { return false; };
+        if normalize_repo_path(base, &relative).as_deref() != Some(target) { return false; }
+        match relative.rsplit_once('/') {
+            Some((parent, name)) => source.contains(&relative)
+                || (source.contains(&format!("{parent}/")) && source.contains(name)),
+            None => source.contains(&relative),
         }
-        let path = string_literals(expression)?
-            .into_iter()
-            .filter(|literal| literal != "CARGO_MANIFEST_DIR")
-            .collect::<String>();
-        if path.is_empty() {
-            return None;
-        }
-        let base = if uses_manifest_dir {
-            manifest_dir?
-        } else {
-            source_path.rsplit_once('/')?.0
-        };
-        let path = if uses_manifest_dir {
-            path.trim_start_matches('/')
-        } else {
-            &path
-        };
-        targets.push(normalize_repo_relative_path(base, path)?);
-    }
-    Some(targets)
+    })
 }
 
-fn next_include_expression(source: &str, from: usize) -> Option<Option<(usize, &str)>> {
-    let bytes = source.as_bytes();
-    let mut index = from;
-    while index < bytes.len() {
-        if let Some(end) = skip_rust_ignored(bytes, index) {
-            index = end;
-            continue;
-        }
-        let name = [b"include_str".as_slice(), b"include_bytes".as_slice()]
-            .into_iter()
-            .find(|name| bytes[index..].starts_with(name));
-        if let Some(name) = name {
-            if index == 0 || !is_rust_ident_byte(bytes[index - 1]) {
-                let mut marker = index + name.len();
-                while bytes.get(marker).is_some_and(u8::is_ascii_whitespace) { marker += 1; }
-                if bytes.get(marker) == Some(&b'!') {
-                    marker += 1;
-                    while bytes.get(marker).is_some_and(u8::is_ascii_whitespace) { marker += 1; }
-                    if bytes.get(marker) == Some(&b'(') {
-                        let close = matching_rust_paren(bytes, marker)?;
-                        return Some(Some((close + 1, &source[marker + 1..close])));
-                    }
-                }
-            }
-        }
-        index += 1;
-    }
-    Some(None)
+fn relative_repo_path(base: &str, target: &str) -> Option<String> {
+    let from = normalize_repo_path("", base)?;
+    let to = normalize_repo_path("", target)?;
+    let from = from.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let to = to.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
+    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
+    Some(std::iter::repeat("..").take(from.len() - common)
+        .chain(to[common..].iter().copied()).collect::<Vec<_>>().join("/"))
 }
 
-fn is_rust_ident_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn matching_rust_paren(bytes: &[u8], open: usize) -> Option<usize> {
-    let mut depth = 1usize;
-    let mut index = open + 1;
-    while index < bytes.len() {
-        if let Some(end) = skip_rust_ignored(bytes, index) {
-            index = end;
-            continue;
-        }
-        match bytes[index] {
-            b'(' => depth += 1,
-            b')' => { depth -= 1; if depth == 0 { return Some(index); } }
-            _ => {}
-        }
-        index += 1;
-    }
-    None
-}
-
-fn skip_rust_ignored(bytes: &[u8], index: usize) -> Option<usize> {
-    if bytes.get(index..index + 2) == Some(b"//") {
-        return Some(bytes[index..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |offset| index + offset + 1));
-    }
-    if bytes.get(index..index + 2) == Some(b"/*") {
-        let mut depth = 1usize;
-        let mut cursor = index + 2;
-        while cursor + 1 < bytes.len() {
-            if bytes.get(cursor..cursor + 2) == Some(b"/*") { depth += 1; cursor += 2; }
-            else if bytes.get(cursor..cursor + 2) == Some(b"*/") { depth -= 1; cursor += 2; if depth == 0 { return Some(cursor); } }
-            else { cursor += 1; }
-        }
-        return None;
-    }
-    if let Some(end) = rust_string_end(bytes, index) { return Some(end); }
-    if bytes.get(index) == Some(&b'\'') {
-        let mut cursor = index + 1;
-        if bytes.get(cursor) == Some(&b'\\') { cursor += 2; } else { cursor += 1; }
-        if bytes.get(cursor) == Some(&b'\'') { return Some(cursor + 1); }
-    }
-    None
-}
-
-fn rust_string_end(bytes: &[u8], index: usize) -> Option<usize> {
-    if bytes.get(index) == Some(&b'"') {
-        let mut cursor = index + 1;
-        while cursor < bytes.len() {
-            match bytes[cursor] { b'\\' => cursor += 2, b'"' => return Some(cursor + 1), _ => cursor += 1 }
-        }
-        return None;
-    }
-    if bytes.get(index) != Some(&b'r') { return None; }
-    let mut quote = index + 1;
-    while bytes.get(quote) == Some(&b'#') { quote += 1; }
-    if bytes.get(quote) != Some(&b'"') { return None; }
-    let hashes = quote - index - 1;
-    let mut cursor = quote + 1;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' && bytes.get(cursor + 1..cursor + 1 + hashes) == Some(&vec![b'#'; hashes][..]) { return Some(cursor + 1 + hashes); }
-        cursor += 1;
-    }
-    None
-}
-
-fn string_literals(source: &str) -> Option<Vec<String>> {
-    let bytes = source.as_bytes();
-    let mut result = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(end) = skip_rust_ignored(bytes, index) {
-            if bytes.get(index) == Some(&b'"') {
-                result.push(serde_json::from_str(&source[index..end]).ok()?);
-            } else if bytes.get(index) == Some(&b'r') {
-                let quote = source[index..end].find('"')? + index;
-                let hashes = bytes[index + 1..quote].iter().filter(|byte| **byte == b'#').count();
-                let content_end = end.checked_sub(1 + hashes)?;
-                result.push(source.get(quote + 1..content_end)?.to_owned());
-            }
-            index = end;
-        } else {
-            index += 1;
-        }
-    }
-    Some(result)
-}
-
-fn normalize_repo_relative_path(base: &str, path: &str) -> Option<String> {
+fn normalize_repo_path(base: &str, path: &str) -> Option<String> {
     if path.starts_with('/') || path.contains('\0') { return None; }
-    let mut components = base.split('/').filter(|component| !component.is_empty()).map(str::to_owned).collect::<Vec<_>>();
-    for component in path.split('/') {
-        match component {
-            "" | "." => {}
-            ".." => { components.pop()?; }
-            component => components.push(component.to_owned()),
-        }
+    let mut parts = Vec::new();
+    for part in base.split('/').chain(path.split('/')) {
+        match part { "" | "." => {}, ".." => { parts.pop()?; }, name => parts.push(name) }
     }
-    (!components.is_empty()).then(|| components.join("/"))
+    Some(parts.join("/"))
 }
 
 /// Write the receipt a passing targeted run leaves, for tests of the gates

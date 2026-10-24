@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map regenerated for the 3.76 freeze tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated for the 3.77 freeze tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 

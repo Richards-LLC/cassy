@@ -196,6 +196,41 @@ fn foreign_task_branch_start_refusal(
     )
 }
 
+/// A parked ref may back an open PR. Switch the new task to its own lane
+/// without moving that ref or publishing a replacement for the parked task.
+fn checkout_task_beside_parked_delivery(
+    checkout: &std::path::Path,
+    worker: &str,
+    task_id: &str,
+    target: &str,
+) -> Result<String, String> {
+    let git = GitOperations::new(checkout.to_path_buf());
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(checkout)
+        .output()
+        .map_err(|error| format!("Cannot inspect parked checkout: {error}"))?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return Err("Cannot start task beside a parked delivery: commit or stash tracked changes before switching branches.".into());
+    }
+    let branch = crate::factory_isolation::worker_task_branch(worker, task_id);
+    if git.resolve_commit(&format!("refs/heads/{branch}")).is_none() {
+        let remote = format!("origin/{branch}");
+        let base = if git.resolve_commit(&remote).is_some() {
+            remote
+        } else {
+            git.resolve_fresh_base(target)
+                .map_err(|error| format!("Cannot resolve task target `{target}`: {error}"))?
+                .branch_ref
+        };
+        git.create_branch_from(&branch, &base)
+            .map_err(|error| format!("Cannot create task branch {branch}: {error}"))?;
+    }
+    git.checkout(&branch)
+        .map_err(|error| format!("Cannot check out task branch {branch}: {error}"))?;
+    Ok(branch)
+}
+
 /// The declared target eligible for a first-start branch reset at assignment.
 /// Assignment passes its proposed final status, so a batched ownership/status
 /// update cannot promise a reset that start will skip. Resumes with anchors
@@ -2373,7 +2408,7 @@ impl CasCore {
                     // A completed per-task lane is owned just like the base
                     // lane. Reconcile the branch actually checked out so an
                     // accepted clean-idle assignment also starts on fresh code.
-                    let worker_branch = crate::factory_isolation::branch_at(worker_checkout)
+                    let mut worker_branch = crate::factory_isolation::branch_at(worker_checkout)
                         .filter(|branch| {
                             crate::factory_isolation::classify_worker_binding(
                                 &worker.name,
@@ -2383,6 +2418,30 @@ impl CasCore {
                         .unwrap_or_else(|| {
                             crate::factory_isolation::expected_worker_branch(&worker.name)
                         });
+                    // GH #1353: both the reusable and per-task parked refs
+                    // must remain stable while the next task starts.
+                    let parked_branch_note = if task.status == TaskStatus::Open {
+                        crate::mcp::tools::worktree_head(worker_checkout)
+                            .and_then(|tip| crate::mcp::tools::parked_delivery_at_tip(
+                                task_store.as_ref(), &worker.name, &tip,
+                            ))
+                            .filter(|parked| parked.task_id != task.id
+                                && crate::factory_isolation::branch_at(worker_checkout).as_deref()
+                                    == Some(worker_branch.as_str()))
+                            .map(|parked| {
+                                let preserved = worker_branch.clone();
+                                worker_branch = checkout_task_beside_parked_delivery(
+                                    worker_checkout, &worker.name, &task.id, target_branch,
+                                ).map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
+                                Ok::<_, McpError>(format!(
+                                    "\n\n🔀 PARKED BRANCH PRESERVED: {} stays on {preserved} at {}. This task uses {worker_branch}.",
+                                    parked.task_id, parked.tip,
+                                ))
+                            })
+                            .transpose()?
+                    } else {
+                        None
+                    };
                     // A proof-scope correction can reopen the same task while
                     // its delivery branch remains checked out. That branch is
                     // the task's own history, not a reusable worker lane to
@@ -2390,7 +2449,11 @@ impl CasCore {
                     let is_current_task_branch = crate::factory_isolation::own_task_branch_task_id(
                         &worker.name,
                         &worker_branch,
-                    ) == Some(task.id.as_str());
+                    )
+                    .is_some_and(|owner_task| {
+                        owner_task == task.id.as_str()
+                            || owner_task.starts_with(&format!("{}-", task.id))
+                    });
                     // cas-ff6c: another task's per-task branch is that task's
                     // delivery ref, never a reusable lane. A supervisor
                     // rebind that recorded this branch for the task is exempt.
@@ -2398,7 +2461,10 @@ impl CasCore {
                         &worker.name,
                         &worker_branch,
                     )
-                    .filter(|owner_task| *owner_task != task.id)
+                    .filter(|owner_task| {
+                        *owner_task != task.id
+                            && !owner_task.starts_with(&format!("{}-", task.id))
+                    })
                         && task
                             .deliverables
                             .factory_branch_start
@@ -2417,7 +2483,7 @@ impl CasCore {
                             ),
                         ));
                     }
-                    let reset_note =if task.status == TaskStatus::Open && !is_current_task_branch {
+                    let reset_note = if task.status == TaskStatus::Open && !is_current_task_branch {
                         let identity =
                             close_ops::task_commit_identity_in_repo(worker_checkout, &task, None)
                                 .map_err(|message| Self::error(ErrorCode::INVALID_PARAMS, message))?;
@@ -2487,7 +2553,7 @@ impl CasCore {
                             base_sha,
                         });
                     }
-                    reset_note
+                    parked_branch_note.or(reset_note)
                 } else {
                     None
                 }

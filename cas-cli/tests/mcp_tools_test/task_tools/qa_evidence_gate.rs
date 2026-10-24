@@ -519,13 +519,22 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 
 #[tokio::test]
 async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
-    for case in ["new live owner", "changed status", "changed invariant", "neutral bug metadata"] {
-    let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
-        &[("web/composer.css", ".composer{gap:8px}\n")],
-        "Open the composer; spacing is even",
-    );
-    let registry = r#"version: 1
+    for case in [
+        "new live owner",
+        "changed status",
+        "changed invariant",
+        "changed evidence requirement",
+        "changed kind",
+        "changed safety policy",
+        "neutral bug metadata",
+    ] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let fx = fixture(
+            &mut test_env,
+            &[("web/composer.css", ".composer{gap:8px}\n")],
+            "Open the composer; spacing is even",
+        );
+        let registry = r#"version: 1
 updated: "2026-10-23"
 invariants:
   INV-COMPOSER:
@@ -541,68 +550,119 @@ journeys:
     invariants: [INV-COMPOSER]
     traffic: {share_pct: 100, basis: messages}
 "#;
-    if case != "new live owner" {
-        commit_file(&fx.repo, "docs/qa/journeys.yaml", registry);
-    }
-    let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
-    let bundle = fx.write_bundle(&head);
-    let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{case}: {parked}");
-    assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
-
-    let paths = [
-        "docs/qa/journeys.yaml",
-        "docs/qa/LEDGER.md",
-        ".claude/CODEMAP.md",
-        "docs/PRODUCT_OVERVIEW.md",
-    ];
-    let after = match case {
-        "new live owner" => registry.to_string(),
-        "changed status" => registry.replace("status: live", "status: dark\n    status_reason: feature disabled"),
-        "changed invariant" => registry.replace("The composer remains visible", "The sent message remains visible"),
-        _ => registry.replace("check: Read the composer after opening it", "check: Read the composer after opening it\n    bug: {task: cas-56bf}"),
-    };
-    for path in paths {
-        commit_file(&fx.repo, path, if path.ends_with(".yaml") { &after } else { "QA documentation upkeep\n" });
-    }
-    // The reused artifacts predate B: SHA acceptance alone is insufficient.
-    let date = format!("@{} +0000", chrono::Utc::now().timestamp() + 60);
-    let amended = Command::new("git")
-        .args([
-            "-c", "user.name=CAS Test", "-c", "user.email=cas@example.test",
-            "commit", "--amend", "--no-edit", "-q",
-        ])
-        .current_dir(&fx.repo)
-        .env("GIT_COMMITTER_DATE", date)
-        .output()
-        .unwrap();
-    assert!(amended.status.success(), "{amended:?}");
-    let rebound = git(&fx.repo, &["rev-parse", "HEAD"]);
-    let result = close_text(&fx.core, TASK).await;
-    if case != "neutral bug metadata" {
-        assert!(result.contains("QA evidence bundle is") && result.contains("coverage changed"), "{case}: {result}");
-        assert!(result.contains("COMPOSE"), "{case}: {result}");
-        if case == "changed invariant" {
-            assert!(result.contains("INV-COMPOSER"), "{result}");
+        if case != "new live owner" {
+            commit_file(&fx.repo, "docs/qa/journeys.yaml", registry);
         }
-        assert!(!fx.notes().contains("QA evidence rebind"), "no rebind decision on refusal");
-        continue;
-    }
-    assert!(result.contains("MERGE REQUIRED"), "{case}: {result}");
-    let notes = fx.notes();
-    let rebind = notes.lines()
-        .find(|line| line.contains("QA evidence rebind"))
-        .expect("close records why the earlier trace still covers this delivery");
-    assert!(rebind.contains(&head) && rebind.contains(&rebound), "{rebind}");
-    for path in paths {
-        assert!(rebind.contains(path), "missing {path}: {rebind}");
-    }
-    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
-    assert_eq!(manifest["head_sha"], head, "close preserves the original execution manifest");
-    let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
-    let stale = close_text(&fx.core, TASK).await;
-    assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
-    assert!(stale.contains(&later[..8]), "{stale}");
+        let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
+        let bundle = fx.write_bundle(&head);
+        let parked = close_text(&fx.core, TASK).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{case}: {parked}");
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
+
+        let paths = [
+            "docs/qa/journeys.yaml",
+            "docs/qa/LEDGER.md",
+            ".claude/CODEMAP.md",
+            "docs/PRODUCT_OVERVIEW.md",
+        ];
+        let after = match case {
+            "new live owner" => registry.to_string(),
+            "changed status" => registry.replace(
+                "status: live",
+                "status: dark\n    status_reason: feature disabled",
+            ),
+            "changed invariant" => registry.replace(
+                "The composer remains visible",
+                "The sent message remains visible",
+            ),
+            "changed evidence requirement" => registry.replace(
+                "steps: [open, compose]",
+                "steps: [open, compose]\n    spec: e2e/composer.spec.ts\n    spec_status: planned",
+            ),
+            "changed kind" => registry.replace(
+                "status: live",
+                "status: live\n    kind: browser",
+            ),
+            "changed safety policy" => registry.replace(
+                "journeys:\n",
+                "safety: {mode: staging, protected_credentials: [DATABASE_PASSWORD]}\njourneys:\n",
+            ),
+            _ => registry.replace(
+                "check: Read the composer after opening it",
+                "check: Read the composer after opening it\n    bug: {task: cas-56bf}",
+            ),
+        };
+        for path in paths {
+            commit_file(
+                &fx.repo,
+                path,
+                if path.ends_with(".yaml") {
+                    &after
+                } else {
+                    "QA documentation upkeep\n"
+                },
+            );
+        }
+        // The reused artifacts predate B: SHA acceptance alone is insufficient.
+        let date = format!("@{} +0000", chrono::Utc::now().timestamp() + 60);
+        let amended = Command::new("git")
+            .args([
+                "-c",
+                "user.name=CAS Test",
+                "-c",
+                "user.email=cas@example.test",
+                "commit",
+                "--amend",
+                "--no-edit",
+                "-q",
+            ])
+            .current_dir(&fx.repo)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .unwrap();
+        assert!(amended.status.success(), "{amended:?}");
+        let rebound = git(&fx.repo, &["rev-parse", "HEAD"]);
+        let result = close_text(&fx.core, TASK).await;
+        if case != "neutral bug metadata" {
+            assert!(
+                result.contains("QA evidence bundle is") && result.contains("coverage changed"),
+                "{case}: {result}"
+            );
+            assert!(
+                result.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing ("),
+                "{case}: {result}"
+            );
+            assert!(result.contains("COMPOSE"), "{case}: {result}");
+            if case == "changed invariant" {
+                assert!(result.contains("INV-COMPOSER"), "{result}");
+            }
+            assert!(
+                !fx.notes().contains("QA evidence rebind"),
+                "no rebind decision on refusal"
+            );
+            continue;
+        }
+        assert!(result.contains("MERGE REQUIRED"), "{case}: {result}");
+        let notes = fx.notes();
+        assert!(notes.contains("QA evidence bundle accepted"), "{notes}");
+        let rebind = notes
+            .lines()
+            .find(|line| line.contains("QA evidence rebind"))
+            .expect("close records why the earlier trace still covers this delivery");
+        assert!(rebind.contains(&head) && rebind.contains(&rebound), "{rebind}");
+        for path in paths {
+            assert!(rebind.contains(path), "missing {path}: {rebind}");
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
+        assert_eq!(
+            manifest["head_sha"], head,
+            "close preserves the original execution manifest"
+        );
+        let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
+        let stale = close_text(&fx.core, TASK).await;
+        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
+        assert!(stale.contains(&later[..8]), "{stale}");
     }
 }
 

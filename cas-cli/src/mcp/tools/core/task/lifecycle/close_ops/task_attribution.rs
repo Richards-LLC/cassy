@@ -60,24 +60,45 @@ pub(crate) fn started_delivery(
     };
     let mut tip = resolve_branch_sha(repo, &format!("{branch}^{{commit}}"))
         .ok_or_else(|| refuse("the delivery tip cannot be read"))?;
+    let target = preferred_diff_target_ref_for_delivery(
+        repo,
+        &start.work_target.target_branch,
+        task.delivery_mode,
+    );
     // Once parked, later tasks may reuse the lane. Its immutable anchor ends
     // this delivery; current in-progress commit-hook anchors do not truncate WIP.
     if matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Closed)
         && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
         && git_commit_is_ancestor(repo, anchor, &tip)
     {
-        tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
-            .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+        // GH #1355: a target-sync merge may restore a start base absent
+        // from the older park. Validate that fast-forward continuation before
+        // truncating to B, or close would test C's ancestry against stale B.
+        // Persistence still applies the sibling-lease and ownership fences.
+        let restored_start = task.status == TaskStatus::AwaitingMerge
+            && !git_commit_is_ancestor(repo, &start.base_sha, anchor)
+            && git_commit_is_ancestor(repo, &start.base_sha, &tip)
+            && parked_anchor_advance_with_target_is_attributable(
+                repo, anchor, &tip, &task.id, None, &target,
+            );
+        if !restored_start {
+            if !git_commit_is_ancestor(repo, &start.base_sha, anchor)
+                && git_commit_is_ancestor(repo, &start.base_sha, &tip)
+            {
+                return Err(refuse(&format!(
+                    "parked anchor {anchor} predates the start base; current tip {tip} contains \
+                     that base but is not an attributable continuation. Ask the supervisor to \
+                     request_changes or rebind_branch before re-parking"
+                )));
+            }
+            tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+                .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+        }
     }
     if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
         return Err(refuse("the base is no longer an ancestor of the delivery"));
     }
     let range = format!("{}..{tip}", start.base_sha);
-    let target = preferred_diff_target_ref_for_delivery(
-        repo,
-        &start.work_target.target_branch,
-        task.delivery_mode,
-    );
     // Rebasing onto the target puts integrated ordinary commits on the lane
     // after the start base. They belong to the target, not this delivery.
     let lane_history = git_text(

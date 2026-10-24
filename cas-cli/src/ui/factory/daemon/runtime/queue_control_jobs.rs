@@ -359,6 +359,15 @@ impl RecipientInputs {
             _ => false,
         })
     }
+    /// cas-e6d7: the transcript positively records a turn end after the last
+    /// turn start. Unlike [`Self::mid_turn`], a read tail with no turn record
+    /// (a turn longer than the read window) is not evidence of an ended turn.
+    pub(crate) fn turn_completed(&self) -> bool {
+        self.has_transcript
+            && self.latest.completion.as_ref().is_some_and(|end| {
+                self.latest.wake.as_ref().is_none_or(|start| end.at > start.at)
+            })
+    }
 }
 
 struct WakeInputs {

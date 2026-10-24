@@ -1629,31 +1629,26 @@ pub(super) fn report_provision_failure(
             detail,
         );
     }
-    let notified = enqueue_spawn_outcome_notice(
-        cas_dir,
-        supervisor_name,
-        factory_session,
-        request_id,
-        worker_name,
-        "provision",
-        false,
-        detail,
-    );
-    if notified.is_err() {
-        let request = request_id
-            .map(|id| format!("request {id}"))
-            .unwrap_or_else(|| "a direct spawn".to_string());
-        notify_supervisor_or_defer(
-            cas_dir,
-            supervisor_name,
-            factory_session,
-            format!("Worker spawn failed: {worker_name}"),
-            format!(
-                "Factory spawn {request} for worker '{worker_name}' failed in provisioning: \
-                 {detail}"
-            ),
-        );
-    }
+    // A spent loop budget must not downgrade the deferred notice to ordinary
+    // inbox traffic: retry the same blocker-bearing enqueue off the loop.
+    let cas_dir = cas_dir.to_path_buf();
+    let supervisor = supervisor_name.to_owned();
+    let session = factory_session.to_owned();
+    let worker = worker_name.to_owned();
+    let detail = detail.to_owned();
+    super::store_worker::persist_or_defer("notify supervisor of provision failure", move || {
+        enqueue_spawn_outcome_notice(
+            &cas_dir,
+            &supervisor,
+            &session,
+            request_id,
+            &worker,
+            "provision",
+            false,
+            &detail,
+        )
+        .map(|_| ())
+    });
 }
 
 /// Queue a director notice to the supervisor that must not be lost to a spent
@@ -1717,13 +1712,27 @@ fn enqueue_spawn_outcome_notice(
             ),
         )
     };
-    let id = queue.enqueue_with_summary(
-        "director",
-        supervisor_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
+    let id = if !success && matches!(stage, "provision" | "register") {
+        queue.enqueue_urgent_with_outcome(
+            "director",
+            supervisor_name,
+            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, None),
+            Some(factory_session),
+            Some(&summary),
+            Some(cas_store::NotificationPriority::Critical),
+            false,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )?
+        .id()
+    } else {
+        queue.enqueue_with_summary(
+            "director",
+            supervisor_name,
+            &message,
+            Some(factory_session),
+            Some(&summary),
+        )?
+    };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
 }
@@ -7163,6 +7172,28 @@ impl FactoryDaemon {
         }))
     }
 
+    /// cas-c0d0 (GH #1246): the supervisor's own fired reminder, once its
+    /// transcript records that the last turn ended. A Claude supervisor with a
+    /// running background task repaints its pane, so the 2-second silence bar
+    /// held these wakes until an unrelated turn started (98.5 s in the live
+    /// cas-ca26 probe). The typing, readiness and tool-call vetoes stay. Without that
+    /// transcript evidence the ordinary policy decides. cas-e6d7: that
+    /// evidence is a turn end seen after the last turn start; a read tail with
+    /// no turn record (a turn longer than the read window) does not count.
+    pub fn supervisor_self_reminder_wake(
+        pane_target: &str,
+        supervisor_name: &str,
+        turn_completed: bool,
+        pane: PaneWakeState,
+    ) -> Option<WakeDecision> {
+        if pane_target != supervisor_name || !turn_completed {
+            return None;
+        }
+        Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
+            WakeDecision::allow("fired self-reminder to a supervisor whose transcript shows its turn ended")
+        }))
+    }
+
     /// cas-cd3f: the startup brief begins a supervisor's first turn. A
     /// just-launched harness has a fresh heartbeat and repaints while it
     /// loads, so the quiet-pane bar would hold the brief until the operator
@@ -7334,6 +7365,12 @@ impl FactoryDaemon {
             .as_ref()
             .filter(|completion| completion.at > after)
             .map(|completion| completion.at)
+    }
+    fn prepared_turn_completed(&self, pane: &str) -> bool {
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)
+            .is_some_and(|inputs| inputs.turn_completed())
     }
     fn prepared_mid_turn(&self, pane: &str) -> Option<bool> {
         self.queue_jobs
@@ -10023,7 +10060,17 @@ impl FactoryDaemon {
                         // to a worker parked on it wakes promptly; everything
                         // else keeps the ordinary policy.
                         let supervisor_decision = if is_supervisor_target {
-                            None
+                            // cas-c0d0 (GH #1246): the supervisor's own fired reminder.
+                            self_addressed_reminder(&queued)
+                                .then(|| {
+                                    Self::supervisor_self_reminder_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        self.prepared_turn_completed(&pane_target),
+                                        pane_state,
+                                    )
+                                })
+                                .flatten()
                         } else if self_addressed_reminder(&queued) {
                             // cas-901f: the worker's own fired reminder.
                             self.queue_jobs
@@ -17600,6 +17647,14 @@ mod tests {
         assert!(prompts[0].prompt.contains("request 407"));
         // pin: worker status relies on the registration-failure stage saved in the notice.
         assert!(prompts[0].prompt.contains("stage=register"));
+        assert_eq!(prompts[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(prompts[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon, "keen-crane", &prompts[0].source, &prompts[0].prompt,
+            ),
+            Some(SupervisorWakeClass::Blocker),
+        );
     }
 
     // -----------------------------------------------------------------------

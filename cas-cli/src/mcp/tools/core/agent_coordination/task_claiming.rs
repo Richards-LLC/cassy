@@ -495,9 +495,11 @@ impl CasCore {
         // GH #1098: a registered live supervisor can return a worker's
         // task to the pool without waiting for its exhausted conversation.
         // Environment roles and force=true do not grant this authority.
-        let is_live_supervisor = agent_store.get(&agent_id).is_ok_and(|agent| {
+        let caller = agent_store.get(&agent_id).ok();
+        let is_live_supervisor = caller.as_ref().is_some_and(|agent| {
             agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
         });
+        let reviewer_name = caller.as_ref().map(|agent| agent.name.as_str()).unwrap_or(&agent_id);
         let release_result = if is_live_supervisor {
             agent_store
                 .release_lease_for_task(
@@ -520,6 +522,9 @@ impl CasCore {
 
         match release_result {
             Ok(()) => {
+                let qa_warning = self.release_qa_claim_on_task_release(
+                    &req.task_id, &agent_id, reviewer_name, is_live_supervisor,
+                );
                 // cas-5f28: release the Cassy Cloud claim beside the lease.
                 crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id)
                     .await;
@@ -563,12 +568,12 @@ impl CasCore {
                         data: None,
                     })?;
                     Ok(Self::success(format!(
-                        "Released task: {} (status reset from InProgress to Open)",
+                        "Released task: {} (status reset from InProgress to Open){qa_warning}",
                         req.task_id
                     )))
                 } else {
                     Ok(Self::success(format!(
-                        "Released task lease: {} (task status remains {})",
+                        "Released task lease: {} (task status remains {}){qa_warning}",
                         req.task_id, task.status
                     )))
                 }
@@ -597,6 +602,11 @@ impl CasCore {
                             && task.status != TaskStatus::Open
                             && task.status != TaskStatus::AwaitingMerge
                         {
+                            let qa_warning = self.release_qa_claim_on_task_release(
+                                &req.task_id, &agent_id, reviewer_name, is_live_supervisor,
+                            );
+                            crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id).await;
+                            crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
                             let prior_status = task.status;
                             let prior_assignee = task.assignee.clone();
                             task.status = TaskStatus::Open;
@@ -620,7 +630,7 @@ impl CasCore {
                                 data: None,
                             })?;
                             return Ok(Self::success(format!(
-                                "Released task: {} (auto-recovered from {:?} — lease was absent; status reset to Open)",
+                                "Released task: {} (auto-recovered from {:?} — lease was absent; status reset to Open){qa_warning}",
                                 req.task_id, prior_status
                             )));
                         }
@@ -632,6 +642,38 @@ impl CasCore {
                     message: Cow::from(format!("Failed to release task: {err_str}")),
                     data: None,
                 })
+            }
+        }
+    }
+
+    // QA ownership is independent of the task lease. An error here must not
+    // strand Cloud/file leases after the task lease has already been dropped.
+    fn release_qa_claim_on_task_release(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        reviewer_name: &str,
+        is_live_supervisor: bool,
+    ) -> String {
+        let released = if is_live_supervisor {
+            cas_store::release_qa_claim_for_task(&self.cas_root, task_id)
+        } else {
+            cas_store::release_qa_claim_for_reviewer(&self.cas_root, task_id, reviewer_name)
+                .or_else(|error| {
+                    // QA start records names; direct store callers may record IDs.
+                    // Retry only an ownership conflict, preserving database failures.
+                    if reviewer_name != agent_id && matches!(&error, cas_store::StoreError::Other(_)) {
+                        cas_store::release_qa_claim_for_reviewer(&self.cas_root, task_id, agent_id)
+                    } else {
+                        Err(error)
+                    }
+                })
+        };
+        match released {
+            Ok(_) => String::new(),
+            Err(error) => {
+                tracing::warn!(task_id, agent_id, %error, "task release could not clear QA claim; continuing cleanup");
+                format!("\nWarning: QA pass claim was not released: {error}")
             }
         }
     }

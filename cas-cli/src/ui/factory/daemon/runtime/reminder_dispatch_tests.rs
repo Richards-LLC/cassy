@@ -194,6 +194,18 @@ async fn cas_f265_idle_supervisor_time_reminder_wakes_once_even_with_recent_chec
 /// call's `tool_use` in an `api-request-blob` record after its `tool_result`;
 /// the transcript has been quiet for ten minutes, as an idle pane's is.
 fn idle_transcript_replaying_a_finished_call(root: &tempfile::TempDir, daemon: &FactoryDaemon) {
+    let call = r#"{"type":"tool_use","id":"toolu_3866","name":"Bash","input":{"command":"gh run view 42"}}"#;
+    write_supervisor_transcript(root, daemon, &[
+        format!(r#"{{"type":"assistant","timestamp":"2026-10-19T22:39:34Z","message":{{"role":"assistant","content":[{call}],"stop_reason":"tool_use"}}}}"#),
+        r#"{"type":"user","timestamp":"2026-10-19T22:39:35Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3866","content":"completed"}]}}"#.to_string(),
+        format!(r#"{{"type":"api-request-blob","hash":"h","sessionId":"single-sup","message":{{"role":"assistant","content":[{call}]}}}}"#),
+        r#"{"type":"assistant","timestamp":"2026-10-19T22:41:28Z","message":{"role":"assistant","content":[{"type":"text","text":"Waiting on the merge queue."}],"stop_reason":"end_turn"}}"#.to_string(),
+    ]);
+}
+
+/// Register the fixture's Claude supervisor Active with `lines` as the
+/// transcript the wake read consults, quiet for ten minutes.
+fn write_supervisor_transcript(root: &tempfile::TempDir, daemon: &FactoryDaemon, lines: &[String]) {
     let agents = open_agent_store(daemon.app.cas_dir()).unwrap();
     let mut supervisor = agents.get("single-sup").unwrap();
     let clone = root.path().to_str().unwrap().to_string();
@@ -205,13 +217,6 @@ fn idle_transcript_replaying_a_finished_call(root: &tempfile::TempDir, daemon: &
     let slug: String = clone.chars().map(|c| if matches!(c, '/' | '.') { '-' } else { c }).collect();
     let dir = dirs::home_dir().unwrap().join(".claude/projects").join(slug);
     std::fs::create_dir_all(&dir).unwrap();
-    let call = r#"{"type":"tool_use","id":"toolu_3866","name":"Bash","input":{"command":"gh run view 42"}}"#;
-    let lines = [
-        format!(r#"{{"type":"assistant","timestamp":"2026-10-19T22:39:34Z","message":{{"role":"assistant","content":[{call}],"stop_reason":"tool_use"}}}}"#),
-        r#"{"type":"user","timestamp":"2026-10-19T22:39:35Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3866","content":"completed"}]}}"#.to_string(),
-        format!(r#"{{"type":"api-request-blob","hash":"h","sessionId":"single-sup","message":{{"role":"assistant","content":[{call}]}}}}"#),
-        r#"{"type":"assistant","timestamp":"2026-10-19T22:41:28Z","message":{"role":"assistant","content":[{"type":"text","text":"Waiting on the merge queue."}],"stop_reason":"end_turn"}}"#.to_string(),
-    ];
     let path = dir.join("single-sup.jsonl");
     std::fs::write(&path, lines.join("\n") + "\n").unwrap();
     std::fs::File::options()
@@ -281,6 +286,72 @@ async fn cas_3866_idle_claude_supervisor_wakes_for_ci_reminder_past_replayed_too
 async fn cas_3866_idle_claude_supervisor_wakes_for_stalled_relay_past_replayed_tool_call() {
     if child("cas_3866_idle_claude_supervisor_wakes_for_stalled_relay_past_replayed_tool_call") {
         idle_supervisor_with_replayed_call_wakes(true).await;
+    }
+}
+
+/// cas-c0d0 (GH #1246): an idle Claude supervisor with a running background
+/// task keeps repainting, so its pane is never 2 s silent. In the live cas-ca26 probe its
+/// own fired reminder sat gated 98.5 s until an unrelated turn started. With
+/// the transcript showing the turn ended, the first pass must type it once.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_c0d0_repainting_idle_supervisor_wakes_once_for_its_own_reminder() {
+    if !child("cas_c0d0_repainting_idle_supervisor_wakes_once_for_its_own_reminder") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    idle_transcript_replaying_a_finished_call(&root, &daemon);
+    let (_, body) = dispatch(&mut daemon, false, false);
+    let name = daemon.app.supervisor_name().to_string();
+    daemon.pane_silent_since.insert(name.clone(), Instant::now());
+    daemon.process_prompt_queue().await.unwrap();
+    daemon.pane_silent_since.insert(name, Instant::now());
+    let typed = typed_once(&root, &mut daemon, &body).await;
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed, "no second injection");
+}
+
+/// cas-e6d7: the cas-c0d0 bypass needs a turn end actually seen after the
+/// last turn start. A tail with no turn record (a turn longer than the 256 KiB
+/// read window) or one still mid-turn keeps a repainting pane's reminder held.
+async fn reminder_held_without_turn_end(lines: &[String]) {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    write_supervisor_transcript(&root, &daemon, lines);
+    let (id, _) = dispatch(&mut daemon, false, false);
+    let name = daemon.app.supervisor_name().to_string();
+    for _ in 0..2 {
+        daemon.pane_silent_since.insert(name.clone(), Instant::now());
+        daemon.process_prompt_queue().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    daemon.process_prompt_queue().await.unwrap();
+    let report = open_prompt_queue_store(daemon.app.cas_dir()).unwrap().message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.stage, cas_store::DeliveryStage::Gated, "{report:?}");
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty(), "nothing typed into a working supervisor");
+    assert!(teams_messages(&daemon).is_empty());
+}
+
+fn finished_call_lines() -> Vec<String> {
+    vec![
+        r#"{"type":"assistant","timestamp":"2026-10-19T22:39:34Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_e6d7","name":"Bash","input":{"command":"cargo check"}}],"stop_reason":"tool_use"}}"#.to_string(),
+        r#"{"type":"user","timestamp":"2026-10-19T22:39:35Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_e6d7","content":"ok"}]}}"#.to_string(),
+    ]
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_e6d7_tail_without_turn_record_keeps_self_reminder_held() {
+    if child("cas_e6d7_tail_without_turn_record_keeps_self_reminder_held") {
+        reminder_held_without_turn_end(&finished_call_lines()).await;
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_e6d7_mid_turn_busy_supervisor_keeps_self_reminder_held() {
+    if child("cas_e6d7_mid_turn_busy_supervisor_keeps_self_reminder_held") {
+        let mut lines = vec![r#"{"type":"user","timestamp":"2026-10-19T22:39:30Z","message":{"role":"user","content":"Merge cas-675a."}}"#.to_string()];
+        lines.extend(finished_call_lines());
+        reminder_held_without_turn_end(&lines).await;
     }
 }
 

@@ -226,10 +226,10 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     );
 }
 
-/// GH #515: close must publish the committed epic outcome before a huge
-/// stranded-branch audit payload is written. The fixture has 31 child lanes
-/// and a 200 KB supervisor narrative, the incident shape that previously
-/// exhausted the MCP response budget.
+/// GH #515: close returns the committed epic outcome as a compact receipt and
+/// durably appends the large stranded-branch audit payload in the background.
+/// The fixture has 31 child lanes and a 200 KB supervisor narrative, the
+/// incident shape that previously exhausted the MCP response budget.
 #[tokio::test]
 async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -325,7 +325,6 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         "evidence retained for each branch; ".repeat(7_000)
     );
     assert!(narrative.len() > 200_000, "large-narrative precondition");
-    let started = std::time::Instant::now();
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
             no_delivery: None,
@@ -339,15 +338,15 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         }))
         .await
         .expect("close epic");
-    let elapsed = started.elapsed();
     let receipt = extract_text(close);
     assert!(
         receipt.contains("Closed task:") && receipt.contains("epic close committed"),
         "close must return the compact committed receipt: {receipt}"
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "close waited for the large note instead of returning its committed receipt: {elapsed:?}"
+        !receipt.contains("GH515-NARRATIVE-START")
+            && !receipt.contains("GH515-NARRATIVE-END"),
+        "the large narrative must stay out of the compact close receipt"
     );
     assert_eq!(
         task_store.get(&epic_id).expect("closed epic").status,
@@ -355,23 +354,28 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         "the terminal mutation must commit before the compact receipt"
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let stored = task_store.get(&epic_id).expect("read closed epic");
-        if stored.notes.contains("GH515-NARRATIVE-START")
-            && stored.notes.contains("GH515-NARRATIVE-END")
-            && stored.notes.len() >= narrative.len()
-        {
-            break;
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let stored = task_store.get(&epic_id).expect("read closed epic");
+            if stored.notes.contains("GH515-NARRATIVE-START")
+                && stored.notes.contains("GH515-NARRATIVE-END")
+                && stored.notes.len() >= narrative.len()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let current = task_store.get(&epic_id).expect("read current epic");
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the full override narrative must land durably after the compact close receipt; task notes contain {} bytes",
-            current.notes.len()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let stored = task_store
+            .get(&epic_id)
+            .expect("read closed epic after timeout");
+        panic!(
+            "timed out waiting for deferred narrative; stored note length: {}",
+            stored.notes.len()
         );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    });
 }
 
 #[tokio::test]

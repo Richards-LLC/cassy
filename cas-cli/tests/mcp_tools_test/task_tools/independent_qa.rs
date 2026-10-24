@@ -386,50 +386,135 @@ async fn user_facing_park_dispatches_an_independent_round_and_refuses_self_revie
 
 #[tokio::test]
 async fn resetting_a_qa_work_item_lets_a_replacement_start_the_same_round_cas_1aef3() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let (temp, core, repo, task_id) = fixture(&mut test_env);
-    let cas_dir = repo.join(".cas");
-    let _keep = &temp;
+    for action in ["reset", "release", "orphan-release", "shutdown"] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let (temp, core, repo, task_id) = fixture(&mut test_env);
+        let cas_dir = repo.join(".cas");
+        let _keep = &temp;
 
-    let parked = close_text(&core, &task_id).await;
-    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
-    let qa_task = qa_task_id(&cas_dir, &task_id);
-    let original = reviewer_core(&cas_dir, "dead-reviewer");
-    original
-        .cas_task_start(Parameters(IdRequest { id: qa_task.clone() }))
-        .await
-        .expect("first reviewer claims the round");
-    let before = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
-        .unwrap()
-        .unwrap();
-
-    core.cas_task_reset(Parameters(TaskReleaseRequest {
-        task_id: qa_task.clone(),
-        force: Some(true),
-    }))
-    .await
-    .expect("supervisor reset clears the dead reviewer's task and pass claim");
-    let pending = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
-        .unwrap()
-        .unwrap();
-    assert_eq!(pending.id, before.id);
-    assert_eq!(pending.deadline_at, before.deadline_at);
-    assert_eq!(pending.state, cas::types::QaPassState::Pending);
-    assert!(pending.reviewer_agent_id.is_none());
-
-    let replacement = reviewer_core(&cas_dir, "replacement-reviewer");
-    let started = extract_text(
-        replacement
-            .cas_task_start(Parameters(IdRequest { id: qa_task }))
+        let parked = close_text(&core, &task_id).await;
+        assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+        let qa_task = qa_task_id(&cas_dir, &task_id);
+        let original = reviewer_core(&cas_dir, "dead-reviewer");
+        original
+            .cas_task_start(Parameters(IdRequest {
+                id: qa_task.clone(),
+            }))
             .await
-            .expect("replacement reviewer starts the reset QA task"),
-    );
-    assert!(started.contains("claimed"), "{started}");
-    let reclaimed = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
-        .unwrap()
-        .unwrap();
-    assert_eq!(reclaimed.id, before.id);
-    assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement-reviewer"));
+            .expect("first reviewer claims the round");
+        let before = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+
+        let request = Parameters(TaskReleaseRequest {
+            task_id: qa_task.clone(),
+            force: Some(true),
+        });
+        match action {
+            "reset" => {
+                core.cas_task_reset(request).await.unwrap();
+            }
+            "release" | "orphan-release" => {
+                if action == "orphan-release" {
+                    open_agent_store(&cas_dir)
+                        .unwrap()
+                        .release_lease_for_task(&qa_task, "simulate expired lease")
+                        .unwrap();
+                }
+                original.cas_task_release(request).await.unwrap();
+            }
+            "shutdown" => {
+                let agents = open_agent_store(&cas_dir).unwrap();
+                let agent = agents
+                    .list(None)
+                    .unwrap()
+                    .into_iter()
+                    .find(|agent| agent.name == "dead-reviewer")
+                    .unwrap();
+                agents.graceful_shutdown(&agent.id).unwrap();
+                let _role = SupervisorRole::enter(&mut test_env);
+                let service = CasService::new(supervisor_core(&cas_dir), None);
+                let requested = extract_text(
+                    service
+                        .verification(Parameters(verification(
+                            serde_json::json!({"action":"qa_request", "task_id":task_id,
+                    "summary":"the reviewer shut down"}),
+                        )))
+                        .await
+                        .unwrap(),
+                );
+                assert!(requested.contains("is pending;"), "{requested}");
+                // Restore the orphaned task row through the normal recovery path.
+                core.cas_task_release(Parameters(TaskReleaseRequest {
+                    task_id: qa_task.clone(),
+                    force: None,
+                }))
+                .await
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let pending = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.id, before.id);
+        assert_eq!(pending.deadline_at, before.deadline_at);
+        assert_eq!(pending.state, cas::types::QaPassState::Pending);
+        assert!(pending.reviewer_agent_id.is_none());
+
+        let replacement = reviewer_core(&cas_dir, "replacement-reviewer");
+        let started = extract_text(
+            replacement
+                .cas_task_start(Parameters(IdRequest { id: qa_task }))
+                .await
+                .expect("replacement reviewer starts the reset QA task"),
+        );
+        assert!(started.contains("claimed"), "{started}");
+        let reclaimed = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        assert_eq!(reclaimed.id, before.id);
+        assert_eq!(
+            reclaimed.reviewer_agent_id.as_deref(),
+            Some("replacement-reviewer")
+        );
+    }
+}
+
+#[tokio::test]
+async fn release_only_clears_the_callers_qa_claim_cas_e27e() {
+    for with_lease in [true, false] {
+        for mode in ["own-name", "own-id", "other-name", "other-id", "supervisor"] {
+            let mut env = TestEnvGuard::temp_home();
+            let (_temp, core, repo, task_id) = fixture(&mut env);
+            let cas_dir = repo.join(".cas");
+            assert!(close_text(&core, &task_id).await.contains("INDEPENDENT QA DISPATCHED"));
+            let qa_task = qa_task_id(&cas_dir, &task_id);
+            let alpha = reviewer_core(&cas_dir, "worker-a");
+            alpha.cas_task_start(Parameters(IdRequest { id: qa_task.clone() })).await.unwrap();
+            let _bravo = reviewer_core(&cas_dir, "worker-b");
+            cas_store::release_qa_claim_for_task(&cas_dir, &qa_task).unwrap();
+            let name = if mode.starts_with("own") { "worker-a" } else { "worker-b" };
+            let identity = if mode.ends_with("id") {
+                format!("qa-session-{name}-{}", std::process::id())
+            } else { name.to_string() };
+            let before = cas_store::claim_qa_pass(&cas_dir, &task_id, &identity, chrono::Utc::now()).unwrap();
+            if !with_lease {
+                open_agent_store(&cas_dir).unwrap().release_lease_for_task(&qa_task, "simulate absent lease").unwrap();
+            }
+            let caller = if mode == "supervisor" { supervisor_core(&cas_dir) } else { alpha };
+            caller.cas_task_release(Parameters(TaskReleaseRequest { task_id: qa_task.clone(), force: None }))
+                .await.unwrap();
+            let after = cas_store::latest_qa_pass(&cas_dir, &task_id, chrono::Utc::now()).unwrap().unwrap();
+            if mode.starts_with("other") {
+                assert_eq!(after, before, "with_lease={with_lease}, mode={mode}: releasing A cannot clear B's claim");
+            } else {
+                assert_eq!(after.state, cas::types::QaPassState::Pending, "with_lease={with_lease}, mode={mode}");
+                assert!(after.reviewer_agent_id.is_none());
+            }
+            assert_eq!(open_task_store(&cas_dir).unwrap().get(&qa_task).unwrap().status, TaskStatus::Open);
+        }
+    }
 }
 
 #[tokio::test]

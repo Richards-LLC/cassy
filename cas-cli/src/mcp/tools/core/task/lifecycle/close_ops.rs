@@ -6889,20 +6889,20 @@ impl CasCore {
             return None;
         }
 
-        // GH #873: the supervisor may merge the parked worker tip into the
-        // target and then fast-forward the mutable factory ref to that merge
-        // commit before the worker retries close. That merge is a delivery
-        // container, not a new task boundary; replacing the recorded anchor
-        // would make content proof inspect the merge's first-parent effect,
-        // which is often empty. Keep the historical anchor in that shape.
-        if let (Some(repo_path), Some(recorded_anchor)) = (
-            repo_path,
-            task.deliverables.factory_branch_anchor.as_deref(),
-        ) && merge_tip_contains_recorded_anchor(repo_path, factory_branch_anchor, recorded_anchor)
-        {
-            return None;
+        // GH #873 / #1355: a target-reachable tip is a delivery container,
+        // even when B's content proof is Unknown or Dropped. An unmerged
+        // target-sync merge can still advance the boundary. Push deliveries
+        // accept either target view; local_merge retains local authority.
+        if let (Some(repo_path), Some(parent_branch)) = (repo_path, parent_branch) {
+            let integrated = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+                git_commit_is_ancestor(repo_path, factory_branch_anchor, parent_branch)
+            } else {
+                commit_is_merged_into_parent(repo_path, factory_branch_anchor, parent_branch)
+            };
+            if integrated {
+                return None;
+            }
         }
-
         // Once the recorded task delivery has landed, a later mutable
         // factory-branch tip cannot become this task's new delivery boundary.
         if let (Some(repo_path), Some(parent_branch), Some(recorded_anchor)) = (
@@ -8612,6 +8612,20 @@ impl CasCore {
                     // a new branch tip requires the delivery anchor to move.
                     let anchor = measured_branch.as_deref()
                         .and_then(|branch| resolve_branch_sha(&close_project_root, branch));
+                    // A merged delivery may have had its source refs cleaned
+                    // up. Reject also carries content refusals: keep that
+                    // decision instead of trying to re-park the integrated
+                    // anchor and replacing it with a missing-source error.
+                    if anchor.is_none()
+                        && task.status == TaskStatus::AwaitingMerge
+                        && task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
+                            commit_is_merged_into_parent(
+                                &close_project_root, anchor, &resolved_parent_branch,
+                            )
+                        })
+                    {
+                        return Ok(Self::tool_error(msg));
+                    }
                     // cas-44e93: the merge reads the pushed branch, so a
                     // commit origin lacks can never be the delivery anchor.
                     if let Some(branch) = measured_branch.as_deref()
@@ -14959,6 +14973,20 @@ pub(crate) fn resolve_close_delivery_branch(
     task: &Task,
     assignee: &str,
 ) -> Result<String, String> {
+    // GH #1353: older starts recorded the reusable lane before the worker
+    // cut its own per-task branch. That lane may still back another task's
+    // open PR. Measure the task lane, keeping the original base and all
+    // start-to-delivery ownership checks on the branch actually delivered.
+    if task.deliverables.factory_branch_start.as_ref().is_some_and(|start| {
+        start.branch == format!("factory/{assignee}")
+    }) && let Some(branch) = worker_task_branch_ref(repo_path, assignee, &task.id) {
+        let mut measured = task.clone();
+        measured.deliverables.factory_branch_start.as_mut().expect("start checked above")
+            .branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
+        return Ok(task_attribution::started_delivery(repo_path, &measured)?
+            .map(|delivery| delivery.branch)
+            .unwrap_or(branch));
+    }
     if let Some(delivery) = task_attribution::started_delivery(repo_path, task)? {
         return Ok(delivery.branch);
     }
@@ -29819,6 +29847,42 @@ esac
         assert!(deliverables.handoff_branches.is_empty());
     }
 
+    #[test]
+    fn per_task_close_ignores_legacy_start_on_parked_lane_gh1353() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let base = head_sha(p);
+        std::fs::create_dir_all(p.join(".cas")).unwrap();
+        std::fs::write(p.join(".cas/config.toml"), "[project]\ncanonical_id = \"gh1353\"\n").unwrap();
+        let target = cas_types::WorkTarget {
+            repo_selector: "project:gh1353".into(), target_branch: "main".into(),
+        };
+        // The old runtime recorded the reusable lane, which still backs
+        // the parked task's open PR. It must never be suggested for push.
+        std::fs::write(p.join("parked.rs"), "// parked\n").unwrap();
+        git(p, &["add", "parked.rs"]);
+        git(p, &["commit", "-q", "-m", "parked work"]);
+        let parked = head_sha(p);
+        git(p, &["checkout", "-q", "-b", "factory/worker-cas-test1", "main"]);
+        std::fs::write(p.join("own.rs"), "// own\n").unwrap();
+        git(p, &["add", "own.rs"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-test1): own work"]);
+        let tip = head_sha(p);
+        let mut task = worker_task("worker");
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: target, assignee: "worker".into(),
+            branch: "factory/worker".into(), base_sha: base.clone(),
+        });
+        let branch = resolve_close_delivery_branch(p, &task, "worker").unwrap();
+        assert_eq!(branch, "factory/worker-cas-test1");
+        let refusal = unpushed_delivery_tip_refusal(&branch, &tip, &base);
+        assert!(refusal.contains("git push origin factory/worker-cas-test1"), "{refusal}");
+        assert!(!refusal.contains("git push origin factory/worker`"), "{refusal}");
+        assert_eq!(head_sha(p), tip);
+        assert_eq!(rev_parse_local(p, "factory/worker"), parked);
+    }
+
     /// Without a per-task branch the worker's own branch is measured, as
     /// before.
     #[test]
@@ -31660,6 +31724,27 @@ esac
             matches!(out, MergeStateGateOutcome::Proceed),
             "an original content commit receipt must be accepted when it is an ancestor of the merged target, got {out:?}"
         );
+
+        // cas-189f: content proof can be Unknown for a real target-reachable
+        // delivery (here B has no first-parent effect). Its supervisor merge
+        // is still a container and must not replace the content boundary B.
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "feat(cas-test1): empty delivery boundary"]);
+        let unknown_anchor = rev_parse_local(p, "HEAD");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge unknown-content delivery"]);
+        let supervisor_merge = rev_parse_local(p, "main");
+        assert!(matches!(
+            delivery_content_presence_on_target(p, &unknown_anchor, "main"),
+            DeliveryContentPresence::Unknown { .. }
+        ));
+        let mut advanced = worker_task("worker");
+        advanced.status = TaskStatus::AwaitingMerge;
+        advanced.deliverables.factory_branch_anchor = Some(unknown_anchor.clone());
+        assert!(CasCore::apply_awaiting_merge_anchor_advance(
+            &mut advanced, &supervisor_merge, chrono::Utc::now(), Some(p), Some("main"),
+        ).is_none(), "a target-reachable merge must retain B even when content proof is Unknown");
+        assert_eq!(advanced.deliverables.factory_branch_anchor.as_deref(), Some(unknown_anchor.as_str()));
     }
 
     #[test]

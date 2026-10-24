@@ -64,6 +64,8 @@ impl SqliteAgentStore {
             )?;
         }
 
+        crate::qa_pass_store::release_qa_claims_for_agent_with_conn(&tx, agent_id)?;
+
         // Mark agent as shutdown
         tx.execute(
             "UPDATE agents SET status = 'shutdown', active_tasks = 0 WHERE id = ?",

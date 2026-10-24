@@ -7,6 +7,30 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.77.0] - 2026-10-24
+
+### Fixed
+
+- **Spawn base checked before queueing** — Refuse `factory spawn_workers` at once when the resolved spawn base has diverged from its cached origin, naming the `git rebase --autostash` remedy and queuing nothing, instead of answering "queued" for a spawn certain to fail at provision; provision and register failures now reach the owning supervisor as Critical blocker notices that can wake it while idle.
+
+- **Second task beside a parked delivery** — Start a worker's next task on its own per-task branch without resetting the branch that holds a parked delivery, measure close on that task branch while keeping start-base ownership checks, and let the pre-push hook publish an explicitly named per-task archive ref, instead of moving the parked branch, pointing close at the old branch's push and refusing the archive push; cross-task and cross-worker pushes still refuse.
+
+- **Rebinding a rewritten delivery** — Let `task rebind_branch` accept a replacement whose unmerged commits belong to the task after a rewritten anchor, a reset onto the target or a move to a distinct per-task branch, deriving the replacement base from the task target even when the branch name is unchanged and auditing the old start, base, anchor and tip, instead of refusing with "replacement has no unmerged task delivery"; linked checkouts no longer need their own project configuration, and empty or foreign-task ranges still refuse.
+
+- **Re-close after a target sync** — Advance the parked delivery anchor and its QA round together when a delivery is re-closed at a fast-forward merge of its target, so `merge_request` accepts the new tip, instead of dispatching QA for the obsolete tip and then refusing close with a false start-base ancestry claim; a supervisor merge already reachable from the target keeps the original anchor even when the content check is inconclusive, and rewritten source history still refuses with an accurate reason.
+
+- **Closing merged work after branch cleanup** — Keep the content and verification decisions for a parked delivery whose anchor is already merged into its target after its source branch is deleted from origin, instead of refusing close with PARK REFUSED "pushed source at None" until someone re-pushed the branch; an anchor not on the target still refuses.
+
+- **Recovery-suffix branches** — Treat `factory/<worker>-<task>-<suffix>` as the task's own branch at start and in the assignment note, so a restart on it after its rebind record is cleared succeeds, instead of refusing it as the branch of a task named `<task>-<suffix>`; another task's per-task branch still refuses.
+
+- **QA claims on release and shutdown** — Return a QA pass to Pending when its reviewer releases the QA task or its lease is recovered, clear claims by session ID or name on shutdown and unregister, and let a replacement reviewer take over a pass held by a stale, shut-down or unregistered reviewer, instead of blocking review until the pass deadline; a reviewer's own release drops only its own claim, a claim-release error is logged while Cloud and file-lease cleanup still completes, and an active or idle claimant still holds the pass.
+
+- **QA rebind compares full coverage** — Compare each selected journey's kind and `evidence_required` and the registry safety policy, as well as its status and invariants, before reusing a QA trace across a non-product commit, so a registry edit that raises a journey's evidence requirement refuses the rebind by name.
+
+- **Supervisor reminders during background work** — Wake an idle Claude supervisor for its own fired reminder once its transcript records a turn end after the latest turn start, even while a running background task keeps writing to the pane, instead of holding the reminder for up to two minutes until an unrelated turn began; the composer, readiness and in-flight checks still apply.
+
+- **macOS provisioning test and a timing flake** — Compare canonical paths in the provisioning dispatch test and run it through the real typed launch with its build-hash check, and wait for pane readiness and the consumed submit instead of fixed sleeps in the supervisor single-turn test, instead of failing every macOS run on `/var` versus `/private/var` and flaking under CPU load.
+
 ## [3.76.0] - 2026-10-23
 
 ### Changed

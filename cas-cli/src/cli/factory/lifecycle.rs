@@ -66,7 +66,7 @@ pub(super) fn session_picker_item(s: &SessionInfo) -> PickerItem {
 }
 
 /// Kill a factory session. If no name is given, show an interactive picker.
-pub fn execute_kill(name: Option<&str>, force: bool) -> Result<()> {
+pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Result<()> {
     let manager = SessionManager::new();
 
     let (name, picked) = match name {
@@ -91,6 +91,29 @@ pub fn execute_kill(name: Option<&str>, force: bool) -> Result<()> {
     let theme = ActiveTheme::default();
     let mut stdout = io::stdout();
     let mut fmt = Formatter::stdout(&mut stdout, theme);
+
+    if force_stale {
+        if !force {
+            StatusLine::warning(format!(
+                "This removes session '{name}' and reaps its recorded workers without signalling PID {}. \
+                 Only continue if `ps -p {}` shows a program other than this factory daemon.",
+                session.metadata.daemon_pid, session.metadata.daemon_pid
+            ))
+            .render(&mut fmt)?;
+            write!(io::stdout(), "Continue? [y/N] ")?;
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_lowercase();
+            if input != "y" && input != "yes" {
+                StatusLine::info("Cancelled.").render(&mut fmt)?;
+                return Ok(());
+            }
+        }
+        force_clear_stale_session(&name, &crate::mcp::daemon::read_pid_starttime)?;
+        StatusLine::success(format!("Cleared stale session: {name}")).render(&mut fmt)?;
+        return Ok(());
+    }
 
     if !session.is_running {
         end_session_by_name(&name)?;
@@ -175,19 +198,8 @@ fn end_session_with(
         return Ok(EndSessionOutcome::NotFound);
     }
     let pid = session.metadata.daemon_pid;
-    // cas-47037: the daemon is dead only when its PID is not running or a
-    // readable start time differs. An unreadable one proves nothing.
-    let identity = match session.metadata.daemon_pid_starttime {
-        _ if !session.is_running => DaemonIdentity::Gone,
-        None => DaemonIdentity::Same,
-        Some(expected) => match starttime_of(pid) {
-            Some(actual) if actual == expected => DaemonIdentity::Same,
-            Some(_) => DaemonIdentity::Gone,
-            None => DaemonIdentity::Unknown,
-        },
-    };
-    match identity {
-        DaemonIdentity::Gone => {
+    match recorded_daemon(&session, starttime_of) {
+        RecordedDaemon::Gone => {
             // cas-fcb0: the daemon is already gone, for example after a
             // manual `kill -9`. Its workers lead their own sessions and
             // outlive it, so reap the groups it recorded (fingerprint-
@@ -197,7 +209,7 @@ fn end_session_with(
             manager.remove_metadata(name)?;
             return Ok(EndSessionOutcome::CleanedStale);
         }
-        DaemonIdentity::Unknown => {
+        RecordedDaemon::Unknown => {
             let reason = format!(
                 "cas kill: worker reap skipped; daemon PID {pid} is running but its start time could not be read, so it may still be this session's daemon"
             );
@@ -206,10 +218,10 @@ fn end_session_with(
             bail!(
                 "Session '{name}' was left untouched: PID {pid} is running but its start time could not be read, so it may still be this session's daemon. \
                  If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up the session and reap its workers; \
-                 if it shows another program, the daemon is gone and `cas factory gc cleanup --force` removes what it left behind."
+                 if it shows another program, run `cas kill {name} --force-stale` to remove the session record and reap its recorded workers."
             );
         }
-        DaemonIdentity::Same => {}
+        RecordedDaemon::Same => {}
     }
     terminate_process(pid)?;
     // SIGTERM delivery is not death. Wait before reclaiming socket names.
@@ -243,7 +255,8 @@ fn end_session_with(
             tracing::warn!(session = name, pid, "{reason}");
             bail!(
                 "Session '{name}' (PID {pid}) did not exit after SIGTERM, and SIGKILL was withheld because {why}. \
-                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up the session and reap its workers."
+                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up the session and reap its workers; \
+                 if it shows another program, run `cas kill {name} --force-stale`."
             );
         }
         if !exited_mid_escalation {
@@ -301,8 +314,61 @@ fn end_session_with(
     Ok(EndSessionOutcome::Ended)
 }
 
+/// cas-47037: a daemon is dead only when its PID is not running or a
+/// readable start time differs. An unreadable start time proves nothing.
+fn recorded_daemon(
+    session: &crate::ui::factory::SessionInfo,
+    starttime_of: &dyn Fn(u32) -> Option<u64>,
+) -> RecordedDaemon {
+    match session.metadata.daemon_pid_starttime {
+        _ if !session.is_running => RecordedDaemon::Gone,
+        None => RecordedDaemon::Same,
+        Some(expected) => match starttime_of(session.metadata.daemon_pid) {
+            Some(actual) if actual == expected => RecordedDaemon::Same,
+            Some(_) => RecordedDaemon::Gone,
+            None => RecordedDaemon::Unknown,
+        },
+    }
+}
+
+/// `cas kill <name> --force-stale` (cas-47037): the operator has confirmed
+/// that the PID recorded for `name` is not its factory daemon. Remove the
+/// record and reap the recorded workers, fingerprint-checked. The recorded
+/// PID is never signalled, and a PID verifiably still the daemon is refused.
+fn force_clear_stale_session(
+    name: &str,
+    starttime_of: &dyn Fn(u32) -> Option<u64>,
+) -> Result<EndSessionOutcome> {
+    let manager = SessionManager::new();
+    let Some(session) = manager.find_session(Some(name))? else {
+        return Ok(EndSessionOutcome::NotFound);
+    };
+    if session.name != name {
+        return Ok(EndSessionOutcome::NotFound);
+    }
+    let pid = session.metadata.daemon_pid;
+    if let RecordedDaemon::Same = recorded_daemon(&session, starttime_of) {
+        bail!(
+            "Session '{name}': PID {pid} is verifiably still its factory daemon, so --force-stale does not apply. Run `cas kill {name}`."
+        );
+    }
+    crate::ui::factory::record_daemon_lifecycle(
+        name,
+        "force_stale",
+        &format!("cas kill --force-stale: the operator confirmed PID {pid} is not this session's daemon"),
+    );
+    #[cfg(unix)]
+    reap_session_worker_groups(
+        name,
+        &session.metadata,
+        "after the operator confirmed the daemon is gone (--force-stale)",
+    );
+    manager.remove_metadata(name)?;
+    Ok(EndSessionOutcome::CleanedStale)
+}
+
 /// What `cas kill` knows about the process at a session's recorded PID.
-enum DaemonIdentity {
+enum RecordedDaemon {
     /// Still the session's daemon, or no start time was recorded to doubt it.
     Same,
     /// Not running, or a different process (its start time differs).
@@ -532,10 +598,51 @@ mod tests {
         assert!(daemon_alive && worker_alive, "an alive daemon's worker was reaped");
         assert!(still_recorded, "an alive daemon's session record was removed");
         assert!(
-            error.contains("start time could not be read") && error.contains(&format!("ps -p {pid}")),
-            "{error}"
+            error.contains("start time could not be read")
+                && error.contains(&format!("ps -p {pid}"))
+                && error.contains("cas kill opaque --force-stale")
+                && !error.contains("gc cleanup"),
+            "every remedy offered must clear the session: {error}"
         );
         assert!(daemon_log("opaque").contains("\"worker_reap_skipped\""));
+    }
+
+    /// cas-47037: when the recorded PID runs another program, the operator
+    /// clears the session with `cas kill <name> --force-stale`. The record
+    /// goes, the recorded workers are reaped, and that PID is never signalled.
+    #[test]
+    fn force_stale_clears_the_session_without_signalling_its_pid() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (other_pid, other) = spawn_group("sleep", &["30"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::ui::factory::process_groups::track(store.path(), "w1", "reused", worker_pgid)
+            .unwrap();
+        let mut metadata = save_session("reused", other_pid, project.path());
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome = force_clear_stale_session("reused", &|_| None);
+        let other_alive =
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
+        let started = std::time::Instant::now();
+        let stop_worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            kill_group(worker_pgid);
+        });
+        let worker_status = worker.join().unwrap().unwrap();
+        let elapsed = started.elapsed();
+        kill_group(other_pid);
+        other.join().unwrap().unwrap();
+        stop_worker.join().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
+        assert!(other_alive, "--force-stale signalled the recorded PID");
+        assert!(elapsed < std::time::Duration::from_secs(4), "the recorded worker was left running");
+        assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
+        assert!(SessionManager::new().find_session(Some("reused")).unwrap().is_none());
+        assert!(daemon_log("reused").contains("\"force_stale\""));
     }
 
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and

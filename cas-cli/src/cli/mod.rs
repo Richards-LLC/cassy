@@ -937,7 +937,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Setup(args) => setup::execute(args, cli),
         Commands::Attach(args) => factory::execute_attach(args),
         Commands::List(args) => factory::execute_list(cli, args),
-        Commands::Kill(args) => factory::execute_kill(args.name.as_deref(), args.force),
+        Commands::Kill(args) => factory::execute_kill(args.name.as_deref(), args.force, args.force_stale),
         Commands::KillAll(args) => factory::execute_kill_all(args.force),
         Commands::Factory(args) => factory::execute(args, cli, cas_root),
         // cas-7f2c: provider shortcuts — preset supervisor_cli + explicit flag,

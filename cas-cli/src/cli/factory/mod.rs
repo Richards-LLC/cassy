@@ -704,6 +704,12 @@ pub struct KillArgs {
     /// Force kill without confirmation
     #[arg(long, short = 'f')]
     pub force: bool,
+
+    /// The recorded daemon PID is running but is a different program:
+    /// remove the session record and reap its recorded workers without
+    /// signalling that PID. Asks for confirmation unless --force.
+    #[arg(long)]
+    pub force_stale: bool,
 }
 
 /// Arguments for `cas kill-all`

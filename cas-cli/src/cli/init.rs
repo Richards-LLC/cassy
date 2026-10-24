@@ -1226,7 +1226,8 @@ where
 /// Write one completed phase row: mark, label padded to the detail column,
 /// then the detail. With a terminal `width`, a detail that would overflow
 /// continues on rows aligned under the detail column. Rows break only between
-/// whitespace-separated items, so a path is never split or shortened. A pipe
+/// whitespace-separated items, so a path is never split or shortened. An
+/// over-long single path intentionally overflows on its own row. A pipe
 /// (`None`) keeps one line per phase.
 fn write_step_success(
     out: &mut impl Write,
@@ -1252,21 +1253,14 @@ fn write_step_success(
         .filter(|budget| cells(detail) > *budget);
     let rows = match budget {
         None => vec![detail.to_string()],
-        Some(budget) => {
-            let mut rows = vec![String::new()];
-            for item in detail.split_whitespace() {
-                let row = rows.last_mut().expect("rows starts non-empty");
-                if row.is_empty() {
-                    row.push_str(item);
-                } else if cells(row) + 1 + cells(item) <= budget {
-                    row.push(' ');
-                    row.push_str(item);
-                } else {
-                    rows.push(item.to_string());
-                }
-            }
-            rows
-        }
+        // Keep a path intact even when it exceeds the detail-column budget.
+        Some(budget) => crate::ui::word_wrap::wrap_words(
+            detail,
+            budget,
+            &cells,
+            crate::ui::word_wrap::OverlongWordPolicy::KeepWhole,
+        )
+        .lines,
     };
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {

@@ -5,3 +5,4 @@ pub mod factory;
 pub mod markdown;
 pub mod theme;
 pub mod widgets;
+pub(crate) mod word_wrap;

@@ -691,26 +691,6 @@ pub fn create_metadata(
 mod tests {
     use crate::ui::factory::session::*;
 
-    /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
-    /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander
-    /// launches take, saved metadata without one, so a CAS_ROOT daemon's
-    /// workers were never found. Every daemon start path must build its
-    /// metadata with the store.
-    #[test]
-    fn every_daemon_start_path_records_its_store() {
-        for (file, source) in [
-            ("daemon/process.rs", include_str!("daemon/process.rs")),
-            ("daemon/fork_first.rs", include_str!("daemon/fork_first.rs")),
-            ("daemon/runtime/lifecycle.rs", include_str!("daemon/runtime/lifecycle.rs")),
-        ] {
-            let without_store = source.replace("create_daemon_metadata(", "");
-            assert!(
-                !without_store.contains("create_metadata("),
-                "{file} saves daemon session metadata without its store; use create_daemon_metadata"
-            );
-        }
-    }
-
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn stale_socket(path: &Path) {
         drop(std::os::unix::net::UnixListener::bind(path).unwrap());

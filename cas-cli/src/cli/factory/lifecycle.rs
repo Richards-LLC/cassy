@@ -403,6 +403,41 @@ mod tests {
         assert!(log.contains("\"killed\"") && log.contains("sent SIGKILL"), "{log}");
     }
 
+    /// cas-fcb0: after a manual `kill -9` the daemon is gone but its workers,
+    /// which lead their own sessions, are not. The follow-up `cas kill`
+    /// reaps the groups the dead daemon recorded.
+    #[test]
+    fn stale_cleanup_reaps_the_dead_daemons_workers() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (dead_pid, daemon) = spawn_group("true", &[]);
+        daemon.join().unwrap().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::ui::factory::process_groups::track(store.path(), "w1", "killed9", worker_pgid)
+            .unwrap();
+        let mut metadata = save_session("killed9", dead_pid, project.path());
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome = end_session_by_name("killed9");
+        let started = std::time::Instant::now();
+        let reaped = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            kill_group(worker_pgid);
+        });
+        let worker_status = worker.join().unwrap().unwrap();
+        let elapsed = started.elapsed();
+        reaped.join().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "the dead daemon's worker group was left running"
+        );
+        assert!(daemon_log("killed9").contains("\"worker_reaped\""));
+    }
+
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and
     /// `cas kill` says so, with the manual remedy, instead of claiming the
     /// daemon survived SIGKILL.

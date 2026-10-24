@@ -1196,17 +1196,16 @@ struct DeliveredTree {
 
 /// Share the immutable delivered-tree scan among proof reads for the same tip.
 fn delivered_tree(repo: &Path, head: &str) -> Option<std::sync::Arc<DeliveredTree>> {
-    type CachedTree = (PathBuf, String, std::sync::Arc<DeliveredTree>);
+    type CachedTree = (String, std::sync::Arc<DeliveredTree>);
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedTree>>> = std::sync::OnceLock::new();
     let mut cache = CACHE.get_or_init(|| std::sync::Mutex::new(None)).lock().ok()?;
-    if let Some((cached_repo, cached_head, tree)) = cache.as_ref()
-        && cached_repo == repo
+    if let Some((cached_head, tree)) = cache.as_ref()
         && cached_head == head
     {
         return Some(std::sync::Arc::clone(tree));
     }
     let tree = std::sync::Arc::new(DeliveredTree::load(repo, head)?);
-    *cache = Some((repo.to_path_buf(), head.to_owned(), std::sync::Arc::clone(&tree)));
+    *cache = Some((head.to_owned(), std::sync::Arc::clone(&tree)));
     Some(tree)
 }
 

@@ -680,11 +680,11 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
             && args.iter().any(|arg| arg == &delivered_tip)
     }).count();
     assert_eq!(inventories, 1, "one delivered-tree inventory per close: {git_calls:?}");
-    let source_batches = git_calls.iter().filter(|args| {
+    let cat_batches = git_calls.iter().filter(|args| {
         args.get(1).is_some_and(|arg| arg == "cat-file")
             && args.iter().any(|arg| arg == "--batch")
     }).count();
-    assert_eq!(source_batches, 1, "one Rust-source batch per close: {git_calls:?}");
+    assert_eq!(cat_batches, 1, "one blob batch per close: {git_calls:?}");
     assert!(git_calls.iter().all(|args| {
         args.get(1).is_none_or(|arg| arg != "grep") || !args.iter().any(|arg| arg == brief)
     }), "the include lookup should use the batched delivered tree: {git_calls:?}");

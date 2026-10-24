@@ -3201,7 +3201,9 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
         env.set(&variable, "/inherited/outer-test-runner");
 
         let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("project");
+        // Match production admission's canonical paths, including macOS's
+        // /var -> /private/var temporary-directory alias.
+        let repo = dir.path().canonicalize().unwrap().join("project");
         fixture_commit(&repo);
         let head = fixture_head(&repo);
         let root = repo.join(".cas");

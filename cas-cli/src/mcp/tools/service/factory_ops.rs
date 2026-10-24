@@ -3442,14 +3442,6 @@ impl CasService {
             .iter()
             .filter(|worker| adopted_workers.contains(&worker.id))
         {
-            let current = agent_store
-                .get(&worker.id)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-            if current.status == AgentStatus::Shutdown {
-                // Retirement outlives its process-group record. A repeated
-                // shutdown must not block the remaining workers in this call.
-                continue;
-            }
             let original_groups: Vec<_> = groups
                 .iter()
                 .filter(|group| {
@@ -3458,6 +3450,14 @@ impl CasService {
                 })
                 .collect();
             if original_groups.is_empty() {
+                let current = agent_store
+                    .get(&worker.id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if current.status == AgentStatus::Shutdown {
+                    // The daemon retires the row before killing. Only a retired
+                    // worker with no remaining recorded group is already done.
+                    continue;
+                }
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(

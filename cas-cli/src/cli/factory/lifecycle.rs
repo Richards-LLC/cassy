@@ -157,6 +157,16 @@ fn wait_for_daemon_exit(
 }
 
 fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result<EndSessionOutcome> {
+    end_session_with(name, term_grace, &crate::mcp::daemon::read_pid_starttime)
+}
+
+/// [`end_session_with_grace`] reading process start times through
+/// `starttime_of`, so tests can make one unreadable.
+fn end_session_with(
+    name: &str,
+    term_grace: std::time::Duration,
+    starttime_of: &dyn Fn(u32) -> Option<u64>,
+) -> Result<EndSessionOutcome> {
     let manager = SessionManager::new();
     let Some(session) = manager.find_session(Some(name))? else {
         return Ok(EndSessionOutcome::NotFound);
@@ -166,7 +176,7 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
     }
     let pid = session.metadata.daemon_pid;
     let same_daemon = match session.metadata.daemon_pid_starttime {
-        Some(expected) => crate::mcp::daemon::read_pid_starttime(pid) == Some(expected),
+        Some(expected) => starttime_of(pid) == Some(expected),
         None => true,
     };
     if !session.is_running || !same_daemon {
@@ -189,7 +199,7 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
         // unrecorded start time is not a match.
         let identity = match session.metadata.daemon_pid_starttime {
             None => Err("the session record has no daemon start time"),
-            Some(expected) => match crate::mcp::daemon::read_pid_starttime(pid) {
+            Some(expected) => match starttime_of(pid) {
                 Some(actual) if actual == expected => Ok(true),
                 // cas-fcb0: the daemon exited after the grace check and its
                 // PID was reused. It did end; there is nothing to signal.
@@ -450,6 +460,43 @@ mod tests {
             "the dead daemon's worker group was left running"
         );
         assert!(daemon_log("killed9").contains("\"worker_reaped\""));
+    }
+
+    /// cas-47037: a running daemon whose start time cannot be read is not
+    /// known to be dead. `cas kill` must not reap its workers or drop its
+    /// record; it says why it stopped and how to proceed.
+    #[test]
+    fn alive_daemon_with_unreadable_start_time_is_not_reaped() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (pid, daemon) = spawn_group("sleep", &["30"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::ui::factory::process_groups::track(store.path(), "w1", "opaque", worker_pgid)
+            .unwrap();
+        let mut metadata = save_session("opaque", pid, project.path());
+        assert!(metadata.daemon_pid_starttime.is_some());
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome = end_session_with("opaque", std::time::Duration::from_millis(300), &|_| None);
+        let daemon_alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok();
+        let worker_alive =
+            nix::sys::signal::killpg(nix::unistd::Pid::from_raw(worker_pgid as i32), None).is_ok();
+        let still_recorded = SessionManager::new().find_session(Some("opaque")).unwrap().is_some();
+        kill_group(pid);
+        kill_group(worker_pgid);
+        daemon.join().unwrap().unwrap();
+        worker.join().unwrap().unwrap();
+        let error = outcome.unwrap_err().to_string();
+        assert!(daemon_alive && worker_alive, "an alive daemon's worker was reaped");
+        assert!(still_recorded, "an alive daemon's session record was removed");
+        assert!(
+            error.contains("start time could not be read") && error.contains(&format!("ps -p {pid}")),
+            "{error}"
+        );
+        assert!(daemon_log("opaque").contains("\"worker_reap_skipped\""));
     }
 
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and

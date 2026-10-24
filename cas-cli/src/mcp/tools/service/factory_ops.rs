@@ -13839,6 +13839,10 @@ mod tests {
         )
         .unwrap();
         let agents = crate::store::open_agent_store(&service.inner.cas_root).unwrap();
+        // The daemon marks Shutdown before killing. If it dies in that window,
+        // adoption must still stop the live, fingerprinted group.
+        agents.graceful_shutdown(&worker.id).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
         let mut unrecorded = worker_named("unrecorded-orphan", "unrecorded-id");
         unrecorded.factory_session = worker.factory_session.clone();
         agents.register(&unrecorded).unwrap();
@@ -13855,7 +13859,7 @@ mod tests {
             .expect_err("a later unrecorded orphan refuses after the earlier worker stopped");
         let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
             .await
-            .expect("actual process must exit")
+            .expect("Shutdown status must not skip the live recorded process")
             .unwrap();
         assert!(!status.success());
         let state = std::process::Command::new("ps")

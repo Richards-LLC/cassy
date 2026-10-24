@@ -3481,12 +3481,21 @@ impl CasService {
                 // Tool children may enter separate process groups. Capture
                 // ancestry before stopping the leader; revalidate every PID.
                 let (pid, starttime) = (group.pgid, group.pid_starttime);
-                tokio::task::spawn_blocking(move || {
+                let tree_stopped = tokio::task::spawn_blocking(move || {
                     crate::ui::factory::server_registry::kill_process_tree_fingerprinted(pid, starttime)
                 })
                 .await
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if tree_stopped && crate::ui::factory::process_groups::status(group)
+                    == crate::ui::factory::process_groups::ProcessGroupStatus::Unverifiable
+                {
+                    // macOS may withhold the fingerprint of the just-killed
+                    // zombie leader until its parent reaps it. The verified
+                    // tree is stopped; preserve the ambiguous group record
+                    // for GC rather than signal a numerically identified group.
+                    continue;
+                }
                 let outcome = crate::ui::factory::process_groups::reap(&self.inner.cas_root, group)
                     .await
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;

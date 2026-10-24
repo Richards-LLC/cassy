@@ -299,6 +299,20 @@ impl SessionManager {
     }
 
     /// Save session metadata
+    /// Save the metadata a running daemon publishes, naming the store it
+    /// tracks its worker process groups in. Every daemon start path saves
+    /// through here, so `cas kill` can reap a SIGKILLed daemon's workers
+    /// even when it ran under CAS_ROOT (cas-4b42, cas-fcb0).
+    pub(crate) fn save_daemon_metadata(
+        &self,
+        mut metadata: SessionMetadata,
+        cas_dir: &Path,
+    ) -> std::io::Result<SessionMetadata> {
+        metadata.cas_root = Some(cas_dir.to_string_lossy().to_string());
+        self.save_metadata(&metadata)?;
+        Ok(metadata)
+    }
+
     pub fn save_metadata(&self, metadata: &SessionMetadata) -> std::io::Result<()> {
         if !valid_session_name(&metadata.name) {
             return Err(std::io::Error::new(
@@ -690,6 +704,26 @@ pub fn create_metadata(
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::session::*;
+
+    /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
+    /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander
+    /// launches take, saved metadata without one, so a CAS_ROOT daemon's
+    /// workers were never found. Daemon start paths save through
+    /// `save_daemon_metadata`, which always records the store.
+    #[test]
+    fn daemon_metadata_names_the_daemons_store() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let store = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new();
+        manager
+            .save_daemon_metadata(
+                create_metadata("rooted", std::process::id(), "supervisor", &[], None, Some("/project"), None),
+                store.path(),
+            )
+            .unwrap();
+        let saved = manager.find_session(Some("rooted")).unwrap().unwrap().metadata;
+        assert_eq!(saved.cas_root.as_deref(), store.path().to_str());
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn stale_socket(path: &Path) {

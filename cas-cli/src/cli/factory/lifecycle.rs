@@ -170,12 +170,19 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
         None => true,
     };
     if !session.is_running || !same_daemon {
+        // cas-fcb0: the daemon is already gone, for example after a manual
+        // `kill -9`. Its workers lead their own sessions and outlive it, so
+        // reap the groups it recorded (fingerprint-checked) before the
+        // record that names its store is removed.
+        #[cfg(unix)]
+        reap_session_worker_groups(name, &session.metadata);
         manager.remove_metadata(name)?;
         return Ok(EndSessionOutcome::CleanedStale);
     }
     terminate_process(pid)?;
     // SIGTERM delivery is not death. Wait before reclaiming socket names.
     let mut sigkilled = false;
+    let mut exited_mid_escalation = false;
     if !wait_for_daemon_exit(&session.metadata, term_grace) {
         // GH #1363: a daemon whose loop is wedged never acts on SIGTERM.
         // Escalate only on a positive identity (cas-3372): an unreadable or
@@ -183,11 +190,16 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
         let identity = match session.metadata.daemon_pid_starttime {
             None => Err("the session record has no daemon start time"),
             Some(expected) => match crate::mcp::daemon::read_pid_starttime(pid) {
-                Some(actual) if actual == expected => Ok(()),
-                Some(_) => Err("the PID's start time no longer matches the daemon's"),
+                Some(actual) if actual == expected => Ok(true),
+                // cas-fcb0: the daemon exited after the grace check and its
+                // PID was reused. It did end; there is nothing to signal.
+                Some(_) => Ok(false),
                 None => Err("the daemon's start time could not be read"),
             },
         };
+        if let Ok(false) = identity {
+            exited_mid_escalation = true;
+        }
         if let Err(why) = identity {
             // cas-4b42: say what actually happened, and leave a record.
             let reason = format!(
@@ -198,24 +210,26 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
             tracing::warn!(session = name, pid, "{reason}");
             bail!(
                 "Session '{name}' (PID {pid}) did not exit after SIGTERM, and SIGKILL was withheld because {why}. \
-                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up."
+                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up the session and reap its workers."
             );
         }
-        #[cfg(unix)]
-        {
-            let reason = format!(
-                "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
-                term_grace.as_secs()
-            );
-            crate::ui::factory::record_daemon_lifecycle(name, "killed", &reason);
-            tracing::warn!(session = name, pid, "{reason}");
-            use nix::sys::signal::{Signal, kill};
-            let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
-        }
-        if !wait_for_daemon_exit(&session.metadata, SIGKILL_GRACE) {
-            bail!(
-                "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
-            );
+        if !exited_mid_escalation {
+            #[cfg(unix)]
+            {
+                let reason = format!(
+                    "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
+                    term_grace.as_secs()
+                );
+                crate::ui::factory::record_daemon_lifecycle(name, "killed", &reason);
+                tracing::warn!(session = name, pid, "{reason}");
+                use nix::sys::signal::{Signal, kill};
+                let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
+            }
+            if !wait_for_daemon_exit(&session.metadata, SIGKILL_GRACE) {
+                bail!(
+                    "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
+                );
+            }
         }
         sigkilled = true;
     }

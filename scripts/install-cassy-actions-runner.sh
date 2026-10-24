@@ -6,8 +6,8 @@
 #     sudo --preserve-env=RUNNER_TOKEN,RUNNER_SLOT,SCCACHE_SOURCE \
 #       scripts/install-cassy-actions-runner.sh
 # Slots 3 and 4 (cas-3b5e) are light lane slots: label cas-lane-light only,
-# no Rust/sccache, CPU-capped units. RUNNER_REGISTRATION=repo registers with a
-# repository token (no organization group) when no org-admin token exists.
+# no Rust/sccache, CPU-capped units. RUNNER_REGISTRATION=repo uses a repository
+# token and omits the organization runner group.
 set -euo pipefail
 
 runner_user=cassy-actions
@@ -22,6 +22,8 @@ runner_labels=cas-ci-32core,trusted-branches
 registration="${RUNNER_REGISTRATION:-org}"
 light=false
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=scripts/cassy-actions-runner-registration.sh
+source "$repo_root/scripts/cassy-actions-runner-registration.sh"
 pruner_source="$repo_root/scripts/prune-cassy-actions-cache.sh"
 pruner_dest=/usr/local/sbin/cassy-actions-cache-prune
 mount_guard_source="$repo_root/scripts/check-cassy-actions-cache-mount.sh"
@@ -73,6 +75,8 @@ case "$registration" in
     repo) runner_url=https://github.com/Richards-LLC/cassy ;;
     *) echo "RUNNER_REGISTRATION must be org or repo; got $registration" >&2; exit 1 ;;
 esac
+group_args=()
+set_runner_group_args "$registration" "$runner_group" group_args
 unit_source="$repo_root/ops/systemd/$service_name"
 
 if [[ "$(id -u)" -ne 0 ]]; then
@@ -80,7 +84,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 1
 fi
 if [[ -z "${RUNNER_TOKEN:-}" ]]; then
-    echo "RUNNER_TOKEN must contain a short-lived Richards-LLC organization runner registration token" >&2
+    echo "RUNNER_TOKEN must contain a short-lived Richards-LLC organization or repository runner registration token" >&2
     exit 1
 fi
 if "$light"; then
@@ -100,8 +104,6 @@ if "$light"; then
     printf '%s  %s\n' "$runner_sha256" "$tmp_dir/$runner_archive" | sha256sum --check --strict
     tar -xzf "$tmp_dir/$runner_archive" -C "$runner_dir"
     chown -R "$runner_user:$runner_user" "$runner_dir"
-    group_args=()
-    [[ "$registration" == org ]] && group_args=(--runnergroup "$runner_group")
     (
         cd "$runner_dir"
         sudo -u "$runner_user" env HOME="$runner_root" \
@@ -182,7 +184,7 @@ fi
         --url "$runner_url" \
         --token "$RUNNER_TOKEN" \
         --name "$runner_name" \
-        --runnergroup "$runner_group" \
+        "${group_args[@]}" \
         --labels "$runner_labels" \
         --work _work
 )

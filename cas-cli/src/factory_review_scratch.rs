@@ -130,12 +130,21 @@ fn write_owner_with_directory_sync(
 fn write_new_checkout_owner_with_parent_sync(
     directory: &Path,
     record: &Owner,
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+    mut sync_parent: impl FnMut(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
     write_owner(directory, record)?;
     // The owner's child sync makes its contents durable; the store parent
-    // sync makes the new checkout directory entry durable before Git uses it.
-    sync_parent(directory.parent().context("review store parent missing")?)?;
+    // sync publishes the checkout, and the scratch base sync publishes its task.
+    let parent = directory.parent().context("review store parent missing")?;
+    let scratch_base = parent.parent().context("review scratch base missing")?;
+    if let Err(error) = sync_parent(parent).and_then(|()| sync_parent(scratch_base)) {
+        // Only fresh checkouts reach this helper, before Git creates a worktree.
+        // Removal keeps a retry on the fresh path so it repeats both syncs.
+        fs::remove_dir_all(directory).with_context(|| {
+            format!("remove incomplete review checkout after parent sync failure: {error}")
+        })?;
+        return Err(error.into());
+    }
     Ok(())
 }
 

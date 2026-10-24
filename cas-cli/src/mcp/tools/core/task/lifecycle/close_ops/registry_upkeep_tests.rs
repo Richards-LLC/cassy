@@ -304,7 +304,7 @@ fn registry_upkeep_rename_orphans_refuse_but_existing_debt_warns() {
     write(f.repo.path(), "README.md", "mine");
     let head = commit(f.repo.path());
     check(
-        &f.store,
+        &mut CloseNoteTracker::new(&f.store, &f.task),
         &mut f.task,
         f.repo.path(),
         &f.qa,

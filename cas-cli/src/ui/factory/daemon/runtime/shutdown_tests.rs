@@ -407,12 +407,14 @@ async fn full_viewer_resize_does_not_debounce_the_owner_cas_4fde() {
 
     // Leaving compact mode can change the remaining compact viewers' target,
     // just as entering compact or resizing within it can.
-    for (mode, size, expected) in [
-        (ClientViewMode::Full, (150, 50), None),
-        (ClientViewMode::Full, (60, 20), Some((60, 20))),
-        (ClientViewMode::Compact, (70, 25), Some((70, 25))),
-        (ClientViewMode::Compact, (150, 50), Some((150, 50))),
+    for (owner_mode, mode, size, expected) in [
+        (ClientViewMode::Full, ClientViewMode::Full, (150, 50), None),
+        (ClientViewMode::Full, ClientViewMode::Full, (60, 20), Some((60, 20))),
+        (ClientViewMode::Full, ClientViewMode::Compact, (70, 25), Some((70, 25))),
+        (ClientViewMode::Full, ClientViewMode::Compact, (150, 50), Some((150, 50))),
+        (ClientViewMode::Compact, ClientViewMode::Full, (100, 30), Some((100, 30))),
     ] {
+        daemon.clients.get_mut(&0).unwrap().view_mode = owner_mode;
         daemon.clients.get_mut(&1).unwrap().view_mode = mode;
         daemon.clients.get_mut(&1).unwrap().needs_full_redraw = false;
         daemon.owner_last_activity = Instant::now();
@@ -422,7 +424,7 @@ async fn full_viewer_resize_does_not_debounce_the_owner_cas_4fde() {
         frame.push(CONTROL_SUFFIX);
         viewer.write_all(&frame).unwrap();
         daemon.process_client_input().await.unwrap();
-        assert_eq!(daemon.pending_resize, expected, "viewer {mode:?} -> {size:?}");
+        assert_eq!(daemon.pending_resize, expected, "owner {owner_mode:?}, viewer {mode:?} -> {size:?}");
         assert_eq!(daemon.owner_client_id, Some(0));
         assert_eq!((daemon.cols, daemon.rows), (120, 40));
         assert_eq!((daemon.clients[&1].client_cols, daemon.clients[&1].client_rows), size);
@@ -444,22 +446,33 @@ async fn same_size_keyboard_takeover_does_not_debounce_cas_4fde() {
     daemon.accept_clients().unwrap();
     let mut viewer = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
     daemon.accept_clients().unwrap();
+    let _smaller_full_viewer = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    daemon.accept_clients().unwrap();
+    daemon.clients.get_mut(&2).unwrap().client_cols = 100;
+    daemon.clients.get_mut(&2).unwrap().client_rows = 30;
     daemon.cols = 120;
     daemon.rows = 40;
     daemon.clients.get_mut(&0).unwrap().client_cols = 120;
     daemon.clients.get_mut(&0).unwrap().client_rows = 40;
 
-    for (size, expected) in [((120, 40), None), ((100, 30), Some((100, 30)))] {
+    for (mode, size, expected) in [
+        (ClientViewMode::Full, (120, 40), None),
+        (ClientViewMode::Full, (100, 30), Some((100, 30))),
+        (ClientViewMode::Compact, (120, 40), Some((120, 40))),
+    ] {
         daemon.owner_client_id = Some(0);
         daemon.owner_last_activity = Instant::now() - Duration::from_secs(INPUT_OWNER_IDLE_SECS + 1);
         daemon.pending_resize = None;
         let client = daemon.clients.get_mut(&1).unwrap();
+        client.view_mode = mode;
         client.client_cols = size.0;
         client.client_rows = size.1;
         viewer.write_all(b"\x1b[C").unwrap();
         assert!(daemon.process_client_input().await.unwrap());
         assert_eq!(daemon.owner_client_id, Some(1), "keyboard must still take ownership");
         assert_eq!(daemon.pending_resize, expected, "takeover at {size:?}");
+        assert_eq!(daemon.dims_for_mode(ClientViewMode::Full),
+            if mode == ClientViewMode::Compact { (100, 30) } else { size });
     }
 }
 

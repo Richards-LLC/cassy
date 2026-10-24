@@ -77,7 +77,7 @@ impl Fixture {
     }
     fn run(&mut self, head: &str) -> Result<Vec<String>, String> {
         at_park(
-            &self.store,
+            &mut CloseNoteTracker::new(&self.store, &self.task),
             &mut self.task,
             self.db.path(),
             self.repo.path(),
@@ -140,7 +140,7 @@ fn docs_upkeep_enumerated_directory_requires_map_or_reason() {
     assert!(f.run(&head).is_err());
     assert!(
         at_park(
-            &f.store,
+            &mut CloseNoteTracker::new(&f.store, &f.task),
             &mut f.task,
             f.db.path(),
             f.repo.path(),

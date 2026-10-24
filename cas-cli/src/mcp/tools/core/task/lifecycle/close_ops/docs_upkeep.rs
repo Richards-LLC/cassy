@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn at_park(
-    store: &dyn cas_store::TaskStore,
+    notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
     cas_root: &Path,
     repo: &Path,
@@ -20,7 +20,7 @@ pub(super) fn at_park(
         Ok(config) => config,
         Err(error) => {
             return warning(
-                store,
+                notes,
                 task,
                 format!("UPKEEP WARNING: docs config unreadable (not blocking): {error}"),
             );
@@ -32,7 +32,7 @@ pub(super) fn at_park(
     }
     let (base, head, paths) = match delivery_snapshot(task, repo, target, window, receipt) {
         Ok(snapshot) => snapshot,
-        Err(message) => return warning(store, task, message),
+        Err(message) => return warning(notes, task, message),
     };
     let qa = config.qa();
     let result = (|| -> anyhow::Result<_> {
@@ -117,7 +117,7 @@ pub(super) fn at_park(
         Ok(result) => result,
         Err(error) => {
             return warning(
-                store,
+                notes,
                 task,
                 format!("UPKEEP WARNING: docs inputs unavailable (not blocking): {error:#}"),
             );
@@ -168,7 +168,7 @@ pub(super) fn at_park(
             }]
         };
         match finish(
-            store,
+            notes,
             task,
             stage,
             path,

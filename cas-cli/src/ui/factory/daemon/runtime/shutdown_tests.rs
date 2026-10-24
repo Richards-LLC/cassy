@@ -402,6 +402,8 @@ async fn full_viewer_resize_does_not_debounce_the_owner_cas_4fde() {
     daemon.owner_client_id = Some(0);
     daemon.cols = 120;
     daemon.rows = 40;
+    daemon.clients.get_mut(&0).unwrap().client_cols = 120;
+    daemon.clients.get_mut(&0).unwrap().client_rows = 40;
 
     // Leaving compact mode can change the remaining compact viewers' target,
     // just as entering compact or resizing within it can.
@@ -412,6 +414,7 @@ async fn full_viewer_resize_does_not_debounce_the_owner_cas_4fde() {
         (ClientViewMode::Compact, (150, 50), Some((150, 50))),
     ] {
         daemon.clients.get_mut(&1).unwrap().view_mode = mode;
+        daemon.clients.get_mut(&1).unwrap().needs_full_redraw = false;
         daemon.owner_last_activity = Instant::now();
         daemon.pending_resize = None;
         let mut frame = CONTROL_PREFIX.to_vec();
@@ -443,6 +446,8 @@ async fn same_size_keyboard_takeover_does_not_debounce_cas_4fde() {
     daemon.accept_clients().unwrap();
     daemon.cols = 120;
     daemon.rows = 40;
+    daemon.clients.get_mut(&0).unwrap().client_cols = 120;
+    daemon.clients.get_mut(&0).unwrap().client_rows = 40;
 
     for (size, expected) in [((120, 40), None), ((100, 30), Some((100, 30)))] {
         daemon.owner_client_id = Some(0);

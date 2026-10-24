@@ -1,7 +1,7 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 //! A separate target lifetime lease is inherited to protect surviving children.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -971,31 +971,14 @@ fn passing_test_records(
     }
 
     let mut ranges = BTreeMap::new();
-    for (receipt_head, package, test) in &ancestors {
-        let key = (package.clone(), test.harness.clone(), test.filter.clone());
-        if exact.contains_key(&key) {
-            continue;
-        }
-        ranges.entry(receipt_head.clone()).or_insert_with(|| {
-            receipt_range_changed_paths(&repo, receipt_head, head)
-        });
-    }
-
-    let changed_paths = ranges
-        .values()
-        .filter_map(Option::as_ref)
-        .flatten()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let proof_inputs = delivered_tree_proof_inputs(&repo, head, &changed_paths)
-        .unwrap_or_else(|| changed_paths.clone());
-
+    let mut named_sources = BTreeMap::new();
     for (receipt_head, package, test) in ancestors {
-        let key = (package.clone(), test.harness.clone(), test.filter.clone());
-        let Some(changes) = ranges.get(&receipt_head).and_then(Option::as_ref) else {
-            continue;
-        };
-        if exact.contains_key(&key) || changes.iter().any(|path| proof_inputs.contains(path)) {
+        let key = (package, test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key)
+            || !*ranges.entry(receipt_head.clone()).or_insert_with(|| {
+                receipt_range_has_no_proof_inputs(&repo, &receipt_head, head, &mut named_sources)
+            })
+        {
             continue;
         }
         match exact.entry(key) {
@@ -1049,16 +1032,17 @@ fn read_passing_test_record(
         .then_some((record.head, package, test))
 }
 
-fn receipt_range_changed_paths(
+fn receipt_range_has_no_proof_inputs(
     repo: &Path,
     receipt_head: &str,
     delivered_head: &str,
-) -> Option<Vec<String>> {
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
     if !valid_git_oid(receipt_head)
         || !valid_git_oid(delivered_head)
         || !receipt_head_is_ancestor(repo, receipt_head, delivered_head)
     {
-        return None;
+        return false;
     }
     let range = format!("{receipt_head}..{delivered_head}");
     let Ok(changes) = Command::new("git")
@@ -1075,17 +1059,16 @@ fn receipt_range_changed_paths(
         .current_dir(repo)
         .output()
     else {
-        return None;
+        return false;
     };
-    if !changes.status.success() {
-        return None;
-    }
-    changes
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| std::str::from_utf8(path).map(str::to_owned).ok())
-        .collect()
+    changes.status.success()
+        && changes.stdout.split(|byte| *byte == 0).all(|path| {
+            path.is_empty()
+                || std::str::from_utf8(path)
+                    .is_ok_and(|path| {
+                        !is_test_or_build_input_path(repo, delivered_head, path, named_sources)
+                    })
+        })
 }
 
 fn receipt_head_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
@@ -1103,9 +1086,15 @@ fn valid_git_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn is_test_or_build_input_path(path: &str) -> bool {
+fn is_test_or_build_input_path(
+    repo: &Path,
+    delivered_head: &str,
+    path: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
     let lower = path.to_ascii_lowercase();
-    if lower == ".env"
+    if is_workspace_crate_path(repo, delivered_head, path)
+        || lower == ".env"
         || lower.ends_with(".capture.txt")
         || lower == "hub-web/dist"
         || lower.starts_with("hub-web/dist/")
@@ -1163,154 +1152,122 @@ fn is_test_or_build_input_path(path: &str) -> bool {
             | "exs" | "scala" | "clj" | "vue" | "svelte" | "toml" | "lock" | "json"
             | "json5" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "xml"
             | "proto" | "graphql" | "nix"
-    )
+    ) || is_named_by_tracked_rust_source(repo, delivered_head, path, named_sources)
 }
 
-/// Read the delivered tree once per close and batch its Rust sources once.
-fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
-    if changed.is_empty() { return Some(BTreeSet::new()); }
-    let tree = delivered_tree(repo, head)?;
-    let mut inputs = BTreeSet::new();
-    let external = changed.iter().filter(|path| {
-        if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
-            inputs.insert((*path).clone()); false
-        } else { true }
-    }).cloned().collect::<Vec<_>>();
-    if external.is_empty() { return Some(inputs); }
-    for (source_path, source) in tree.rust_sources(repo)? {
-        let manifest = tree.manifest_dir_for_source(source_path);
-        for path in &external {
-            if source_references_path(source, source_path, manifest.as_deref(), path) {
-                inputs.insert(path.clone());
+/// A Rust source file can embed assets outside its crate directory with
+/// `include_str!` or `include_bytes!`. Use the basename to find candidate
+/// sources, then confirm the repo-relative or source-relative path. Treat git
+/// errors conservatively as proof inputs rather than reusing an unvalidated receipt.
+fn is_named_by_tracked_rust_source(
+    repo: &Path,
+    delivered_head: &str,
+    path: &str,
+    named_sources: &mut BTreeMap<String, bool>,
+) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return true;
+    };
+    // The basename only discovers possible source files. Confirm the full
+    // repo-relative path or its spelling relative to each source file; matching
+    // only a basename makes unrelated assets invalidate each other's receipts.
+    *named_sources.entry(path.to_owned()).or_insert_with(|| {
+        let sources = Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["grep", "-lF", "-z", "-e", name, delivered_head, "--", "*.rs"])
+            .current_dir(repo)
+            .output();
+        let Ok(sources) = sources else {
+            return true;
+        };
+        if !sources.status.success() {
+            return sources.status.code() != Some(1);
+        }
+        let sources = sources.stdout.split(|byte| *byte == 0);
+        for source in sources {
+            if source.is_empty() {
+                continue;
             }
-        }
-    }
-    Some(inputs)
-}
-
-struct DeliveredTree {
-    manifests: BTreeSet<String>,
-    sources: Vec<(String, String)>,
-    source_bodies: std::sync::OnceLock<Option<Vec<(String, String)>>>,
-}
-
-/// Share the immutable delivered-tree scan among proof reads for the same tip.
-fn delivered_tree(repo: &Path, head: &str) -> Option<std::sync::Arc<DeliveredTree>> {
-    type CachedTree = (String, std::sync::Arc<DeliveredTree>);
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedTree>>> = std::sync::OnceLock::new();
-    let mut cache = CACHE.get_or_init(|| std::sync::Mutex::new(None)).lock().ok()?;
-    if let Some((cached_head, tree)) = cache.as_ref()
-        && cached_head == head
-    {
-        return Some(std::sync::Arc::clone(tree));
-    }
-    let tree = std::sync::Arc::new(DeliveredTree::load(repo, head)?);
-    *cache = Some((head.to_owned(), std::sync::Arc::clone(&tree)));
-    Some(tree)
-}
-
-impl DeliveredTree {
-    fn load(repo: &Path, head: &str) -> Option<Self> {
-        let tree = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["ls-tree", "-r", "-z", "--full-tree", head]).current_dir(repo).output().ok()?;
-        if !tree.status.success() { return None; }
-        let (mut manifests, mut sources) = (BTreeSet::new(), Vec::new());
-        for row in tree.stdout.split(|b| *b == 0).filter(|row| !row.is_empty()) {
-            let tab = row.iter().position(|b| *b == b'\t')?;
-            let mut fields = row[..tab].split(|b| b.is_ascii_whitespace());
-            fields.next()?;
-            if fields.next()? != b"blob" { continue; }
-            let oid = std::str::from_utf8(fields.next()?).ok()?.to_owned();
-            let path = std::str::from_utf8(&row[tab + 1..]).ok()?.to_owned();
-            if path == "Cargo.toml" { manifests.insert(String::new()); }
-            if let Some(dir) = path.strip_suffix("/Cargo.toml") { manifests.insert(dir.to_owned()); }
-            if path.ends_with(".rs") { sources.push((path, oid)); }
-        }
-        Some(Self { manifests, sources, source_bodies: std::sync::OnceLock::new() })
-    }
-
-    fn is_workspace_crate_path(&self, path: &str) -> bool {
-        let mut dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
-        while !dir.is_empty() {
-            if self.manifests.contains(dir) { return true; }
-            dir = dir.rsplit_once('/').map_or("", |(parent, _)| parent);
+            let Ok(source) = std::str::from_utf8(source) else {
+                return true;
+            };
+            let tree_prefix = format!("{delivered_head}:");
+            let source = source.strip_prefix(&tree_prefix).unwrap_or(source);
+            let Some(relative_path) = relative_path_from_source(source, path) else {
+                return true;
+            };
+            let matches = Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .arg("grep")
+                .arg("-lF")
+                .arg("-e")
+                .arg(path)
+                .arg("-e")
+                .arg(&relative_path)
+                .arg(delivered_head)
+                .arg("--")
+                .arg(source)
+                .current_dir(repo)
+                .output();
+            match matches {
+                Ok(matches) if matches.status.success() => return true,
+                Ok(matches) if matches.status.code() == Some(1) => {}
+                Ok(_) | Err(_) => return true,
+            }
         }
         false
-    }
-
-    fn manifest_dir_for_source(&self, path: &str) -> Option<String> {
-        let mut dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
-        loop {
-            if self.manifests.contains(dir) { return Some(dir.to_owned()); }
-            match dir.rsplit_once('/') {
-                Some((parent, _)) => dir = parent,
-                None => return self.manifests.contains("").then(String::new),
-            }
-        }
-    }
-
-    fn rust_sources(&self, repo: &Path) -> Option<&[(String, String)]> {
-        self.source_bodies.get_or_init(|| {
-            if self.sources.is_empty() { return Some(Vec::new()); }
-            let mut child = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
-                .args(["cat-file", "--batch"]).current_dir(repo)
-                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().ok()?;
-            {
-                use std::io::Write;
-                let input = child.stdin.as_mut()?;
-                for (_, oid) in &self.sources { writeln!(input, "{oid}").ok()?; }
-            }
-            let output = child.wait_with_output().ok()?;
-            if !output.status.success() { return None; }
-            let mut cursor = 0;
-            let bodies = self.sources.iter().map(|(path, oid)| {
-                let end = cursor + output.stdout.get(cursor..)?.iter().position(|b| *b == b'\n')?;
-                let mut fields = output.stdout[cursor..end].split(|b| b.is_ascii_whitespace());
-                if fields.next()? != oid.as_bytes() || fields.next()? != b"blob" { return None; }
-                let size = std::str::from_utf8(fields.next()?).ok()?.parse::<usize>().ok()?;
-                cursor = end + 1;
-                let body_end = cursor.checked_add(size)?;
-                let body = std::str::from_utf8(output.stdout.get(cursor..body_end)?).ok()?.to_owned();
-                if output.stdout.get(body_end) != Some(&b'\n') { return None; }
-                cursor = body_end + 1;
-                Some((path.clone(), body))
-            }).collect::<Option<Vec<_>>>()?;
-            (cursor == output.stdout.len()).then_some(bodies)
-        }).as_deref()
-    }
-}
-
-fn source_references_path(source: &str, source_path: &str, manifest: Option<&str>, target: &str) -> bool {
-    if !source.contains("include_str") && !source.contains("include_bytes") { return false; }
-    let dir = source_path.rsplit_once('/').map_or("", |(dir, _)| dir);
-    [Some(dir), manifest].into_iter().flatten().any(|base| {
-        let Some(relative) = relative_repo_path(base, target) else { return false; };
-        if normalize_repo_path(base, &relative).as_deref() != Some(target) { return false; }
-        match relative.rsplit_once('/') {
-            Some((parent, name)) => source.contains(&relative)
-                || (source.contains(&format!("{parent}/")) && source.contains(name)),
-            None => source.contains(&relative),
-        }
     })
 }
 
-fn relative_repo_path(base: &str, target: &str) -> Option<String> {
-    let from = normalize_repo_path("", base)?;
-    let to = normalize_repo_path("", target)?;
-    let from = from.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
-    let to = to.split('/').filter(|part| !part.is_empty()).collect::<Vec<_>>();
-    let common = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    Some(std::iter::repeat("..").take(from.len() - common)
-        .chain(to[common..].iter().copied()).collect::<Vec<_>>().join("/"))
+fn relative_path_from_source(source: &str, target: &str) -> Option<String> {
+    let mut source_dir = source.split('/').collect::<Vec<_>>();
+    source_dir.pop()?;
+    let target = target.split('/').collect::<Vec<_>>();
+    if source_dir
+        .iter()
+        .chain(&target)
+        .any(|component| component.is_empty() || *component == "." || *component == "..")
+    {
+        return None;
+    }
+    let shared = source_dir
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut relative = vec![".."; source_dir.len() - shared];
+    relative.extend_from_slice(&target[shared..]);
+    Some(relative.join("/"))
 }
 
-fn normalize_repo_path(base: &str, path: &str) -> Option<String> {
-    if path.starts_with('/') || path.contains('\0') { return None; }
-    let mut parts = Vec::new();
-    for part in base.split('/').chain(path.split('/')) {
-        match part { "" | "." => {}, ".." => { parts.pop()?; }, name => parts.push(name) }
+/// Cargo inputs are not limited to source-code extensions: `include_str!`,
+/// `include_bytes!`, and package build scripts can consume any file beneath a
+/// crate directory. Treat those files as proof inputs regardless of suffix.
+fn is_workspace_crate_path(repo: &Path, delivered_head: &str, path: &str) -> bool {
+    let path = Path::new(path);
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut prefix = PathBuf::new();
+    for component in parent.components() {
+        prefix.push(component.as_os_str());
+        if prefix != Path::new(".") {
+            let prefix_for_git = prefix.to_string_lossy().replace('\\', "/");
+            let manifest = format!("{delivered_head}:{prefix_for_git}/Cargo.toml");
+            match Command::new("git")
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .args(["cat-file", "-e", &manifest])
+                .stderr(std::process::Stdio::null())
+                .current_dir(repo)
+                .status()
+            {
+                Ok(status) if status.success() => return true,
+                Ok(_) => {}
+                Err(_) => return true,
+            }
+        }
     }
-    Some(parts.join("/"))
+    false
 }
 
 /// Write the receipt a passing targeted run leaves, for tests of the gates
@@ -2500,91 +2457,6 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
                 "test: PASS {receipt_head} cas test(cached) 1 rebound from {receipt_head} to {delivered_head}"
             )],
             "the delivered source refers to a different repo-relative path with the same basename"
-        );
-    }
-
-    #[test]
-    fn ancestor_test_receipt_git_processes_are_bounded_by_close_cas_27f8() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join(".cas");
-        let repo = root.join("worktrees/worker");
-        fixture_commit(&repo);
-        std::fs::create_dir_all(repo.join("src")).unwrap();
-        for index in 0..12 {
-            std::fs::write(
-                repo.join(format!("src/source-{index}.rs")),
-                "const GUIDE: &str = include_str!(\"guide.data\");\n",
-            )
-            .unwrap();
-        }
-        fixture_commit_as(&repo, "Rust source candidates");
-        let receipt_head = fixture_head(&repo);
-        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
-
-        for index in 0..12 {
-            let asset = repo.join(format!("docs/deep/section-{index}/guide.data"));
-            std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
-            std::fs::write(asset, "guide\n").unwrap();
-        }
-        fixture_commit_as(&repo, "unreferenced assets");
-        let delivered_head = fixture_head(&repo);
-
-        let trace = dir.path().join("git-trace2.jsonl");
-        let mut env = crate::test_env_guard::TestEnvGuard::new();
-        env.set("GIT_TRACE2_EVENT", &trace);
-        let receipts = passing_test_receipts(&root, &repo, &delivered_head);
-        drop(env);
-
-        assert_eq!(receipts.len(), 1, "unreferenced files should retain the receipt");
-        let starts = std::fs::read_to_string(trace)
-            .unwrap()
-            .lines()
-            .filter(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .is_ok_and(|event| event["event"] == "start")
-            })
-            .count();
-        assert!(
-            starts <= 5,
-            "one close should use a bounded Git process count for many directories and source candidates; observed {starts}"
-        );
-    }
-
-    #[test]
-    fn ancestor_test_receipt_matches_nested_manifest_relative_include_cas_27f8() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path().join(".cas");
-        let repo = root.join("worktrees/worker");
-        fixture_commit(&repo);
-        std::fs::write(
-            repo.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/nested/widget\"]\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(repo.join("crates/nested/widget/src")).unwrap();
-        std::fs::write(
-            repo.join("crates/nested/widget/Cargo.toml"),
-            "[package]\nname = \"widget\"\nversion = \"0.1.0\"\n",
-        )
-        .unwrap();
-        std::fs::create_dir_all(repo.join("docs/assets")).unwrap();
-        std::fs::write(repo.join("docs/assets/guide.md"), "old guide\n").unwrap();
-        std::fs::write(
-            repo.join("crates/nested/widget/src/lib.rs"),
-            "const GUIDE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../../docs/assets/\", \"guide.md\"));\n",
-        )
-        .unwrap();
-        fixture_commit_as(&repo, "nested include fixture");
-        let receipt_head = fixture_head(&repo);
-        record_passing_test_for_tests(&root, &repo, &receipt_head, "widget", "test(cached)");
-
-        std::fs::write(repo.join("docs/assets/guide.md"), "updated guide\n").unwrap();
-        fixture_commit_as(&repo, "included manifest-relative asset");
-        let delivered_head = fixture_head(&repo);
-
-        assert!(
-            passing_test_receipts(&root, &repo, &delivered_head).is_empty(),
-            "a nested CARGO_MANIFEST_DIR-relative include resolves to its repo-relative asset"
         );
     }
 

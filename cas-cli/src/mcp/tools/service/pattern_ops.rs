@@ -97,9 +97,7 @@ impl CasService {
 
         let resp = self.pattern_api_call("GET", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&resp)?;
 
         Ok(Self::success(format_pattern(pattern)))
     }
@@ -144,9 +142,7 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&resp)?;
 
         Ok(Self::success(format!(
             "Updated pattern: {}\n\n{}",
@@ -204,9 +200,7 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&resp)?;
 
         Ok(Self::success(format!(
             "Adopted rule {} as personal pattern: {}\n\n{}",
@@ -230,9 +224,7 @@ impl CasService {
         // Update helpful_count by fetching current and incrementing
         let show_resp = self.pattern_api_call("GET", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = show_resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&show_resp)?;
 
         let current_count = pattern
             .get("helpful_count")
@@ -251,9 +243,9 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let updated = resp.get("pattern");
+        let updated = pattern_response_row(&resp)?;
         let new_count = updated
-            .and_then(|p| p.get("helpful_count"))
+            .get("helpful_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(current_count + 1);
 
@@ -272,9 +264,7 @@ impl CasService {
 
         let show_resp = self.pattern_api_call("GET", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = show_resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&show_resp)?;
 
         let current_count = pattern
             .get("harmful_count")
@@ -293,9 +283,9 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let updated = resp.get("pattern");
+        let updated = pattern_response_row(&resp)?;
         let new_count = updated
-            .and_then(|p| p.get("harmful_count"))
+            .get("harmful_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(current_count + 1);
 
@@ -741,6 +731,13 @@ impl CasService {
                         format!("API error ({code}): {body}"),
                     ))
                 }
+                Err(ureq::Error::Transport(_)) if method == "POST" && path == "/api/patterns" => {
+                    Err(pattern_create_uncertain(
+                        None,
+                        format!("local-{}", uuid::Uuid::new_v4()),
+                        "a network error prevented confirmation of the write",
+                    ))
+                }
                 Err(ureq::Error::Transport(e)) => Err(Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Network error: {e}"),
@@ -748,6 +745,40 @@ impl CasService {
             }
         }
     }
+}
+
+/// Both deployed bare rows and legacy wrappers must identify a persisted pattern.
+fn pattern_response_row(response: &serde_json::Value) -> Result<&serde_json::Value, McpError> {
+    let has_id = |row: &&serde_json::Value| {
+        row.is_object()
+            && row.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+    };
+    response.get("pattern").filter(has_id)
+        .or_else(|| Some(response).filter(has_id))
+        .ok_or_else(|| CasService::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))
+}
+
+/// A non-idempotent write without a usable result needs reconciliation, not a retry.
+fn pattern_create_uncertain(status: Option<u16>, reference: String, reason: &str) -> McpError {
+    let status_text = status.map(|status| format!("Cloud returned HTTP {status}, but ")).unwrap_or_default();
+    let mut error = CasService::error(
+        ErrorCode::INTERNAL_ERROR,
+        format!(
+            "Pattern create outcome uncertain: {status_text}{reason}. \
+             The pattern may already exist. Do not retry create. Reconcile with \
+             pattern action=list and match the original request before creating again. \
+             Reconciliation reference: {reference}",
+        ),
+    );
+    error.data = Some(serde_json::json!({
+        "outcome": "uncertain",
+        "http_status": status,
+        "reconciliation_id": reference,
+        "retry_safe": false,
+    }));
+    error
 }
 
 /// Cloud returns the persisted row directly or in a legacy pattern wrapper.
@@ -761,42 +792,12 @@ fn decode_pattern_create_response(response: ureq::Response) -> Result<serde_json
         .filter(|id| !id.trim().is_empty())
         .map(|id| id.chars().take(200).collect::<String>())
         .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4()));
-    let uncertain = |reason: &str| {
-        let mut error = CasService::error(
-            ErrorCode::INTERNAL_ERROR,
-            format!(
-                "Pattern create outcome uncertain: Cloud returned HTTP {status}, but {reason}. \
-                 The pattern may already exist. Do not retry create. Reconcile with \
-                 pattern action=list and match the original request before creating again. \
-                 Reconciliation reference: {reference}",
-            ),
-        );
-        error.data = Some(serde_json::json!({
-            "outcome": "uncertain",
-            "http_status": status,
-            "reconciliation_id": reference,
-            "retry_safe": false,
-        }));
-        error
-    };
+    let uncertain = |reason: &str| pattern_create_uncertain(Some(status), reference.clone(), reason);
     let pattern: serde_json::Value = response
         .into_json()
         .map_err(|_| uncertain("the response is not valid JSON"))?;
-    let has_id = |row: &serde_json::Value| {
-        row.is_object()
-            && row.get("id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-    };
-    let pattern = pattern
-        .get("pattern")
-        .filter(|row| has_id(row))
-        .cloned()
-        .unwrap_or(pattern);
-    if !has_id(&pattern) {
-        return Err(uncertain("the response has no pattern ID"));
-    }
-    Ok(pattern)
+    pattern_response_row(&pattern).cloned()
+        .map_err(|_| uncertain("the response has no pattern ID"))
 }
 
 // ============================================================================

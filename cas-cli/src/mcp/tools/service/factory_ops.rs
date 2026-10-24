@@ -3478,6 +3478,15 @@ impl CasService {
                         "Adoption authority changed before shutdown; nothing further was signalled",
                     ));
                 }
+                // Tool children may enter separate process groups. Capture
+                // ancestry before stopping the leader; revalidate every PID.
+                let (pid, starttime) = (group.pgid, group.pid_starttime);
+                tokio::task::spawn_blocking(move || {
+                    crate::ui::factory::server_registry::kill_process_tree_fingerprinted(pid, starttime)
+                })
+                .await
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
                 let outcome = crate::ui::factory::process_groups::reap(&self.inner.cas_root, group)
                     .await
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
@@ -13713,16 +13722,17 @@ mod tests {
         env.set("CAS_FACTORY_SESSION", "dead-session");
         env.set("CAS_AGENT_ROLE", "worker");
         let input = cas_core::hooks::types::HookInput {
-            hook_event_name: "UserPromptSubmit".into(),
+            hook_event_name: "PostToolUse".into(),
             agent_role: Some("worker".into()),
             ..Default::default()
         };
+        let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
         let context =
-            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
-                Some(&service.inner.cas_root),
-                &input,
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
+                Some(&service.inner.cas_root), &input, None, &mut budget,
             )
-            .expect("the next actual hook boundary renders the recovery body");
+            .and_then(|outcome| outcome.text)
+            .expect("the next actual tool boundary renders the recovery body");
         assert!(context.contains("Preserve your committed work"));
         let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
         let report = queue.message_delivery_report(row.id).unwrap().unwrap();
@@ -13730,12 +13740,12 @@ mod tests {
             report.recipient_receipt,
             Some(cas_store::SurfacingSource::HookSurfaced)
         );
+        let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
         assert!(
-            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
-                Some(&service.inner.cas_root),
-                &input,
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
+                Some(&service.inner.cas_root), &input, None, &mut budget,
             )
-            .is_none(),
+            .and_then(|outcome| outcome.text).is_none(),
             "a second hook cannot render the same recovery body again"
         );
     }
@@ -13792,9 +13802,13 @@ mod tests {
             .expect("actual process must exit")
             .unwrap();
         assert!(!status.success());
+        let state = std::process::Command::new("ps")
+            .args(["-p", &escaped.0.to_string(), "-o", "stat="])
+            .output().unwrap();
         assert!(
-            !crate::mcp::daemon::pid_matches_fingerprint(escaped.0, escaped.1),
-            "worker shutdown must also reap a child that started its own session"
+            !crate::mcp::daemon::pid_matches_fingerprint(escaped.0, escaped.1)
+                || String::from_utf8_lossy(&state.stdout).trim_start().starts_with('Z'),
+            "worker shutdown must also stop a child that started its own session"
         );
         assert_eq!(
             crate::store::open_agent_store(&service.inner.cas_root)

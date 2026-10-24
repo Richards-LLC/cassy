@@ -212,7 +212,7 @@ fn cas_0a4c_real_binary_missing_selector_is_one_secret_free_json_error() {
 
 /// Read the real CLI's report against isolated ordinary-auth REST services.
 /// No registration, mapping mutation, Slack body read or activation is allowed.
-fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authorities: Vec<(&str, serde_json::Value)>) -> serde_json::Value {
+fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authorities: Vec<(&str, serde_json::Value)>, registration: bool) -> serde_json::Value {
     use serde_json::json;
     let temp = TempDir::new().unwrap();
     let root = temp.path().join(".cas");
@@ -225,10 +225,10 @@ fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authoritie
         team_id: Some("qa-team".into()), ..Default::default()
     }.save_to_cas_dir(&root).unwrap();
     let inventory = inventory.into_iter().map(|channel| json!({"binding":{"channel_id":channel,"project_id":"qa.invalid/channels"}})).collect::<Vec<_>>();
-    let mut responses = vec![
-        ("/api/channels".to_owned(), json!({"channels": mappings})),
-        ("/api/coordination/bindings/activation?registration_id=qa-supervisor".to_owned(), json!({"schema":"cassy.coordination/v1","code":"completed","bindings":inventory})),
-    ];
+    let mut responses = vec![("/api/channels".to_owned(), json!({"channels": mappings}))];
+    if registration {
+        responses.push(("/api/coordination/bindings/activation?registration_id=qa-supervisor".to_owned(), json!({"schema":"cassy.coordination/v1","code":"completed","bindings":inventory})));
+    }
     responses.extend(authorities.into_iter().map(|(channel, body)| (
         format!("/api/coordination/bindings/authority?team_id=qa-team&channel_id={channel}"), body
     )));
@@ -244,13 +244,15 @@ fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authoritie
         }
         assert!(server.try_recv().unwrap().is_none(), "no activation or registration");
     });
-    let output = violet(temp.path())
-        .args(["channels", "--url", &endpoint, "--registration-id", "qa-supervisor", "--json"])
-        .output().unwrap();
+    let mut command = violet(temp.path());
+    command.env_remove("CLAUDE_CODE_SESSION_ID").args(["channels", "--url", &endpoint, "--json"]);
+    if registration { command.args(["--registration-id", "qa-supervisor"]); }
+    let output = command.output().unwrap();
     // Join even when the CLI fails, so no fixture server outlives this test.
     let served = remote.join();
     assert_eq!(output.status.code(), Some(1), "findings must exit 1: {}", String::from_utf8_lossy(&output.stderr));
     served.unwrap();
+    assert!(!root.join("cas.db").exists(), "listing must not create a local agent database");
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
@@ -276,7 +278,7 @@ fn channels_report_unions_both_stores_and_configured_unmapped_channels() {
         ("C01BOTH",channel_authority("C01BOTH","qa.invalid/channels",true)),
         ("C02CLOUD",channel_authority("C02CLOUD","qa.invalid/channels",false)),
         ("C03CONFIG",absent.clone()), ("C04VIOLET",absent),
-    ]);
+    ], true);
     assert_eq!(report["complete"], true);
     let rows = report["channels"].as_array().unwrap();
     assert_eq!(rows.iter().map(|r| r["channel_id"].as_str().unwrap()).collect::<Vec<_>>(), ["C01BOTH","C02CLOUD","C03CONFIG","C04VIOLET"]);
@@ -286,6 +288,16 @@ fn channels_report_unions_both_stores_and_configured_unmapped_channels() {
     assert_eq!(rows[2]["flags"],json!(["violet_unmapped","cloud_unmapped"]));
     assert_eq!(rows[3]["flags"],json!(["cloud_unmapped"]));
     assert!(report.to_string().contains("cas update"));
+
+    let without_registration = channels_report(json!([
+        {"channel_id":"C01BOTH","channel_name":"both","project_id":"qa.invalid/channels"}
+    ]), vec![], vec![
+        ("C01BOTH",channel_authority("C01BOTH","qa.invalid/channels",true)),
+        ("C03CONFIG",json!({"schema":"cassy.binding-reconciliation/v1","code":"completed","binding":null,"strict_activation":null})),
+    ], false);
+    assert_eq!(without_registration["complete"],false);
+    assert_eq!(without_registration["channels"].as_array().unwrap().len(),2);
+    assert!(without_registration["errors"].to_string().contains("Cloud-only discovery unavailable"));
 }
 
 #[test]
@@ -298,7 +310,7 @@ fn channels_flags_project_mismatches_and_never_calls_them_verified_matches() {
         ("C01BOTH",channel_authority("C01BOTH","another/project",true)),
         ("C02CLOUD",channel_authority("C02CLOUD","qa.invalid/channels",true)),
         ("C03CONFIG",json!({"schema":"cassy.binding-reconciliation/v1","code":"completed","binding":null,"strict_activation":null})),
-    ]);
+    ], true);
     let rows=report["channels"].as_array().unwrap();
     for row in &rows[..2] {
         assert_eq!(row["flags"],json!(["project_mismatch"]),"{row}");

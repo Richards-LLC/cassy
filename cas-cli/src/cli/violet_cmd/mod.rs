@@ -1,4 +1,4 @@
-//! `cas violet post|thread|read`: Slack through the Violet hub from any
+//! `cas violet post|thread|read|channels`: Slack through the Violet hub from any
 //! repository, with local files given by path (cassy#1157).
 //!
 //! An agent that shares a file names its path; this command reads, hashes and

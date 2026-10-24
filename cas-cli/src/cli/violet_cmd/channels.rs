@@ -36,6 +36,7 @@ pub struct Channel {
     /// Violet GET lists discovery rows; only reconciliation obtains server proof.
     violet_verification: &'static str,
     cloud_project_id: Option<String>,
+    cloud_workspace_id: Option<String>,
     cloud_verified: Option<bool>,
     strict_activation: Option<StrictActivation>,
     flags: Vec<&'static str>,
@@ -104,10 +105,14 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
         .validate_channels()
         .map_err(|error| VioletError::local("invalid_config", error))?;
     let configured = slack.channels;
-    let registration = args
-        .registration_id
-        .clone()
-        .or_else(|| crate::cloud::peers::cli_self_id(root));
+    let registration = args.registration_id.clone().or_else(|| {
+        // cli_self_id's PID fallback opens/migrates the local agent store.
+        // This read-only command must not create a DB just to discover an ID.
+        ["CAS_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
+            .into_iter()
+            .filter_map(|key| std::env::var(key).ok())
+            .find(|value| !value.trim().is_empty())
+    });
     let mut report = Report {
         ok: false,
         complete: false,
@@ -250,6 +255,7 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
             violet_project_id: mapping.map(|row| row.project_id.clone()),
             violet_verification: "discovery_only",
             cloud_project_id: binding.as_ref().map(|row| row.project_id.clone()),
+            cloud_workspace_id: binding.as_ref().map(|row| row.workspace_id.clone()),
             cloud_verified: binding.as_ref().map(|row| row.verified),
             strict_activation,
             flags,

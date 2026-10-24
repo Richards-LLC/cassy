@@ -385,6 +385,79 @@ fn detached_factory_attach_and_later_resize_use_the_owner_terminal_cas_9631() {
     );
 }
 
+#[tokio::test]
+async fn full_viewer_resize_does_not_debounce_the_owner_cas_4fde() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    daemon.listener.set_nonblocking(true).unwrap();
+    let _owner = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    daemon.accept_clients().unwrap();
+    let mut viewer = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    daemon.accept_clients().unwrap();
+    daemon.owner_client_id = Some(0);
+    daemon.cols = 120;
+    daemon.rows = 40;
+
+    // Leaving compact mode can change the remaining compact viewers' target,
+    // just as entering compact or resizing within it can.
+    for (mode, size, expected) in [
+        (ClientViewMode::Full, (150, 50), None),
+        (ClientViewMode::Full, (60, 20), Some((60, 20))),
+        (ClientViewMode::Compact, (70, 25), Some((70, 25))),
+        (ClientViewMode::Compact, (150, 50), Some((150, 50))),
+    ] {
+        daemon.clients.get_mut(&1).unwrap().view_mode = mode;
+        daemon.owner_last_activity = Instant::now();
+        daemon.pending_resize = None;
+        let mut frame = CONTROL_PREFIX.to_vec();
+        frame.extend_from_slice(format!("resize;{};{}", size.0, size.1).as_bytes());
+        frame.push(CONTROL_SUFFIX);
+        viewer.write_all(&frame).unwrap();
+        daemon.process_client_input().await.unwrap();
+        assert_eq!(daemon.pending_resize, expected, "viewer {mode:?} -> {size:?}");
+        assert_eq!(daemon.owner_client_id, Some(0));
+        assert_eq!((daemon.cols, daemon.rows), (120, 40));
+        assert_eq!((daemon.clients[&1].client_cols, daemon.clients[&1].client_rows), size);
+        assert!(daemon.clients[&1].needs_full_redraw);
+    }
+}
+
+#[tokio::test]
+async fn same_size_keyboard_takeover_does_not_debounce_cas_4fde() {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = daemon(&cas_dir);
+    daemon.listener.set_nonblocking(true).unwrap();
+    let _owner = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    daemon.accept_clients().unwrap();
+    let mut viewer = UnixStream::connect(cas_dir.join("test.sock")).unwrap();
+    daemon.accept_clients().unwrap();
+    daemon.cols = 120;
+    daemon.rows = 40;
+
+    for (size, expected) in [((120, 40), None), ((100, 30), Some((100, 30)))] {
+        daemon.owner_client_id = Some(0);
+        daemon.owner_last_activity = Instant::now() - Duration::from_secs(INPUT_OWNER_IDLE_SECS + 1);
+        daemon.pending_resize = None;
+        let client = daemon.clients.get_mut(&1).unwrap();
+        client.client_cols = size.0;
+        client.client_rows = size.1;
+        viewer.write_all(b"\x1b[C").unwrap();
+        assert!(daemon.process_client_input().await.unwrap());
+        assert_eq!(daemon.owner_client_id, Some(1), "keyboard must still take ownership");
+        assert_eq!(daemon.pending_resize, expected, "takeover at {size:?}");
+    }
+}
+
 /// macOS has no /proc discovery. Keep that OS boundary deterministic on CI
 /// while retaining real PID checks, registry reads, PTYs and queue consumers.
 struct EmptyProcessTable;

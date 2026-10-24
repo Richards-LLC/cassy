@@ -3036,9 +3036,6 @@ impl CasService {
                 queue
                     .record_deferred_inbox(message_id, 0)
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-                queue
-                    .mark_transport_delivered(message_id)
-                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
                 queue.record_pending_reason(message_id, cas_store::PendingReason::GatedNotReady,
                     Some("Original daemon is dead; recovery body waits for the worker's next turn or tool boundary (no idle wake)"))
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;

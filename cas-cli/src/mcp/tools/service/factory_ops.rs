@@ -13699,8 +13699,12 @@ mod tests {
         service.message_send(request).await.unwrap();
         let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session");
         let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
-        let row = queue.latest_session_activity("dead-session").unwrap().unwrap();
-        let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
+        let row = queue
+            .latest_session_activity("dead-session")
+            .unwrap()
+            .unwrap();
+        let body =
+            crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
         assert!(
             teams.inbox_has_unread_copy(&worker.name, "supervisor", &body),
             "orphan Claude must receive its body in the original team inbox"
@@ -13726,9 +13730,14 @@ mod tests {
             report.recipient_receipt,
             Some(cas_store::SurfacingSource::HookSurfaced)
         );
-        assert!(crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
-            Some(&service.inner.cas_root), &input,
-        ).is_none(), "a second hook cannot render the same recovery body again");
+        assert!(
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
+                Some(&service.inner.cas_root),
+                &input,
+            )
+            .is_none(),
+            "a second hook cannot render the same recovery body again"
+        );
     }
 
     #[cfg(unix)]
@@ -13745,7 +13754,10 @@ mod tests {
         let mut child = command.spawn().unwrap();
         let pid = child.id().unwrap();
         let mut ready = String::new();
-        tokio::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).await.unwrap();
+        tokio::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .await
+            .unwrap();
         let escaped_pid: u32 = ready.trim().parse().unwrap();
         let escaped_start = crate::mcp::daemon::read_pid_starttime(escaped_pid).unwrap();
         struct EscapedChild(u32, u64);
@@ -13753,7 +13765,9 @@ mod tests {
             fn drop(&mut self) {
                 if crate::mcp::daemon::pid_matches_fingerprint(self.0, self.1) {
                     // SAFETY: this fixture captured and rechecked its disposable child identity.
-                    unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL); }
+                    unsafe {
+                        libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+                    }
                 }
             }
         }
@@ -13778,7 +13792,10 @@ mod tests {
             .expect("actual process must exit")
             .unwrap();
         assert!(!status.success());
-        assert!(!crate::mcp::daemon::pid_matches_fingerprint(escaped.0, escaped.1), "worker shutdown must also reap a child that started its own session");
+        assert!(
+            !crate::mcp::daemon::pid_matches_fingerprint(escaped.0, escaped.1),
+            "worker shutdown must also reap a child that started its own session"
+        );
         assert_eq!(
             crate::store::open_agent_store(&service.inner.cas_root)
                 .unwrap()

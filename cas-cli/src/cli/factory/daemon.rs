@@ -194,7 +194,6 @@ pub(super) fn execute_daemon(
         phone_home,
     };
 
-    let rt = tokio::runtime::Runtime::new()?;
     if daemon_config.boot_progress {
         let supervisor_name = daemon_config
             .factory_config
@@ -202,14 +201,30 @@ pub(super) fn execute_daemon(
             .clone()
             .unwrap_or_else(|| "supervisor".to_string());
         let worker_names = daemon_config.factory_config.worker_names.clone();
-        rt.block_on(crate::ui::factory::run_daemon_with_boot_progress(
+        run_on_daemon_runtime(crate::ui::factory::run_daemon_with_boot_progress(
             daemon_config,
             supervisor_name,
             worker_names,
-        ))
+        ))?
     } else {
-        rt.block_on(crate::ui::factory::run_daemon(daemon_config))
+        run_on_daemon_runtime(crate::ui::factory::run_daemon(daemon_config))?
     }
+}
+
+/// How long the daemon's exit waits for its blocking threads (cas-3372).
+const DAEMON_RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
+
+/// Run a daemon future on its own multi-thread runtime.
+///
+/// A worker teardown that stalled for good (GH #1363) leaves its blocking
+/// thread running. Dropping the runtime would wait for it forever, after the
+/// daemon had already removed its metadata and logged its exit; the bounded
+/// shutdown lets the process end instead (cas-3372).
+fn run_on_daemon_runtime<F: std::future::Future>(future: F) -> Result<F::Output> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let output = rt.block_on(future);
+    rt.shutdown_timeout(DAEMON_RUNTIME_SHUTDOWN);
+    Ok(output)
 }
 
 pub(super) fn execute_legacy_daemon(
@@ -355,8 +370,7 @@ pub(super) fn run_factory_with_daemon(
         }
         ForkFirstResult::Child { init_phase } => {
             let mut daemon = init_phase.run_with_progress()?;
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(daemon.run())
+            run_on_daemon_runtime(daemon.run())?
         }
     }
 }
@@ -459,4 +473,31 @@ pub(super) fn run_factory_with_daemon(
     _phone_home: bool,
 ) -> Result<()> {
     bail!("Factory daemon mode is only supported on Unix systems")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cas-3372 (GH #1363): a worker teardown that stalls for good leaves a
+    /// blocking thread behind. Dropping the runtime waited for it, so after
+    /// the daemon had removed its metadata and logged its exit the process
+    /// lingered, ignoring SIGTERM, where `cas kill` could not find it.
+    #[test]
+    fn daemon_runtime_exits_past_a_stuck_blocking_thread() {
+        let (release, stuck) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        run_on_daemon_runtime(async move {
+            tokio::task::spawn_blocking(move || {
+                let _ = stuck.recv_timeout(Duration::from_secs(30));
+            });
+        })
+        .unwrap();
+        let elapsed = started.elapsed();
+        drop(release);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the daemon process waited {elapsed:?} for a stuck teardown thread"
+        );
+    }
 }

@@ -1537,7 +1537,8 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
     let receipt = git(repo, &["rev-parse", "HEAD"]);
     git(repo, &["push", "-q", "origin", "main"]);
     let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
-    config.set("qa.enabled", "false").unwrap();
+    config.set("qa.evidence_gate", "false").unwrap();
+    config.set("qa.independent_pass", "false").unwrap();
     config.set("qa.registry.enforce", "enforce").unwrap();
     config.save(&f.cas_dir()).unwrap();
     let mut task = assigned(id, TaskType::Task, "main");

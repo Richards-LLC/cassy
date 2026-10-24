@@ -1169,7 +1169,7 @@ fn is_test_or_build_input_path(path: &str) -> bool {
 /// Read the delivered tree once per close and batch its Rust sources once.
 fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<String>) -> Option<BTreeSet<String>> {
     if changed.is_empty() { return Some(BTreeSet::new()); }
-    let tree = DeliveredTree::load(repo, head)?;
+    let tree = delivered_tree(repo, head)?;
     let mut inputs = BTreeSet::new();
     let external = changed.iter().filter(|path| {
         if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
@@ -1178,9 +1178,9 @@ fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<Strin
     }).cloned().collect::<Vec<_>>();
     if external.is_empty() { return Some(inputs); }
     for (source_path, source) in tree.rust_sources(repo)? {
-        let manifest = tree.manifest_dir_for_source(&source_path);
+        let manifest = tree.manifest_dir_for_source(source_path);
         for path in &external {
-            if source_references_path(&source, &source_path, manifest.as_deref(), path) {
+            if source_references_path(source, source_path, manifest.as_deref(), path) {
                 inputs.insert(path.clone());
             }
         }
@@ -1188,7 +1188,27 @@ fn delivered_tree_proof_inputs(repo: &Path, head: &str, changed: &BTreeSet<Strin
     Some(inputs)
 }
 
-struct DeliveredTree { manifests: BTreeSet<String>, sources: Vec<(String, String)> }
+struct DeliveredTree {
+    manifests: BTreeSet<String>,
+    sources: Vec<(String, String)>,
+    source_bodies: std::sync::OnceLock<Option<Vec<(String, String)>>>,
+}
+
+/// Share the immutable delivered-tree scan among proof reads for the same tip.
+fn delivered_tree(repo: &Path, head: &str) -> Option<std::sync::Arc<DeliveredTree>> {
+    type CachedTree = (PathBuf, String, std::sync::Arc<DeliveredTree>);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedTree>>> = std::sync::OnceLock::new();
+    let mut cache = CACHE.get_or_init(|| std::sync::Mutex::new(None)).lock().ok()?;
+    if let Some((cached_repo, cached_head, tree)) = cache.as_ref()
+        && cached_repo == repo
+        && cached_head == head
+    {
+        return Some(std::sync::Arc::clone(tree));
+    }
+    let tree = std::sync::Arc::new(DeliveredTree::load(repo, head)?);
+    *cache = Some((repo.to_path_buf(), head.to_owned(), std::sync::Arc::clone(&tree)));
+    Some(tree)
+}
 
 impl DeliveredTree {
     fn load(repo: &Path, head: &str) -> Option<Self> {
@@ -1207,7 +1227,7 @@ impl DeliveredTree {
             if let Some(dir) = path.strip_suffix("/Cargo.toml") { manifests.insert(dir.to_owned()); }
             if path.ends_with(".rs") { sources.push((path, oid)); }
         }
-        Some(Self { manifests, sources })
+        Some(Self { manifests, sources, source_bodies: std::sync::OnceLock::new() })
     }
 
     fn is_workspace_crate_path(&self, path: &str) -> bool {
@@ -1230,32 +1250,34 @@ impl DeliveredTree {
         }
     }
 
-    fn rust_sources(&self, repo: &Path) -> Option<Vec<(String, String)>> {
-        if self.sources.is_empty() { return Some(Vec::new()); }
-        let mut child = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["cat-file", "--batch"]).current_dir(repo)
-            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().ok()?;
-        {
-            use std::io::Write;
-            let input = child.stdin.as_mut()?;
-            for (_, oid) in &self.sources { writeln!(input, "{oid}").ok()?; }
-        }
-        let output = child.wait_with_output().ok()?;
-        if !output.status.success() { return None; }
-        let mut cursor = 0;
-        let bodies = self.sources.iter().map(|(path, oid)| {
-            let end = cursor + output.stdout.get(cursor..)?.iter().position(|b| *b == b'\n')?;
-            let mut fields = output.stdout[cursor..end].split(|b| b.is_ascii_whitespace());
-            if fields.next()? != oid.as_bytes() || fields.next()? != b"blob" { return None; }
-            let size = std::str::from_utf8(fields.next()?).ok()?.parse::<usize>().ok()?;
-            cursor = end + 1;
-            let body_end = cursor.checked_add(size)?;
-            let body = std::str::from_utf8(output.stdout.get(cursor..body_end)?).ok()?.to_owned();
-            if output.stdout.get(body_end) != Some(&b'\n') { return None; }
-            cursor = body_end + 1;
-            Some((path.clone(), body))
-        }).collect::<Option<Vec<_>>>()?;
-        (cursor == output.stdout.len()).then_some(bodies)
+    fn rust_sources(&self, repo: &Path) -> Option<&[(String, String)]> {
+        self.source_bodies.get_or_init(|| {
+            if self.sources.is_empty() { return Some(Vec::new()); }
+            let mut child = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
+                .args(["cat-file", "--batch"]).current_dir(repo)
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().ok()?;
+            {
+                use std::io::Write;
+                let input = child.stdin.as_mut()?;
+                for (_, oid) in &self.sources { writeln!(input, "{oid}").ok()?; }
+            }
+            let output = child.wait_with_output().ok()?;
+            if !output.status.success() { return None; }
+            let mut cursor = 0;
+            let bodies = self.sources.iter().map(|(path, oid)| {
+                let end = cursor + output.stdout.get(cursor..)?.iter().position(|b| *b == b'\n')?;
+                let mut fields = output.stdout[cursor..end].split(|b| b.is_ascii_whitespace());
+                if fields.next()? != oid.as_bytes() || fields.next()? != b"blob" { return None; }
+                let size = std::str::from_utf8(fields.next()?).ok()?.parse::<usize>().ok()?;
+                cursor = end + 1;
+                let body_end = cursor.checked_add(size)?;
+                let body = std::str::from_utf8(output.stdout.get(cursor..body_end)?).ok()?.to_owned();
+                if output.stdout.get(body_end) != Some(&b'\n') { return None; }
+                cursor = body_end + 1;
+                Some((path.clone(), body))
+            }).collect::<Option<Vec<_>>>()?;
+            (cursor == output.stdout.len()).then_some(bodies)
+        }).as_deref()
     }
 }
 

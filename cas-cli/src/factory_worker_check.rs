@@ -2460,6 +2460,91 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         );
     }
 
+    #[test]
+    fn ancestor_test_receipt_git_processes_are_bounded_by_close_cas_27f8() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for index in 0..12 {
+            std::fs::write(
+                repo.join(format!("src/source-{index}.rs")),
+                "const GUIDE: &str = include_str!(\"guide.data\");\n",
+            )
+            .unwrap();
+        }
+        fixture_commit_as(&repo, "Rust source candidates");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+
+        for index in 0..12 {
+            let asset = repo.join(format!("docs/deep/section-{index}/guide.data"));
+            std::fs::create_dir_all(asset.parent().unwrap()).unwrap();
+            std::fs::write(asset, "guide\n").unwrap();
+        }
+        fixture_commit_as(&repo, "unreferenced assets");
+        let delivered_head = fixture_head(&repo);
+
+        let trace = dir.path().join("git-trace2.jsonl");
+        let mut env = crate::test_env_guard::TestEnvGuard::new();
+        env.set("GIT_TRACE2_EVENT", &trace);
+        let receipts = passing_test_receipts(&root, &repo, &delivered_head);
+        drop(env);
+
+        assert_eq!(receipts.len(), 1, "unreferenced files should retain the receipt");
+        let starts = std::fs::read_to_string(trace)
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<serde_json::Value>(line)
+                    .is_ok_and(|event| event["event"] == "start")
+            })
+            .count();
+        assert!(
+            starts <= 5,
+            "one close should use a bounded Git process count for many directories and source candidates; observed {starts}"
+        );
+    }
+
+    #[test]
+    fn ancestor_test_receipt_matches_nested_manifest_relative_include_cas_27f8() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::write(
+            repo.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/nested/widget\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("crates/nested/widget/src")).unwrap();
+        std::fs::write(
+            repo.join("crates/nested/widget/Cargo.toml"),
+            "[package]\nname = \"widget\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("docs/assets")).unwrap();
+        std::fs::write(repo.join("docs/assets/guide.md"), "old guide\n").unwrap();
+        std::fs::write(
+            repo.join("crates/nested/widget/src/lib.rs"),
+            "const GUIDE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../../docs/assets/guide.md\"));\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "nested include fixture");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "widget", "test(cached)");
+
+        std::fs::write(repo.join("docs/assets/guide.md"), "updated guide\n").unwrap();
+        fixture_commit_as(&repo, "included manifest-relative asset");
+        let delivered_head = fixture_head(&repo);
+
+        assert!(
+            passing_test_receipts(&root, &repo, &delivered_head).is_empty(),
+            "a nested CARGO_MANIFEST_DIR-relative include resolves to its repo-relative asset"
+        );
+    }
+
     #[cfg(unix)]
     fn path_test_child(name: &str, path: &OsStr, bin: &Path) {
         let test = format!("factory_worker_check::tests::{name}");

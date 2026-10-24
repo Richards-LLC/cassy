@@ -143,7 +143,7 @@ pub(crate) fn end_session_by_name(name: &str) -> Result<EndSessionOutcome> {
 }
 
 fn wait_for_daemon_exit(
-    metadata: &crate::ui::factory::protocol::SessionMetadata,
+    metadata: &crate::ui::factory::SessionMetadata,
     grace: std::time::Duration,
 ) -> bool {
     let deadline = std::time::Instant::now() + grace;

@@ -540,76 +540,103 @@ async fn deploy_task_closes_on_no_code_proof_over_a_foreign_lane_gh1133() {
     assert!(task.notes.contains(PROOF), "{}", task.notes);
 }
 
-/// cas-c202: a supervisor proof_scope_fix that lands after this close loaded
-/// the task, but before its terminal write, must survive: the close refuses
-/// rather than writing its stale copy (status, proof_targets, notes) back.
+/// Every proof correction and reopen must survive both terminal race windows.
 #[tokio::test]
 async fn close_refuses_terminal_write_over_a_concurrent_proof_scope_fix_cas_c202() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env, "main");
-    let id = "cas-c202-race";
-    f.put(&assigned(id, TaskType::Task, "main"));
-    claim(&f, id);
-    let cas_dir = f.cas_dir();
-    close_race_hook::before_terminal_write(id, move || {
-        let store = open_task_store(&cas_dir).unwrap();
-        let loaded = store.get("cas-c202-race").unwrap();
-        let mut corrected = loaded.clone();
-        corrected.status = TaskStatus::Open;
-        corrected.proof_targets = vec!["pre_tool".into(), "pre_tool::shell_effects".into()];
-        corrected.notes.push_str("\n\n[2026-10-21 14:18] PROOF-SCOPE FIX widened");
-        store.update_if_current(&corrected, &loaded).unwrap();
-    });
-    let response = call(
-        &f.worker,
-        serde_json::json!({
-            "action": "close", "id": id, "reason": "Deployed the monthly release",
-            "execution_note": "no-code", "external_ref": PROOF,
-        }),
-    )
-    .await;
-    let task = f.task(id);
-    assert_eq!(task.status, TaskStatus::Open, "the correction's status survives: {response}");
-    assert_eq!(task.proof_targets, ["pre_tool", "pre_tool::shell_effects"], "{response}");
-    assert!(task.notes.contains("PROOF-SCOPE FIX"), "{}", task.notes);
-    assert!(
-        response.contains("CLOSE REFUSED") && response.contains("Reload"),
-        "the refusal tells the worker to reload and retry: {response}"
-    );
+    for after_read in [false, true] {
+        for field in ["reopen", "proof_targets", "risk", "execution_note", "work_target"] {
+            let id = format!("cas-c202-{field}-{after_read}");
+            f.put(&assigned(&id, TaskType::Task, "main"));
+            claim(&f, &id);
+            let cas_dir = f.cas_dir();
+            let changed_id = id.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let hook = move || {
+                let store = open_task_store(&cas_dir).unwrap();
+                let loaded = store.get(&changed_id).unwrap();
+                let mut corrected = loaded.clone();
+                match field {
+                    "reopen" => corrected.status = TaskStatus::Open,
+                    "proof_targets" => corrected.proof_targets = vec!["pre_tool".into()],
+                    "risk" => corrected.risk = vec![TaskRisk::Concurrency],
+                    "execution_note" => corrected.execution_note = Some("test-first".into()),
+                    "work_target" => corrected.deliverables.work_target.as_mut().unwrap().target_branch = "corrected".into(),
+                    _ => unreachable!(),
+                }
+                corrected.notes.push_str("\n\nConcurrent correction");
+                store.update_if_current(&corrected, &loaded).unwrap();
+                tx.send(corrected).unwrap();
+            };
+            if after_read { close_race_hook::before_terminal_cas(&id, hook); }
+            else { close_race_hook::before_terminal_write(&id, hook); }
+            let response = call(&f.worker, serde_json::json!({
+                "action": "close", "id": id, "reason": "Deployed the monthly release",
+                "execution_note": "no-code", "external_ref": PROOF,
+            })).await;
+            let corrected = rx.try_recv().expect("race hook ran");
+            let task = f.task(&id);
+            assert_eq!(task.status, corrected.status, "{field}, after_read={after_read}: {response}");
+            assert_eq!(task.proof_targets, corrected.proof_targets);
+            assert_eq!(task.risk, corrected.risk);
+            assert_eq!(task.execution_note, corrected.execution_note);
+            assert_eq!(task.deliverables.work_target, corrected.deliverables.work_target);
+            assert!(task.notes.contains("Concurrent correction"));
+            assert!(response.contains("CLOSE REFUSED") && response.contains("Reload"), "{response}");
+        }
+    }
+}
 
-    // cas-3f81: a note-only append does not invalidate the close's proof.
-    // Keep the stored timeline intact, including repeated notes and blank
-    // paragraphs, then append close's own audit notes without duplicating it.
+async fn note_only_close_race(rewrite: bool, after_read: bool) {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
     let id = "cas-3f81-race";
     let mut original = assigned(id, TaskType::Task, "main");
-    original.notes = "[2026-10-21 14:17] Initial progress".into();
+    original.notes = "[2026-10-21 14:17] Initial progress\n\nEarlier observation".into();
     f.put(&original);
     claim(&f, id);
     let cas_dir = f.cas_dir();
     let (notes_tx, notes_rx) = std::sync::mpsc::channel();
-    close_race_hook::before_terminal_write(id, move || {
+    let hook = move || {
         let store = open_task_store(&cas_dir).unwrap();
+        if rewrite {
+            let loaded = store.get(id).unwrap();
+            let mut replaced = loaded.clone();
+            replaced.notes = replaced.notes.replace("Initial progress", "Verified provenance");
+            store.update_if_current(&replaced, &loaded).unwrap();
+        }
         store.append_note(id, "[2026-10-21 14:18] Supervisor update\n\nSecond paragraph").unwrap();
         for _ in 0..2 {
             store.append_note(id, "[2026-10-21 14:19] Repeated observation").unwrap();
         }
         notes_tx.send(store.get(id).unwrap().notes).unwrap();
-    });
-    let response = call(
-        &f.worker,
-        serde_json::json!({
-            "action": "close", "id": id, "reason": "Deployment independently verified",
-            "execution_note": "no-code", "external_ref": PROOF,
-        }),
-    ).await;
+    };
+    if after_read { close_race_hook::before_terminal_cas(id, hook); }
+    else { close_race_hook::before_terminal_write(id, hook); }
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Deployment independently verified",
+        "execution_note": "no-code", "external_ref": PROOF,
+    })).await;
     let closed = f.task(id);
     let persisted_notes = notes_rx.try_recv().expect("terminal race hook ran");
     assert_eq!(closed.status, TaskStatus::Closed, "note-only changes allow close: {response}");
     assert!(closed.notes.starts_with(&persisted_notes), "concurrent timeline lost or reordered: {}", closed.notes);
-    assert_eq!(closed.notes.matches("Initial progress").count(), 1);
+    assert_eq!(closed.notes.matches("Initial progress").count(), usize::from(!rewrite));
+    assert_eq!(closed.notes.matches("Earlier observation").count(), 1);
     assert_eq!(closed.notes.matches("Supervisor update").count(), 1);
     assert_eq!(closed.notes.matches("Repeated observation").count(), 2);
     assert!(closed.notes[persisted_notes.len()..].contains("Deployment independently verified"), "close audit follows concurrent notes: {}", closed.notes);
+}
+
+#[tokio::test]
+async fn close_preserves_note_rewrites_without_duplicate_history_cas_90ea() {
+    for rewrite in [false, true] { note_only_close_race(rewrite, false).await; }
+}
+
+#[tokio::test]
+async fn close_retries_a_note_in_the_terminal_write_gap_cas_90ea() {
+    note_only_close_race(false, true).await;
 }
 
 /// GH #1147: a no-code spike created under a code epic inherits the epic's

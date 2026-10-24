@@ -249,6 +249,16 @@ pub(crate) fn register_session_start_agent(
                         {
                             return false;
                         }
+                        // A supervisor row whose session end was recorded is a
+                        // retired predecessor awaiting cleanup: its successor
+                        // takes a new identity and the handoff (cas-9735).
+                        if rebind_role == AgentRole::Supervisor
+                            && cas_store::SqliteAgentStore::open(cas_root)
+                                .and_then(|store| store.session_end_recorded(&existing.id))
+                                .unwrap_or(true)
+                        {
+                            return false;
+                        }
 
                         // Socket registration records the Claude Code PID directly.
                         // Eager MCP registration records the MCP process and the

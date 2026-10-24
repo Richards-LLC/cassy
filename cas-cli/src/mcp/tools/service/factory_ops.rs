@@ -13817,7 +13817,7 @@ mod tests {
         agents.register(&unrecorded).unwrap();
         agents.add_working_epic(&unrecorded.id, "cas-adopted-epic").unwrap();
         let request = serde_json::from_value(serde_json::json!({
-            "action": "shutdown_workers", "worker_names": [worker.name.clone(), unrecorded.name.clone()].join(","), "force": true
+            "action": "shutdown_workers", "worker_names": ([worker.name.clone(), unrecorded.name.clone()].join(",")), "force": true
         }))
         .unwrap();
         let partial = service
@@ -13850,7 +13850,7 @@ mod tests {
         own.factory_session = Some("adopter-session".into());
         agents.register(&own).unwrap();
         let request = serde_json::from_value(serde_json::json!({
-            "action": "shutdown_workers", "worker_names": [worker.name, unrecorded.name].join(","), "force": true
+            "action": "shutdown_workers", "worker_names": ([worker.name, unrecorded.name].join(",")), "force": true
         })).unwrap();
         service.factory_shutdown_workers(request).await.expect("naming retired adopted workers succeeds without a process-group record");
         let request = serde_json::from_value(serde_json::json!({

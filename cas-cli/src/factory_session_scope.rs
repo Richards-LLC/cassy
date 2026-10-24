@@ -16,9 +16,11 @@
 //! - the caller runs inside a factory session (`CAS_FACTORY_SESSION`);
 //! - the target resolves to a live worker whose factory session differs, and
 //!   no live worker of the caller's own session answers to the same name;
-//! - that other session still has a live supervisor. A session whose
-//!   supervisor is gone leaves orphans, and recovering them from here stays
-//!   allowed.
+//! - that other session still has a live supervisor.
+//!
+//! This heartbeat predicate remains the legacy spawn/merge check. Reset and
+//! adopted-worker control require proof of the original daemon's death plus
+//! the current registered epic owner; a missing supervisor alone is insufficient.
 //!
 //! Reads (`worker_status`, `epic_status`, `qa_status`) are never checked.
 

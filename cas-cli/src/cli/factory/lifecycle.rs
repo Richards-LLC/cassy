@@ -532,8 +532,11 @@ mod tests {
         assert!(daemon_alive && worker_alive, "an alive daemon's worker was reaped");
         assert!(still_recorded, "an alive daemon's session record was removed");
         assert!(
-            error.contains("start time could not be read") && error.contains(&format!("ps -p {pid}")),
-            "{error}"
+            error.contains("start time could not be read")
+                && error.contains(&format!("ps -p {pid}"))
+                && error.contains("cas kill opaque --force-stale")
+                && !error.contains("gc cleanup"),
+            "every remedy offered must clear the session: {error}"
         );
         assert!(daemon_log("opaque").contains("\"worker_reap_skipped\""));
     }

@@ -249,12 +249,15 @@ pub(crate) fn stale_base_note(
     predecessor_branch: &str,
 ) -> String {
     let resolve = |name: &str| git_stdout(repo, &["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")]);
-    let successor = match (resolve(branch), resolve(&format!("origin/{branch}"))) {
+    let (successor, local_behind) = match (resolve(branch), resolve(&format!("origin/{branch}"))) {
         // A fetched descendant includes everything the local copy has. For
         // divergent copies retain the local view; neither is more advanced.
-        (Some(local), Some(remote)) if git_ok(repo, &["merge-base", "--is-ancestor", &local, &remote]) => remote,
-        (Some(local), _) => local,
-        (None, Some(remote)) => remote,
+        (Some(local), Some(remote)) if git_ok(repo, &["merge-base", "--is-ancestor", &local, &remote]) => {
+            let local_behind = local != remote;
+            (remote, local_behind)
+        }
+        (Some(local), _) => (local, false),
+        (None, Some(remote)) => (remote, false),
         (None, None) => return String::new(),
     };
     // Compare every last-observed predecessor tip against that same successor.
@@ -278,6 +281,11 @@ pub(crate) fn stale_base_note(
             Err(refusal) => return format!("\nSTALE BASE: {refusal}\n"),
         };
     let branch = crate::worktree::GitOperations::visible_git_label(branch);
+    let before_merge = if local_behind {
+        format!("fast-forward {branch} first, then ")
+    } else {
+        String::new()
+    };
     let predecessor_branch = crate::worktree::GitOperations::visible_git_label(predecessor_branch);
     let probe = std::process::Command::new("git")
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -288,7 +296,7 @@ pub(crate) fn stale_base_note(
         Ok(output) if output.status.code() == Some(0) => format!(
             "\n⚠️ STALE BASE (cas-fd4c): stacked on open epic {predecessor_id} ({predecessor_branch}), \
              which has advanced to {short}; {branch} lacks {lacking} of its commit(s). It merges \
-             cleanly: run `{merge}` on {branch} and push, so work here builds \
+             cleanly: {before_merge}run `{merge}` on {branch} and push, so work here builds \
              on it.\n"
         ),
         Ok(output) if output.status.code() == Some(1) => {

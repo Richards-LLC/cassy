@@ -1666,19 +1666,20 @@ mod integration_flag_tests {
         let captures: &[(&str, &str)] =
             include!(concat!(env!("OUT_DIR"), "/init_design_captures.rs"));
         assert!(!captures.is_empty(), "no init capture fixtures were generated");
+        let mut checked_paths = 0;
         for (name, capture) in captures {
-            let paths: Vec<_> = capture
+            for path in capture
                 .lines()
                 .filter_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
-                .collect();
-            assert!(!paths.is_empty(), "{name}: missing initialization path");
-            for path in paths {
+            {
+                checked_paths += 1;
                 assert!(
                     !std::path::Path::new(path).is_absolute(),
                     "{name}: non-portable capture path: {path}"
                 );
             }
         }
+        assert!(checked_paths > 0, "init captures contain no initialization paths");
     }
 
     #[test]

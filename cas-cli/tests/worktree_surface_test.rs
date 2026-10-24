@@ -3358,6 +3358,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
     run_git(&["merge", "--no-ff", "factory/alice", "-m", "already integrated"], &repo.root);
     run_git(&["push", "origin", "main", "factory/alice"], &repo.root);
     let before = git_stdout(&repo.root, &["rev-parse", "main"]);
+    let delivered_content = std::fs::read(worker.join("delivery.rs")).unwrap();
     let tasks = open_task_store(&root).unwrap();
     let mut task = Task::new("cas-4221".into(), "No-op merge receipt".into());
     task.status = TaskStatus::AwaitingMerge;
@@ -3386,7 +3387,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         let text = get_text(&result);
         assert!(text.contains(&format!("Target: origin/main @ {before}")), "{text}");
         if local_behind {
-            assert_eq!(std::fs::read_to_string(repo.root.join("delivery.rs")).unwrap(), "pub fn delivered() {}\n");
+            assert_eq!(std::fs::read(repo.root.join("delivery.rs")).unwrap(), delivered_content);
         }
         if !text.contains("nothing new to merge") || !text.contains("already in main") {
             failures.push(format!("contained source (local behind={local_behind}) must be explicit: {text}"));

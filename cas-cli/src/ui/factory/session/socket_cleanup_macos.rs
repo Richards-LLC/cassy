@@ -212,6 +212,20 @@ mod tests {
     use super::*;
     use std::os::unix::fs::MetadataExt;
 
+    #[derive(Clone)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn uncertain_inventory_and_replaced_inode_retain_owned_socket_cas_f2c7() {
         let home = tempfile::tempdir_in("/tmp").unwrap();
@@ -252,28 +266,42 @@ mod tests {
         relative_holder[address] = (2 + name.len() + 1) as u8;
         relative_holder[address + 1] = libc::AF_UNIX as u8;
         relative_holder[address + 2..address + 2 + name.len()].copy_from_slice(name);
-        for (label, stream) in [
-            ("permission", None),
-            ("truncated", Some(truncated)),
-            ("ABI", Some(unknown_abi)),
-            ("generation", Some(changed_generation)),
-            ("missing protocol", Some(missing_protocol)),
-            ("relative holder", Some(relative_holder)),
-        ] {
-            super::super::remove_locked_with(&path, &sessions, false, |path, meta| {
-                proves_unheld(path, meta, |name| match &stream {
-                    None => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
-                    Some(bytes) if name == STREAM => Ok(bytes.clone()),
-                    Some(_) => {
-                        let mut empty = header(1);
-                        empty.extend(header(1));
-                        Ok(empty)
-                    }
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || Capture(sink.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for (label, stream) in [
+                ("permission", None),
+                ("truncated", Some(truncated)),
+                ("ABI", Some(unknown_abi)),
+                ("generation", Some(changed_generation)),
+                ("missing protocol", Some(missing_protocol)),
+                ("relative holder", Some(relative_holder)),
+            ] {
+                super::super::remove_locked_with(&path, &sessions, false, |path, meta| {
+                    proves_unheld(path, meta, |name| match &stream {
+                        None => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                        Some(bytes) if name == STREAM => Ok(bytes.clone()),
+                        Some(_) => {
+                            let mut empty = header(1);
+                            empty.extend(header(1));
+                            Ok(empty)
+                        }
+                    })
                 })
-            })
-            .unwrap();
-            assert!(path.exists(), "{label} must retain the socket");
-        }
+                .unwrap();
+                assert!(path.exists(), "{label} must retain the socket");
+            }
+        });
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        // pin: an unknown ABI anywhere in the global table must explain why
+        // this path was retained when an operator enables debug logging.
+        assert!(logs.contains("malformed stream Unix PCB inventory"), "{logs}");
 
         let original = fs::symlink_metadata(&path).unwrap().ino();
         let mut replacement = None;

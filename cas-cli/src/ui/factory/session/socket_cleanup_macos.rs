@@ -152,26 +152,45 @@ pub(super) fn proves_unheld(
     // Both protocol lists share a global PCB generation/count. Bounded
     // recollection handles churn between reads; uncertainty retains the path.
     for _ in 0..3 {
-        let Some(stream) = read(STREAM)
-            .ok()
-            .and_then(|bytes| parse(&bytes, libc::SOCK_STREAM))
-        else {
+        let stream_bytes = match read(STREAM) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::debug!(socket = %path.display(), %error,
+                    "factory socket kept: stream Unix PCB inventory read failed");
+                return false;
+            }
+        };
+        let Some(stream) = parse(&stream_bytes, libc::SOCK_STREAM) else {
+            tracing::debug!(socket = %path.display(),
+                "factory socket kept: malformed stream Unix PCB inventory");
             return false;
         };
-        let Some(dgram) = read(DGRAM)
-            .ok()
-            .and_then(|bytes| parse(&bytes, libc::SOCK_DGRAM))
-        else {
+        let dgram_bytes = match read(DGRAM) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::debug!(socket = %path.display(), %error,
+                    "factory socket kept: datagram Unix PCB inventory read failed");
+                return false;
+            }
+        };
+        let Some(dgram) = parse(&dgram_bytes, libc::SOCK_DGRAM) else {
+            tracing::debug!(socket = %path.display(),
+                "factory socket kept: malformed datagram Unix PCB inventory");
             return false;
         };
         if stream.generation != dgram.generation {
             continue;
         }
         if stream.count + dgram.count != stream.generation.count as usize {
+            tracing::debug!(socket = %path.display(), stream_count = stream.count,
+                datagram_count = dgram.count, generation_count = stream.generation.count,
+                "factory socket kept: incomplete Unix PCB inventory");
             return false;
         }
         for held in stream.paths.iter().chain(&dgram.paths) {
             if held == path || (!held.is_absolute() && held.file_name() == path.file_name()) {
+                tracing::debug!(socket = %path.display(), holder = %held.display(),
+                    "factory socket kept: matching Unix PCB holder path");
                 return false;
             }
             // A relative bind belongs to its binder's cwd, not ours. The
@@ -182,12 +201,16 @@ pub(super) fn proves_unheld(
             // holder absence; unrelated private/relative names are common.
             if let Ok(meta) = fs::symlink_metadata(held) {
                 if meta.dev() == candidate.dev() && meta.ino() == candidate.ino() {
+                    tracing::debug!(socket = %path.display(), holder = %held.display(),
+                        "factory socket kept: Unix PCB holder resolves to candidate inode");
                     return false;
                 }
             }
         }
         return true;
     }
+    tracing::debug!(socket = %path.display(),
+        "factory socket kept: Unix PCB generations changed during all inventory reads");
     false
 }
 
@@ -301,7 +324,14 @@ mod tests {
         let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
         // pin: an unknown ABI anywhere in the global table must explain why
         // this path was retained when an operator enables debug logging.
-        assert!(logs.contains("malformed stream Unix PCB inventory"), "{logs}");
+        assert!(
+            logs.contains("malformed stream Unix PCB inventory"),
+            "{logs}"
+        );
+        assert!(
+            logs.contains("stream Unix PCB inventory read failed"),
+            "{logs}"
+        );
 
         let original = fs::symlink_metadata(&path).unwrap().ino();
         let mut replacement = None;

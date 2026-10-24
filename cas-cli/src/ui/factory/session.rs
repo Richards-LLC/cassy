@@ -872,9 +872,15 @@ mod tests {
         let nonlistener_path = socket_path("bound");
         // A bound stream socket need not listen. A refused connect must never
         // be mistaken for proof that its filesystem entry has no holder.
+        // SAFETY: AF_UNIX and SOCK_STREAM are valid socket arguments; the
+        // return value is checked before it is used as a file descriptor.
         let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
         assert!(raw >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: socket returned a fresh descriptor that is owned only here;
+        // this transfers it exactly once into OwnedFd.
         let nonlistener = unsafe { OwnedFd::from_raw_fd(raw) };
+        // SAFETY: an all-zero sockaddr_un is a valid base for assigning its
+        // family, optional Darwin length, and NUL-terminated pathname below.
         let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
         address.sun_family = libc::AF_UNIX as _;
         let bytes = nonlistener_path.as_os_str().as_bytes();
@@ -888,6 +894,8 @@ mod tests {
             address.sun_len = length as _;
         }
         assert_eq!(
+            // SAFETY: nonlistener owns a live descriptor; address is initialized
+            // and length stays within sockaddr_un because bytes fit sun_path.
             unsafe {
                 libc::bind(
                     nonlistener.as_raw_fd(),

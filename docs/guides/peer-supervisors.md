@@ -129,6 +129,11 @@ Peer mailbox: receiving.
 
 Add `--json` for the same report as one document with untruncated values.
 
+A Claude supervisor keeps its agent id, name, epics and leases across
+`/clear`, so peers and `whoami` see the same identity before and after it.
+A real session end, such as a logout or exit, still retires the row and hands
+off to a successor.
+
 A supervisor also sees its live peers when its session starts, including
 after `/clear`. The block reads the same snapshot as `cas peers`:
 

@@ -771,6 +771,8 @@ large_artifact_dir = \"before\"\n",
                 "staging.staging_dir" => "roundtrip-staging-dir".to_owned(),
                 "staging.large_artifact_dir" => "roundtrip-large-artifact-dir".to_owned(),
                 "factory.write_roots" => "~/Documents".to_owned(),
+                // Validated as a JSON list of Slack channel IDs (cas-4e0c).
+                "slack.channels" => r#"["C0123456789"]"#.to_owned(),
                 // The registry intentionally permits only `low` for the
                 // shared worker, so assert its serialized path instead of
                 // inventing an invalid non-default value.

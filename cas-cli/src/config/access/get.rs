@@ -19,6 +19,9 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "slack.channels" => Some(serde_json::to_string(
+                &self.slack.as_ref().cloned().unwrap_or_default().channels
+            ).expect("serializable channel IDs")),
             "slack.stakeholder_contacts" => Some(serde_json::to_string(
                 &self.slack.as_ref().cloned().unwrap_or_default().stakeholder_contacts
             ).expect("serializable stakeholder policies")),

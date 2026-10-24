@@ -659,7 +659,7 @@ pub fn create_metadata(
 mod tests {
     use crate::ui::factory::session::*;
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn stale_socket(path: &Path) {
         drop(std::os::unix::net::UnixListener::bind(path).unwrap());
     }
@@ -844,10 +844,15 @@ mod tests {
         assert!(metadata_path("inspect").exists());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn bind_and_cleanup_preserve_held_sockets_with_spaces_cas_c636() {
-        let home = tempfile::tempdir().unwrap();
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        // Darwin's sockaddr_un path is only 104 bytes; keep the disposable
+        // HOME short while still exercising spaces in the bound pathname.
+        let home = tempfile::tempdir_in("/tmp").unwrap();
         let spaced_home = home.path().join("home with spaces");
         fs::create_dir(&spaced_home).unwrap();
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
@@ -864,13 +869,46 @@ mod tests {
             std::io::ErrorKind::AddrInUse
         );
         let datagram = std::os::unix::net::UnixDatagram::bind(gui_socket_path("lease")).unwrap();
+        let nonlistener_path = socket_path("bound");
+        // A bound stream socket need not listen. A refused connect must never
+        // be mistaken for proof that its filesystem entry has no holder.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(raw >= 0, "{}", std::io::Error::last_os_error());
+        let nonlistener = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as _;
+        let bytes = nonlistener_path.as_os_str().as_bytes();
+        assert!(bytes.len() < address.sun_path.len());
+        for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+            *to = *from as _;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as _;
+        }
+        assert_eq!(
+            unsafe {
+                libc::bind(
+                    nonlistener.as_raw_fd(),
+                    (&address as *const libc::sockaddr_un).cast(),
+                    length as _,
+                )
+            },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&nonlistener_path).is_err());
         manager.cleanup_stale().unwrap();
         assert!(path.exists());
         assert!(gui_socket_path("lease").exists());
-        drop((live, datagram));
+        assert!(nonlistener_path.exists());
+        drop((live, datagram, nonlistener));
         manager.cleanup_stale().unwrap();
         assert!(!path.exists());
         assert!(!gui_socket_path("lease").exists());
+        assert!(!nonlistener_path.exists());
     }
 
     #[test]

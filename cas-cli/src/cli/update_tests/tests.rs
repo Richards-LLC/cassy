@@ -3932,7 +3932,7 @@ fn update_reaps_dead_metadata_without_touching_live_sessions_cas_9299() {
     assert!(gui_socket_path("held9299").exists());
     assert_eq!(
         gui_socket_path("dead9299").exists(),
-        !cfg!(target_os = "linux")
+        !cfg!(any(target_os = "linux", target_os = "macos"))
     );
     std::fs::write(metadata_path("bad9299"), "incomplete receipt").unwrap();
     run();

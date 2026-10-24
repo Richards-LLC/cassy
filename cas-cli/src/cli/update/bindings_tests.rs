@@ -5,6 +5,7 @@ use std::time::Duration;
 const PROJECT: &str = "qa.invalid/v1-receipts";
 const MANAGED: &str = "C0QARECEIPT";
 const FOREIGN: &str = "C0FOREIGN";
+const UNMAPPED: &str = "C0UNMAPPED";
 
 /// Cloud's approved r1 example, retargeted to this fixture's team.
 fn receipt_case(index: usize, team: &str) -> String {
@@ -30,6 +31,14 @@ fn foreign_refusal() -> String {
     .to_string()
 }
 
+fn unmapped_refusal() -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&foreign_refusal()).unwrap();
+    value["code"] = "mapping_not_found".into();
+    value["reason"] = "channel_unmapped".into();
+    value["next_action"] = "operator_repair".into();
+    value.to_string()
+}
+
 /// Violet lists two mappings for this project (and one for another project);
 /// Cloud refuses the foreign one and manages the other. A second update is
 /// idempotent: the managed channel keeps its original fence evidence.
@@ -38,7 +47,7 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
     let env = crate::test_support::TestEnvGuard::temp_home();
     let root = env.home().join("project/.cas");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {PROJECT:?}\n")).unwrap();
+    std::fs::write(root.join("config.toml"), format!("[project]\ncanonical_id = {PROJECT:?}\n[slack]\nchannels = [{UNMAPPED:?}]\n")).unwrap();
     let team = uuid::Uuid::new_v4().to_string();
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", server.server_addr());
@@ -62,14 +71,14 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
                 ]})
                 .to_string(),
             ];
-            for body in [foreign_refusal(), receipt_case(managed_case, &serving)] {
+            for body in [foreign_refusal(), receipt_case(managed_case, &serving), unmapped_refusal()] {
                 answers.push(serde_json::json!({"projects": [{"id": "project-id", "canonical_id": PROJECT, "name": "fixture", "contributor_count": 0, "memory_count": 0}]}).to_string());
                 answers.push(body);
             }
             for answer in answers {
                 let request = server.recv_timeout(Duration::from_secs(10)).unwrap().expect("request");
                 seen.push(format!("{} {}", request.method(), request.url()));
-                let status = if answer.contains("mapping_project_mismatch") { 409 } else { 200 };
+                let status = if answer.contains("mapping_project_mismatch") || answer.contains("channel_unmapped") { 409 } else { 200 };
                 request
                     .respond(
                         tiny_http::Response::from_string(answer)
@@ -94,13 +103,14 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
     }
     let seen = remote.join().unwrap();
     assert_eq!(seen[0], format!("GET /api/channels?project_id={}", PROJECT.replace('/', "%2F")));
-    assert_eq!(seen.iter().filter(|line| line.starts_with("POST ")).count(), 4);
+    assert_eq!(seen.iter().filter(|line| line.starts_with("POST ")).count(), 6);
 
     let state = IntakeJournal::new(&root).read().unwrap();
     let disposition = |channel: &str| {
         state.policies.iter().find(|p| p.scope.channel_id == channel).unwrap().disposition.clone()
     };
     assert_eq!(disposition(FOREIGN), ChannelDisposition::LegacyAllowed, "a definite refusal leaves legacy intake as it was");
+    assert_eq!(disposition(UNMAPPED), ChannelDisposition::LegacyAllowed, "a configured channel missing from Violet receives an authoritative refusal");
     let ChannelDisposition::Managed { completion, .. } = disposition(MANAGED) else { panic!("managed") };
     assert_eq!(completion.activation_id.as_deref(), Some("22222222-2222-4222-8222-222222222222"));
     assert_eq!(
@@ -108,7 +118,7 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
         Some("11111111-1111-4111-8111-111111111111"),
         "the repeat keeps the original fence"
     );
-    assert_eq!(state.pauses.len(), 2, "a rerun reuses each channel's pause");
+    assert_eq!(state.pauses.len(), 3, "a rerun reuses each channel's pause");
 }
 
 #[test]

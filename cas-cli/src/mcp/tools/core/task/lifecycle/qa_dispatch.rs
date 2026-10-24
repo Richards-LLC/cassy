@@ -223,11 +223,21 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
-/// Whether a delivery is already carried by the target, including squash tips.
-/// Integration alone does not satisfy QA: dispatch suppression also needs a
-/// passed or waived verdict for this exact delivery.
-fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
-    is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
+/// Trunk and landed batches suppress late dispatch. Epic-only integration
+/// still owes the GH #1026 review backstop.
+fn integrated_dispatch_boundary(task: &Task, repo: &Path, head: &str, target: &str) -> Option<String> {
+    for trunk in ["main", "staging"] {
+        let reference = freshest_target_ref(repo, trunk);
+        if is_ancestor(repo, head, &reference) || reviewed_tip_carried_by(repo, head, &reference, &reference) {
+            return Some(format!("trunk {trunk}"));
+        }
+    }
+    task.deliverables.integration_batch.as_ref().filter(|batch| {
+            resolve_commit(repo, head).as_deref() == Some(batch.delivered_head.as_str())
+                && super::super::integration_batch::landed_batch_squash(
+                    task, repo, target, None,
+                ).is_some()
+        }).map(|_| format!("landed integration batch on {target}"))
 }
 
 /// cas-624f: rejected (failed) rounds on record for a delivery.
@@ -441,17 +451,7 @@ impl CasCore {
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
         let target = freshest_target_ref(repo, parent_branch);
-        if delivery_tip_on_target(repo, delivery_ref, &target)
-            && resolve_commit(repo, delivery_ref).is_some_and(|delivered| {
-                cas_store::list_qa_passes(&self.cas_root, &task.id)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|pass| {
-                        pass.state.satisfies_gate()
-                            && resolve_commit(repo, &pass.bound_head).as_deref() == Some(delivered.as_str())
-                    })
-            })
-        {
+        if integrated_dispatch_boundary(task, repo, delivery_ref, &target).is_some() {
             return None;
         }
         let changed = match changed_paths_for_delivery(
@@ -1283,6 +1283,10 @@ impl CasCore {
                 commit_receipt,
                 target_branch,
             )
+                || (pass.state.satisfies_gate()
+                    && task.deliverables.integration_batch.is_some()
+                    && head.as_deref() == Some(pass.bound_head.as_str())
+                    && integrated_dispatch_boundary(task, repo, &pass.bound_head, target_branch).is_some())
         }) {
             return QaCloseGate::Clear;
         }
@@ -1421,11 +1425,21 @@ impl CasCore {
                 remedy,
             ));
         };
-        if let Some(trunk) = trunk_containing(repo, &head) {
+        let integrated_target = trunk_containing(repo, &head)
+            .map(|trunk| format!("trunk {trunk}"))
+            .or_else(|| integrated_dispatch_boundary(task, repo, &head, target_branch));
+        if let Some(trunk) = integrated_target {
+            if let Some(pass) = passes.iter().find(|pass| pass.state.is_active() && pass.bound_head == head) {
+                let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+                return QaCloseGate::Refuse(format!(
+                    "INDEPENDENT QA REQUIRED: {} is already on {trunk}; the close waits for the pending verdict for pass {} at @{}. No new QA round was opened. Track the existing review with {prefix}verification action=qa_status task_id={}; a live supervisor can use {prefix}verification action=qa_request task_id={} if the round needs recovery. {remedy}.",
+                    task.id, pass.id, pass.head8(), task.id, task.id,
+                ));
+            }
             return QaCloseGate::Refuse(format!(
-                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on trunk \
+                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on \
                  {trunk} with no passed or waived QA round. Cassy does not dispatch a review of code \
-                 that is already on trunk, so no QA pass was opened. {remedy}.",
+                 that is already integrated, so no QA pass was opened. {remedy}.",
                 task.id,
                 &head[..head.len().min(8)],
             ));
@@ -2084,17 +2098,53 @@ mod squash_close_tests {
     }
 
     #[test]
-    fn cas_b591_unreviewed_squash_still_dispatches_a_round() {
+    fn cas_d8b4_unreviewed_landed_squash_never_dispatches_a_round() {
         let mut env = TestEnvGuard::temp_home();
-        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
-        let outcome = core.independent_qa_close_gate(&task, dir.path(), "main", None, None);
-        let QaCloseGate::Refuse(text) = outcome else {
-            panic!("an integrated delivery without a verdict still requires QA");
-        };
-        assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
-        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
-        assert_eq!(passes.len(), 1);
-        assert_eq!(passes[0].state, QaPassState::Pending);
+        for (evolved_batch, pending) in [(false, false), (true, false), (false, true)] {
+            let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+            let repo = dir.path();
+            let head = task.deliverables.factory_branch_anchor.clone().unwrap();
+            if evolved_batch {
+                task.deliverables.integration_batch = Some(cas_types::IntegrationBatchEvidence {
+                    branch: "batch/X".into(),
+                    tip: head.clone(),
+                    base: git(repo, &["merge-base", &head, "main"]),
+                    delivered_head: head.clone(),
+                    supervisor_id: "supervisor".into(),
+                    recorded_at: chrono::Utc::now(),
+                });
+                git(repo, &["checkout", "-q", "main"]);
+                std::fs::write(repo.join("web/composer.css"), ".composer{gap:16px}\n").unwrap();
+                git(repo, &["add", "web/composer.css"]);
+                git(repo, &["commit", "-q", "-m", "later spacing change"]);
+                git(repo, &["checkout", "-q", "factory/worker"]);
+            }
+            if pending {
+                let now = chrono::Utc::now();
+                cas_store::open_qa_pass(&repo.join(".cas"), &NewQaPass {
+                    task_id: &task.id,
+                    implementer_agent_id: "worker",
+                    branch: "factory/worker",
+                    bound_head: &head,
+                    deadline_at: now + chrono::Duration::minutes(30),
+                    max_rounds: 3,
+                }, now).unwrap();
+            }
+            assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+            let outcome = core.independent_qa_close_gate(&task, repo, "main", None, None);
+            let QaCloseGate::Refuse(text) = outcome else {
+                panic!("an integrated delivery without a verdict still requires QA");
+            };
+            let passes = cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap();
+            if pending {
+                assert_eq!(passes.len(), 1);
+                assert!(text.contains(&passes[0].id) && text.contains("pending verdict"), "{text}");
+                assert!(!text.contains("no QA pass was opened"), "{text}");
+            } else {
+                assert!(text.contains("no QA pass was opened"), "{text}");
+                assert!(passes.is_empty(), "already merged work must not create a QA task");
+            }
+        }
     }
 
     #[test]

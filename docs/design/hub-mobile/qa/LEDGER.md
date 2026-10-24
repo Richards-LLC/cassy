@@ -10,23 +10,14 @@ Labels: real-build 8
 sweep: not configured
 
 | id | cell | expected | observed | verdict | label | evidence path | defect task |
-
 | --- | --- | --- | --- | --- | --- | --- | --- |
-
 | M01 | Phone image → pinch → fullscreen → landscape → scroll | I can zoom, fill the screen, rotate and keep reading at the same relative place. | Touch pinch 1.69×; fullscreen native; scroll ratio 0.400 → 0.400 on rotation; drag continued scrolling. | PASS | real-build | M01-rotated-reader.png | none |
-
 | M02 | Appearance and geometry at six scheme/viewport combinations | The study and image controls stay readable without page overflow in light and dark. | All 6 viewport/scheme pairs: 10 proposals, 20 proposal views, no horizontal page overflow; reader controls visible and vertically scrollable. | PASS | real-build | matrix-390x844-light.png | none |
-
 | M03 | Fullscreen API rejects; page and image fallback | Full screen still gives me a scrollable full-viewport reader and Escape restores the page. | Native API deliberately rejected; CSS viewport fallback remained scrollable after rotation. First Escape exited fullscreen; second closed the reader. | PASS | real-build | M03-fullscreen-fallback.png | none |
-
 | M04 | Keyboard-only opening, zoom, scroll, close and return | I can operate the image reader with the keyboard and focus returns to the image I opened. | Enter opened; + zoomed; PageDown scrolled; 0 fit width; Escape restored focus to the opening image. | PASS | real-build | M04-keyboard-reader.png | none |
-
 | M05 | Revisit and switch images after zooming | A new image opens at fit width; the correct caption and system context follow it. | Reopening a different image reset to fit width and showed its own caption; mouse wheel zoom increased the new image scale. | PASS | real-build | M05-revisit-desktop-image.png | none |
-
 | M06 | JavaScript disabled and print | All ten proposals, baseline images and the comparison remain available. | JavaScript off: 10 proposals, 10 comparison rows and all 25 images decoded; print PDF contains the study. | PASS | real-build | M06-no-javascript.png; &lt;artifacts&gt;/cas-cc1b/qa/study-print.pdf | none |
-
 | M07 | Offline standalone file and all embedded images | The study opens from a local file and loads every image without network access. | Opened standalone file with browser offline; zero HTTP(S) requests; all embedded images decoded and current-state lightbox opened. | PASS | real-build | M07-offline-current-image.png | none |
-
 | M08 | Whole-study fullscreen and comparison navigation | I can read the entire study fullscreen, reach the comparison and return without losing my place. | Whole-study fullscreen (native) reached the comparison; Escape restored document scrolling near the same position. | PASS | real-build | M08-study-fullscreen-comparison.png | none |
 
 ## Constants vs expectation

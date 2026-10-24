@@ -387,88 +387,92 @@ fn context_reset_rebind_preserves_worker_name_and_lease_for_claude_and_codex() {
 /// cas-e9fc: `/clear` emits the old conversation's SessionEnd(reason=clear)
 /// before the worker row names the new session. Through the real hook path it
 /// must keep the worker registered with its lease, and the new SessionStart
-/// must rebind that same row.
+/// must rebind that same row. cas-ec5f (GH #1215): a supervisor's MCP server
+/// outlives `/clear` and caches the row id, so the supervisor keeps its row,
+/// name and leases the same way instead of reappearing as
+/// "Primary (re-registered)" beside a second identity.
 #[test]
-fn cas_e9fc_clear_session_end_before_rebind_keeps_the_worker_registered() {
-    let _env = TestEnvGuard::with_optional_vars(&[
-        ("CAS_AGENT_ROLE", Some("worker")),
-        ("CAS_AGENT_NAME", Some("smooth-robin-87")),
-        ("CAS_FACTORY_SESSION", Some("factory-e9fc")),
-        ("CAS_FACTORY_WORKER_CLI", Some("claude")),
-    ]);
-    let temp = TempDir::new().expect("temp project");
-    let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
-    let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
-    let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
-    task_store
-        .add(&Task::new("cas-e9fc-lease".to_string(), "scratch root".to_string()))
-        .expect("seed task");
-    let old_session = "cd08c932-378b-4b5c-a69a-c5ade0b8aa62";
-    let new_session = "34398e29-2e78-46c0-b17f-127c407f02e4";
-    let cc_pid = std::process::id();
+fn cas_e9fc_clear_session_end_before_rebind_keeps_the_agent_registered() {
+    for (role, name, clone_path) in [
+        ("worker", "smooth-robin-87", Some("/tmp/smooth-robin-87")),
+        ("supervisor", "true-dragon-23", None),
+    ] {
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_ROLE", Some(role)),
+            ("CAS_AGENT_NAME", Some(name)),
+            ("CAS_FACTORY_SESSION", Some("factory-e9fc")),
+            ("CAS_FACTORY_WORKER_CLI", Some("claude")),
+        ]);
+        let temp = TempDir::new().expect("temp project");
+        let cas_root = init_cas_dir(temp.path()).expect("init cas dir");
+        let agent_store = crate::store::open_agent_store(&cas_root).expect("open agent store");
+        let task_store = crate::store::open_task_store(&cas_root).expect("open task store");
+        task_store
+            .add(&Task::new("cas-e9fc-lease".to_string(), "scratch root".to_string()))
+            .expect("seed task");
+        let old_session = "cd08c932-378b-4b5c-a69a-c5ade0b8aa62";
+        let new_session = "34398e29-2e78-46c0-b17f-127c407f02e4";
+        let cc_pid = std::process::id();
 
-    // The worker as spawned: registered by its first SessionStart.
-    let (original, _) = register_session_start_agent(
-        &cas_root,
-        agent_store.as_ref(),
-        old_session,
-        Some("smooth-robin-87"),
-        Some("worker"),
-        cc_pid,
-        Some("/tmp/smooth-robin-87"),
-    )
-    .expect("register worker");
-    agent_store
-        .try_claim("cas-e9fc-lease", &original.id, 600, Some("in progress"))
-        .expect("claim task before reset");
-
-    // /clear: the old conversation's SessionEnd lands while the row still
-    // names the old session (clear_context has not recorded the new one).
-    crate::hooks::handlers::handle_session_end(
-        &crate::hooks::HookInput {
-            session_id: old_session.into(),
-            hook_event_name: "SessionEnd".into(),
-            reason: Some("clear".into()),
-            ..Default::default()
-        },
-        Some(&cas_root),
-    )
-    .expect("SessionEnd");
-    let kept = agent_store
-        .get(&original.id)
-        .expect("a /clear SessionEnd keeps the worker registered");
-    assert_eq!(kept.name, "smooth-robin-87");
-    assert_eq!(
+        // The agent as started: registered by its first SessionStart.
+        let (original, _) = register_session_start_agent(
+            &cas_root,
+            agent_store.as_ref(),
+            old_session,
+            Some(name),
+            Some(role),
+            cc_pid,
+            clone_path,
+        )
+        .expect("register agent");
         agent_store
-            .get_lease("cas-e9fc-lease")
-            .unwrap()
-            .filter(|lease| lease.status == cas_types::LeaseStatus::Active)
-            .expect("the task lease survives a /clear")
-            .agent_id,
-        original.id
-    );
+            .try_claim("cas-e9fc-lease", &original.id, 600, Some("in progress"))
+            .expect("claim task before reset");
 
-    // The new conversation's SessionStart rebinds the same row.
-    let (resolved, reused) = register_session_start_agent(
-        &cas_root,
-        agent_store.as_ref(),
-        new_session,
-        Some("smooth-robin-87"),
-        Some("worker"),
-        cc_pid,
-        Some("/tmp/smooth-robin-87"),
-    )
-    .expect("rebind after /clear");
-    assert!(reused, "the post-clear SessionStart reuses the worker row");
-    assert_eq!(resolved.id, original.id);
-    assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session));
-    let workers = agent_store
-        .list(None)
-        .unwrap()
-        .into_iter()
-        .filter(|agent| agent.name == "smooth-robin-87")
-        .count();
-    assert_eq!(workers, 1, "one row, reachable by name");
+        // /clear: the old conversation's SessionEnd lands while the row still
+        // names the old session (clear_context has not recorded the new one).
+        crate::hooks::handlers::handle_session_end(
+            &crate::hooks::HookInput {
+                session_id: old_session.into(),
+                hook_event_name: "SessionEnd".into(),
+                reason: Some("clear".into()),
+                ..Default::default()
+            },
+            Some(&cas_root),
+        )
+        .expect("SessionEnd");
+        let kept = agent_store
+            .get(&original.id)
+            .unwrap_or_else(|_| panic!("a /clear SessionEnd keeps the {role} registered"));
+        assert_eq!(kept.name, name, "{role}");
+        assert_eq!(
+            agent_store
+                .get_lease("cas-e9fc-lease")
+                .unwrap()
+                .filter(|lease| lease.status == cas_types::LeaseStatus::Active)
+                .unwrap_or_else(|| panic!("the {role}'s task lease survives a /clear"))
+                .agent_id,
+            original.id
+        );
+
+        // The new conversation's SessionStart rebinds the same row.
+        let (resolved, reused) = register_session_start_agent(
+            &cas_root,
+            agent_store.as_ref(),
+            new_session,
+            Some(name),
+            Some(role),
+            cc_pid,
+            clone_path,
+        )
+        .expect("rebind after /clear");
+        assert!(reused, "the post-clear SessionStart reuses the {role} row");
+        assert_eq!(resolved.id, original.id, "{role}");
+        assert_eq!(resolved.cc_session_id.as_deref(), Some(new_session));
+        let rows = agent_store.list(None).unwrap();
+        assert_eq!(rows.len(), 1, "{role}: one row, reachable by name");
+        assert_eq!(rows[0].name, name, "{role}");
+    }
 }
 
 /// Duplicate rows are a recovery case for databases written by the buggy

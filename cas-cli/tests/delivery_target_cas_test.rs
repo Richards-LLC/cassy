@@ -196,6 +196,21 @@ struct DeliveryFixture {
 }
 
 async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> DeliveryFixture {
+    arm_delivery_with_selector(
+        slug,
+        repo_host,
+        env,
+        &format!("remote:github.com/org/{repo_host}"),
+    )
+    .await
+}
+
+async fn arm_delivery_with_selector(
+    slug: &str,
+    repo_host: &str,
+    env: &mut TestEnvGuard,
+    repo_selector: &str,
+) -> DeliveryFixture {
     let repo = GitRepo::new();
     run_git(
         &[
@@ -218,7 +233,12 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     std::fs::write(
         cas_root.join("config.toml"),
         format!(
-            "[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            "{}[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            if repo_selector.starts_with("project:") {
+                format!("[project]\ncanonical_id = \"github.com/org/{repo_host}\"\n")
+            } else {
+                String::new()
+            },
             artifact_root.display().to_string()
         ),
     )
@@ -258,7 +278,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     task.depth = TaskDepth::Deep;
     task.assignee = Some(slug.to_string());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: format!("remote:github.com/org/{repo_host}"),
+        repo_selector: repo_selector.to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task");
@@ -281,7 +301,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     let receipt = WorkerCompletionReceiptInput {
         task_id: task.id.clone(),
         worker_agent_id: worker_id.clone(),
-        repo_selector: format!("remote:github.com/org/{repo_host}"),
+        repo_selector: repo_selector.to_string(),
         source_branch: format!("factory/{slug}"),
         commit_sha: git_stdout(&repo.root, &["rev-parse", &format!("factory/{slug}")]),
         merge_base_sha: git_stdout(
@@ -816,6 +836,76 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
 // =============================================================================
 // Regressions
 // =============================================================================
+
+/// cas-5a7e: the transactional path records its published merge before its
+/// internal close. Stretch that close on the real MCP response path: the
+/// caller must receive the merge receipt promptly, then find the close's
+/// actual result on the task rather than losing it with the early answer.
+#[tokio::test]
+async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = arm_delivery_with_selector(
+        "slowclose",
+        "slow-close",
+        &mut env,
+        "project:github.com/org/slow-close",
+    )
+    .await;
+    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &fixture.repo.root);
+    run_git(
+        &[
+            "config",
+            &format!("url.{}.insteadOf", origin.path().display()),
+            "git@github.com:org/slow-close.git",
+        ],
+        &fixture.repo.root,
+    );
+    env.set("CAS_TEST_POST_MERGE_DELAY_MS", "300");
+    let _dir = env.enter_dir(&fixture.repo.root);
+
+    let supervisor = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some(fixture.receipt.source_branch.clone());
+    merge.task_id = Some(fixture.task_id.clone());
+    merge.allow_trunk = Some(true);
+    merge.cleanup = Some(false);
+    let answer = get_text(
+        &supervisor
+            .coordination_with_budget_for_testing(
+                merge,
+                std::time::Duration::from_secs(50),
+                std::time::Duration::ZERO,
+            )
+            .await
+            .expect("transactional merge"),
+    );
+    assert!(answer.contains("COMMITTED"), "{answer}");
+    assert!(answer.contains("local-only target"), "{answer}");
+    assert!(answer.contains(&git_stdout(&fixture.repo.root, &["rev-parse", "main"])), "{answer}");
+    assert_eq!(
+        delivery_state(&fixture),
+        WorkerDeliveryState::MergeAuthorized,
+        "early answer must precede the delivery close: {answer}",
+    );
+
+    let task_store = open_task_store(&fixture.cas_root).unwrap();
+    let mut notes = String::new();
+    for _ in 0..400 {
+        notes = task_store.get(&fixture.task_id).unwrap().notes;
+        if notes.contains("POST_COMMIT_OUTCOME") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(notes.contains("POST_COMMIT_OUTCOME"), "close outcome missing: {notes}");
+    assert!(
+        notes.contains("task status now `closed`")
+            && notes.contains("Close outcome: Closed task: cas-slowclose-target-cas"),
+        "{notes}"
+    );
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Delivered);
+}
 
 /// cas-96ba: transactional delivery must accept the task binding consumed by
 /// worktree target resolution. The destructive-action field guard runs before

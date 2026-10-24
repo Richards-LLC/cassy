@@ -6,7 +6,7 @@ use std::process::Command;
 use super::lifecycle::close_ops::{
     DeliveryContentPresence, commit_is_merged_into_parent, delivery_content_presence_in_parent,
     effective_close_work_target, resolve_close_gate_repo_root, resolve_close_parent_branch,
-    resolve_task_commit_receipt_sha,
+    resolve_task_commit_receipt_sha, squash_text_paths_survive,
 };
 use crate::git_evidence::measurement::CommandExt as _;
 use crate::mcp::CasCore;
@@ -41,7 +41,7 @@ fn ancestor(repo: &Path, older: &str, newer: &str) -> bool {
 fn full_sha(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
-fn final_delta(repo: &Path, from: &str, to: &str) -> Option<BTreeMap<Vec<u8>, (String, String)>> {
+fn tree_delta(repo: &Path, from: &str, to: &str) -> Option<BTreeMap<Vec<u8>, (String, String)>> {
     if !full_sha(from) || !full_sha(to) {
         return None;
     }
@@ -78,7 +78,33 @@ fn final_delta(repo: &Path, from: &str, to: &str) -> Option<BTreeMap<Vec<u8>, (S
             return None;
         }
     }
-    (!delta.is_empty()).then_some(delta)
+    Some(delta)
+}
+
+fn final_delta(repo: &Path, from: &str, to: &str) -> Option<BTreeMap<Vec<u8>, (String, String)>> {
+    tree_delta(repo, from, to).filter(|delta| !delta.is_empty())
+}
+
+fn squash_content_survives(
+    repo: &Path, parent: &str, squash: &str, target: &str,
+    squash_delta: &BTreeMap<Vec<u8>, (String, String)>,
+) -> bool {
+    let origin = format!("origin/{target}");
+    let target = if ancestor(repo, squash, &origin) { &origin } else { target };
+    let Some(target) = revision(repo, target) else { return false; };
+    let Some(before) = tree_delta(repo, squash, parent) else { return false; };
+    let Some(current) = tree_delta(repo, squash, &target) else { return false; };
+    // Restoring a changed blob (or a mode-only change) is a revert, including
+    // binary files and paths which did not exist before the squash.
+    if before.iter().any(|(path, original)| current.get(path).is_some_and(|now| {
+        squash_delta.get(path).is_none_or(|delivered| {
+            if original.1 != delivered.1 { now.1 == original.1 } else { now.0 == original.0 }
+        })
+    })) {
+        return false;
+    }
+    let text_paths = before.keys().filter_map(|path| String::from_utf8(path.clone()).ok()).collect::<Vec<_>>();
+    squash_text_paths_survive(repo, parent, squash, &target, &text_paths)
 }
 
 impl CasCore {
@@ -183,7 +209,9 @@ impl CasCore {
 }
 
 /// Accept only a target-reachable commit whose own first-parent delta matches
-/// the complete pinned batch. A dropped or added path is never containment.
+/// the complete pinned batch. A dropped or added squash path is never containment.
+/// Later evolution is allowed; restoring pre-squash content or dropping
+/// text ownership through a labelled/inverse revert is not delivery.
 /// Keep the original anchor for review, evidence and executable-hook scope.
 pub(crate) fn landed_batch_squash(
     task: &Task,
@@ -232,11 +260,7 @@ pub(crate) fn landed_batch_squash(
             continue;
         }
         if final_delta(repo, &parent, &candidate).as_ref() == Some(&expected)
-            && matches!(
-                delivery_content_presence_in_parent(repo, &candidate, target),
-                DeliveryContentPresence::Present { .. }
-                    | DeliveryContentPresence::Superseded { .. }
-            )
+            && squash_content_survives(repo, &parent, &candidate, target, &expected)
         {
             return Some(candidate);
         }

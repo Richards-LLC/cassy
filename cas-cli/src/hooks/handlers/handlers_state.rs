@@ -190,8 +190,9 @@ fn rebound_since(
 /// before clear_context has recorded the new session on the row; tearing the
 /// worker down here released its task lease and deleted the row the new
 /// SessionStart had just rebound, leaving a running, unregistered worker. A
-/// worker's `/clear` SessionEnd therefore keeps its identity, leases and
-/// worktree; the next SessionStart rebinds the row by its live PID and name.
+/// worker's or supervisor's `/clear` SessionEnd therefore keeps its identity,
+/// leases, epics and worktree; the next SessionStart rebinds the row by its
+/// live PID and name (supervisors: cas-ec5f).
 pub(crate) fn cleanup_agent_leases_for_end(
     cas_root: &std::path::Path,
     session_id: &str,
@@ -225,12 +226,22 @@ pub(crate) fn cleanup_agent_leases_for_end(
         );
         return Some(Vec::new());
     }
-    if conversation_reset(end_reason) && agent.role == crate::types::AgentRole::Worker {
+    // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its identity too. Its
+    // MCP server outlives the conversation and still caches this row's id;
+    // tearing the row down made that server resurrect it as
+    // "Primary (re-registered)" beside the SessionStart's fresh row.
+    if conversation_reset(end_reason)
+        && matches!(
+            agent.role,
+            crate::types::AgentRole::Worker | crate::types::AgentRole::Supervisor
+        )
+    {
         tracing::info!(
             ended_session = %session_id,
             agent_id = %agent.id,
             agent_name = %agent.name,
-            "Preserving worker across /clear: its process keeps running and the next SessionStart rebinds this row"
+            role = %agent.role,
+            "Preserving agent across /clear: its process keeps running and the next SessionStart rebinds this row"
         );
         return Some(Vec::new());
     }

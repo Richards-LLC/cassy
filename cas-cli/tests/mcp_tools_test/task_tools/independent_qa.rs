@@ -1041,9 +1041,8 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
         "{}",
         handoff.prompt
     );
+    // pin: GH #1026 handoff must name the actual epic integration authority.
     assert!(handoff.prompt.contains("contained in epic/ui"), "{}", handoff.prompt);
-    assert!(!handoff.prompt.contains("never parked"), "{}", handoff.prompt);
-    assert!(!handoff.prompt.contains("parked for merge"), "{}", handoff.prompt);
     let guard = cas::qa_pass::supervisor_merge_refusal(
         &cas_dir,
         &repo,
@@ -1051,6 +1050,9 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
     )
     .expect("the backstop's InProgress round must block a raw merge");
     assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
+    let retried = close_text(&core, &task_id).await;
+    assert!(retried.contains("waits for") && !retried.contains("no QA pass was opened"), "{retried}");
+    assert_eq!(cas_store::list_qa_passes(&cas_dir, &task_id).unwrap().len(), 1);
 }
 
 /// A live supervisor registered in `cas_dir`, acting through its own core.

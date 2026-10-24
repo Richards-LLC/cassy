@@ -205,6 +205,21 @@ class Announce(unittest.TestCase):
         for name, body in zip(announce.BODY_NAMES, BODIES):
             self.assertEqual((self.body_dir / f"{name}.txt").read_text(), body + "\n")
 
+    def test_validate_checks_forbidden_word_in_user_reply_only(self):
+        bodies = list(BODIES)
+        bodies[1] += " A worker can use it."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("body user-reply", result.stderr)
+        self.assertIn("forbidden user wording: worker", result.stderr)
+
+        bodies[1] = BODIES[1]
+        bodies[3] += " A worker can use it."
+        self.write_draft(bodies)
+        result = self.validate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_bullet_span_ends_at_a_section_heading(self):
         two_lines = "• *Checks* — Was: checks took longer.\n→ Now: they finish sooner."
         bodies = list(BODIES)

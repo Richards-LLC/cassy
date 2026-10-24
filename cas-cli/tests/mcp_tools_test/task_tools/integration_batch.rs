@@ -212,6 +212,50 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
 }
 
 #[tokio::test]
+async fn cas_d8b4_batch_squash_survives_target_evolution() {
+    let mut env = TestEnvGuard::temp_home();
+    for (receipt_kind, change) in [("anchor", "evolved"), ("squash", "evolved"), ("anchor", "reverted"), ("anchor", "labelled")] {
+        let (temp, _, supervisor, head) = fixture(&mut env);
+        let repo = temp.path();
+        git(repo, &["checkout", "-q", "batch/X"]);
+        // Binary evolution cannot use the ordinary line-ownership fallback.
+        let batch_tip = commit(repo, "asset.bin", "batch\0version");
+        git(repo, &["checkout", "-q", "factory/test-agent"]);
+        squash(repo, None);
+        let receipt = git(repo, &["rev-parse", "main"]);
+        git(repo, &["checkout", "-q", "main"]);
+        if change == "reverted" {
+            git(repo, &["revert", "--no-edit", &receipt]);
+        } else if change == "labelled" {
+            std::fs::write(repo.join("src/one.rs"), "pub fn replacement() {}\n").unwrap();
+            git(repo, &["add", "src/one.rs"]);
+            git(repo, &["commit", "-q", "-m", "Revert published batch path"]);
+        } else {
+            commit(repo, "asset.bin", "later\0version");
+        }
+        git(repo, &["checkout", "-q", "factory/test-agent"]);
+        // Historical tasks can be staged after the squash and subsequent edits.
+        stage(supervisor.clone(), &batch_tip).await.unwrap();
+        let receipt = if receipt_kind == "anchor" { &head } else { &receipt };
+        let request = serde_json::from_value(serde_json::json!({
+            "action":"close", "id":TASK, "commit_receipt":receipt,
+            "supervisor_override":true, "reason":"Reconcile historical merged delivery"
+        })).unwrap();
+        let text = extract_text(CasService::new(supervisor.clone(), None)
+            .task(Parameters(request)).await.unwrap());
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let task = tasks.get(TASK).unwrap();
+        if change != "evolved" {
+            assert_eq!(task.status, TaskStatus::AwaitingMerge, "a reverted squash is not delivered: {text}");
+            assert!(text.contains("MERGE REQUIRED"), "{text}");
+            continue;
+        }
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()));
+    }
+}
+
+#[tokio::test]
 async fn cas_4b26f_dropped_batch_path_is_rejected() {
     let mut env = TestEnvGuard::temp_home();
     for dropped in ["src/two.rs", "src/sibling.rs", "extra"] {

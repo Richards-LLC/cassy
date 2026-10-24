@@ -1226,7 +1226,8 @@ where
 /// Write one completed phase row: mark, label padded to the detail column,
 /// then the detail. With a terminal `width`, a detail that would overflow
 /// continues on rows aligned under the detail column. Rows break only between
-/// whitespace-separated items, so a path is never split or shortened. A pipe
+/// whitespace-separated items, so a path is never split or shortened. An
+/// over-long single path intentionally overflows on its own row. A pipe
 /// (`None`) keeps one line per phase.
 fn write_step_success(
     out: &mut impl Write,
@@ -1252,21 +1253,14 @@ fn write_step_success(
         .filter(|budget| cells(detail) > *budget);
     let rows = match budget {
         None => vec![detail.to_string()],
-        Some(budget) => {
-            let mut rows = vec![String::new()];
-            for item in detail.split_whitespace() {
-                let row = rows.last_mut().expect("rows starts non-empty");
-                if row.is_empty() {
-                    row.push_str(item);
-                } else if cells(row) + 1 + cells(item) <= budget {
-                    row.push(' ');
-                    row.push_str(item);
-                } else {
-                    rows.push(item.to_string());
-                }
-            }
-            rows
-        }
+        // Keep a path intact even when it exceeds the detail-column budget.
+        Some(budget) => crate::ui::word_wrap::wrap_words(
+            detail,
+            budget,
+            &cells,
+            crate::ui::word_wrap::OverlongWordPolicy::KeepWhole,
+        )
+        .lines,
     };
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {
@@ -1669,36 +1663,23 @@ mod integration_flag_tests {
     fn init_design_capture_uses_a_portable_project_path() {
         // The published transcript is a data artifact: its project path must
         // stay portable rather than naming the machine that captured it.
-        for (name, capture) in [
-            (
-                "init-full-yes.ascii",
-                include_str!("../../../docs/design/cli/init-full-yes.ascii.capture.txt"),
-            ),
-            (
-                "init-full-interactive.ascii",
-                include_str!("../../../docs/design/cli/init-full-interactive.ascii.capture.txt"),
-            ),
-            (
-                "init-wordmark.ascii",
-                include_str!("../../../docs/design/cli/init-wordmark.ascii.capture.txt"),
-            ),
-            (
-                "init-wordmark.utf8",
-                include_str!("../../../docs/design/cli/init-wordmark.utf8.capture.txt"),
-            ),
-        ] {
-            let paths: Vec<_> = capture
+        let captures: &[(&str, &str)] =
+            include!(concat!(env!("OUT_DIR"), "/init_design_captures.rs"));
+        assert!(!captures.is_empty(), "no init capture fixtures were generated");
+        let mut checked_paths = 0;
+        for (name, capture) in captures {
+            for path in capture
                 .lines()
                 .filter_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
-                .collect();
-            assert!(!paths.is_empty(), "{name}: missing initialization path");
-            for path in paths {
+            {
+                checked_paths += 1;
                 assert!(
                     !std::path::Path::new(path).is_absolute(),
                     "{name}: non-portable capture path: {path}"
                 );
             }
         }
+        assert!(checked_paths > 0, "init captures contain no initialization paths");
     }
 
     #[test]

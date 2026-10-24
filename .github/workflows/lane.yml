@@ -12,8 +12,9 @@
 # push validates exactly as before (rollback: unset CAS_LANE_SLIM). Runner
 # placement follows cas-14e0: local runners only when CASSY_LANE_SELF_HOSTED is
 # enabled, and only the light lane slots (label cas-lane-light, cas-3b5e), so a
-# burst of lanes never queues behind merge-queue Rust jobs on cas-ci-32core. This workflow has no pull_request trigger, so a fork can never reach
-# the self-hosted runners. scripts/ci_tiers/test-policy.py pins all of this.
+# burst of lanes never queues behind merge-queue Rust jobs on cas-ci-32core.
+# This workflow has no pull_request trigger, so a fork cannot reach self-hosted
+# runners. scripts/ci_tiers/test-policy.py pins all of this.
 #
 # The workflow name stays "CI": ci_completed reminders and the factory CI
 # watcher select runs by that name.
@@ -147,6 +148,10 @@ jobs:
       - name: Test runner cache job lock lifecycle
         if: steps.runner-lock-diff.outputs.changed == 'true'
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
+
+      - name: Test runner repository registration arguments
+        if: steps.runner-lock-diff.outputs.changed == 'true'
+        run: ./scripts/test-cassy-actions-runner-registration.sh
 
       - name: Report full-tier routing
         if: needs.ci-diff.outputs.fast-admission != 'true'

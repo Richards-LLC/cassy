@@ -357,6 +357,22 @@ impl SqliteAgentStore {
             .collect()
     }
 
+    /// Whether the agent row's current incarnation already recorded a session
+    /// end (a retirement whose row deletion failed or has not happened yet).
+    /// A `/clear` keeps the row without recording one (cas-ec5f).
+    pub fn session_end_recorded(&self, agent_id: &str) -> Result<bool> {
+        let conn = self.lock_conn()?;
+        if !table_exists(&conn, "agent_session_ends")? {
+            return Ok(false);
+        }
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM agent_session_ends e JOIN agents a
+               ON a.id=e.agent_id AND a.registered_at=e.registered_at WHERE a.id=?)",
+            [agent_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn recent_session_ends(&self, machine: &str, limit: usize) -> Result<Vec<SessionEnd>> {
         let conn = self.lock_conn()?;
         if !table_exists(&conn, "agent_session_ends")? {

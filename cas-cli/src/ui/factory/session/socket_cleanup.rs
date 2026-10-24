@@ -63,7 +63,7 @@ pub(super) fn inventory_lock(sessions: &Path, reap: bool) -> io::Result<Option<f
 }
 
 /// Reap only the exact dead receipt inspected by update. The GUI probe is
-/// advisory for metadata; socket deletion still needs the Linux kernel proof.
+/// advisory for metadata; socket deletion still needs the native kernel proof.
 pub(super) fn reap_metadata_locked(
     sessions: &Path,
     path: &Path,
@@ -127,7 +127,7 @@ pub(super) fn reap_metadata_locked(
                 && current.nlink() == 1 => {}
         _ => return Ok(false),
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     for socket in [base.join(format!("factory-{}.sock", metadata.name)), gui] {
         remove_locked(&socket, sessions, false)?;
         if fs::symlink_metadata(socket).is_ok() {
@@ -158,7 +158,7 @@ pub(super) fn bind(path: &Path, sessions: &Path) -> io::Result<std::os::unix::ne
         .ok_or_else(|| io::Error::other("missing session base"))?;
     fs::create_dir_all(sessions)?;
     let _lock = transition_lock(base)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         remove_locked(path, sessions, true)?;
         // The fork-after-init path writes a temporary parent-PID receipt before
@@ -171,7 +171,7 @@ pub(super) fn bind(path: &Path, sessions: &Path) -> io::Result<std::os::unix::ne
     std::os::unix::net::UnixListener::bind(path)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(super) fn remove_if_unheld(path: &Path, sessions: &Path) -> io::Result<()> {
     if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
         return Ok(());
@@ -194,8 +194,18 @@ pub(super) fn remove_if_unheld(path: &Path, sessions: &Path) -> io::Result<()> {
     remove_locked(path, sessions, false)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn remove_locked(path: &Path, sessions: &Path, binding: bool) -> io::Result<()> {
+    remove_locked_with(path, sessions, binding, kernel_proves_unheld)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn remove_locked_with(
+    path: &Path,
+    sessions: &Path,
+    binding: bool,
+    mut proves_unheld: impl FnMut(&Path, &fs::Metadata) -> bool,
+) -> io::Result<()> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     let Some(base) = sessions.parent() else {
@@ -220,7 +230,7 @@ fn remove_locked(path: &Path, sessions: &Path, binding: bool) -> io::Result<()> 
     if !original.file_type().is_socket() || original.uid() != uid || original.nlink() != 1 {
         return Ok(());
     }
-    if !owners_are_dead(path, sessions, binding) || !kernel_proves_unheld(path, &original) {
+    if !owners_are_dead(path, sessions, binding) || !proves_unheld(path, &original) {
         return Ok(());
     }
     let Ok(current) = fs::symlink_metadata(path) else {
@@ -232,7 +242,7 @@ fn remove_locked(path: &Path, sessions: &Path, binding: bool) -> io::Result<()> 
         || !current.file_type().is_socket()
         || current.nlink() != 1
         || !owners_are_dead(path, sessions, binding)
-        || !kernel_proves_unheld(path, &current)
+        || !proves_unheld(path, &current)
     {
         return Ok(());
     }
@@ -242,7 +252,7 @@ fn remove_locked(path: &Path, sessions: &Path, binding: bool) -> io::Result<()> 
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn owners_are_dead(path: &Path, sessions: &Path, binding: bool) -> bool {
     use std::os::unix::fs::MetadataExt;
     let Ok(entries) = fs::read_dir(sessions) else {
@@ -328,8 +338,17 @@ fn kernel_proves_unheld(path: &Path, candidate: &fs::Metadata) -> bool {
     true
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(super) fn remove_if_unheld(_path: &Path, _sessions: &Path) -> io::Result<()> {
     // No reliable holder inventory on this platform: retain the pathname.
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+#[path = "socket_cleanup_macos.rs"]
+mod macos;
+
+#[cfg(target_os = "macos")]
+fn kernel_proves_unheld(path: &Path, candidate: &fs::Metadata) -> bool {
+    macos::proves_unheld(path, candidate, macos::read_table)
 }

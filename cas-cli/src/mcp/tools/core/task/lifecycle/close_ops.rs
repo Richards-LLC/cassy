@@ -15414,7 +15414,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         ) {
             let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
             return MergeStateGateOutcome::ProceedWithNote(format!(
-                "integration batch {}@{} delivered {} as target-reachable squash {}; exact changed-path final blobs and modes match (supervisor {}).",
+                "integration batch {}@{} delivered {} as target-reachable squash {}; the squash's own changed-path final blobs and modes match, independently of later target edits (supervisor {}).",
                 batch.branch, batch.tip, batch.delivered_head, squash, batch.supervisor_id
             ));
         }
@@ -23908,6 +23908,21 @@ where
         });
     }
     answers
+}
+
+/// Retain the existing text ownership/revert fence for a batch squash.
+/// Binary paths have no line proof; the batch guard compares their blobs.
+pub(crate) fn squash_text_paths_survive(
+    repo: &std::path::Path,
+    parent: &str,
+    squash: &str,
+    target: &str,
+    paths: &[String],
+) -> bool {
+    paths.iter().all(|path| matches!(
+        delivery_evolution::line_content_presence(repo, parent, squash, target, path),
+        Ok(None | Some(DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. }))
+    ))
 }
 
 /// Verify delivery content on the authoritative parent view. Prefer the

@@ -710,51 +710,13 @@ fn report_output_width(fmt: &Formatter<'_>) -> usize {
 /// path) with one spare cell. The spare cell avoids terminal-qa mistaking a
 /// continuation of a path for a word split at the right edge.
 fn wrap_report_output(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let width = width.max(1);
-    let hard_width = width.saturating_sub(1).max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        let word_width = word.chars().count();
-        if word_width <= width {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.chars().count() + 1 + word_width <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(word);
-            }
-            continue;
-        }
-
-        if !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-        }
-        let mut remaining = word;
-        while remaining.chars().count() > hard_width {
-            let split_at = remaining
-                .char_indices()
-                .nth(hard_width)
-                .map(|(index, _)| index)
-                .unwrap_or(remaining.len());
-            lines.push(remaining[..split_at].to_string());
-            remaining = &remaining[split_at..];
-        }
-        current.push_str(remaining);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+    crate::ui::word_wrap::wrap_words(
+        text,
+        width,
+        |text| text.chars().count(),
+        crate::ui::word_wrap::OverlongWordPolicy::HardWrap { spare_columns: 1 },
+    )
+    .lines
 }
 
 fn output_text_for_locale(fmt: &Formatter<'_>, text: &str) -> String {

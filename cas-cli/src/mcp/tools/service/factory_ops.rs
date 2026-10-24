@@ -3442,6 +3442,14 @@ impl CasService {
             .iter()
             .filter(|worker| adopted_workers.contains(&worker.id))
         {
+            let current = agent_store
+                .get(&worker.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            if current.status == AgentStatus::Shutdown {
+                // Retirement outlives its process-group record. A repeated
+                // shutdown must not block the remaining workers in this call.
+                continue;
+            }
             let original_groups: Vec<_> = groups
                 .iter()
                 .filter(|group| {
@@ -3453,7 +3461,7 @@ impl CasService {
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(
-                        "Cannot stop adopted worker {}: no recorded process-group identity; nothing was signalled",
+                        "Cannot stop adopted worker {}: no recorded process-group identity; no signal was sent to this worker in this request",
                         worker.name
                     ),
                 ));
@@ -13667,7 +13675,9 @@ mod tests {
                 "wrong epic owner" => epic.epic_verification_owner = Some("old-supervisor".into()),
                 "worker caller" => caller.role = AgentRole::Worker,
                 "stale adopter" => caller.last_heartbeat -= chrono::Duration::seconds(600),
-                "project directory mismatch" => evidence.project_dir = Some(other_project.path().to_string_lossy().into_owned()),
+                "project directory mismatch" => {
+                    evidence.project_dir = Some(other_project.path().to_string_lossy().into_owned())
+                }
                 _ => unreachable!(),
             }
             std::fs::write(&path, serde_json::to_vec(&evidence).unwrap()).unwrap();
@@ -13803,19 +13813,38 @@ mod tests {
         .unwrap();
         let original_start = record.pid_starttime.unwrap();
         record.pid_starttime = Some(original_start.wrapping_add(1));
-        let record_path = service.inner.cas_root.join("factory-process-groups").join(format!("{pid}.json"));
+        let record_path = service
+            .inner
+            .cas_root
+            .join("factory-process-groups")
+            .join(format!("{pid}.json"));
         std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
         let request = serde_json::from_value(serde_json::json!({
             "action": "shutdown_workers", "id": worker.id, "force": true
-        })).unwrap();
-        service.factory_shutdown_workers(request).await.expect_err("a live PID with a mismatched fingerprint must refuse shutdown");
-        assert!(child.try_wait().unwrap().is_none(), "fingerprint refusal must preserve the live process");
-        crate::ui::factory::process_groups::track(&service.inner.cas_root, &worker.name, "dead-session", pid).unwrap();
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect_err("a live PID with a mismatched fingerprint must refuse shutdown");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "fingerprint refusal must preserve the live process"
+        );
+        crate::ui::factory::process_groups::track(
+            &service.inner.cas_root,
+            &worker.name,
+            "dead-session",
+            pid,
+        )
+        .unwrap();
         let agents = crate::store::open_agent_store(&service.inner.cas_root).unwrap();
         let mut unrecorded = worker_named("unrecorded-orphan", "unrecorded-id");
         unrecorded.factory_session = worker.factory_session.clone();
         agents.register(&unrecorded).unwrap();
-        agents.add_working_epic(&unrecorded.id, "cas-adopted-epic").unwrap();
+        agents
+            .add_working_epic(&unrecorded.id, "cas-adopted-epic")
+            .unwrap();
         let request = serde_json::from_value(serde_json::json!({
             "action": "shutdown_workers", "worker_names": ([worker.name.clone(), unrecorded.name.clone()].join(",")), "force": true
         }))
@@ -13845,6 +13874,8 @@ mod tests {
                 .status,
             cas_types::AgentStatus::Shutdown
         );
+        // Model GC dropping the stopped parent's record after its handle is reaped.
+        crate::ui::factory::process_groups::untrack(&service.inner.cas_root, pid).unwrap();
         agents.graceful_shutdown(&unrecorded.id).unwrap();
         let mut own = worker_named("local-worker", "local-id");
         own.factory_session = Some("adopter-session".into());
@@ -13852,15 +13883,28 @@ mod tests {
         let request = serde_json::from_value(serde_json::json!({
             "action": "shutdown_workers", "worker_names": ([worker.name, unrecorded.name].join(",")), "force": true
         })).unwrap();
-        service.factory_shutdown_workers(request).await.expect("naming retired adopted workers succeeds without a process-group record");
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("naming retired adopted workers succeeds without a process-group record");
         let request = serde_json::from_value(serde_json::json!({
             "action": "shutdown_workers", "force": true
-        })).unwrap();
-        service.factory_shutdown_workers(request).await.expect("retired adopted rows cannot block local-worker shutdown");
-        let queued = crate::store::open_spawn_queue_store(&service.inner.cas_root).unwrap().poll("adopter-session", 10).unwrap();
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("retired adopted rows cannot block local-worker shutdown");
+        let queued = crate::store::open_spawn_queue_store(&service.inner.cas_root)
+            .unwrap()
+            .poll("adopter-session", 10)
+            .unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].worker_names, vec![own.name]);
-        assert!(!partial.message.contains("nothing was signalled"), "the earlier adopted worker did stop: {partial:?}");
+        assert!(
+            !partial.message.contains("nothing was signalled"),
+            "the earlier adopted worker did stop: {partial:?}"
+        );
     }
 
     #[test]

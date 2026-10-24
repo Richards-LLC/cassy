@@ -2988,10 +2988,12 @@ impl CasService {
             // surviving Claude team's actual inbox; the next hook/turn renders
             // and receipts the body. This does not claim an idle model wake.
             let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new(
-                worker
-                    .factory_session
-                    .as_deref()
-                    .expect("validated original session"),
+                worker.factory_session.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Adopted worker has no original factory session",
+                    )
+                })?,
             );
             let view = teams.view_for_config_dir(
                 worker

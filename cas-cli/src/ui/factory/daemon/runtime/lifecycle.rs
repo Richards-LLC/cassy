@@ -3193,7 +3193,7 @@ impl FactoryDaemon {
             ws_port,
         );
         metadata.team_name = teams.as_ref().map(|t| t.team_name().to_string());
-        session_manager.save_metadata(&metadata)?;
+        session_manager.save_daemon_metadata(metadata, app.cas_dir())?;
 
         // cas-d2a2: the prompt queue's store work runs on its own job lanes.
         let queue_jobs = crate::ui::factory::daemon::runtime::prompt_queue_jobs::QueueJobs::start(app.cas_dir().to_path_buf(), app.project_scope());

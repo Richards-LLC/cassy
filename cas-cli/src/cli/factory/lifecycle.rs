@@ -170,12 +170,19 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
         None => true,
     };
     if !session.is_running || !same_daemon {
+        // cas-fcb0: the daemon is already gone, for example after a manual
+        // `kill -9`. Its workers lead their own sessions and outlive it, so
+        // reap the groups it recorded (fingerprint-checked) before the
+        // record that names its store is removed.
+        #[cfg(unix)]
+        reap_session_worker_groups(name, &session.metadata);
         manager.remove_metadata(name)?;
         return Ok(EndSessionOutcome::CleanedStale);
     }
     terminate_process(pid)?;
     // SIGTERM delivery is not death. Wait before reclaiming socket names.
     let mut sigkilled = false;
+    let mut exited_mid_escalation = false;
     if !wait_for_daemon_exit(&session.metadata, term_grace) {
         // GH #1363: a daemon whose loop is wedged never acts on SIGTERM.
         // Escalate only on a positive identity (cas-3372): an unreadable or
@@ -183,11 +190,16 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
         let identity = match session.metadata.daemon_pid_starttime {
             None => Err("the session record has no daemon start time"),
             Some(expected) => match crate::mcp::daemon::read_pid_starttime(pid) {
-                Some(actual) if actual == expected => Ok(()),
-                Some(_) => Err("the PID's start time no longer matches the daemon's"),
+                Some(actual) if actual == expected => Ok(true),
+                // cas-fcb0: the daemon exited after the grace check and its
+                // PID was reused. It did end; there is nothing to signal.
+                Some(_) => Ok(false),
                 None => Err("the daemon's start time could not be read"),
             },
         };
+        if let Ok(false) = identity {
+            exited_mid_escalation = true;
+        }
         if let Err(why) = identity {
             // cas-4b42: say what actually happened, and leave a record.
             let reason = format!(
@@ -198,24 +210,26 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
             tracing::warn!(session = name, pid, "{reason}");
             bail!(
                 "Session '{name}' (PID {pid}) did not exit after SIGTERM, and SIGKILL was withheld because {why}. \
-                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up."
+                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up the session and reap its workers."
             );
         }
-        #[cfg(unix)]
-        {
-            let reason = format!(
-                "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
-                term_grace.as_secs()
-            );
-            crate::ui::factory::record_daemon_lifecycle(name, "killed", &reason);
-            tracing::warn!(session = name, pid, "{reason}");
-            use nix::sys::signal::{Signal, kill};
-            let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
-        }
-        if !wait_for_daemon_exit(&session.metadata, SIGKILL_GRACE) {
-            bail!(
-                "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
-            );
+        if !exited_mid_escalation {
+            #[cfg(unix)]
+            {
+                let reason = format!(
+                    "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
+                    term_grace.as_secs()
+                );
+                crate::ui::factory::record_daemon_lifecycle(name, "killed", &reason);
+                tracing::warn!(session = name, pid, "{reason}");
+                use nix::sys::signal::{Signal, kill};
+                let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
+            }
+            if !wait_for_daemon_exit(&session.metadata, SIGKILL_GRACE) {
+                bail!(
+                    "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
+                );
+            }
         }
         sigkilled = true;
     }
@@ -401,6 +415,41 @@ mod tests {
         assert!(SessionManager::new().find_session(Some("wedged")).unwrap().is_none());
         let log = daemon_log("wedged");
         assert!(log.contains("\"killed\"") && log.contains("sent SIGKILL"), "{log}");
+    }
+
+    /// cas-fcb0: after a manual `kill -9` the daemon is gone but its workers,
+    /// which lead their own sessions, are not. The follow-up `cas kill`
+    /// reaps the groups the dead daemon recorded.
+    #[test]
+    fn stale_cleanup_reaps_the_dead_daemons_workers() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (dead_pid, daemon) = spawn_group("true", &[]);
+        daemon.join().unwrap().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::ui::factory::process_groups::track(store.path(), "w1", "killed9", worker_pgid)
+            .unwrap();
+        let mut metadata = save_session("killed9", dead_pid, project.path());
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome = end_session_by_name("killed9");
+        let started = std::time::Instant::now();
+        let reaped = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            kill_group(worker_pgid);
+        });
+        let worker_status = worker.join().unwrap().unwrap();
+        let elapsed = started.elapsed();
+        reaped.join().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
+        assert!(
+            elapsed < std::time::Duration::from_secs(4),
+            "the dead daemon's worker group was left running"
+        );
+        assert!(daemon_log("killed9").contains("\"worker_reaped\""));
     }
 
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and

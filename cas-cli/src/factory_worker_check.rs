@@ -3214,12 +3214,17 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped
             .unwrap();
         let checkout =
             crate::factory_review_scratch::create(&root, &repo, "cas-proof", None, &head).unwrap();
-        assert!(
-            crate::factory_target_cache::owner::acquire(&root, &checkout.path)
-                .unwrap()
-                .is_none(),
-            "managed review checkouts do not own worker target leases"
-        );
+        let alias = dir.path().join("cas-alias");
+        std::os::unix::fs::symlink(&root, &alias).unwrap();
+        for cas_root in [&root, &alias] {
+            assert!(
+                crate::factory_target_cache::owner::acquire(cas_root, &checkout.path)
+                    .unwrap()
+                    .is_none(),
+                "managed review checkouts do not own worker target leases: {}",
+                cas_root.display()
+            );
+        }
 
         let fake = dir.path().join("fake-cargo");
         fake_cargo(

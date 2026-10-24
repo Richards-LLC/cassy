@@ -514,9 +514,11 @@ class Agent(threading.Thread):
         A serve that exits during boot is restarted, up to `--boot-retries`
         times, so a receipt keeps its configured agent count. Each failure is
         recorded in the receipt (`agent_boot_failures`), so a boot bug stays
-        visible instead of silently thinning the load.
+        visible instead of silently thinning the load. Once create is
+        acknowledged, a later exit fails the run without creating another task.
         """
         attempts = 1 + max(0, self.args.boot_retries)
+        create_acknowledged = False
         for attempt in range(attempts):
             try:
                 started = now()
@@ -532,18 +534,19 @@ class Agent(threading.Thread):
                     "risk": "none",
                     "priority": 3,
                 })
-                if self.client.proc.poll() is not None:
-                    raise RuntimeError(f"cas serve exited ({self.client.proc.returncode})")
+                create_acknowledged = ok
                 match = re.search(r"\b(cas-[0-9a-f]{4,6})\b", text)
                 if ok and match:
                     self.own_task = match.group(1)
+                if self.client.proc.poll() is not None:
+                    raise RuntimeError(f"cas serve exited ({self.client.proc.returncode})")
                 return
             except (RuntimeError, TimeoutError, OSError) as error:
                 self.boot_failures.append(f"{type(error).__name__}: {error}")
                 if self.client is not None:
                     self.client.close()
                     self.client = None
-                if attempt + 1 == attempts:
+                if create_acknowledged or attempt + 1 == attempts:
                     raise
                 time.sleep(1.0)
 

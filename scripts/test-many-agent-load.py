@@ -12,6 +12,7 @@ import pty
 import select
 import signal
 import socket
+import sys
 import tempfile
 import threading
 import time
@@ -83,6 +84,7 @@ class StubAgent(unittest.TestCase):
                                   env=dict(os.environ, CAS_AGENT_ROLE="worker"), timeout=10)
             self.assertEqual(done.stdout, "claude 9.9 (stub)\n")
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only /dev/pts writer receipt")
     def test_each_worker_pane_claims_the_next_rate_and_writes_at_it(self):
         tmp, stub = stub_dir([40.0, 200.0])
         with tmp:
@@ -369,6 +371,7 @@ class Receipts(unittest.TestCase):
             self.assertEqual(load.file_sha256(handle.name), hashlib.sha256(b"cas").hexdigest())
         self.assertIsNone(load.file_sha256("/nonexistent/cas"))
 
+    @unittest.skipUnless(sys.platform == "linux", "Linux-only /proc/loadavg receipt")
     def test_loadavg_summary(self):
         samples = [{"load1": v, "load5": 1.0, "load15": 1.0, "at": "t"} for v in (3.0, 9.0, 6.0)]
         summary = load.summarize_load(samples)

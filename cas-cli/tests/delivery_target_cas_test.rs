@@ -196,6 +196,21 @@ struct DeliveryFixture {
 }
 
 async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> DeliveryFixture {
+    arm_delivery_with_selector(
+        slug,
+        repo_host,
+        env,
+        &format!("remote:github.com/org/{repo_host}"),
+    )
+    .await
+}
+
+async fn arm_delivery_with_selector(
+    slug: &str,
+    repo_host: &str,
+    env: &mut TestEnvGuard,
+    repo_selector: &str,
+) -> DeliveryFixture {
     let repo = GitRepo::new();
     run_git(
         &[
@@ -218,7 +233,12 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     std::fs::write(
         cas_root.join("config.toml"),
         format!(
-            "[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            "{}[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            if repo_selector.starts_with("project:") {
+                format!("[project]\ncanonical_id = \"github.com/org/{repo_host}\"\n")
+            } else {
+                String::new()
+            },
             artifact_root.display().to_string()
         ),
     )
@@ -258,7 +278,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     task.depth = TaskDepth::Deep;
     task.assignee = Some(slug.to_string());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: format!("remote:github.com/org/{repo_host}"),
+        repo_selector: repo_selector.to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task");
@@ -281,7 +301,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     let receipt = WorkerCompletionReceiptInput {
         task_id: task.id.clone(),
         worker_agent_id: worker_id.clone(),
-        repo_selector: format!("remote:github.com/org/{repo_host}"),
+        repo_selector: repo_selector.to_string(),
         source_branch: format!("factory/{slug}"),
         commit_sha: git_stdout(&repo.root, &["rev-parse", &format!("factory/{slug}")]),
         merge_base_sha: git_stdout(
@@ -824,14 +844,13 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
 #[tokio::test]
 async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     let mut env = TestEnvGuard::temp_home();
-    let fixture = arm_delivery("slowclose", "slow-close", &mut env).await;
-    let config_path = fixture.cas_root.join("config.toml");
-    let config = std::fs::read_to_string(&config_path).unwrap();
-    std::fs::write(
-        &config_path,
-        format!("[project]\ncanonical_id = \"github.com/org/slow-close\"\n{config}"),
+    let fixture = arm_delivery_with_selector(
+        "slowclose",
+        "slow-close",
+        &mut env,
+        "project:github.com/org/slow-close",
     )
-    .unwrap();
+    .await;
     let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &fixture.repo.root);
     run_git(

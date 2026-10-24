@@ -251,12 +251,47 @@ for line in sys.stdin:
     result = {"content": [{"type": "text", "text": "Created task: cas-abcd"}]}
     if message["method"] == "initialize":
         result = {}
+    if message["method"] == "tools/call" and os.environ.get("FAKE_SERVE_EXIT_AFTER_CREATE"):
+        with open(os.environ["FAKE_SERVE_CREATES"], "a") as creates:
+            creates.write("cas-abcd\n")
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": result}) + "\n")
     sys.stdout.flush()
+    if message["method"] == "tools/call" and os.environ.get("FAKE_SERVE_EXIT_AFTER_CREATE"):
+        sys.exit(1)
 """
 
 
 class AgentBoot(unittest.TestCase):
+    def test_a_serve_exit_after_create_does_not_create_another_task(self):
+        class ExitAfterCreate(load.Agent):
+            def timed_call(self, *args):
+                result = super().timed_call(*args)
+                # Wait for the real child exit after its acknowledged response.
+                self.client.proc.wait(timeout=5)
+                return result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / "cas"
+            fake.write_text(FAKE_SERVE)
+            fake.chmod(0o755)
+            (root / "run").mkdir()
+            marker = root / "booted-once"
+            marker.touch()  # Start cleanly; fail only after a successful create.
+            creates = root / "creates"
+            args = argparse.Namespace(cas_bin=str(fake), boot_retries=2, seed=1,
+                                      run_dir=str(root / "run"), t0=0.0)
+            agent = ExitAfterCreate(1, args, {"project": root}, [], [], [], threading.Lock(), 0)
+            env = dict(os.environ, FAKE_SERVE_MARKER=str(marker), FAKE_SERVE_EXIT_AFTER_CREATE="1",
+                       FAKE_SERVE_CREATES=str(creates))
+            with self.assertRaisesRegex(RuntimeError, r"cas serve exited \(1\)"):
+                agent.boot(env, root / "run")
+            self.assertEqual(creates.read_text().splitlines(), ["cas-abcd"],
+                             "acknowledged create must fence the boot retry")
+            self.assertEqual(agent.own_task, "cas-abcd", "retain the acknowledged task for the receipt")
+            self.assertEqual(len(agent.boot_failures), 1)
+            self.assertIsNone(agent.client)
+
     def test_a_serve_that_exits_at_boot_is_restarted_and_recorded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

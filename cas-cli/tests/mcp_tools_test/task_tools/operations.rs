@@ -4880,8 +4880,8 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
         ("other-worker", "unnamed WIP before review", Some("not you"), false),
         // Reassignment makes this caller authorized, so the old worker's
         // branch history must be refused by commit ownership instead.
-        // pin: reassignment must expose the same commit-ownership refusal.
-        ("other-worker", "unnamed WIP before review", Some("foreign commit"), true),
+        // pin: reassignment must reject the unattributed old-worker commit.
+        ("other-worker", "unnamed WIP before review", Some("unattributed commit"), true),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
@@ -4931,6 +4931,10 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             let mut reassigned = tasks.get(&task.id).expect("task after review hold");
             reassigned.assignee = Some(caller.into());
             tasks.update(&reassigned).expect("reassign task after review hold");
+            // Keep the old worker lane intact while giving the new assignee a
+            // lane at its tip; start must inspect the inherited commit history.
+            branch_transfer_git(root, &["branch", "factory/other-worker", &tip]);
+            branch_transfer_git(root, &["switch", "factory/other-worker"]);
         }
         let result = if caller == worker.name {
             service.task(Parameters(start())).await

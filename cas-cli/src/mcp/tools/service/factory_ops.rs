@@ -3442,14 +3442,6 @@ impl CasService {
             .iter()
             .filter(|worker| adopted_workers.contains(&worker.id))
         {
-            let current = agent_store
-                .get(&worker.id)
-                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-            if current.status == AgentStatus::Shutdown {
-                // Retirement outlives its process-group record. A repeated
-                // shutdown must not block the remaining workers in this call.
-                continue;
-            }
             let original_groups: Vec<_> = groups
                 .iter()
                 .filter(|group| {
@@ -3458,6 +3450,14 @@ impl CasService {
                 })
                 .collect();
             if original_groups.is_empty() {
+                let current = agent_store
+                    .get(&worker.id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if current.status == AgentStatus::Shutdown {
+                    // The daemon retires the row before killing. Only a retired
+                    // worker with no remaining recorded group is already done.
+                    continue;
+                }
                 return Err(Self::error(
                     ErrorCode::INVALID_REQUEST,
                     format!(
@@ -13839,6 +13839,10 @@ mod tests {
         )
         .unwrap();
         let agents = crate::store::open_agent_store(&service.inner.cas_root).unwrap();
+        // The daemon marks Shutdown before killing. If it dies in that window,
+        // adoption must still stop the live, fingerprinted group.
+        agents.graceful_shutdown(&worker.id).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
         let mut unrecorded = worker_named("unrecorded-orphan", "unrecorded-id");
         unrecorded.factory_session = worker.factory_session.clone();
         agents.register(&unrecorded).unwrap();
@@ -13855,7 +13859,7 @@ mod tests {
             .expect_err("a later unrecorded orphan refuses after the earlier worker stopped");
         let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
             .await
-            .expect("actual process must exit")
+            .expect("Shutdown status must not skip the live recorded process")
             .unwrap();
         assert!(!status.success());
         let state = std::process::Command::new("ps")

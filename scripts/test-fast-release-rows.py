@@ -442,6 +442,15 @@ sleep 2
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL markdown-lint", result.stdout)
 
+    def test_markdown_lint_reports_both_checkers_in_one_run(self):
+        self.write("scripts/check-design-paths.py", "print('fixture path finding')\nraise SystemExit(1)\n")
+        self.write("scripts/check-changed-markdown.py", "print('fixture markdown finding')\nraise SystemExit(1)\n")
+        result = self.fast()
+        log = (self.repo / ".git/gate-rows/markdown-lint.log").read_text()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("fixture path finding", log)
+        self.assertIn("fixture markdown finding", log)
+
     def test_preview_refuses_failure_without_moving_refs_or_leaking_worktree(self):
         command(self.repo, "git", "checkout", "-qb", "factory/lane")
         self.write("cas-cli/tests/unwired/main.rs", "#[test]\nfn unwired() {}\n")

@@ -397,6 +397,10 @@ jobs:
         if: steps.runner-lock-diff.outputs.changed == 'true'
         run: ./scripts/test-cassy-actions-cache-job-lock.sh
 
+      - name: Test runner repository registration arguments
+        if: steps.runner-lock-diff.outputs.changed == 'true'
+        run: ./scripts/test-cassy-actions-runner-registration.sh
+
       - name: Report full-tier routing
         if: steps.classify-diff.outputs.fast-admission != 'true'
         env:

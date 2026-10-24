@@ -5,8 +5,9 @@ Wants=network-online.target
 After=network-online.target
 
 # cas-3b5e: a light slot runs only slim factory lane jobs (label
-# cas-lane-light, never cas-ci-32core). It compiles no Rust, so it has no
-# sccache server, no shared cargo cache and a hard CPU cap.
+# cas-lane-light, never cas-ci-32core). Its jobs compile no Rust, so they use
+# neither the shared Cargo cache nor an sccache server. The unit has a hard CPU
+# cap.
 [Service]
 Type=simple
 User=cassy-actions

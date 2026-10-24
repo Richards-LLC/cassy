@@ -1222,7 +1222,9 @@ impl DeliveredTree {
         let mut manifests = BTreeSet::new();
         let mut rust_sources = BTreeMap::new();
         for entry in output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
-            let (metadata, path) = entry.split_once(|byte| *byte == b'\t')?;
+            let separator = entry.iter().position(|byte| *byte == b'\t')?;
+            let (metadata, path) = entry.split_at(separator);
+            let path = &path[1..];
             let mut fields = metadata.split(|byte| byte.is_ascii_whitespace());
             let _mode = fields.next()?;
             let object_type = fields.next()?;

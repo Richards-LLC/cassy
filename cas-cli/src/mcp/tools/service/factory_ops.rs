@@ -3184,6 +3184,25 @@ impl CasService {
                 format!("Failed to list agents: {e}"),
             )
         })?;
+        let caller_id = self.inner.get_registered_agent_id_read_only().ok();
+        let adopted_workers: std::collections::HashSet<String> = all_agents
+            .iter()
+            .filter(|worker| {
+                ctx.supervisor_authorized
+                    && !worker.visible_to_factory_session(factory_session.as_deref())
+            })
+            .filter(|worker| {
+                crate::factory_session_scope::adopted_worker_supervisor(
+                    &self.inner.cas_root,
+                    worker,
+                )
+                .is_some_and(|owner| {
+                    Some(&owner.id) == caller_id.as_ref()
+                        && owner.factory_session == factory_session
+                })
+            })
+            .map(|worker| worker.id.clone())
+            .collect();
         // Every registered worker, before scope/ownership filtering. Used only
         // to tell "unknown" apart from "refused" in the error path (cas-2c05).
         let all_registry_workers: Vec<cas_types::Agent> = all_agents
@@ -3200,7 +3219,8 @@ impl CasService {
                 .into_iter()
                 .filter(|agent| {
                     agent.role == AgentRole::Worker
-                        && agent.visible_to_factory_session(factory_session.as_deref())
+                        && (agent.visible_to_factory_session(factory_session.as_deref())
+                            || adopted_workers.contains(&agent.id))
                         && (factory_session.is_some()
                             || (matches!(
                                 agent.status,
@@ -3406,11 +3426,92 @@ impl CasService {
             ));
         }
 
+        // Orphan PTYs cannot be attached to this daemon. Stop only durable,
+        // fingerprinted groups from the proven-dead original session; retain
+        // the normal queued pane path for every worker already owned here.
+        let groups = crate::ui::factory::process_groups::list(&self.inner.cas_root)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        for worker in selected
+            .iter()
+            .filter(|worker| adopted_workers.contains(&worker.id))
+        {
+            let original_groups: Vec<_> = groups
+                .iter()
+                .filter(|group| {
+                    group.worker_name == worker.name
+                        && Some(&group.factory_session) == worker.factory_session.as_ref()
+                })
+                .collect();
+            if original_groups.is_empty() {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Cannot stop adopted worker {}: no recorded process-group identity; nothing was signalled",
+                        worker.name
+                    ),
+                ));
+            }
+            for group in original_groups {
+                let current = agent_store
+                    .get(&worker.id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if !crate::factory_session_scope::adopted_worker_supervisor(
+                    &self.inner.cas_root,
+                    &current,
+                )
+                .is_some_and(|owner| {
+                    Some(&owner.id) == caller_id.as_ref()
+                        && owner.factory_session == factory_session
+                }) {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        "Adoption authority changed before shutdown; nothing further was signalled",
+                    ));
+                }
+                let outcome = crate::ui::factory::process_groups::reap(&self.inner.cas_root, group)
+                    .await
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if outcome == crate::ui::factory::process_groups::ReapOutcome::FingerprintMismatch {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        "Adopted worker process identity changed; registration preserved",
+                    ));
+                }
+            }
+            let held = agent_store
+                .graceful_shutdown(&worker.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            super::orphan_recovery::recover_worker_retired_on_request(
+                &self.inner.cas_root,
+                agent_store.as_ref(),
+                worker,
+                &held,
+                "adopted worker shutdown",
+            );
+            retire_dead_worker_for_shutdown(
+                &self.inner.cas_root,
+                &worker.name,
+                worker.factory_session.as_deref(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        }
         let worker_names: Vec<String> = selected
             .iter()
+            .filter(|worker| !adopted_workers.contains(&worker.id))
             .map(|worker| worker.name.clone())
             .chain(selected_launched_names.iter().cloned())
             .collect();
+
+        if worker_names.is_empty() {
+            return Ok(Self::success(format!(
+                "Shut down adopted workers: {}. Worktrees preserved.",
+                selected
+                    .iter()
+                    .map(|worker| worker.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
 
         // Validation passed: queue only the exact resolved names. `count=None`
         // is intentional — the daemon must not re-expand this decision.
@@ -13399,7 +13500,9 @@ mod tests {
     }
 
     // GH #1362: fresh registry heartbeats can outlive the owning daemon.
-    fn adopted_fleet_gh1362(caller: &str) -> (
+    fn adopted_fleet_gh1362(
+        caller: &str,
+    ) -> (
         crate::test_support::TestEnvGuard,
         CasService,
         cas_types::Agent,
@@ -13416,7 +13519,7 @@ mod tests {
             ("old-supervisor", "dead-session"),
             ("adopter", "adopter-session"),
         ] {
-            let mut supervisor = worker_named(name, name);
+            let mut supervisor = worker_named(name, &format!("id-{name}"));
             supervisor.role = AgentRole::Supervisor;
             supervisor.factory_session = Some(session.into());
             agents.register(&supervisor).unwrap();
@@ -13434,6 +13537,7 @@ mod tests {
         task.assignee = Some(worker.name.clone());
         task.status = cas_types::TaskStatus::InProgress;
         tasks.add(&task).unwrap();
+        agents.add_working_epic(&worker.id, &epic.id).unwrap();
         tasks
             .add_dependency(&Dependency::new(
                 task.id,
@@ -13458,7 +13562,11 @@ mod tests {
         )
         .unwrap();
         let core = CasCore::with_daemon(root, None, None);
-        core.set_agent_id_for_testing(caller.into());
+        core.set_agent_id_for_testing(if caller == "orphan-id" {
+            caller.into()
+        } else {
+            format!("id-{caller}")
+        });
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -13504,11 +13612,56 @@ mod tests {
         metadata.daemon_pid = i32::MAX as u32;
         metadata.daemon_pid_starttime = Some(1);
         std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let agents = crate::store::open_agent_store(&service.inner.cas_root).unwrap();
+        let tasks = crate::store::open_task_store(&service.inner.cas_root).unwrap();
+        // Authorization identities and evidence combinations share the real reset path.
+        for refusal in [
+            "missing fingerprint",
+            "wrong epic owner",
+            "worker caller",
+            "stale adopter",
+        ] {
+            let mut evidence = metadata.clone();
+            let mut epic = tasks.get("cas-adopted-epic").unwrap();
+            let mut caller = agents.get("id-adopter").unwrap();
+            match refusal {
+                "missing fingerprint" => evidence.daemon_pid_starttime = None,
+                "wrong epic owner" => epic.epic_verification_owner = Some("old-supervisor".into()),
+                "worker caller" => caller.role = AgentRole::Worker,
+                "stale adopter" => caller.last_heartbeat -= chrono::Duration::seconds(600),
+                _ => unreachable!(),
+            }
+            std::fs::write(&path, serde_json::to_vec(&evidence).unwrap()).unwrap();
+            tasks.update(&epic).unwrap();
+            agents.update(&caller).unwrap();
+            assert!(
+                service.inner.cas_task_reset(request()).await.is_err(),
+                "{refusal} must not authorize recovery"
+            );
+            assert!(tasks.get("cas-orphan-work").unwrap().assignee.is_some());
+            epic.epic_verification_owner = Some("id-adopter".into());
+            caller.role = AgentRole::Supervisor;
+            caller.last_heartbeat = chrono::Utc::now();
+            tasks.update(&epic).unwrap();
+            agents.update(&caller).unwrap();
+        }
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         service
             .inner
             .cas_task_reset(request())
             .await
             .expect("adopter resets orphan task");
+        let worker = agents.get("orphan-id").unwrap();
+        assert_eq!(
+            crate::factory_session_scope::adopted_worker_supervisor(
+                &service.inner.cas_root,
+                &worker
+            )
+            .unwrap()
+            .id,
+            "id-adopter",
+            "reset must preserve the worker's epic association for later shutdown"
+        );
         let task = crate::store::open_task_store(&service.inner.cas_root)
             .unwrap()
             .get("cas-orphan-work")
@@ -13527,8 +13680,13 @@ mod tests {
         .unwrap();
         service.message_send(request).await.unwrap();
         let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session");
+        let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
+        let rows = queue.poll_all(10).unwrap();
+        let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
+            &rows[0],
+        );
         assert!(
-            teams.inbox_has_unread_copy(&worker.name, "supervisor", "Preserve your committed work"),
+            teams.inbox_has_unread_copy(&worker.name, "supervisor", &body),
             "orphan Claude must receive its body in the original team inbox"
         );
         env.set("CAS_AGENT_NAME", &worker.name);
@@ -13539,16 +13697,21 @@ mod tests {
             agent_role: Some("worker".into()),
             ..Default::default()
         };
-        let context = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
-            Some(&service.inner.cas_root), &input,
-        ).expect("the next actual hook boundary renders the recovery body");
+        let context =
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
+                Some(&service.inner.cas_root),
+                &input,
+            )
+            .expect("the next actual hook boundary renders the recovery body");
         assert!(context.contains("Preserve your committed work"));
         let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
         let rows = queue.poll_all(10).unwrap();
         assert_eq!(rows.len(), 1);
         let report = queue.message_delivery_report(rows[0].id).unwrap().unwrap();
-        assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
-
+        assert_eq!(
+            report.recipient_receipt,
+            Some(cas_store::SurfacingSource::HookSurfaced)
+        );
     }
 
     #[cfg(unix)]

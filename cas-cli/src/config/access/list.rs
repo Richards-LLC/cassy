@@ -18,6 +18,7 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            ("slack.channels".into(), self.get("slack.channels").unwrap()),
             ("slack.stakeholder_contacts".into(), self.get("slack.stakeholder_contacts").unwrap()),
             ("hub.transport_mode".into(), self.get("hub.transport_mode").unwrap()),
             (

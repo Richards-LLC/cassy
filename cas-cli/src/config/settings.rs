@@ -39,6 +39,9 @@ pub struct PeersConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlackConfig {
+    /// Desired project channel IDs, including channels not yet mapped in Violet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
     #[serde(default)]
     pub transport: SlackTransport,
     /// cas-e753: whether the factory daemon claims this project's Violet
@@ -102,6 +105,17 @@ impl StakeholderContactPolicy {
 }
 
 impl SlackConfig {
+    pub(crate) fn validate_channels(&self) -> Result<(), String> {
+        if self.channels.iter().any(|id| {
+            !(id.starts_with('C') || id.starts_with('G'))
+                || !(3..=31).contains(&id.len())
+                || !id.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        }) {
+            return Err("slack.channels requires a JSON/TOML list of C... or G... Slack channel IDs".into());
+        }
+        Ok(())
+    }
+
     /// cas-e753: Violet push-wake is on unless explicitly disabled.
     pub fn wake_enabled(&self) -> bool {
         self.wake_enabled.unwrap_or(true)

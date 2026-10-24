@@ -3,6 +3,14 @@ use crate::config::meta::types::{ConfigMeta, ConfigType, Constraint};
 
 pub(super) fn register_slack(registry: &mut ConfigRegistry) {
     registry.register(ConfigMeta {
+        key: "slack.channels", section: "slack", name: "Project Slack Channels",
+        description: "JSON list of project channel IDs (C... or G...). cas violet channels compares Violet discovery with Cloud verification; cas update reconciles configured channels through ordinary authorized repair. Declaring a channel grants no mapping or work authority.",
+        value_type: ConfigType::String, default: "[]", constraint: Constraint::None,
+        advanced: false, requires_feature: None,
+        keywords: &["slack", "channel", "mapping", "binding"],
+        use_cases: &["List every desired channel with cas violet channels", "Detect configured channels missing from Violet"],
+    });
+    registry.register(ConfigMeta {
         key: "slack.stakeholder_contacts", section: "slack", name: "Stakeholder Contact Policies",
         description: "JSON list of workspace_id, user_id, minimum_interval_secs and mode (refuse or warn). Cloud owns the shared policy and last-contact record. Until Cloud and Violet advertise stakeholder-contacts/v1, posts carry a local-only warning with the last locally confirmed contact; cross-machine exclusion is unavailable.",
         value_type: ConfigType::String, default: "[]", constraint: Constraint::None,

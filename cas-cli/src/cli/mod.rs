@@ -300,7 +300,7 @@ pub enum Commands {
     /// Show credential-safe provisioning status for the managed Viktor gateway
     Viktor(ViktorArgs),
 
-    /// Post local files and messages to Slack through the Violet hub, or read a channel
+    /// Inspect channel bindings, or read and post Slack through the Violet hub
     Violet(violet_cmd::VioletArgs),
 
     /// Manage configuration

@@ -1781,10 +1781,10 @@ fn contained_merge_receipt(
     // A failed refresh never lets stale local history claim publication.
     // Tracking refs refresh here; local target advancement remains behind CI,
     // unless this source is already integrated and no merge is needed.
-    let (target_tip, authority) = match git.fetch_merge_target(target) {
-        Ok(Some(sha)) => (sha, format!("origin/{target}")),
+    let (target_tip, authority, origin_verified) = match git.fetch_merge_target(target) {
+        Ok(Some(sha)) => (sha, format!("origin/{target}"), true),
         Ok(None) => match git.resolve_commit(target) {
-            Some(local) => (local, target.to_string()),
+            Some(local) => (local, target.to_string(), false),
             None => return Containment::NotContained,
         },
         Err(error) => {
@@ -1803,7 +1803,7 @@ fn contained_merge_receipt(
             };
         }
     };
-    contained_at(git, source, &source_tip, target, &target_tip, &authority)
+    contained_at(git, source, &source_tip, target, &target_tip, &authority, origin_verified)
 }
 
 fn contained_at(
@@ -1813,6 +1813,7 @@ fn contained_at(
     target: &str,
     target_tip: &str,
     authority: &str,
+    origin_verified: bool,
 ) -> Containment {
     if git.is_ancestor(source_tip, target_tip) {
         Containment::Contained {
@@ -1820,7 +1821,7 @@ fn contained_at(
                 "Already contained: nothing new to merge; the parked tip is already in {target}.\n\n\
                  Source: {source} @ {source_tip}\nTarget: {authority} @ {target_tip}"
             ),
-            origin_verified: authority != target,
+            origin_verified,
         }
     } else {
         Containment::NotContained
@@ -1910,16 +1911,16 @@ fn contained_after_reconcile(
 ) -> Option<String> {
     use crate::worktree::git::TargetReconcile;
     let source_tip = git.resolve_commit(source)?;
-    let (target_tip, authority) = match reconcile {
-        TargetReconcile::AlreadyCurrent { sha } => (sha.clone(), format!("origin/{target}")),
-        TargetReconcile::FastForwarded { to, .. } => (to.clone(), format!("origin/{target}")),
-        TargetReconcile::AheadOfRemote { remote, .. } => (remote.clone(), format!("origin/{target}")),
+    let (target_tip, authority, origin_verified) = match reconcile {
+        TargetReconcile::AlreadyCurrent { sha } => (sha.clone(), format!("origin/{target}"), true),
+        TargetReconcile::FastForwarded { to, .. } => (to.clone(), format!("origin/{target}"), true),
+        TargetReconcile::AheadOfRemote { remote, .. } => (remote.clone(), format!("origin/{target}"), true),
         TargetReconcile::NoRemote if !git.has_origin_remote() => {
-            (git.resolve_commit(target)?, target.to_string())
+            (git.resolve_commit(target)?, target.to_string(), false)
         }
         _ => return None,
     };
-    match contained_at(git, source, &source_tip, target, &target_tip, &authority) {
+    match contained_at(git, source, &source_tip, target, &target_tip, &authority, origin_verified) {
         Containment::Contained { receipt, .. } => Some(receipt),
         _ => None,
     }

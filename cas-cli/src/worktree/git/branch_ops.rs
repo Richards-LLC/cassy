@@ -1251,6 +1251,28 @@ impl GitOperations {
 }
 
 #[cfg(test)]
+mod merge_target_tests {
+    use super::*;
+
+    #[test]
+    fn zero_time_left_cannot_confirm_origin_lacks_branch_cas_9e7e() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let remote = tempfile::tempdir().unwrap();
+        for (path, args) in [
+            (repo.path(), vec!["init", "-q"]),
+            (remote.path(), vec!["init", "-q", "--bare"]),
+            (repo.path(), vec!["remote", "add", "origin", remote.path().to_str().unwrap()]),
+        ] {
+            assert!(Command::new("git").args(args).current_dir(path).status().unwrap().success());
+        }
+        let git = GitOperations::new(repo.path().to_path_buf());
+        assert!(!git.origin_lacks_branch("epic/missing", Duration::ZERO));
+        assert!(git.origin_lacks_branch("epic/missing", Duration::from_secs(10)));
+    }
+}
+
+#[cfg(test)]
 mod protected_branch_tests {
     use super::{TargetPushOutcome, classify_push_rejection};
 

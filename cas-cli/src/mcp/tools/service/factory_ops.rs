@@ -271,7 +271,12 @@ fn preflight_codex_model_support(
         if spec.cli != cas_mux::SupervisorCli::Codex {
             continue;
         }
-        let Some(model) = spec.model.as_deref().map(str::trim).filter(|m| !m.is_empty()) else {
+        let Some(model) = spec
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        else {
             continue;
         };
         let account_dir = spec
@@ -2134,7 +2139,10 @@ fn parse_worker_name_list(raw: &str) -> Vec<String> {
         .then(|| serde_json::from_str::<Vec<String>>(trimmed).ok())
         .flatten()
     {
-        Some(array) => array.iter().map(|name| strip_target_wrapping(name)).collect(),
+        Some(array) => array
+            .iter()
+            .map(|name| strip_target_wrapping(name))
+            .collect(),
         None => trimmed.split(',').map(strip_target_wrapping).collect(),
     };
     let mut unique = Vec::with_capacity(names.len());
@@ -2262,12 +2270,12 @@ fn factory_provision_build_compatibility(
 }
 
 impl CasService {
-
     pub(super) async fn factory_spawn_workers(
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        self.factory_spawn_workers_in(&mcp_fleet_context(), req).await
+        self.factory_spawn_workers_in(&mcp_fleet_context(), req)
+            .await
     }
 
     /// [`Self::factory_spawn_workers`] with the factory context passed in rather than read
@@ -2282,12 +2290,8 @@ impl CasService {
             .factory_session
             .as_ref()
             .and_then(|_| crate::ui::factory::installed_provisioner_build_hash().ok());
-        self.factory_spawn_workers_in_with_provisioner_build(
-            ctx,
-            req,
-            provisioner_build.as_deref(),
-        )
-        .await
+        self.factory_spawn_workers_in_with_provisioner_build(ctx, req, provisioner_build.as_deref())
+            .await
     }
 
     async fn factory_spawn_workers_in_with_provisioner_build(
@@ -2662,7 +2666,9 @@ impl CasService {
         if isolate
             && let Ok(repo) = crate::worktree::GitOperations::detect_repo_root(&self.inner.cas_root)
         {
-            let focused_branch = ctx.factory_session.as_deref()
+            let focused_branch = ctx
+                .factory_session
+                .as_deref()
                 .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
                 .and_then(|id| task_store.get(&id).ok())
                 .and_then(|epic| epic.branch);
@@ -3016,7 +3022,9 @@ impl CasService {
             .task_id
             .as_ref()
             .map(|id| {
-                format!("\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}")
+                format!(
+                    "\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}"
+                )
             })
             .unwrap_or_default();
         // cas-0078: peer findings, measured before the queue row existed.
@@ -3111,7 +3119,8 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        self.factory_shutdown_workers_in(&mcp_fleet_context(), req).await
+        self.factory_shutdown_workers_in(&mcp_fleet_context(), req)
+            .await
     }
 
     /// [`Self::factory_shutdown_workers`] with the factory context passed in rather than read
@@ -3205,7 +3214,9 @@ impl CasService {
                             || (matches!(
                                 agent.status,
                                 AgentStatus::Active | AgentStatus::Idle | AgentStatus::Stale
-                            ) && owned.as_ref().is_none_or(|names| names.contains(&agent.name))))
+                            ) && owned
+                                .as_ref()
+                                .is_none_or(|names| names.contains(&agent.name))))
                 })
                 .collect(),
         );
@@ -3270,7 +3281,9 @@ impl CasService {
             requested_names
                 .iter()
                 .filter(|name| {
-                    !selected.iter().any(|worker| worker_answers_to(worker, name))
+                    !selected
+                        .iter()
+                        .any(|worker| worker_answers_to(worker, name))
                         && !selected_launched_names
                             .iter()
                             .any(|launched| launched.eq_ignore_ascii_case(name))
@@ -3484,7 +3497,8 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        self.factory_recycle_worker_in(&mcp_fleet_context(), req).await
+        self.factory_recycle_worker_in(&mcp_fleet_context(), req)
+            .await
     }
 
     /// [`Self::factory_recycle_worker`] with the factory context passed in rather than read
@@ -3640,7 +3654,9 @@ impl CasService {
                      effort=<effort> once it is idle.",
                     spec.cli.backend().name(),
                     spec.model.as_deref().unwrap_or("default"),
-                    spec.effort.map(|effort| effort.to_string()).unwrap_or_else(|| "default".into()),
+                    spec.effort
+                        .map(|effort| effort.to_string())
+                        .unwrap_or_else(|| "default".into()),
                 ),
             ));
         }
@@ -3743,7 +3759,8 @@ impl CasService {
         req: FactoryRequest,
         held: bool,
     ) -> Result<CallToolResult, McpError> {
-        self.factory_set_worker_hold_in(&mcp_fleet_context(), req, held).await
+        self.factory_set_worker_hold_in(&mcp_fleet_context(), req, held)
+            .await
     }
 
     /// [`Self::factory_set_worker_hold`] with the factory context passed in rather than read
@@ -3914,7 +3931,9 @@ impl CasService {
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         let binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
-            .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
+            .map(|snapshot| {
+                crate::factory_binary_skew::render(&snapshot, factory_session.as_deref())
+            })
             .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         let (scoped_worker_count, outside_scope_worker_count) =
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
@@ -3927,9 +3946,14 @@ impl CasService {
                 outside_scope_worker_count,
             );
             summary.push_str(&format!("\n{binary_versions}"));
-            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
-                factory_session.as_deref(), chrono::Utc::now());
-            if !capacity.is_empty() { summary.push_str(&format!("\n{capacity}")); }
+            let capacity = crate::factory_capacity_wait::render(
+                &self.inner.cas_root,
+                factory_session.as_deref(),
+                chrono::Utc::now(),
+            );
+            if !capacity.is_empty() {
+                summary.push_str(&format!("\n{capacity}"));
+            }
             // cas-73b5: the fast poll surfaces a wedged daemon loop too.
             let health = factory_session
                 .as_deref()
@@ -3972,7 +3996,11 @@ impl CasService {
             return Ok(Self::success(if health.is_empty() {
                 format!("{summary}\n{}", mailbox_health.trim_end())
             } else {
-                format!("{}\n{summary}\n{}", health.trim_end(), mailbox_health.trim_end())
+                format!(
+                    "{}\n{summary}\n{}",
+                    health.trim_end(),
+                    mailbox_health.trim_end()
+                )
             }));
         }
 
@@ -4338,9 +4366,14 @@ impl CasService {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
             }
-            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
-                factory_session.as_deref(), chrono::Utc::now());
-            if !capacity.is_empty() { msg.push_str(&format!("\n{capacity}\n")); }
+            let capacity = crate::factory_capacity_wait::render(
+                &self.inner.cas_root,
+                factory_session.as_deref(),
+                chrono::Utc::now(),
+            );
+            if !capacity.is_empty() {
+                msg.push_str(&format!("\n{capacity}\n"));
+            }
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
@@ -4468,9 +4501,14 @@ impl CasService {
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
         // starting it past the configured stall threshold.
-        let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
-            factory_session.as_deref(), chrono::Utc::now());
-        if !capacity.is_empty() { output.push_str(&format!("{capacity}\n\n")); }
+        let capacity = crate::factory_capacity_wait::render(
+            &self.inner.cas_root,
+            factory_session.as_deref(),
+            chrono::Utc::now(),
+        );
+        if !capacity.is_empty() {
+            output.push_str(&format!("{capacity}\n\n"));
+        }
         let all_open_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
             match open_task_store(&self.inner.cas_root)
@@ -4691,7 +4729,10 @@ impl CasService {
                     since,
                     epic.render(),
                     actionable_idle_label(
-                        agent.factory_session.as_deref().or(factory_session.as_deref())
+                        agent
+                            .factory_session
+                            .as_deref()
+                            .or(factory_session.as_deref())
                     )
                 ));
             }
@@ -4748,10 +4789,13 @@ impl CasService {
                 } else {
                     ""
                 };
-                let held_task = in_progress_tasks.iter().chain(parked_tasks.iter()).find(|task| {
-                    task.assignee.as_deref() == Some(agent.name.as_str())
-                        || task.assignee.as_deref() == Some(agent.id.as_str())
-                });
+                let held_task = in_progress_tasks
+                    .iter()
+                    .chain(parked_tasks.iter())
+                    .find(|task| {
+                        task.assignee.as_deref() == Some(agent.name.as_str())
+                            || task.assignee.as_deref() == Some(agent.id.as_str())
+                    });
                 let worktree_status = collect_worker_worktree_status_with_timeout(
                     &self.inner.cas_root,
                     agent,
@@ -4775,7 +4819,10 @@ impl CasService {
                     .then(|| {
                         crate::cli::factory::wedged::pending_permission_for_worker(
                             &agent.name,
-                            agent.factory_session.as_deref().or(factory_session.as_deref()),
+                            agent
+                                .factory_session
+                                .as_deref()
+                                .or(factory_session.as_deref()),
                             agent.metadata.get("worker_account_dir").map(String::as_str),
                         )
                     })
@@ -4957,11 +5004,9 @@ impl CasService {
                 // check below — one resolution, two consumers, instead of
                 // globbing/reading the transcript twice per worker.
                 let context_usage = transcript_path_for_worker
-                        .as_deref()
+                    .as_deref()
                     .and_then(|path| read_context_usage_from_tail_for_cli(path, worker_cli));
-                let context_info = context_usage
-                    .map(format_context_usage)
-                    .unwrap_or_default();
+                let context_info = context_usage.map(format_context_usage).unwrap_or_default();
                 let compaction_info = format_context_checkpoint_status(&agent.metadata);
                 // cas-86c5: surface per-worker "last activity" age so the
                 // supervisor can distinguish an actively-investigating worker
@@ -5347,7 +5392,9 @@ impl CasService {
         }
 
         output.push_str(&format!("\n{binary_versions}\n"));
-        output.push_str(&crate::supervisor_continuity::status_section(&self.inner.cas_root));
+        output.push_str(&crate::supervisor_continuity::status_section(
+            &self.inner.cas_root,
+        ));
         Ok(Self::success(output))
     }
 
@@ -5400,18 +5447,16 @@ impl CasService {
         }
 
         if !requested_names.is_empty() {
-            visible_workers
-                .retain(|a| {
-                    requested_names
-                        .iter()
-                        .any(|target| worker_answers_to(a, target))
-                });
-            dead_workers
-                .retain(|a| {
-                    requested_names
-                        .iter()
-                        .any(|target| worker_answers_to(a, target))
-                });
+            visible_workers.retain(|a| {
+                requested_names
+                    .iter()
+                    .any(|target| worker_answers_to(a, target))
+            });
+            dead_workers.retain(|a| {
+                requested_names
+                    .iter()
+                    .any(|target| worker_answers_to(a, target))
+            });
         }
 
         let visible_worker_ids: std::collections::HashSet<String> =
@@ -5667,14 +5712,16 @@ impl CasService {
         &self,
         req: FactoryRequest,
     ) -> Result<CallToolResult, McpError> {
-        self.factory_clear_context_impl(req).await.map_err(|mut error| {
-            // Codex delegates to safe recycling; the caller still requested
-            // clear_context. Keep that action on every error, including
-            // post-condition failures after a Claude control was queued.
-            // A neutral prefix preserves whether the reset was attempted.
-            error.message = format!("clear_context: {}", error.message).into();
-            error
-        })
+        self.factory_clear_context_impl(req)
+            .await
+            .map_err(|mut error| {
+                // Codex delegates to safe recycling; the caller still requested
+                // clear_context. Keep that action on every error, including
+                // post-condition failures after a Claude control was queued.
+                // A neutral prefix preserves whether the reset was attempted.
+                error.message = format!("clear_context: {}", error.message).into();
+                error
+            })
     }
 
     async fn factory_clear_context_impl(
@@ -5786,8 +5833,11 @@ impl CasService {
         // "unknown", which is not an identity, so the stamp is taken from a
         // real agent row or omitted entirely.
         let source_agent = agent_store.get(&source).ok();
-        let resume_source =
-            resume_brief_sender(source_agent.as_ref(), &live_agents, factory_session.as_deref());
+        let resume_source = resume_brief_sender(
+            source_agent.as_ref(),
+            &live_agents,
+            factory_session.as_deref(),
+        );
         let queue_origin = source_agent
             .map(|agent| cas_store::QueueOrigin::RegisteredAgent { agent_id: agent.id });
 
@@ -6078,8 +6128,13 @@ impl CasService {
         })?
         .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
         let text = if include_session_ends {
-            format!("{text}{}", crate::supervisor_continuity::status_section(&self.inner.cas_root))
-        } else { text };
+            format!(
+                "{text}{}",
+                crate::supervisor_continuity::status_section(&self.inner.cas_root)
+            )
+        } else {
+            text
+        };
         Ok(Self::success(text))
     }
 
@@ -6598,15 +6653,19 @@ impl CasService {
             .map(|task| task.id)
             .collect();
         let mut artifact_report = factory_artifact_inventory(
-            crate::config::project_factory_artifacts_root(&self.inner.cas_root, &crate::config::resolved_factory_artifacts_root(
-                config.factory().artifacts_root.as_deref(),
-            )),
+            crate::config::project_factory_artifacts_root(
+                &self.inner.cas_root,
+                &crate::config::resolved_factory_artifacts_root(
+                    config.factory().artifacts_root.as_deref(),
+                ),
+            ),
             &closed_task_ids,
         );
         artifact_report.include_review_roots();
         let target_cache_report = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
-            let live_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
+            let live_roots =
+                live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
             let known_roots = known_target_cache_worktrees(
                 &self.inner.cas_root,
                 &config,
@@ -6662,7 +6721,9 @@ impl CasService {
         ));
         match agent_store.list(None) {
             Ok(agents) => out.push_str(&serve_memory_report(&agents)),
-            Err(error) => out.push_str(&format!("\nServe memory: agent inventory unavailable: {error}\n")),
+            Err(error) => out.push_str(&format!(
+                "\nServe memory: agent inventory unavailable: {error}\n"
+            )),
         }
         out.push_str(&format!(
             "\nTrace archive: {} files, {} bytes\n",
@@ -6684,17 +6745,33 @@ impl CasService {
             );
         }
         out.push_str(&orphan_processes.render());
-        out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
+        out.push_str(&crate::factory_target_cache::scratch::render(
+            &self.inner.cas_root,
+            false,
+        ));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
-        out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
-        out.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
-        out.push_str(&crate::factory_review_scratch::unmanaged_large(&self.inner.cas_root));
+        out.push_str(&crate::factory_scratch::render_relocated(
+            &self.inner.cas_root,
+        ));
+        out.push_str(&crate::factory_review_scratch::render(
+            &self.inner.cas_root,
+            false,
+        ));
+        out.push_str(&crate::factory_review_scratch::unmanaged_large(
+            &self.inner.cas_root,
+        ));
         out.push_str(&artifact_report.render());
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
-            out.push_str("\nReclaimable checkouts with missing gitdir (review WIP before removal):\n");
+            out.push_str(
+                "\nReclaimable checkouts with missing gitdir (review WIP before removal):\n",
+            );
             for (checkout, gitdir) in missing_gitdirs {
-                out.push_str(&format!("  - {} -> {}\n", checkout.display(), gitdir.display()));
+                out.push_str(&format!(
+                    "  - {} -> {}\n",
+                    checkout.display(),
+                    gitdir.display()
+                ));
             }
         }
 
@@ -6740,8 +6817,14 @@ impl CasService {
                     &crate::task_ownership::KnownProjects::load(&cas_root),
                     chrono::Utc::now(),
                 ))
-            }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                format!("Simulator inventory worker failed: {error}")))?;
+            })
+            .await
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Simulator inventory worker failed: {error}"),
+                )
+            })?;
             out.push_str(&text);
         }
 
@@ -6888,9 +6971,7 @@ impl CasService {
         // cas-0033: disposable database branches past their task, worktree or TTL.
         out.push_str(&self.db_branch_gc_section());
 
-        Ok(Self::success(render_gc_report_response(
-            &out, view,
-        )))
+        Ok(Self::success(render_gc_report_response(&out, view)))
     }
 
     /// cas-8f8f: read-only diagnostic that walks an epic's children
@@ -7052,7 +7133,11 @@ impl CasService {
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
         // cas-fd4c: a successor stacked on an open predecessor epic must not
         // silently fall behind it until the predecessor lands.
-        if let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+        if let Some(branch) = epic
+            .branch
+            .as_deref()
+            .filter(|branch| !branch.trim().is_empty())
+        {
             use crate::mcp::tools::core::task::lifecycle::epic_lane;
             let blockers: Vec<String> = task_store
                 .get_blockers(epic_id)
@@ -7071,11 +7156,23 @@ impl CasService {
                 ));
             }
         }
-        let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
+        let staged: Vec<_> = subtasks
+            .iter()
+            .filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
+            .filter_map(|task| {
+                task.deliverables
+                    .integration_batch
+                    .as_ref()
+                    .map(|batch| (task, batch))
+            })
+            .collect();
         if !staged.is_empty() {
             report.push_str("\nStaged integration batch receipts:\n");
             for (task, batch) in staged {
-                report.push_str(&format!("- {}: {}@{} (delivery {})\n", task.id, batch.branch, batch.tip, batch.delivered_head));
+                report.push_str(&format!(
+                    "- {}: {}@{} (delivery {})\n",
+                    task.id, batch.branch, batch.tip, batch.delivered_head
+                ));
             }
         }
         // cas-619f: independent QA state per child, including supervisor
@@ -7092,7 +7189,9 @@ impl CasService {
                 format!("Failed to list encode chores: {error}"),
             )
         })?;
-        report.push_str(&crate::mcp::tools::core::rules::render_pending_encode_chores(&project_tasks));
+        report.push_str(
+            &crate::mcp::tools::core::rules::render_pending_encode_chores(&project_tasks),
+        );
 
         Ok(Self::success(report))
     }
@@ -7116,7 +7215,10 @@ impl CasService {
         let clear = req.clear.unwrap_or(false);
         let epic_id = req.id.as_deref().map(str::trim).filter(|s| !s.is_empty());
         if !clear && epic_id.is_none() {
-            return Err(Self::error(ErrorCode::INVALID_PARAMS, "focus_epic requires `id=<epic-id>` or `clear=true`"));
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "focus_epic requires `id=<epic-id>` or `clear=true`",
+            ));
         }
 
         // cas-566b: the body is the operator facade the Commander hub also
@@ -7132,21 +7234,30 @@ impl CasService {
         let focus_id = pinned_epic.clone();
         let text = tokio::task::spawn_blocking(move || {
             let request = match focus_id.as_deref() {
-                Some(epic_id) => FocusEpic::Pin { epic_id, delivery_mode: requested_delivery_mode },
+                Some(epic_id) => FocusEpic::Pin {
+                    epic_id,
+                    delivery_mode: requested_delivery_mode,
+                },
                 None => FocusEpic::Clear,
             };
             focus_epic(&focus_root, &focus_session, request)
-        }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, format!("focus worker failed: {error}")))?.map_err(
-            |error| match error {
-                OperationError::Failed(message) => Self::error(ErrorCode::INTERNAL_ERROR, message),
-                OperationError::NotFound(message) | OperationError::Invalid(message) => {
-                    Self::error(ErrorCode::INVALID_PARAMS, message)
-                }
-                stale @ OperationError::Stale(_) => {
-                    Self::error(ErrorCode::INVALID_PARAMS, stale.to_string())
-                }
-            },
-        )?;
+        })
+        .await
+        .map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("focus worker failed: {error}"),
+            )
+        })?
+        .map_err(|error| match error {
+            OperationError::Failed(message) => Self::error(ErrorCode::INTERNAL_ERROR, message),
+            OperationError::NotFound(message) | OperationError::Invalid(message) => {
+                Self::error(ErrorCode::INVALID_PARAMS, message)
+            }
+            stale @ OperationError::Stale(_) => {
+                Self::error(ErrorCode::INVALID_PARAMS, stale.to_string())
+            }
+        })?;
         // cas-f707: peers see the new focus now, not at the next heartbeat.
         // In the background: a slow cloud never delays the focus reply, and
         // the daemon's heartbeat carries a focus change it missed.
@@ -7213,20 +7324,36 @@ impl CasService {
             // Exact cache consent never invokes process reaping, task/artifact
             // retention, journey cleanup or any other GC mutation.
             if req.artifacts == Some(true) || req.older_than_secs.is_some() {
-                return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "Named unknown-cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed"));
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "Named unknown-cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed",
+                ));
             }
-            let config = crate::config::Config::load(&self.inner.cas_root)
-                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Cannot establish cache policy: {error}")))?;
+            let config = crate::config::Config::load(&self.inner.cas_root).map_err(|error| {
+                Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    format!("Cannot establish cache policy: {error}"),
+                )
+            })?;
             let agents = open_agent_store(&self.inner.cas_root)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             let worktrees = open_worktree_store(&self.inner.cas_root)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             let live = live_target_cache_worktrees(agents.as_ref(), &self.inner.cas_root);
-            let report = cleanup_target_cache_report(&self.inner.cas_root, &config, agents.as_ref(),
-                worktrees.as_ref(), &live, req.force == Some(true) && req.dry_run == Some(false), Some(Path::new(path)));
+            let report = cleanup_target_cache_report(
+                &self.inner.cas_root,
+                &config,
+                agents.as_ref(),
+                worktrees.as_ref(),
+                &live,
+                req.force == Some(true) && req.dry_run == Some(false),
+                Some(Path::new(path)),
+            );
             return Ok(Self::success(match report {
-                Ok(report) => format!("Named unknown-owner cache reclaim.{}", render_target_cache_report(&report)),
+                Ok(report) => format!(
+                    "Named unknown-owner cache reclaim.{}",
+                    render_target_cache_report(&report)
+                ),
                 Err(error) => format!("Named cache reclaim refused (fail-closed): {error}"),
             }));
         }
@@ -7240,7 +7367,8 @@ impl CasService {
             )
         })?;
         let live_workers = live_factory_workers(agent_store.as_ref());
-        let live_target_cache_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
+        let live_target_cache_roots =
+            live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
         let (orphan_process_groups, live_owned_process_groups, _, unverifiable_process_groups) =
             orphan_process_groups(&self.inner.cas_root, stale_after, &live_workers);
         let mut orphan_process_groups_reaped = 0usize;
@@ -7420,7 +7548,8 @@ impl CasService {
             target_cache_mutation_authorized,
         );
         let config = crate::config::Config::load(&self.inner.cas_root).unwrap_or_default();
-        let artifact_authorized = target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
+        let artifact_authorized =
+            target_cache_mutation_authorized && req.artifacts.unwrap_or(false);
         let tasks = crate::store::open_task_store(&self.inner.cas_root)
             .map_err(|error| error.to_string())
             .and_then(|store| {
@@ -7444,7 +7573,9 @@ impl CasService {
             .unwrap_or_default();
         let artifact_root = crate::config::project_factory_artifacts_root(
             &self.inner.cas_root,
-            &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()),
+            &crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            ),
         );
         let trace_cleanup = tasks
             .as_ref()
@@ -7465,7 +7596,12 @@ impl CasService {
                 .as_ref()
                 .map_err(|error| error.clone())
                 .and_then(|tasks| {
-                    crate::artifacts::retention::eligible_artifact_tasks(&self.inner.cas_root, tasks, chrono::Utc::now(), crate::artifacts::retention::MIN_RETENTION_DAYS)
+                    crate::artifacts::retention::eligible_artifact_tasks(
+                        &self.inner.cas_root,
+                        tasks,
+                        chrono::Utc::now(),
+                        crate::artifacts::retention::MIN_RETENTION_DAYS,
+                    )
                 })
         } else {
             Ok(Default::default())
@@ -7487,8 +7623,13 @@ impl CasService {
             }
         };
         let target_cache_result = cleanup_target_cache_report(
-            &self.inner.cas_root, &config, agent_store.as_ref(), worktree_store.as_ref(),
-            &live_target_cache_roots, target_cache_mutation_authorized, None,
+            &self.inner.cas_root,
+            &config,
+            agent_store.as_ref(),
+            worktree_store.as_ref(),
+            &live_target_cache_roots,
+            target_cache_mutation_authorized,
+            None,
         );
 
         let mut output = format!(
@@ -7514,7 +7655,12 @@ impl CasService {
                     .and_then(|store| store.list(None).map_err(anyhow::Error::from))
                     .and_then(|tasks| {
                         let others = crate::task_ownership::KnownProjects::load(&cas_root);
-                        crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
+                        crate::task_simulators::inventory(
+                            &simctl,
+                            &tasks,
+                            &others,
+                            chrono::Utc::now(),
+                        )
                     });
                 let mut text = crate::task_simulators::render(&simulators);
                 if artifact_authorized && let Ok(simulators) = &simulators {
@@ -7525,8 +7671,14 @@ impl CasService {
                     }
                 }
                 text
-            }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
-                format!("Simulator cleanup worker failed: {error}")))?;
+            })
+            .await
+            .map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Simulator cleanup worker failed: {error}"),
+                )
+            })?;
             output.push_str(&text);
         }
         match trace_cleanup {
@@ -7536,8 +7688,14 @@ impl CasService {
             Err(error) => output.push_str(&format!("\nJourney recording cleanup incomplete: {error}\n")),
         }
 
-        output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
-        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push_str(&crate::factory_target_cache::scratch::render(
+            &self.inner.cas_root,
+            target_cache_mutation_authorized,
+        ));
+        output.push_str(&crate::factory_review_scratch::render(
+            &self.inner.cas_root,
+            target_cache_mutation_authorized,
+        ));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -7600,9 +7758,16 @@ fn cleanup_target_cache_report(
 ) -> std::io::Result<crate::factory_target_cache::TargetCacheReport> {
     let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
     let known = known_target_cache_worktrees(cas_root, config, agents, worktrees);
-    let mut report = crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?;
+    let mut report =
+        crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?;
     if authorized || unknown.is_some() {
-        crate::factory_target_cache::cleanup_selected_with_opt_in(cas_root, &mut report, policy, live, unknown)?;
+        crate::factory_target_cache::cleanup_selected_with_opt_in(
+            cas_root,
+            &mut report,
+            policy,
+            live,
+            unknown,
+        )?;
     }
     Ok(report)
 }
@@ -7610,12 +7775,21 @@ fn cleanup_target_cache_report(
 fn render_target_cache_report(report: &crate::factory_target_cache::TargetCacheReport) -> String {
     let mut output = format!(
         "\n\nCargo target caches: mode={} candidates={} bytes={} selected_bytes={} reclaimed_bytes={}",
-        if report.dry_run { "dry-run" } else { "cleanup" }, report.caches.len(),
-        report.candidate_bytes, report.selected_bytes, report.reclaimed_bytes,
+        if report.dry_run { "dry-run" } else { "cleanup" },
+        report.caches.len(),
+        report.candidate_bytes,
+        report.selected_bytes,
+        report.reclaimed_bytes,
     );
     for cache in &report.caches {
-        output.push_str(&format!("\n  - {} bytes={} scan_ms={} state={:?} reason={}",
-            cache.path.display(), cache.bytes, cache.scan_elapsed_ms, cache.disposition, cache.reason));
+        output.push_str(&format!(
+            "\n  - {} bytes={} scan_ms={} state={:?} reason={}",
+            cache.path.display(),
+            cache.bytes,
+            cache.scan_elapsed_ms,
+            cache.disposition,
+            cache.reason
+        ));
     }
     output.push_str(&format!("\nFilesystem: {} ({}% used; pressure={}; reserved builders={})\n{}\nTARGET_CACHE_STATUS_JSON={}", report.filesystem_path.display(), report.filesystem.used_percent, report.filesystem.pressure, report.reserved_builders, report.remediation, report.machine_json()));
     output
@@ -7762,10 +7936,16 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         .map(|section| section.trim_matches('\n'))
         .filter(|section| !section.trim().is_empty());
     let metrics = sections.next().unwrap_or_default();
-    let category_count = sections.clone().filter(|section| {
-        !section.lines().next().is_some_and(gc_report_is_machine_status_line)
-            && !section.starts_with("Note:")
-    }).count();
+    let category_count = sections
+        .clone()
+        .filter(|section| {
+            !section
+                .lines()
+                .next()
+                .is_some_and(gc_report_is_machine_status_line)
+                && !section.starts_with("Note:")
+        })
+        .count();
     let mut summary = format!(
         "[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n"
     );
@@ -7776,9 +7956,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
                 summary.push('\n');
             }
         }
-        summary.push_str(
-            "\nInventory (first up to 3 items per category):\n",
-        );
+        summary.push_str("\nInventory (first up to 3 items per category):\n");
     }
 
     for section in sections {
@@ -7818,9 +7996,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
         let item_count = item_lines.len();
-        summary.push_str(&format!(
-            "- {label}: {item_count} items\n"
-        ));
+        summary.push_str(&format!("- {label}: {item_count} items\n"));
 
         if let Some(counts) = artifact_counts {
             summary.push_str(&format!("  Counts: closed-task candidates={counts}\n"));
@@ -7830,10 +8006,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .copied()
             .find(|line| !gc_report_is_inventory_item(line))
         {
-            summary.push_str(&format!(
-                "  Context: {}\n",
-                gc_report_short_line(context)
-            ));
+            summary.push_str(&format!("  Context: {}\n", gc_report_short_line(context)));
         }
         for item in item_lines.iter().take(GC_REPORT_SAMPLE_ITEMS) {
             summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
@@ -7940,12 +8113,7 @@ fn render_gc_report_page(
     gc_report_page_text(lines, start, end, requested_limit)
 }
 
-fn gc_report_page_text(
-    lines: &[&str],
-    start: usize,
-    end: usize,
-    requested_limit: usize,
-) -> String {
+fn gc_report_page_text(lines: &[&str], start: usize, end: usize, requested_limit: usize) -> String {
     let mut page = format!(
         "Factory GC Report\n=================\nDetail page: zero-based lines {start}..{end} of {} (max {GC_REPORT_PAGE_MAX} lines, {GC_REPORT_PAGE_MAX_BYTES} bytes).\n",
         lines.len()
@@ -7971,15 +8139,16 @@ fn gc_report_category_label(heading: &str) -> String {
     if heading.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
         heading
     } else {
-        format!("{}...", &heading[..GC_REPORT_CATEGORY_HEADING_MAX_CHARS - 3])
+        format!(
+            "{}...",
+            &heading[..GC_REPORT_CATEGORY_HEADING_MAX_CHARS - 3]
+        )
     }
 }
 
 fn gc_report_is_inventory_item(line: &str) -> bool {
     let line = line.trim_start();
-    line.starts_with("- ")
-        || line.starts_with("session=")
-        || line.starts_with("[")
+    line.starts_with("- ") || line.starts_with("session=") || line.starts_with("[")
 }
 
 fn gc_report_is_machine_status_line(line: &str) -> bool {
@@ -8044,8 +8213,14 @@ mod resume_brief_sender_tests {
         lead.factory_session = Some("session-a".into());
         let live = vec![lead.clone()];
 
-        assert_eq!(resume_brief_sender(Some(&lead), &live, Some("session-a")), "swift-octopus-83");
-        assert_eq!(resume_brief_sender(None, &live, Some("session-a")), "swift-octopus-83");
+        assert_eq!(
+            resume_brief_sender(Some(&lead), &live, Some("session-a")),
+            "swift-octopus-83"
+        );
+        assert_eq!(
+            resume_brief_sender(None, &live, Some("session-a")),
+            "swift-octopus-83"
+        );
         // cas-e13c: the exact fallbacks, so another session's supervisor
         // can never stand in for this one.
         assert_eq!(
@@ -8087,7 +8262,10 @@ mod gc_report_render_tests {
             "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
         );
 
-        let report = format!("{report}\nPaths \u{00e9}:\n  - /{}\n\nNote: these are not auto-deleted. Inspect, then commit/salvage/discard.\n", "a".repeat(200));
+        let report = format!(
+            "{report}\nPaths \u{00e9}:\n  - /{}\n\nNote: these are not auto-deleted. Inspect, then commit/salvage/discard.\n",
+            "a".repeat(200)
+        );
         let summary = render_gc_report_response(&report, GcReportView::Summary);
         assert!(
             summary.is_ascii(),
@@ -8111,7 +8289,10 @@ mod gc_report_render_tests {
             summary[..note_start].ends_with("\n\n"),
             "the WIP note needs a blank line after inventory samples: {summary}"
         );
-        assert!(!summary.contains("- Note:"), "notes are not inventory categories");
+        assert!(
+            !summary.contains("- Note:"),
+            "notes are not inventory categories"
+        );
         assert!(summary.contains("--full"));
         assert_eq!(
             render_gc_report_response(&report, GcReportView::Full),
@@ -8209,7 +8390,10 @@ struct FactoryArtifactInventory {
     error: Option<String>,
     removed: usize,
     dry_run: bool,
-    review_roots: Vec<(std::path::PathBuf, crate::artifacts::retention::ArtifactRootUsage)>,
+    review_roots: Vec<(
+        std::path::PathBuf,
+        crate::artifacts::retention::ArtifactRootUsage,
+    )>,
 }
 
 impl FactoryArtifactInventory {
@@ -8284,7 +8468,6 @@ impl FactoryArtifactInventory {
     }
 }
 
-
 fn factory_artifact_inventory(
     root: std::path::PathBuf,
     closed_task_ids: &std::collections::BTreeSet<String>,
@@ -8294,7 +8477,9 @@ fn factory_artifact_inventory(
         dry_run: true,
         ..Default::default()
     };
-    if std::fs::symlink_metadata(&inventory.root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+    if std::fs::symlink_metadata(&inventory.root)
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
         inventory.error = Some("project artifact namespace must not be a symlink".into());
         return inventory;
     }
@@ -8399,7 +8584,10 @@ fn live_factory_workers(agent_store: &dyn cas_store::AgentStore) -> LiveFactoryW
     live_factory_workers_from_agents(agent_store.list(None).unwrap_or_default())
 }
 
-fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore, cas_root: &std::path::Path) -> Vec<std::path::PathBuf> {
+fn live_target_cache_worktrees(
+    agent_store: &dyn cas_store::AgentStore,
+    cas_root: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
     agent_store
         .list(None)
         .unwrap_or_default()
@@ -8407,10 +8595,18 @@ fn live_target_cache_worktrees(agent_store: &dyn cas_store::AgentStore, cas_root
         .filter(|agent| {
             let lane = agent.metadata.get("clone_path").is_some_and(|path| {
                 let path = std::path::Path::new(path);
-                crate::factory_target_cache::legacy::lane_target(cas_root, path, &path.join("target"))
+                crate::factory_target_cache::legacy::lane_target(
+                    cas_root,
+                    path,
+                    &path.join("target"),
+                )
             });
-            if lane { crate::factory_target_cache::legacy::registered_live(agent) }
-            else { crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent).is_live() }
+            if lane {
+                crate::factory_target_cache::legacy::registered_live(agent)
+            } else {
+                crate::mcp::tools::service::agent_liveness::evaluate_supervision_liveness(agent)
+                    .is_live()
+            }
         })
         .filter_map(|agent| {
             agent
@@ -8661,7 +8857,8 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
-        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
+        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent)
+        {
             tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
         }
         if agent.status != cas_types::AgentStatus::Shutdown {
@@ -8867,19 +9064,13 @@ async fn collect_worker_worktree_status_with_timeout(
     gh_program: &std::path::Path,
 ) -> WorkerWorktreeStatus {
     let fallback = worker_worktree_status_timeout_fallback(cas_root, agent);
-    let failure_fallback =
-        worker_worktree_status_fallback(cas_root, agent, "status lookup failed");
+    let failure_fallback = worker_worktree_status_fallback(cas_root, agent, "status lookup failed");
     let cas_root = cas_root.to_path_buf();
     let agent = agent.clone();
     let task = task.cloned();
     let gh_program = gh_program.to_path_buf();
     let worktree_status = tokio::task::spawn_blocking(move || {
-        collect_worker_worktree_status_with_gh(
-            &cas_root,
-            &agent,
-            task.as_ref(),
-            &gh_program,
-        )
+        collect_worker_worktree_status_with_gh(&cas_root, &agent, task.as_ref(), &gh_program)
     });
 
     match tokio::time::timeout(timeout, worktree_status).await {
@@ -8929,13 +9120,7 @@ fn apply_task_delivery_git_status(
     worker: &str,
     status: &mut WorkerGitStatus,
 ) {
-    apply_task_delivery_git_status_with_gh(
-        repo,
-        task,
-        worker,
-        status,
-        std::path::Path::new("gh"),
-    );
+    apply_task_delivery_git_status_with_gh(repo, task, worker, status, std::path::Path::new("gh"));
 }
 
 fn apply_task_delivery_git_status_with_gh(
@@ -8950,19 +9135,40 @@ fn apply_task_delivery_git_status_with_gh(
             repo, task, worker,
         )
     });
-    let head_ref = task.deliverables.factory_branch_anchor.as_deref().unwrap_or(&branch);
-    let Ok(head) = run_git(repo, &["rev-parse", "--verify", &format!("{head_ref}^{{commit}}")]) else {
+    let head_ref = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .unwrap_or(&branch);
+    let Ok(head) = run_git(
+        repo,
+        &["rev-parse", "--verify", &format!("{head_ref}^{{commit}}")],
+    ) else {
         return;
     };
-    let base = task.deliverables.work_target.as_ref()
+    let base = task
+        .deliverables
+        .work_target
+        .as_ref()
         .map(|target| target.target_branch.as_str())
         .filter(|branch| !branch.is_empty())
         .unwrap_or(&status.base_branch);
-    let Ok(counts) = run_git(repo, &["rev-list", "--left-right", "--count", &format!("{base}...{head}")]) else {
+    let Ok(counts) = run_git(
+        repo,
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{base}...{head}"),
+        ],
+    ) else {
         return;
     };
     let mut parts = counts.split_whitespace();
-    let (Some(behind), Some(ahead)) = (parts.next().and_then(|n| n.parse().ok()), parts.next().and_then(|n| n.parse().ok())) else {
+    let (Some(behind), Some(ahead)) = (
+        parts.next().and_then(|n| n.parse().ok()),
+        parts.next().and_then(|n| n.parse().ok()),
+    ) else {
         return;
     };
     status.branch = branch;
@@ -8971,7 +9177,16 @@ fn apply_task_delivery_git_status_with_gh(
     status.behind = behind;
     status.ahead = ahead;
     let pushed_ref = format!("origin/{}", status.branch);
-    status.pushed_ref = if run_git(repo, &["rev-parse", "--verify", &format!("refs/remotes/{pushed_ref}")]).is_ok() {
+    status.pushed_ref = if run_git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/remotes/{pushed_ref}"),
+        ],
+    )
+    .is_ok()
+    {
         pushed_ref
     } else {
         "none".to_string()
@@ -10843,16 +11058,27 @@ pub(crate) fn supervisor_auth_failure_evidence(
         .get("clone_path")
         .filter(|path| !path.trim().is_empty())
         .cloned()
-        .or_else(|| cas_root.parent().map(|path| path.to_string_lossy().into_owned()));
+        .or_else(|| {
+            cas_root
+                .parent()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
     let transcript = resolve_worker_transcript_path_for_account(
         project.as_deref(),
         agent.cc_session_id.as_deref().unwrap_or(&agent.id),
         cli,
-        agent.metadata.get("supervisor_account_dir").map(String::as_str),
+        agent
+            .metadata
+            .get("supervisor_account_dir")
+            .map(String::as_str),
     );
     // cas-2db0: this runs on every presence heartbeat. Re-read the tail only
     // when the transcript's mtime or size moved since the last beat.
-    type Seen = (std::time::SystemTime, u64, crate::factory_auth_health::AuthFailureEvidence);
+    type Seen = (
+        std::time::SystemTime,
+        u64,
+        crate::factory_auth_health::AuthFailureEvidence,
+    );
     static SCANS: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Seen>>,
     > = std::sync::LazyLock::new(Default::default);
@@ -10863,8 +11089,10 @@ pub(crate) fn supervisor_auth_failure_evidence(
         .ok()
         .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
     if let Some((modified, len)) = stamp
-        && let Some((seen_modified, seen_len, evidence)) =
-            SCANS.lock().ok().and_then(|scans| scans.get(&path).cloned())
+        && let Some((seen_modified, seen_len, evidence)) = SCANS
+            .lock()
+            .ok()
+            .and_then(|scans| scans.get(&path).cloned())
         && (seen_modified, seen_len) == (modified, len)
     {
         return evidence;
@@ -11417,7 +11645,8 @@ pub(crate) fn worker_stall_evidence(
         WorkerClonePathResolve::Ready(path) => Some(path),
         WorkerClonePathResolve::NotOnDisk { .. } => None,
     };
-    let worktree_activity_age = clone_path.as_deref()
+    let worktree_activity_age = clone_path
+        .as_deref()
         .and_then(crate::cli::factory::wedged::worktree_recent_edit_age);
     Some(WorkerStallEvidence {
         executing: observation.state == super::worker_liveness::Liveness::Executing,
@@ -12362,7 +12591,10 @@ mod spawn_lifecycle_tests {
         }
     }
 
-    fn evidence(availability: cas_factory::CapabilityAvailability, reason: &str) -> cas_factory::CapabilityEvidence {
+    fn evidence(
+        availability: cas_factory::CapabilityAvailability,
+        reason: &str,
+    ) -> cas_factory::CapabilityEvidence {
         let mut evidence = cas_factory::CapabilityEvidence::new(availability, 0);
         evidence.reason = Some(reason.to_string());
         evidence
@@ -12371,20 +12603,39 @@ mod spawn_lifecycle_tests {
     #[test]
     fn chatgpt_standard_lane_refuses_a_model_absent_from_target_account_catalog() {
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
-        std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
-            "fetched_at": chrono::Utc::now(),
-            "client_version": "99.0.0",
-            "models": [{"slug": "gpt-6-sol"}]
-        }).to_string()).unwrap();
+        std::fs::write(
+            home.path().join("auth.json"),
+            r#"{"auth_mode":"chatgpt","tokens":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::json!({
+                "fetched_at": chrono::Utc::now(),
+                "client_version": "99.0.0",
+                "models": [{"slug": "gpt-6-sol"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
         let (specs, recipe, _) = build_lane_spawn_specs(
-            1, "standard", Some(home.path().to_str().unwrap()), None,
+            1,
+            "standard",
+            Some(home.path().to_str().unwrap()),
+            None,
             &cas_factory::CapabilitySnapshot::default(),
-        ).unwrap();
-        let error = preflight_account_auth_with(&specs, |_, _| {
-            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        }, || None).expect_err("the target ChatGPT account cannot run this lane recipe");
-        assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
+        )
+        .unwrap();
+        let error = preflight_account_auth_with(
+            &specs,
+            |_, _| evidence(cas_factory::CapabilityAvailability::Available, "logged in"),
+            || None,
+        )
+        .expect_err("the target ChatGPT account cannot run this lane recipe");
+        assert!(
+            error.contains(specs[0].model.as_deref().unwrap()),
+            "{recipe}: {error}"
+        );
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
         assert!(error.contains("No worktree was created"), "{error}");
     }
@@ -12396,11 +12647,19 @@ mod spawn_lifecycle_tests {
     #[test]
     fn an_older_client_cache_does_not_refuse_the_spawn_cas_c8de() {
         let home = tempfile::tempdir().unwrap();
-        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        std::fs::write(
+            home.path().join("auth.json"),
+            r#"{"auth_mode":"chatgpt","tokens":{}}"#,
+        )
+        .unwrap();
         let (specs, _, _) = build_lane_spawn_specs(
-            1, "standard", Some(home.path().to_str().unwrap()), None,
+            1,
+            "standard",
+            Some(home.path().to_str().unwrap()),
+            None,
             &cas_factory::CapabilitySnapshot::default(),
-        ).unwrap();
+        )
+        .unwrap();
         let model = specs[0].model.clone().unwrap();
         let cache = |client: &str, slug: &str| {
             std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
@@ -12417,10 +12676,14 @@ mod spawn_lifecycle_tests {
         };
 
         cache("0.146.0", "gpt-5.6-sol");
-        preflight_account_auth_with(&specs, logged_in, installed).expect("an older client's cache cannot refuse");
+        preflight_account_auth_with(&specs, logged_in, installed)
+            .expect("an older client's cache cannot refuse");
         assert_eq!(probes.get(), 1);
         cache("0.146.0", "gpt-5.6-sol");
-        assert!(preflight_account_auth_with(&specs, logged_in, || None).is_err(), "unknown installed codex keeps the verdict");
+        assert!(
+            preflight_account_auth_with(&specs, logged_in, || None).is_err(),
+            "unknown installed codex keeps the verdict"
+        );
         probes.set(0);
         cache("0.146.0", &model);
         preflight_account_auth_with(&specs, logged_in, installed).unwrap();
@@ -12429,13 +12692,20 @@ mod spawn_lifecycle_tests {
 
     #[test]
     fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
-        let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];
-        let error = preflight_account_auth_with(&specs, |_, _| {
-            evidence(
-                cas_factory::CapabilityAvailability::Unavailable,
-                "Codex login status reports no authenticated account",
-            )
-        }, || None)
+        let specs = vec![spec_for(
+            cas_mux::SupervisorCli::Codex,
+            Some("~/.codex-alt"),
+        )];
+        let error = preflight_account_auth_with(
+            &specs,
+            |_, _| {
+                evidence(
+                    cas_factory::CapabilityAvailability::Unavailable,
+                    "Codex login status reports no authenticated account",
+                )
+            },
+            || None,
+        )
         .expect_err("a logged-out account must refuse the spawn");
         assert!(error.contains("~/.codex-alt"), "{error}");
         assert!(error.contains("codex login"), "{error}");
@@ -12449,12 +12719,16 @@ mod spawn_lifecycle_tests {
     #[test]
     fn a_refusal_names_the_default_account_when_the_caller_named_none() {
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, None)];
-        let error = preflight_account_auth_with(&specs, |_, _| {
-            evidence(
-                cas_factory::CapabilityAvailability::Unavailable,
-                "logged out",
-            )
-        }, || None)
+        let error = preflight_account_auth_with(
+            &specs,
+            |_, _| {
+                evidence(
+                    cas_factory::CapabilityAvailability::Unavailable,
+                    "logged out",
+                )
+            },
+            || None,
+        )
         .expect_err("refusal expected");
         assert!(error.contains("~/.codex"), "{error}");
     }
@@ -12466,18 +12740,24 @@ mod spawn_lifecycle_tests {
         // its own unreliability would ground the factory over a slow binary.
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex"))];
         assert!(
-            preflight_account_auth_with(&specs, |_, _| {
-                evidence(
-                    cas_factory::CapabilityAvailability::Unknown,
-                    "Codex login status probe timed out",
-                )
-            }, || None)
+            preflight_account_auth_with(
+                &specs,
+                |_, _| {
+                    evidence(
+                        cas_factory::CapabilityAvailability::Unknown,
+                        "Codex login status probe timed out",
+                    )
+                },
+                || None
+            )
             .is_ok()
         );
         assert!(
-            preflight_account_auth_with(&specs, |_, _| {
-                evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-            }, || None)
+            preflight_account_auth_with(
+                &specs,
+                |_, _| { evidence(cas_factory::CapabilityAvailability::Available, "logged in") },
+                || None
+            )
             .is_ok()
         );
     }
@@ -12493,15 +12773,19 @@ mod spawn_lifecycle_tests {
             spec_for(cas_mux::SupervisorCli::Claude, Some("~/.claude")),
             spec_for(cas_mux::SupervisorCli::Grok, None),
         ];
-        preflight_account_auth_with(&specs, |cli, _| {
-            assert_ne!(
-                cli,
-                cas_mux::SupervisorCli::Grok,
-                "a harness with no account plumbing must not be probed"
-            );
-            calls.fetch_add(1, Ordering::SeqCst);
-            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        }, || None)
+        preflight_account_auth_with(
+            &specs,
+            |cli, _| {
+                assert_ne!(
+                    cli,
+                    cas_mux::SupervisorCli::Grok,
+                    "a harness with no account plumbing must not be probed"
+                );
+                calls.fetch_add(1, Ordering::SeqCst);
+                evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+            },
+            || None,
+        )
         .expect("healthy accounts pass");
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -12592,10 +12876,17 @@ mod spawn_lifecycle_tests {
         let fresh = lost_relay("task_awaiting_merge: cas-fe23 (2026-10-16T02:00:00Z)");
         let out = format_undelivered_relay_section_at(&[fresh, old, older], now);
         assert!(out.contains("cas-fe23"), "a recent relay is listed: {out}");
-        assert!(!out.contains("kind-owl-50"), "an old relay is not listed: {out}");
-        assert!(out.contains("2 older than 24 h"), "old relays are counted: {out}");
         assert!(
-            out.contains("message_ack notification_id=2904") && out.contains("notification_id=2903"),
+            !out.contains("kind-owl-50"),
+            "an old relay is not listed: {out}"
+        );
+        assert!(
+            out.contains("2 older than 24 h"),
+            "old relays are counted: {out}"
+        );
+        assert!(
+            out.contains("message_ack notification_id=2904")
+                && out.contains("notification_id=2903"),
             "the hint names how to clear each one: {out}"
         );
 
@@ -12925,7 +13216,10 @@ mod spawn_lifecycle_tests {
         let task_store = core.open_task_store().expect("open task store");
         task_store.init().expect("init task store");
         task_store
-            .add(&Task::new("cas-brief1".to_string(), "Fix the sweep".to_string()))
+            .add(&Task::new(
+                "cas-brief1".to_string(),
+                "Fix the sweep".to_string(),
+            ))
             .expect("add task");
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
@@ -12943,7 +13237,11 @@ mod spawn_lifecycle_tests {
             .factory_spawn_workers(orphan)
             .await
             .expect_err("a brief needs a task to ride on");
-        assert!(refused.message.contains("spawn_brief needs task_id"), "{}", refused.message);
+        assert!(
+            refused.message.contains("spawn_brief needs task_id"),
+            "{}",
+            refused.message
+        );
 
         let request: FactoryRequest = serde_json::from_value(serde_json::json!({
             "action": "spawn_workers",
@@ -12966,10 +13264,14 @@ mod spawn_lifecycle_tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(text.contains("Supervisor brief: stored on cas-brief1"), "{text}");
+        assert!(
+            text.contains("Supervisor brief: stored on cas-brief1"),
+            "{text}"
+        );
         let notes = task_store.get("cas-brief1").expect("task").notes;
         assert!(
-            notes.contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),
+            notes
+                .contains("📌 SPAWN BRIEF Rebase onto the epic first; tests are part of the task."),
             "{notes}"
         );
     }
@@ -13081,7 +13383,11 @@ mod tests {
         );
         let current = store.get(&worker.id).unwrap();
         assert_eq!(current.cc_session_id.as_deref(), Some("34398e29-new"));
-        assert_eq!(current.pid, Some(5151), "the stale pre-reset copy never overwrites the row");
+        assert_eq!(
+            current.pid,
+            Some(5151),
+            "the stale pre-reset copy never overwrites the row"
+        );
 
         // The row vanished while the process kept running: restored, by name.
         store.unregister(&worker.id).unwrap();
@@ -13104,10 +13410,18 @@ mod tests {
         let repo = root.join("worktrees/active-codex");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            let output = std::process::Command::new("git").args(args).current_dir(&repo)
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
                 .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
-                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z").output().unwrap();
-            assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         };
         git(&["init", "-b", "factory/active-codex"]);
         git(&["config", "user.name", "Fixture"]);
@@ -13115,17 +13429,35 @@ mod tests {
         std::fs::write(repo.join("app"), "base\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-m", "old task baseline"]);
-        let mut worker = cas_types::Agent::new_with_role("codex-owned-session".into(), "active-codex".into(), cas_types::AgentRole::Worker);
-        worker.metadata.insert("clone_path".into(), repo.to_string_lossy().into());
+        let mut worker = cas_types::Agent::new_with_role(
+            "codex-owned-session".into(),
+            "active-codex".into(),
+            cas_types::AgentRole::Worker,
+        );
+        worker
+            .metadata
+            .insert("clone_path".into(), repo.to_string_lossy().into());
         worker.metadata.insert("worker_cli".into(), "codex".into());
-        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .register(&worker)
+            .unwrap();
         // Outside file churn cannot masquerade as this worker's work.
         std::fs::write(project.path().join("unrelated-file"), "outside worker\n").unwrap();
         let quiet = worker_stall_evidence(&root, "active-codex", chrono::Utc::now(), 600).unwrap();
-        assert!(quiet.worktree_activity_age.is_some_and(|age| age.as_secs() > 600));
+        assert!(
+            quiet
+                .worktree_activity_age
+                .is_some_and(|age| age.as_secs() > 600)
+        );
         std::fs::write(repo.join("app"), "editing now\n").unwrap();
         let active = worker_stall_evidence(&root, "active-codex", chrono::Utc::now(), 600).unwrap();
-        assert!(active.worktree_activity_age.is_some_and(|age| age.as_secs() < 5), "fresh worker edit must veto quiet: {active:?}");
+        assert!(
+            active
+                .worktree_activity_age
+                .is_some_and(|age| age.as_secs() < 5),
+            "fresh worker edit must veto quiet: {active:?}"
+        );
     }
 
     async fn spawn_build_check_case(
@@ -13212,9 +13544,13 @@ mod tests {
 
     #[tokio::test]
     async fn missing_factory_session_metadata_skips_build_check_and_queues_spawn() {
-        let (receipt, queue) =
-            spawn_build_check_case("missing-metadata-1174", None, Some("known-provisioner"), None)
-                .await;
+        let (receipt, queue) = spawn_build_check_case(
+            "missing-metadata-1174",
+            None,
+            Some("known-provisioner"),
+            None,
+        )
+        .await;
         let receipt = receipt.expect("spawn is queued when build identity is inconclusive");
 
         assert!(
@@ -13223,7 +13559,11 @@ mod tests {
             ),
             "receipt should explain why the early check was skipped: {receipt}"
         );
-        assert_eq!(queue.len(), 1, "an unknown daemon build must not refuse spawn");
+        assert_eq!(
+            queue.len(),
+            1,
+            "an unknown daemon build must not refuse spawn"
+        );
     }
 
     #[tokio::test]
@@ -13238,7 +13578,11 @@ mod tests {
             ),
             "receipt should explain why the early check was skipped: {receipt}"
         );
-        assert_eq!(queue.len(), 1, "an unprobeable provisioner must not refuse spawn");
+        assert_eq!(
+            queue.len(),
+            1,
+            "an unprobeable provisioner must not refuse spawn"
+        );
     }
 
     /// cas-cef2 (GH #1242): `cas update` replaced the binary under a running
@@ -13345,7 +13689,9 @@ mod tests {
         let mut owner = cas_types::Agent::new("owner".into(), "supervisor".into());
         owner.pid = Some(std::process::id());
         owner.last_heartbeat = chrono::Utc::now() - chrono::Duration::hours(3);
-        owner.metadata.insert("clone_path".into(), integration.display().to_string());
+        owner
+            .metadata
+            .insert("clone_path".into(), integration.display().to_string());
         store.register(&owner).unwrap();
         assert!(live_target_cache_worktrees(store.as_ref(), &root).contains(&integration));
     }
@@ -13353,18 +13699,21 @@ mod tests {
     #[test]
     fn shutdown_snapshot_renders_worker_specific_cleanup_verdict_gh_1035() {
         let repo = tempfile::tempdir().expect("test repo");
-        assert!(std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(repo.path())
-            .status()
-            .expect("git init")
-            .success());
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(repo.path())
+                .status()
+                .expect("git init")
+                .success()
+        );
         let mut snapshot = ShutdownWorkerSnapshot {
             worker_name: "calm-hawk-84".to_string(),
             worker_id: "worker-id".to_string(),
             task_states: vec![],
             has_in_progress_task: false,
-            worktree_state: "worktree=/repo/.cas/worktrees/calm-hawk-84 (dirty_files=0)".to_string(),
+            worktree_state: "worktree=/repo/.cas/worktrees/calm-hawk-84 (dirty_files=0)"
+                .to_string(),
             worktree_cleanup_verdict: shutdown_worktree_cleanup_verdict(repo.path(), false),
             unsafe_worktree: false,
         };
@@ -13396,6 +13745,182 @@ mod tests {
         // is the case that would fail.
         agent.status = cas_types::AgentStatus::Idle;
         agent
+    }
+
+    // GH #1362: fresh registry heartbeats can outlive the owning daemon.
+    fn adopted_fleet_gh1362() -> (
+        crate::test_support::TestEnvGuard,
+        CasService,
+        cas_types::Agent,
+    ) {
+        use cas_types::{Dependency, DependencyType, Task, TaskType};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "adopter-session");
+        env.set("CAS_AGENT_NAME", "adopter");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_SUPERVISOR_NAME", "old-supervisor");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (name, session) in [
+            ("old-supervisor", "dead-session"),
+            ("adopter", "adopter-session"),
+        ] {
+            let mut supervisor = worker_named(name, name);
+            supervisor.role = AgentRole::Supervisor;
+            supervisor.factory_session = Some(session.into());
+            agents.register(&supervisor).unwrap();
+        }
+        let mut worker = worker_named("orphan-worker", "orphan-id");
+        worker.factory_session = Some("dead-session".into());
+        worker.metadata.insert("cli".into(), "claude".into());
+        agents.register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = Task::new("cas-adopted-epic".into(), "Adopted epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.epic_verification_owner = Some("adopter".into());
+        tasks.add(&epic).unwrap();
+        let mut task = Task::new("cas-orphan-work".into(), "Orphan work".into());
+        task.assignee = Some(worker.name.clone());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        tasks
+            .add_dependency(&Dependency::new(
+                task.id,
+                epic.id,
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            "dead-session",
+            i32::MAX as u32,
+            "old-supervisor",
+            &[worker.name.clone()],
+            None,
+            env.home().to_str(),
+            None,
+        );
+        std::fs::create_dir_all(crate::ui::factory::session::sessions_dir()).unwrap();
+        std::fs::write(
+            crate::ui::factory::session::metadata_path("dead-session"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        core.set_agent_id_for_testing("adopter".into());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        (env, service, worker)
+    }
+
+    #[tokio::test]
+    async fn adopted_worker_routes_and_replies_to_current_supervisor_gh1362() {
+        let (_env, service, worker) = adopted_fleet_gh1362();
+        service.inner.set_agent_id_for_testing(worker.id);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "kind": "status",
+            "summary": "adopted worker status", "message": "Ready for recovery"
+        }))
+        .unwrap();
+        service.message_send(request).await.unwrap();
+        let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
+        let rows = queue.poll_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "adopter");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("adopter-session"));
+    }
+
+    #[tokio::test]
+    async fn adopter_can_reset_only_after_original_daemon_dies_gh1362() {
+        let (_env, service, _) = adopted_fleet_gh1362();
+        let path = crate::ui::factory::session::metadata_path("dead-session");
+        let mut metadata: crate::ui::factory::protocol::SessionMetadata =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        metadata.daemon_pid = std::process::id();
+        metadata.daemon_pid_starttime = crate::mcp::daemon::read_pid_starttime(metadata.daemon_pid);
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let request = || {
+            rmcp::handler::server::wrapper::Parameters(crate::mcp::tools::TaskReleaseRequest {
+                task_id: "cas-orphan-work".into(),
+                force: Some(true),
+            })
+        };
+        assert!(
+            service.inner.cas_task_reset(request()).await.is_err(),
+            "live daemon retains ownership even after epic transfer"
+        );
+        metadata.daemon_pid = i32::MAX as u32;
+        metadata.daemon_pid_starttime = None;
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        service
+            .inner
+            .cas_task_reset(request())
+            .await
+            .expect("adopter resets orphan task");
+        let task = crate::store::open_task_store(&service.inner.cas_root)
+            .unwrap()
+            .get("cas-orphan-work")
+            .unwrap();
+        assert_eq!(task.status, cas_types::TaskStatus::Open);
+        assert!(task.assignee.is_none());
+    }
+
+    #[tokio::test]
+    async fn adopter_delivers_to_original_claude_inbox_gh1362() {
+        let (_env, service, worker) = adopted_fleet_gh1362();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": worker.name,
+            "summary": "recovery", "message": "Preserve your committed work"
+        }))
+        .unwrap();
+        service.message_send(request).await.unwrap();
+        let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session");
+        assert!(
+            teams.inbox_has_unread_copy(&worker.name, "supervisor", "Preserve your committed work"),
+            "orphan Claude must receive its body in the original team inbox"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopter_shutdown_stops_original_worker_process_gh1362() {
+        use std::os::unix::process::CommandExt;
+        let (_env, service, worker) = adopted_fleet_gh1362();
+        let mut command = std::process::Command::new("sleep");
+        command.arg("300").process_group(0);
+        let mut command = tokio::process::Command::from(command);
+        command.kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        crate::ui::factory::process_groups::track(
+            &service.inner.cas_root,
+            &worker.name,
+            "dead-session",
+            pid,
+        )
+        .unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "id": worker.id, "force": true
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("adopter can stop orphan process without its old pane");
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .expect("actual process must exit")
+            .unwrap();
+        assert!(!status.success());
+        assert_eq!(
+            crate::store::open_agent_store(&service.inner.cas_root)
+                .unwrap()
+                .get(&worker.id)
+                .unwrap()
+                .status,
+            cas_types::AgentStatus::Shutdown
+        );
     }
 
     #[test]
@@ -13464,8 +13989,14 @@ mod tests {
     /// the documented comma form.
     #[test]
     fn worker_name_list_accepts_json_arrays_and_commas_cas_4691() {
-        assert_eq!(parse_worker_name_list("[\"wild-phoenix-59\"]"), vec!["wild-phoenix-59"]);
-        assert_eq!(parse_worker_name_list("wild-phoenix-59"), vec!["wild-phoenix-59"]);
+        assert_eq!(
+            parse_worker_name_list("[\"wild-phoenix-59\"]"),
+            vec!["wild-phoenix-59"]
+        );
+        assert_eq!(
+            parse_worker_name_list("wild-phoenix-59"),
+            vec!["wild-phoenix-59"]
+        );
         assert_eq!(
             parse_worker_name_list(" [ \"b-2\" , \"a-1\" , \"b-2\" ] "),
             vec!["b-2", "a-1"],
@@ -13495,7 +14026,11 @@ mod tests {
             let parsed = parse_worker_name_filter(Some(&target.to_string()));
             let resolved: Vec<&cas_types::Agent> = parsed
                 .iter()
-                .filter_map(|name| workers.iter().find(|worker| worker_answers_to(worker, name)))
+                .filter_map(|name| {
+                    workers
+                        .iter()
+                        .find(|worker| worker_answers_to(worker, name))
+                })
                 .collect();
             assert_eq!(
                 resolved.len(),
@@ -13570,7 +14105,12 @@ mod tests {
                 worker.cc_session_id.as_deref().unwrap(),
             ] {
                 let id = queue
-                    .enqueue_with_session("supervisor", target, "unfinished message", "shutdown-c653")
+                    .enqueue_with_session(
+                        "supervisor",
+                        target,
+                        "unfinished message",
+                        "shutdown-c653",
+                    )
                     .expect("enqueue");
                 cancelled.push(id);
             }
@@ -13836,7 +14376,10 @@ mod tests {
         snapshot.mark_task_state_unknown(&error);
         assert!(snapshot.requires_force());
         let rendered = snapshot.render();
-        assert!(rendered.contains("unknown (") && rendered.contains(&error), "{rendered}");
+        assert!(
+            rendered.contains("unknown (") && rendered.contains(&error),
+            "{rendered}"
+        );
         assert!(rendered.contains("task state unknown"), "{rendered}");
     }
 
@@ -13948,7 +14491,9 @@ mod tests {
         );
         supervisor_s1.role = AgentRole::Supervisor;
         supervisor_s1.factory_session = Some("factory-session-s1".to_string());
-        agent_store.register(&supervisor_s1).expect("register S1 supervisor");
+        agent_store
+            .register(&supervisor_s1)
+            .expect("register S1 supervisor");
 
         let mut worker = Agent::new(
             "worker-session-w1".to_string(),
@@ -13964,7 +14509,9 @@ mod tests {
         );
         supervisor_s2.role = AgentRole::Supervisor;
         supervisor_s2.factory_session = Some("factory-session-s2".to_string());
-        agent_store.register(&supervisor_s2).expect("register S2 supervisor");
+        agent_store
+            .register(&supervisor_s2)
+            .expect("register S2 supervisor");
 
         let mut activity = Event::new(
             EventType::WorkerFileEdited,
@@ -14012,7 +14559,10 @@ mod tests {
                 .expect("worker activity"),
         );
         assert!(activity.contains("surviving-worker"), "{activity}");
-        assert!(!activity.contains("No recent worker activity"), "{activity}");
+        assert!(
+            !activity.contains("No recent worker activity"),
+            "{activity}"
+        );
     }
 
     fn valid_claude_config(dir: &std::path::Path) {
@@ -14675,10 +15225,7 @@ mod tests {
         assert_eq!(specs.0[0].name.as_deref(), Some("research"));
         assert_eq!(specs.0[1].name.as_deref(), Some("review"));
         assert_eq!(specs.0[0].config_dir.as_deref(), Some("~/.claude-alt"));
-        assert_eq!(
-            specs.0[0].model.as_deref(),
-            Some("gpt-6-luna")
-        );
+        assert_eq!(specs.0[0].model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(specs.0[0].effort, Some(cas_mux::Effort::XHigh));
         assert!(specs.2.is_empty(), "static primary should not warn");
     }
@@ -14723,14 +15270,12 @@ mod tests {
             }
         }
         for cli in ["codex", "grok", "opencode"] {
-            let error =
-                build_spawn_spec_json(Some(cli), Some("claude-fable-5-1"), Some("medium"))
-                    .unwrap_err();
+            let error = build_spawn_spec_json(Some(cli), Some("claude-fable-5-1"), Some("medium"))
+                .unwrap_err();
             assert!(error.contains("cli=claude"), "{error}");
         }
-        let error =
-            build_spawn_spec_json(Some("claude"), Some("claude-fable-5-1"), Some("ultra"))
-                .unwrap_err();
+        let error = build_spawn_spec_json(Some("claude"), Some("claude-fable-5-1"), Some("ultra"))
+            .unwrap_err();
         assert!(error.contains("effort"), "{error}");
     }
 
@@ -14740,10 +15285,7 @@ mod tests {
         let now = cas_factory::CapabilitySnapshot::now_ms();
         let mut snapshot = cas_factory::CapabilitySnapshot::default();
         snapshot.record(
-            cas_factory::recipe_route_identity(
-                &registry.recipes["claude_opus_5_5"],
-                "default",
-            ),
+            cas_factory::recipe_route_identity(&registry.recipes["claude_opus_5_5"], "default"),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Unavailable,
                 now,
@@ -14751,30 +15293,23 @@ mod tests {
             .with_reason("Claude Opus account unavailable"),
         );
         snapshot.record(
-            cas_factory::recipe_route_identity(
-                &registry.recipes["claude_opus"],
-                "default",
-            ),
+            cas_factory::recipe_route_identity(&registry.recipes["claude_opus"], "default"),
             cas_factory::CapabilityEvidence::new(
                 cas_factory::CapabilityAvailability::Available,
                 now,
             ),
         );
 
-        let (specs, recipe, warnings) = build_lane_spawn_specs(
-            1,
-            "taste",
-            None,
-            None,
-            &snapshot,
-        )
-        .expect("taste fallback should resolve");
+        let (specs, recipe, warnings) = build_lane_spawn_specs(1, "taste", None, None, &snapshot)
+            .expect("taste fallback should resolve");
         assert_eq!(recipe, "claude_opus");
         assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert_eq!(
             warnings,
-            ["fallback: claude_opus (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"],
+            [
+                "fallback: claude_opus (primary claude_opus_5_5 unavailable: Claude Opus account unavailable)"
+            ],
         );
     }
 
@@ -15308,7 +15843,10 @@ model = "local/qwen3.8"
                 Some(config.clone()),
             )
             .unwrap();
-            assert_eq!(specs[0].cli, parse_spawn_cli(Some(harness)).unwrap().unwrap());
+            assert_eq!(
+                specs[0].cli,
+                parse_spawn_cli(Some(harness)).unwrap().unwrap()
+            );
             assert_eq!(specs[0].model.as_deref(), Some(model));
             assert_eq!(specs[0].effort, Some(effort.parse().unwrap()));
             // Same as stock is still configured; re-reading a changed file
@@ -16506,7 +17044,6 @@ effort = "high"
         assert!(merge.contains("awaiting merge"), "{merge}");
         assert!(merge.contains("WAITING ON YOU"), "{merge}");
         assert!(!merge.contains("none assigned"), "{merge}");
-
     }
 
     /// A live in-progress task still outranks a parked one.
@@ -17355,13 +17892,19 @@ effort = "high"
         std::fs::create_dir_all(&bin).unwrap();
         let cas = bin.join("cas");
         std::fs::write(&cas, "#!/bin/sh\necho 'cas 9.99.2'\n").unwrap();
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
         let _env = crate::test_support::TestEnvGuard::with_vars(&[
-            ("PATH", &path), ("CAS_FACTORY_SESSION", "release-session"),
+            ("PATH", &path),
+            ("CAS_FACTORY_SESSION", "release-session"),
         ]);
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
         struct Child(std::process::Child);
@@ -17371,30 +17914,56 @@ effort = "high"
                 let _ = self.0.wait();
             }
         }
-        let daemon = Child(std::process::Command::new("sleep").arg("30").spawn().unwrap());
-        let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
+        let daemon = Child(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let mut epoch =
+            crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
         epoch.pid = Some(daemon.0.id().into());
         epoch.version = Some("9.99.1".into());
-        SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
+        SqliteHistoryStore::open(&root)
+            .unwrap()
+            .record_epoch(&epoch)
+            .unwrap();
         let mut worker = cas_types::Agent::new_with_role(
-            "release-worker-id".into(), "release-worker".into(), cas_types::AgentRole::Worker,
+            "release-worker-id".into(),
+            "release-worker".into(),
+            cas_types::AgentRole::Worker,
         );
         worker.factory_session = Some("release-session".into());
         worker.pid = Some(std::process::id());
         crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
-        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        crate::store::open_agent_store(&root)
+            .unwrap()
+            .register(&worker)
+            .unwrap();
         assert_ne!(worker.pid, Some(daemon.0.id()));
-        let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
-        assert!(banner.contains("release-worker") && banner.contains("9.99.1 [STALE"), "{banner}");
+        let banner =
+            crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
+        assert!(
+            banner.contains("release-worker") && banner.contains("9.99.1 [STALE"),
+            "{banner}"
+        );
         let core = CasCore::with_daemon(root, None, None);
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
-        let request = serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true})).unwrap();
+        let request =
+            serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true}))
+                .unwrap();
         let output = response_text(service.factory_worker_status(request).await.unwrap());
-        assert!(output.contains("Factory MCP versions (installed 9.99.2)"), "{output}");
-        assert!(output.contains("release-worker (Worker") && output.contains("9.99.1 [STALE"), "{output}");
+        assert!(
+            output.contains("Factory MCP versions (installed 9.99.2)"),
+            "{output}"
+        );
+        assert!(
+            output.contains("release-worker (Worker") && output.contains("9.99.1 [STALE"),
+            "{output}"
+        );
     }
 
     #[tokio::test]
@@ -17483,8 +18052,10 @@ effort = "high"
         let lines: Vec<_> = output.lines().collect();
         assert_eq!(lines.len(), 8, "{output}");
         assert!(
-            lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
-                && line.contains("has not reported a mailbox poll")),
+            lines
+                .iter()
+                .any(|line| line.starts_with("Peer mailbox: not receiving:")
+                    && line.contains("has not reported a mailbox poll")),
             "summary must retain a visible mailbox health footer: {output}"
         );
         assert!(
@@ -18332,7 +18903,10 @@ effort = "high"
                 .find(|pad| (run.len() + pad + 1 + record.len() + 1 - TAIL) % 3 == 1)
                 .unwrap();
             let body = format!("{run}{}\n{record}\n", "x".repeat(pad));
-            assert!(!body.is_char_boundary(body.len() - TAIL), "the fixture must cut a character");
+            assert!(
+                !body.is_char_boundary(body.len() - TAIL),
+                "the fixture must cut a character"
+            );
             let path = dir.path().join(name);
             std::fs::write(&path, body).unwrap();
             path
@@ -18396,7 +18970,11 @@ effort = "high"
             assert_eq!(spec.cli, cli);
             assert_eq!(spec.model.as_deref(), Some(model), "{cli:?}");
             assert_eq!(spec.effort, Some(effort), "{cli:?}");
-            assert_eq!(spec.config_dir.as_deref(), Some(account.as_str()), "{cli:?}");
+            assert_eq!(
+                spec.config_dir.as_deref(),
+                Some(account.as_str()),
+                "{cli:?}"
+            );
             cas_factory::validate_explicit(&spec, &cas_factory::CapabilitySnapshot::default())
                 .unwrap_or_else(|error| panic!("{cli:?} recipe must relaunch: {error}"));
         }
@@ -18426,8 +19004,13 @@ effort = "high"
 
         // A record that agrees with its model is kept as recorded.
         agent.metadata.insert("worker_cli".into(), "codex".into());
-        agent.metadata.insert("worker_model".into(), "gpt-6-luna".into());
-        assert_eq!(worker_spec_from_agent(&agent).cli, cas_mux::SupervisorCli::Codex);
+        agent
+            .metadata
+            .insert("worker_model".into(), "gpt-6-luna".into());
+        assert_eq!(
+            worker_spec_from_agent(&agent).cli,
+            cas_mux::SupervisorCli::Codex
+        );
     }
 
     #[test]
@@ -19578,10 +20161,18 @@ effort = "high"
             "a slow gh subprocess must not hold up the worker_status poll: {:?}",
             started.elapsed()
         );
-        assert_eq!(status.clone_path.as_deref(), Some(tmp.path().to_string_lossy().as_ref()));
-        assert!(status.git_info.contains("status lookup timed out"), "{status:?}");
+        assert_eq!(
+            status.clone_path.as_deref(),
+            Some(tmp.path().to_string_lossy().as_ref())
+        );
         assert!(
-            status.git_info.contains("PR: unknown (status lookup timed out)"),
+            status.git_info.contains("status lookup timed out"),
+            "{status:?}"
+        );
+        assert!(
+            status
+                .git_info
+                .contains("PR: unknown (status lookup timed out)"),
             "timeout must not claim a successful empty PR query: {status:?}"
         );
     }
@@ -19593,9 +20184,7 @@ effort = "high"
         let secret = "synthetic-gh-secret";
         let gh = write_gh_stub(
             tmp.path(),
-            &format!(
-                "#!/bin/sh\nprintf '%s' 'auth/network failure: {secret}' >&2\nexit 7\n"
-            ),
+            &format!("#!/bin/sh\nprintf '%s' 'auth/network failure: {secret}' >&2\nexit 7\n"),
         );
 
         let status = collect_worker_git_status_with_gh(tmp.path(), &gh);
@@ -20296,7 +20885,10 @@ mod sync_safety_tests {
 
         let line = failure.report_line();
         // pin: the disambiguating ^0 stash suffix requires shell quoting.
-        assert!(line.contains(&format!("git stash apply '{stash_ref}'")), "{line}");
+        assert!(
+            line.contains(&format!("git stash apply '{stash_ref}'")),
+            "{line}"
+        );
         assert!(
             line.contains("WIP IS NOT LOST") && line.contains(stash_ref),
             "report line must carry recovery instructions with the ref: {line}"
@@ -20624,9 +21216,14 @@ mod artifact_project_scope_tests {
             (&base.join("cas-src-old-key"), 7),
             (&base.join("shared-builds"), 7),
         ] {
-            let row = output.lines().find(|line| line.contains(&path.display().to_string()))
+            let row = output
+                .lines()
+                .find(|line| line.contains(&path.display().to_string()))
                 .unwrap_or_else(|| panic!("unscoped roots must be visible: {output}"));
-            assert!(row.contains(&format!("bytes={bytes}")) && row.contains("review-only"), "{row}");
+            assert!(
+                row.contains(&format!("bytes={bytes}")) && row.contains("review-only"),
+                "{row}"
+            );
         }
         assert!(
             output.contains(&renamed.display().to_string())

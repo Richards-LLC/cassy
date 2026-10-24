@@ -275,3 +275,31 @@ test posts there rather than in release or internal announcement channels.
 - `cas-cli/src/builtins/skills/violet/references/registration.md` — the
   per-file registration shapes, for a machine being repaired by hand.
 - `docs/RELEASE_SLACK_RUBRIC.md` — what to post and where.
+
+## Inspect project channel bindings
+
+Declare every desired channel, including channels that are not mapped yet:
+
+```bash
+cas config set slack.channels '["C0123456789", "G0123456789"]'
+cas violet channels
+```
+
+The report compares Violet's channel mappings with Cloud's binding verification.
+It includes configured channels, Violet-only mappings, Cloud-only bindings and
+previously gated channels. Project mismatches require inspection before remapping;
+Cloud verification of a stored binding does not prove that the two stores agree.
+Violet's listing is discovery; the server verifies mapping authority during repair.
+
+Cloud-only discovery requires an existing supervisor registration for your account
+and this project. From another terminal, pass its ID with
+`cas violet channels --registration-id <supervisor-id>`. The command never creates
+a registration. If that read fails or reaches Cloud's 100-binding limit, the
+report explicitly marks its inventory incomplete while checking known channels.
+Use `--json` for full identities and machine-readable flags. Findings or incomplete
+inventory exit with status 1.
+
+Follow each row's remedy, then run `cas update` for ordinary authorized repair.
+Listing is read-only. Repair uses the existing local drain and Cloud reconciliation
+contract; it does not require an administrative secret. Pre-binding history keeps
+Cloud's archival policy and is not backfilled to later readers.

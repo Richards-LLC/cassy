@@ -100,6 +100,15 @@ impl Config {
         };
 
         match key {
+            "slack.channels" => {
+                let mut slack = self.slack.clone().unwrap_or_default();
+                slack.channels = serde_json::from_str(value)
+                    .map_err(|_| MemError::Parse("slack.channels requires a JSON list of C... or G... channel IDs".into()))?;
+                slack.validate_channels().map_err(MemError::Parse)?;
+                slack.channels.sort();
+                slack.channels.dedup();
+                self.slack = Some(slack);
+            }
             "slack.stakeholder_contacts" => {
                 let policies: Vec<StakeholderContactPolicy> = serde_json::from_str(value)
                     .map_err(|error| MemError::Parse(format!("Invalid stakeholder_contacts JSON: {error}")))?;

@@ -57,6 +57,7 @@
 - `cas-cli/src/capability.rs`, `cas-cli/src/cli/hub_service.rs` - account probes, bounded auth cache and readiness.
 - `cas-cli/src/cli/codemap_cmd.rs`, `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs` - map commands, immutable documentation measurements and calling-checkout document reads.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations, cache GC and integration commands.
+- `cas-cli/src/cli/violet_cmd/channels.rs` - read-only configured/Violet/Cloud channel inventory, binding verification and project mismatch reporting.
 - `cas-cli/src/hooks/handlers/`, `cas-cli/src/cli/hook/` - session/tool policy, native dispatch and hook generation.
 - `cas-cli/src/cloud/`, `cas-cli/src/hub/` - synchronization, identity, pairing, inbox and presence.
 - `cas-cli/src/cloud/syncer/pull.rs`, `cas-cli/src/cli/update/findings.rs` - persistent sync conflicts and update cause/remedy extraction.

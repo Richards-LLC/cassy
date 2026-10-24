@@ -608,6 +608,13 @@ fn malformed_config_error_names_line_and_repair_remedy() {
 fn test_config_get_set() {
     let mut config = Config::default();
 
+    config.set("slack.channels", r#"["G123", "C123", "C123"]"#).unwrap();
+    assert_eq!(config.get("slack.channels").as_deref(), Some(r#"["C123","G123"]"#));
+    assert!(config.set("slack.channels", r##"["#general"]"##).is_err());
+    let roundtrip: Config = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(roundtrip.get("slack.channels"), config.get("slack.channels"));
+    assert!(config.list().iter().any(|(key, value)| key == "slack.channels" && value == r#"["C123","G123"]"#));
+
     config.set("sync.enabled", "false").unwrap();
     assert_eq!(config.get("sync.enabled"), Some("false".to_string()));
 

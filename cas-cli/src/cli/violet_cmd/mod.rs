@@ -16,6 +16,7 @@
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) mod credentials;
+pub mod channels;
 pub mod draft_check;
 pub mod files;
 pub mod hub;
@@ -40,6 +41,8 @@ pub struct VioletArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum VioletCommand {
+    /// List this project's configured, Violet and Cloud channel bindings
+    Channels(channels::ChannelsArgs),
     /// Post a message, or local files by path, to a channel
     Post(PostArgs),
     /// Post a top-level message and its ordered replies as one thread
@@ -124,6 +127,7 @@ pub struct ReadArgs {
 /// list (only the order of `--reply`/`--reply-file` is read from it), the
 /// publication gate, and a lazy hub connection made after local validation.
 pub struct RunContext<'a> {
+    pub cas_root: Option<&'a Path>,
     pub json: bool,
     pub raw_args: &'a [String],
     pub gate: &'a dyn Fn(&Value) -> Option<String>,
@@ -158,6 +162,7 @@ pub fn execute(
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut context = RunContext {
+        cas_root,
         json: cli.json,
         raw_args: &raw_args,
         gate: &gate,
@@ -203,6 +208,24 @@ pub fn run_violet(
     out: &mut dyn Write,
 ) -> Result<(), VioletError> {
     let result = match command {
+        VioletCommand::Channels(args) => {
+            let report = match channels::inspect(context.cas_root, args) {
+                Ok(report) => report,
+                Err(error) => {
+                    if context.json { print_json(out, &error.to_json()); }
+                    return Err(error);
+                }
+            };
+            if context.json {
+                print_json(out, &serde_json::to_value(&report).expect("serializable channel report"));
+            } else {
+                let _ = write!(out, "{}", channels::render(&report));
+            }
+            // Already rendered one complete report; don't wrap it in a post error.
+            return if report.ok { Ok(()) } else {
+                Err(VioletError::local("bindings_attention", "Slack binding inventory has findings"))
+            };
+        }
         VioletCommand::Post(args) => run_post(args, context, out),
         VioletCommand::Thread(args) => run_thread(args, context, out),
         VioletCommand::Read(args) => run_read(args, context, out),

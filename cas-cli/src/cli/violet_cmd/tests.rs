@@ -134,6 +134,7 @@ fn run_cli_claimed(
     };
     let reply_claim = |reply_to: &str| claim.clone().filter(|block| block["reply_to"] == reply_to);
     let mut context = RunContext {
+        cas_root: None,
         json,
         raw_args: &raw,
         gate,

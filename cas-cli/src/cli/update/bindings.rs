@@ -20,16 +20,6 @@ use crate::coordination::binding_repair::{
 /// The Violet hub authenticates production Cloud bearers only. A project on
 /// another Cloud (staging, a local test server) has no hub to ask.
 const PRODUCTION_CLOUD: &str = "https://petra-stella-cloud.vercel.app";
-const CHANNEL_ROUTE: &str = "/api/channels";
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-struct ChannelMapping {
-    channel_id: String,
-    #[serde(default)]
-    channel_name: String,
-    project_id: String,
-}
-
 #[derive(Debug, Serialize)]
 struct ChannelResult {
     channel_id: String,
@@ -94,7 +84,16 @@ fn reconcile_with(
     // Channels this host already gated stay candidates even if their Violet
     // mapping disappeared: Cloud's answer is what settles them.
     let journal = IntakeJournal::new(cas_root);
-    let mut channels: Vec<(String, String)> = Vec::new();
+    let mut channels: Vec<(String, String)> = match crate::config::Config::load(cas_root) {
+        Ok(config) => {
+            let slack = config.slack.unwrap_or_default();
+            if let Err(error) = slack.validate_channels() {
+                return Some(ProjectPhase::Warning(format!("Slack bindings: {error}; check .cas/config.toml")));
+            }
+            slack.channels.into_iter().map(|id| (id, String::new())).collect()
+        }
+        Err(error) => return Some(ProjectPhase::Warning(format!("Slack bindings: configuration unreadable ({error}); run `cas doctor`"))),
+    };
     if journal.path().exists() {
         match journal.read() {
             Ok(state) => channels.extend(
@@ -188,32 +187,8 @@ fn list_channels(
     hub_url: &str,
     token: &str,
     project_id: &str,
-) -> Result<Vec<ChannelMapping>, String> {
-    #[derive(serde::Deserialize)]
-    struct Listing {
-        channels: Vec<ChannelMapping>,
-    }
-    let mut url = url::Url::parse(hub_url).map_err(|_| "invalid Violet hub URL".to_string())?;
-    url.set_path(CHANNEL_ROUTE);
-    url.set_fragment(None);
-    url.query_pairs_mut()
-        .clear()
-        .append_pair("project_id", project_id);
-    let response = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(std::time::Duration::from_secs(20))
-        .build()
-        .get(url.as_str())
-        .set("Authorization", &format!("Bearer {token}"))
-        .call();
-    match response {
-        Ok(response) => response
-            .into_json::<Listing>()
-            .map(|listing| listing.channels)
-            .map_err(|_| "invalid Violet channel listing".into()),
-        Err(ureq::Error::Status(status, _)) => Err(format!("Violet HTTP {status}")),
-        Err(ureq::Error::Transport(_)) => Err("Violet hub unreachable".into()),
-    }
+) -> Result<Vec<crate::cli::violet_cmd::channels::Mapping>, String> {
+    crate::cli::violet_cmd::channels::list_mappings(hub_url, token, Some(project_id))
 }
 
 fn channel_result(channel_name: String, report: RepairReport) -> ChannelResult {

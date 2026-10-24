@@ -120,6 +120,81 @@ pub fn foreign_owner_of_worker(
         .max_by(|a, b| a.worker.cmp(&b.worker))
 }
 
+/// Resolve the successor of a worker stranded by a dead native daemon (GH #1362).
+/// Heartbeats and a transferred epic alone are insufficient: the original
+/// daemon's local, project-scoped PID/start fingerprint must prove it is gone.
+/// Keep the worker's original session intact for its surviving team inbox/hooks.
+pub(crate) fn adopted_worker_supervisor(cas_root: &Path, worker: &Agent) -> Option<Agent> {
+    let session = session_of(worker)?;
+    if worker.role != AgentRole::Worker
+        || session.contains(['/', '\\'])
+        || matches!(session, "." | "..")
+    {
+        return None;
+    }
+    let metadata: crate::ui::factory::SessionMetadata =
+        serde_json::from_slice(&std::fs::read(crate::ui::factory::metadata_path(session)).ok()?)
+            .ok()?;
+    let project = Path::new(metadata.project_dir.as_deref()?)
+        .canonicalize()
+        .ok()?;
+    if metadata.name != session
+        || metadata.daemon_pid <= 1
+        || metadata.daemon_pid > i32::MAX as u32
+        || metadata.daemon_pid_starttime.is_none()
+        || project != cas_root.parent()?.canonicalize().ok()?
+        || crate::ui::factory::daemon_identity_is_live(&metadata)
+    {
+        return None;
+    }
+    let agents = crate::store::open_agent_store(cas_root).ok()?;
+    let tasks = crate::store::open_task_store_local(cas_root).ok()?;
+    let ids = tasks
+        .ids_by_assignees_and_statuses(
+            &[&worker.name, &worker.id],
+            &[
+                crate::types::TaskStatus::Open,
+                crate::types::TaskStatus::InProgress,
+                crate::types::TaskStatus::Blocked,
+                crate::types::TaskStatus::AwaitingMerge,
+            ],
+        )
+        .ok()?;
+    let mut epics = Vec::new();
+    for id in ids {
+        epics.push(tasks.get_parent_epic(&id).ok()??);
+    }
+    // start/claim records this durable association; reset clears the assignee
+    // but must not make the surviving worker unreachable again.
+    if epics.is_empty() {
+        for id in agents.get_working_epics(&worker.id).ok()? {
+            epics.push(tasks.get(&id).ok()?);
+        }
+    }
+    let roster = agents.list(None).ok()?;
+    let mut successor: Option<Agent> = None;
+    for epic in epics {
+        if epic.task_type != crate::types::TaskType::Epic {
+            return None;
+        }
+        let owner = epic.epic_verification_owner.as_deref()?.trim();
+        let candidate = roster.iter().find(|agent| {
+            crate::supervisor_notices::is_live(agent)
+                && (agent.id == owner || agent.name.eq_ignore_ascii_case(owner))
+                && session_of(agent).is_some_and(|current| current != session)
+                && agent.machine_id == worker.machine_id
+        })?;
+        if successor
+            .as_ref()
+            .is_some_and(|prior| prior.id != candidate.id)
+        {
+            return None; // Conflicting live assignments do not grant fleet authority.
+        }
+        successor = Some(candidate.clone());
+    }
+    successor
+}
+
 /// The worker a factory branch belongs to: `factory/<worker>` or the
 /// per-task form `factory/<worker>-<task>`. The longest matching registered
 /// worker name wins, so `factory/ab-cd-cas-1` resolves to `ab-cd`, not `ab`.

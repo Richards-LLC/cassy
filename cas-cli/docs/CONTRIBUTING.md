@@ -27,6 +27,13 @@ parked refs/PRs, pending messages and asks at startup, with a full JSON receipt 
 unadopted inherited lane IDs and references to earlier receipts. Receiving evidence preserves live worker leases;
 explicitly adopt the listed epics before dispatching more work. `worker_status`
 and text `coordination action=peers` show recent session-end reasons locally.
+An epic's live `epic_verification_owner` can recover its stranded workers when
+local session metadata and the daemon's PID/start fingerprint confirm the original
+daemon is dead. Worker `target=supervisor` follows that owner. Recovery messages
+reach the original Claude team inbox and surface at the worker's next turn or tool
+boundary; a dead native daemon cannot wake an idle terminal. Reset and shutdown
+retain the live-session ownership guard, and shutdown uses only recorded,
+fingerprinted process groups while preserving the orphan's worktree.
 Harness reasons are retained verbatim; pane exits include code/signal, MCP ends
 name transport EOF or the parent watchdog, and unobserved causes stay `unknown`.
 

@@ -1191,9 +1191,11 @@ fn delivered_tree_proof_inputs(
     if external_assets.is_empty() {
         return Some(proof_inputs);
     }
-    for (source_path, source) in tree.rust_sources_with_includes(repo, delivered_head)? {
-        let manifest_dir = tree.manifest_dir_for_source(&source_path)?;
-        let targets = include_targets(&source, &source_path, &manifest_dir)?;
+    for (source_path, source) in
+        tree.rust_sources_with_includes(repo, delivered_head, &external_assets)?
+    {
+        let manifest_dir = tree.manifest_dir_for_source(&source_path);
+        let targets = include_targets(&source, &source_path, manifest_dir.as_deref())?;
         for target in targets {
             if external_assets.contains(&target) {
                 proof_inputs.insert(target);
@@ -1277,13 +1279,24 @@ impl DeliveredTree {
         &self,
         repo: &Path,
         delivered_head: &str,
+        changed_paths: &BTreeSet<String>,
     ) -> Option<Vec<(String, String)>> {
-        let sources = Command::new("git")
+        let names = changed_paths
+            .iter()
+            .map(|path| path.rsplit('/').next())
+            .collect::<Option<BTreeSet<_>>>()?;
+        if names.iter().any(|name| name.contains('\n')) {
+            return None;
+        }
+        let mut command = Command::new("git");
+        command
             .env("GIT_OPTIONAL_LOCKS", "0")
-            .args([
-                "grep", "-I", "-l", "-z", "-F", "-e", "include_str", "-e", "include_bytes",
-                delivered_head, "--", "*.rs",
-            ])
+            .args(["grep", "-lF", "-z"]);
+        for name in names {
+            command.arg("-e").arg(name);
+        }
+        let sources = command
+            .args([delivered_head, "--", "*.rs"])
             .current_dir(repo)
             .output()
             .ok()?;
@@ -1347,7 +1360,11 @@ impl DeliveredTree {
     }
 }
 
-fn include_targets(source: &str, source_path: &str, manifest_dir: &str) -> Option<Vec<String>> {
+fn include_targets(
+    source: &str,
+    source_path: &str,
+    manifest_dir: Option<&str>,
+) -> Option<Vec<String>> {
     let mut targets = Vec::new();
     let mut cursor = 0;
     while let Some((end, expression)) = next_include_expression(source, cursor)? {
@@ -1369,11 +1386,15 @@ fn include_targets(source: &str, source_path: &str, manifest_dir: &str) -> Optio
             return None;
         }
         let base = if uses_manifest_dir {
-            manifest_dir
+            manifest_dir?
         } else {
             source_path.rsplit_once('/')?.0
         };
-        let path = if uses_manifest_dir { path.trim_start_matches('/') } else { &path };
+        let path = if uses_manifest_dir {
+            path.trim_start_matches('/')
+        } else {
+            &path
+        };
         targets.push(normalize_repo_relative_path(base, path)?);
     }
     Some(targets)

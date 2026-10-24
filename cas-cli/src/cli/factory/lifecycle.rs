@@ -645,6 +645,40 @@ mod tests {
         assert!(daemon_log("reused").contains("\"force_stale\""));
     }
 
+    /// cas-47037: a record with no start time proves nothing about the
+    /// running PID. `cas kill` withholds SIGKILL and points at --force-stale,
+    /// so --force-stale must clear such a session instead of refusing it.
+    #[test]
+    fn force_stale_clears_a_session_recorded_without_a_start_time() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (other_pid, other) = spawn_group("sleep", &["30"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::ui::factory::process_groups::track(store.path(), "w1", "unstamped", worker_pgid)
+            .unwrap();
+        let mut metadata = save_session("unstamped", other_pid, project.path());
+        metadata.daemon_pid_starttime = None;
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome =
+            force_clear_stale_session("unstamped", &crate::mcp::daemon::read_pid_starttime);
+        let other_alive =
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
+        let worker_alive =
+            nix::sys::signal::killpg(nix::unistd::Pid::from_raw(worker_pgid as i32), None).is_ok();
+        kill_group(other_pid);
+        kill_group(worker_pgid);
+        other.join().unwrap().unwrap();
+        worker.join().unwrap().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
+        assert!(other_alive, "--force-stale signalled the recorded PID");
+        assert!(!worker_alive, "the recorded worker was left running");
+        assert!(SessionManager::new().find_session(Some("unstamped")).unwrap().is_none());
+    }
+
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and
     /// `cas kill` says so, with the manual remedy, instead of claiming the
     /// daemon survived SIGKILL.

@@ -171,9 +171,12 @@ pub(super) fn proves_unheld(
             return false;
         }
         for held in stream.paths.iter().chain(&dgram.paths) {
-            if held == path {
+            if held == path || (!held.is_absolute() && held.file_name() == path.file_name()) {
                 return false;
             }
+            // A relative bind belongs to its binder's cwd, not ours. The
+            // canonical factory namespace is locked, so a matching final
+            // name must be retained rather than resolved in this process.
             // As on Linux, recognize resolvable filesystem aliases too. The
             // complete kernel table (not filesystem lookup success) proves
             // holder absence; unrelated private/relative names are common.
@@ -243,12 +246,19 @@ mod tests {
         // A syntactically valid but incomplete global inventory is unknown.
         let mut missing_protocol = header(1);
         missing_protocol.extend(header(1));
+        let mut relative_holder = valid.clone();
+        let name = path.file_name().unwrap().as_encoded_bytes();
+        let address = GENERATION_LEN + 104;
+        relative_holder[address] = (2 + name.len() + 1) as u8;
+        relative_holder[address + 1] = libc::AF_UNIX as u8;
+        relative_holder[address + 2..address + 2 + name.len()].copy_from_slice(name);
         for (label, stream) in [
             ("permission", None),
             ("truncated", Some(truncated)),
             ("ABI", Some(unknown_abi)),
             ("generation", Some(changed_generation)),
             ("missing protocol", Some(missing_protocol)),
+            ("relative holder", Some(relative_holder)),
         ] {
             super::super::remove_locked_with(&path, &sessions, false, |path, meta| {
                 proves_unheld(path, meta, |name| match &stream {

@@ -64,6 +64,7 @@ pub use runtime::{
     processes_holding_file,
 };
 pub use server::{HubState, router};
+pub(crate) use runtime::process_command;
 pub(crate) use state::ensure_private_dir;
 pub use tailscale::{TailscaleServeManager, TailscaleServeReceipt};
 pub use worker_gate::WorkerGate;

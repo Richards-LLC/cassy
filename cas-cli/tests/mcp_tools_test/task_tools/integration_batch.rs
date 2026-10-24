@@ -215,18 +215,19 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
 async fn cas_d8b4_batch_squash_survives_target_evolution() {
     let mut env = TestEnvGuard::temp_home();
     for receipt_kind in ["anchor", "squash"] {
-    let (temp, _, supervisor, head) = fixture(&mut env);
-    let repo = temp.path();
-    git(repo, &["checkout", "-q", "batch/X"]);
-    let batch_tip = commit(repo, "asset.bin", "batch\0version");
-    git(repo, &["checkout", "-q", "factory/test-agent"]);
-    squash(repo, None);
-    let receipt = git(repo, &["rev-parse", "main"]);
-    git(repo, &["checkout", "-q", "main"]);
-    commit(repo, "asset.bin", "later\0version");
-    git(repo, &["checkout", "-q", "factory/test-agent"]);
-    // Historical tasks can be staged after the squash and subsequent edits.
-    stage(supervisor.clone(), &batch_tip).await.unwrap();
+        let (temp, _, supervisor, head) = fixture(&mut env);
+        let repo = temp.path();
+        git(repo, &["checkout", "-q", "batch/X"]);
+        // Binary evolution cannot use the ordinary line-ownership fallback.
+        let batch_tip = commit(repo, "asset.bin", "batch\0version");
+        git(repo, &["checkout", "-q", "factory/test-agent"]);
+        squash(repo, None);
+        let receipt = git(repo, &["rev-parse", "main"]);
+        git(repo, &["checkout", "-q", "main"]);
+        commit(repo, "asset.bin", "later\0version");
+        git(repo, &["checkout", "-q", "factory/test-agent"]);
+        // Historical tasks can be staged after the squash and subsequent edits.
+        stage(supervisor.clone(), &batch_tip).await.unwrap();
         let receipt = if receipt_kind == "anchor" { &head } else { &receipt };
         let request = serde_json::from_value(serde_json::json!({
             "action":"close", "id":TASK, "commit_receipt":receipt,

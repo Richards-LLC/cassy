@@ -224,10 +224,16 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
 }
 
 /// Whether a delivery is already carried by the target, including squash tips.
-/// Integration alone does not satisfy QA: dispatch suppression also needs a
-/// passed or waived verdict for this exact delivery.
-fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
-    is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
+/// Integration suppresses dispatch; close still requires a verdict or waiver.
+fn delivery_tip_on_target(task: &Task, repo: &Path, head: &str, target: &str) -> bool {
+    is_ancestor(repo, head, target)
+        || reviewed_tip_carried_by(repo, head, target, target)
+        || task.deliverables.integration_batch.as_ref().is_some_and(|batch| {
+            resolve_commit(repo, head).as_deref() == Some(batch.delivered_head.as_str())
+                && super::super::integration_batch::landed_batch_squash(
+                    task, repo, target, None,
+                ).is_some()
+        })
 }
 
 /// cas-624f: rejected (failed) rounds on record for a delivery.
@@ -441,17 +447,7 @@ impl CasCore {
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
         let target = freshest_target_ref(repo, parent_branch);
-        if delivery_tip_on_target(repo, delivery_ref, &target)
-            && resolve_commit(repo, delivery_ref).is_some_and(|delivered| {
-                cas_store::list_qa_passes(&self.cas_root, &task.id)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|pass| {
-                        pass.state.satisfies_gate()
-                            && resolve_commit(repo, &pass.bound_head).as_deref() == Some(delivered.as_str())
-                    })
-            })
-        {
+        if delivery_tip_on_target(task, repo, delivery_ref, &target) {
             return None;
         }
         let changed = match changed_paths_for_delivery(
@@ -1283,6 +1279,10 @@ impl CasCore {
                 commit_receipt,
                 target_branch,
             )
+                || (pass.state.satisfies_gate()
+                    && task.deliverables.integration_batch.is_some()
+                    && head.as_deref() == Some(pass.bound_head.as_str())
+                    && delivery_tip_on_target(task, repo, &pass.bound_head, target_branch))
         }) {
             return QaCloseGate::Clear;
         }
@@ -1421,11 +1421,15 @@ impl CasCore {
                 remedy,
             ));
         };
-        if let Some(trunk) = trunk_containing(repo, &head) {
+        let integrated_target = trunk_containing(repo, &head)
+            .map(|trunk| format!("trunk {trunk}"))
+            .or_else(|| delivery_tip_on_target(task, repo, &head, target_branch)
+                .then(|| format!("target {target_branch}")));
+        if let Some(trunk) = integrated_target {
             return QaCloseGate::Refuse(format!(
-                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on trunk \
+                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on \
                  {trunk} with no passed or waived QA round. Cassy does not dispatch a review of code \
-                 that is already on trunk, so no QA pass was opened. {remedy}.",
+                 that is already integrated, so no QA pass was opened. {remedy}.",
                 task.id,
                 &head[..head.len().min(8)],
             ));

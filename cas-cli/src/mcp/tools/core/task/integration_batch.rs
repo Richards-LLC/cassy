@@ -183,7 +183,8 @@ impl CasCore {
 }
 
 /// Accept only a target-reachable commit whose own first-parent delta matches
-/// the complete pinned batch. A dropped or added path is never containment.
+/// the complete pinned batch. A dropped or added squash path is never containment.
+/// Later target edits do not invalidate that historical integration proof.
 /// Keep the original anchor for review, evidence and executable-hook scope.
 pub(crate) fn landed_batch_squash(
     task: &Task,
@@ -231,13 +232,7 @@ pub(crate) fn landed_batch_squash(
         if revision(repo, &format!("{candidate}^2")).is_some() {
             continue;
         }
-        if final_delta(repo, &parent, &candidate).as_ref() == Some(&expected)
-            && matches!(
-                delivery_content_presence_in_parent(repo, &candidate, target),
-                DeliveryContentPresence::Present { .. }
-                    | DeliveryContentPresence::Superseded { .. }
-            )
-        {
+        if final_delta(repo, &parent, &candidate).as_ref() == Some(&expected) {
             return Some(candidate);
         }
     }

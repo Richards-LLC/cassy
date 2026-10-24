@@ -178,8 +178,12 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
     if !wait_for_daemon_exit(&session.metadata, term_grace) {
         // GH #1363: a daemon whose loop is wedged never acts on SIGTERM.
         // Escalate, but only against the same daemon identity.
+        // cas-3372: SIGKILL needs a positive identity. An unreadable or
+        // unrecorded start time is not a match.
         #[cfg(unix)]
-        if crate::ui::factory::daemon_identity_is_live(&session.metadata) {
+        if let Some(expected) = session.metadata.daemon_pid_starttime
+            && crate::mcp::daemon::read_pid_starttime(pid) == Some(expected)
+        {
             let reason = format!(
                 "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
                 term_grace.as_secs()
@@ -194,6 +198,11 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
                 "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
             );
         }
+        // Workers lead their own sessions, so the daemon's death does not
+        // reach them, and a SIGKILL can land before its teardown stopped
+        // them. Reap the groups the daemon recorded for this session.
+        #[cfg(unix)]
+        reap_session_worker_groups(name, &session.metadata);
     }
     // A replacement daemon may have acquired the same friendly name while
     // shutdown ran. Its receipt and sockets belong to it, not this command.
@@ -206,6 +215,39 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
     }
     manager.remove_metadata(name)?;
     Ok(EndSessionOutcome::Ended)
+}
+
+/// Kill the worker process groups a SIGKILLed daemon recorded for
+/// `session` (cas-3372). Each reap is fingerprint-checked, so a recycled
+/// PGID is never signalled.
+#[cfg(unix)]
+fn reap_session_worker_groups(
+    session: &str,
+    metadata: &crate::ui::factory::SessionMetadata,
+) {
+    let Some(project_dir) = metadata.project_dir.as_deref() else {
+        return;
+    };
+    let project_dir = std::path::Path::new(project_dir);
+    let own_store = project_dir.join(".cas");
+    let cas_root = if own_store.is_dir() {
+        own_store
+    } else {
+        match crate::store::find_cas_root_ignoring_env(project_dir) {
+            Ok(root) => root,
+            Err(_) => return,
+        }
+    };
+    let records = crate::ui::factory::process_groups::list(&cas_root).unwrap_or_default();
+    for record in records.iter().filter(|record| record.factory_session == session) {
+        let outcome = crate::ui::factory::process_groups::reap_blocking(&cas_root, record);
+        let detail = format!(
+            "cas kill: reaped worker '{}' process group {} after SIGKILL: {outcome:?}",
+            record.worker_name, record.pgid
+        );
+        tracing::info!(session, "{detail}");
+        crate::ui::factory::record_daemon_lifecycle(session, "worker_reaped", &detail);
+    }
 }
 
 #[cfg(all(test, unix))]

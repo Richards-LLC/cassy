@@ -211,10 +211,20 @@ pub(super) fn execute_daemon(
     }
 }
 
+/// How long the daemon's exit waits for its blocking threads (cas-3372).
+const DAEMON_RUNTIME_SHUTDOWN: Duration = Duration::from_secs(5);
+
 /// Run a daemon future on its own multi-thread runtime.
+///
+/// A worker teardown that stalled for good (GH #1363) leaves its blocking
+/// thread running. Dropping the runtime would wait for it forever, after the
+/// daemon had already removed its metadata and logged its exit; the bounded
+/// shutdown lets the process end instead (cas-3372).
 fn run_on_daemon_runtime<F: std::future::Future>(future: F) -> Result<F::Output> {
     let rt = tokio::runtime::Runtime::new()?;
-    Ok(rt.block_on(future))
+    let output = rt.block_on(future);
+    rt.shutdown_timeout(DAEMON_RUNTIME_SHUTDOWN);
+    Ok(output)
 }
 
 pub(super) fn execute_legacy_daemon(

@@ -1210,7 +1210,8 @@ mod tests {
     #[test]
     fn new_checkout_syncs_store_parent_and_propagates_failure_cas_34b0() {
         let scratch = tempfile::tempdir().unwrap();
-        let store = scratch.path().join("cas-checkout-sync");
+        let scratch_path = scratch.path().canonicalize().unwrap();
+        let store = scratch_path.join("cas-checkout-sync");
         private_dir(&store).unwrap();
         let checkout = store.join("checkout");
         fs::create_dir(&checkout).unwrap();
@@ -1218,7 +1219,7 @@ mod tests {
         let lock = lease(&checkout, true).unwrap();
         let record = Owner {
             schema_version: 1,
-            cas_root: scratch.path().to_path_buf(),
+            cas_root: scratch_path.clone(),
             task_id: "cas-checkout-sync".into(),
             dispatch_id: None,
             head: "a".repeat(40),
@@ -1247,20 +1248,21 @@ mod tests {
             retried.borrow_mut().push(parent.to_path_buf());
             File::open(parent)?.sync_all()
         }).unwrap();
-        assert_eq!(*retried.borrow(), [store, scratch.path().to_path_buf()],
+        assert_eq!(*retried.borrow(), [store, scratch_path],
             "retry must sync both directory entries before using the checkout");
     }
 
     #[test]
     fn first_checkout_syncs_task_entry_in_scratch_base_cas_da0a() {
         let scratch = tempfile::tempdir().unwrap();
-        let store = scratch.path().join("cas-new-task");
+        let scratch_path = scratch.path().canonicalize().unwrap();
+        let store = scratch_path.join("cas-new-task");
         private_dir(&store).unwrap();
         let checkout = store.join("checkout");
         fs::create_dir(&checkout).unwrap();
         let record = Owner {
             schema_version: 1,
-            cas_root: scratch.path().to_path_buf(),
+            cas_root: scratch_path.clone(),
             task_id: "cas-new-task".into(),
             dispatch_id: None,
             head: "a".repeat(40),
@@ -1271,14 +1273,14 @@ mod tests {
         let result = write_new_checkout_owner_with_parent_sync(&checkout, &record, |parent| {
             assert!(checkout.join("owner.json").is_file());
             synced.borrow_mut().push(parent.to_path_buf());
-            if parent == scratch.path() {
+            if parent == scratch_path {
                 Err(std::io::Error::other("injected scratch base sync failure"))
             } else {
                 File::open(parent)?.sync_all()
             }
         });
         assert!(result.unwrap_err().to_string().contains("injected scratch base sync failure"));
-        assert_eq!(*synced.borrow(), [store, scratch.path().to_path_buf()]);
+        assert_eq!(*synced.borrow(), [store, scratch_path]);
         assert!(!checkout.exists(), "an unconfirmed task entry cannot publish a checkout");
     }
 }

@@ -3116,6 +3116,71 @@ async fn graceful_kill_worker_returns_when_the_group_honors_term() {
     );
 }
 
+/// GH #1363: a worker teardown that outlasts its deadline hands control back
+/// to the daemon loop with the stage it reached and its process group, and
+/// the off-loop thread still finishes the kill.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_worker_teardown_returns_at_its_deadline_naming_stage_and_group() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "trap '' TERM HUP; sleep 300 & wait".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        env_remove: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("stalled-teardown-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "stalled-teardown-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+    let pgid = mux.pane_process_group_id("stalled-teardown-worker").unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The TERM-ignoring group holds kill_tree in its 3 s grace window.
+    let started = std::time::Instant::now();
+    let outcome = mux
+        .kill_worker_within(
+            "stalled-teardown-worker",
+            false,
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(
+        outcome,
+        crate::mux::WorkerTeardown::Stalled {
+            stage: "signal and reap (Pty::kill_tree)",
+            process_group: Some(pgid),
+        }
+    );
+    assert!(mux.get("stalled-teardown-worker").is_none());
+
+    for _ in 0..200 {
+        let probe = std::process::Command::new("sh")
+            .args(["-c", &format!("kill -0 -- -{pgid} 2>/dev/null")])
+            .status()
+            .unwrap();
+        if !probe.success() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the off-loop teardown never finished killing group {pgid}");
+}
+
 #[tokio::test]
 async fn break_turn_targets_pane_by_name_independent_of_focus() {
     let mut mux = Mux::new(24, 80);

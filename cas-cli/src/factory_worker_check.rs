@@ -1231,9 +1231,7 @@ impl DeliveredTree {
             if object_type != b"blob" {
                 continue;
             }
-            if path == "Cargo.toml" {
-                manifests.insert(String::new());
-            } else if let Some(directory) = path.strip_suffix("/Cargo.toml") {
+            if let Some(directory) = path.strip_suffix("/Cargo.toml") {
                 manifests.insert(directory.to_owned());
             }
             if path.ends_with(".rs") {
@@ -1245,14 +1243,14 @@ impl DeliveredTree {
 
     fn is_workspace_crate_path(&self, path: &str) -> bool {
         let Some((mut directory, _)) = path.rsplit_once('/') else {
-            return self.manifests.contains("");
+            return false;
         };
         loop {
             if self.manifests.contains(directory) {
                 return true;
             }
             let Some((parent, _)) = directory.rsplit_once('/') else {
-                return self.manifests.contains("");
+                return false;
             };
             directory = parent;
         }
@@ -1260,14 +1258,14 @@ impl DeliveredTree {
 
     fn manifest_dir_for_source(&self, source_path: &str) -> Option<String> {
         let Some((mut directory, _)) = source_path.rsplit_once('/') else {
-            return self.manifests.contains("").then(String::new);
+            return None;
         };
         loop {
             if self.manifests.contains(directory) {
                 return Some(directory.to_owned());
             }
             let Some((parent, _)) = directory.rsplit_once('/') else {
-                return self.manifests.contains("").then(String::new);
+                return None;
             };
             directory = parent;
         }

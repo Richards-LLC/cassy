@@ -2084,17 +2084,36 @@ mod squash_close_tests {
     }
 
     #[test]
-    fn cas_b591_unreviewed_squash_still_dispatches_a_round() {
+    fn cas_d8b4_unreviewed_landed_squash_never_dispatches_a_round() {
         let mut env = TestEnvGuard::temp_home();
-        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
-        let outcome = core.independent_qa_close_gate(&task, dir.path(), "main", None, None);
-        let QaCloseGate::Refuse(text) = outcome else {
-            panic!("an integrated delivery without a verdict still requires QA");
-        };
-        assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
-        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
-        assert_eq!(passes.len(), 1);
-        assert_eq!(passes[0].state, QaPassState::Pending);
+        for evolved_batch in [false, true] {
+            let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+            let repo = dir.path();
+            let head = task.deliverables.factory_branch_anchor.clone().unwrap();
+            if evolved_batch {
+                task.deliverables.integration_batch = Some(cas_types::IntegrationBatchEvidence {
+                    branch: "batch/X".into(),
+                    tip: head.clone(),
+                    base: git(repo, &["merge-base", &head, "main"]),
+                    delivered_head: head.clone(),
+                    supervisor_id: "supervisor".into(),
+                    recorded_at: chrono::Utc::now(),
+                });
+                git(repo, &["checkout", "-q", "main"]);
+                std::fs::write(repo.join("web/composer.css"), ".composer{gap:16px}\n").unwrap();
+                git(repo, &["add", "web/composer.css"]);
+                git(repo, &["commit", "-q", "-m", "later spacing change"]);
+                git(repo, &["checkout", "-q", "factory/worker"]);
+            }
+            assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+            let outcome = core.independent_qa_close_gate(&task, repo, "main", None, None);
+            let QaCloseGate::Refuse(text) = outcome else {
+                panic!("an integrated delivery without a verdict still requires QA");
+            };
+            assert!(text.contains("no QA pass was opened"), "{text}");
+            let passes = cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap();
+            assert!(passes.is_empty(), "already merged work must not create a QA task");
+        }
     }
 
     #[test]

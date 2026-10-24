@@ -212,6 +212,38 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
 }
 
 #[tokio::test]
+async fn cas_d8b4_batch_squash_survives_target_evolution() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, _, supervisor, head) = fixture(&mut env);
+    let repo = temp.path();
+    git(repo, &["checkout", "-q", "batch/X"]);
+    let batch_tip = commit(repo, "src/sibling.rs", "pub fn sibling() {}\n");
+    git(repo, &["checkout", "-q", "factory/test-agent"]);
+    squash(repo, None);
+    let receipt = git(repo, &["rev-parse", "main"]);
+    git(repo, &["checkout", "-q", "main"]);
+    commit(repo, "src/one.rs", "pub fn evolved() {}\n");
+    git(repo, &["checkout", "-q", "factory/test-agent"]);
+    // Historical tasks can be staged after the squash and subsequent edits.
+    stage(supervisor.clone(), &batch_tip).await.unwrap();
+    for receipt in [&head, &receipt] {
+        let request = serde_json::from_value(serde_json::json!({
+            "action":"close", "id":TASK, "commit_receipt":receipt,
+            "supervisor_override":true, "reason":"Reconcile historical merged delivery"
+        })).unwrap();
+        let text = extract_text(CasService::new(supervisor.clone(), None)
+            .task(Parameters(request)).await.unwrap());
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()));
+        // Reproduce a sync restoring the historical parked state.
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.update(&task).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn cas_4b26f_dropped_batch_path_is_rejected() {
     let mut env = TestEnvGuard::temp_home();
     for dropped in ["src/two.rs", "src/sibling.rs", "extra"] {

@@ -161,9 +161,9 @@ impl CasService {
 
         let resp = self.pattern_api_call("DELETE", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = resp.get("pattern");
+        let pattern = pattern_response_row(&resp)?;
         let status = pattern
-            .and_then(|p| p.get("status"))
+            .get("status")
             .and_then(|v| v.as_str())
             .unwrap_or("archived");
 
@@ -664,6 +664,9 @@ impl CasService {
 
             let url = format!("{}{}", cloud_config.endpoint, path);
             let timeout = std::time::Duration::from_secs(30);
+            let pattern_write = method == "POST"
+                && matches!(path, "/api/patterns" | "/api/patterns/adopt-rule");
+            let mut body_started = false;
 
             let response = match method {
                 "GET" => ureq::get(&url)
@@ -675,7 +678,17 @@ impl CasService {
                         .timeout(timeout)
                         .set("Authorization", &format!("Bearer {token}"))
                         .set("Content-Type", "application/json");
-                    if let Some(body) = body {
+                    if pattern_write {
+                        let payload = serde_json::to_vec(&body.unwrap_or_else(|| serde_json::json!({})))
+                            .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to encode pattern request: {e}")))?;
+                        let length = payload.len().to_string();
+                        let mut reader = std::io::Cursor::new(payload);
+                        let result = req.set("Content-Length", &length).send(&mut reader);
+                        // ureq reads this body only after connecting and writing headers.
+                        // This also distinguishes pre-send TLS/setup I/O from a write attempt.
+                        body_started = reader.position() > 0;
+                        result
+                    } else if let Some(body) = body {
                         req.send_json(body)
                     } else {
                         req.send_json(serde_json::json!({}))
@@ -731,11 +744,12 @@ impl CasService {
                         format!("API error ({code}): {body}"),
                     ))
                 }
-                Err(ureq::Error::Transport(_)) if method == "POST" && path == "/api/patterns" => {
-                    Err(pattern_create_uncertain(
+                Err(ureq::Error::Transport(e)) if pattern_write && body_started => {
+                    Err(pattern_write_uncertain(
+                        if path == "/api/patterns/adopt-rule" { "adopt" } else { "create" },
                         None,
                         format!("local-{}", uuid::Uuid::new_v4()),
-                        "a network error prevented confirmation of the write",
+                        &format!("a network error prevented confirmation of the write: {e}"),
                     ))
                 }
                 Err(ureq::Error::Transport(e)) => Err(Self::error(
@@ -761,13 +775,13 @@ fn pattern_response_row(response: &serde_json::Value) -> Result<&serde_json::Val
 }
 
 /// A non-idempotent write without a usable result needs reconciliation, not a retry.
-fn pattern_create_uncertain(status: Option<u16>, reference: String, reason: &str) -> McpError {
+fn pattern_write_uncertain(operation: &str, status: Option<u16>, reference: String, reason: &str) -> McpError {
     let status_text = status.map(|status| format!("Cloud returned HTTP {status}, but ")).unwrap_or_default();
     let mut error = CasService::error(
         ErrorCode::INTERNAL_ERROR,
         format!(
-            "Pattern create outcome uncertain: {status_text}{reason}. \
-             The pattern may already exist. Do not retry create. Reconcile with \
+            "Pattern {operation} outcome uncertain: {status_text}{reason}. \
+             The pattern may already exist. Do not retry {operation}. Reconcile with \
              pattern action=list and match the original request before creating again. \
              Reconciliation reference: {reference}",
         ),
@@ -792,7 +806,7 @@ fn decode_pattern_create_response(response: ureq::Response) -> Result<serde_json
         .filter(|id| !id.trim().is_empty())
         .map(|id| id.chars().take(200).collect::<String>())
         .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4()));
-    let uncertain = |reason: &str| pattern_create_uncertain(Some(status), reference.clone(), reason);
+    let uncertain = |reason: &str| pattern_write_uncertain("create", Some(status), reference.clone(), reason);
     let pattern: serde_json::Value = response
         .into_json()
         .map_err(|_| uncertain("the response is not valid JSON"))?;

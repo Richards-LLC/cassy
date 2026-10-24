@@ -214,10 +214,28 @@ mod tests {
 
     /// GH #1363: a daemon whose loop is wedged ignores SIGTERM. `cas kill`
     /// used to give up after 3 s and leave it running; it now escalates to
-    /// SIGKILL, records why in daemon.log, and removes the session.
+    /// SIGKILL, records why in daemon.log, and removes the session. Workers
+    /// run in their own sessions, so a SIGKILLed daemon cannot take them
+    /// down: `cas kill` reaps the session's recorded worker groups (cas-3372).
     #[test]
     fn kill_escalates_to_sigkill_when_the_daemon_ignores_sigterm() {
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
         let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = project.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let worker = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let worker_pgid = worker.id();
+        let worker_reaper = std::thread::spawn(move || {
+            let mut worker = worker;
+            worker.wait()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::ui::factory::process_groups::track(&cas_root, "w1", "wedged", worker_pgid).unwrap();
         let child = std::process::Command::new("sh")
             .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
             .spawn()
@@ -232,7 +250,13 @@ mod tests {
         let manager = SessionManager::new();
         manager
             .save_metadata(&crate::ui::factory::create_metadata(
-                "wedged", pid, "supervisor", &[], None, None, None,
+                "wedged",
+                pid,
+                "supervisor",
+                &[],
+                None,
+                project.path().to_str(),
+                None,
             ))
             .unwrap();
 
@@ -244,8 +268,15 @@ mod tests {
             );
         }
         let status = reaper.join().unwrap().unwrap();
+        // A worker that survived would hold this join for 30 s.
+        let started = std::time::Instant::now();
+        let worker_status = worker_reaper.join().unwrap().unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the SIGKILLed daemon's worker group was left running"
+        );
+        assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert_eq!(outcome.unwrap(), EndSessionOutcome::Ended);
-        use std::os::unix::process::ExitStatusExt;
         assert_eq!(status.signal(), Some(libc::SIGKILL));
         assert!(manager.find_session(Some("wedged")).unwrap().is_none());
         let log =

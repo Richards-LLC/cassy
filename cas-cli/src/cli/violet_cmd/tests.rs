@@ -1075,6 +1075,7 @@ fn every_local_code_is_documented_in_the_violet_skill() {
         include_str!("hub.rs"),
         include_str!("files.rs"),
         include_str!("draft_check.rs"),
+        include_str!("channels.rs"),
     ];
     let pattern = regex::Regex::new(r#"VioletError::local\(\s*"([a-z_]+)""#).unwrap();
     let mut codes: Vec<&str> = sources

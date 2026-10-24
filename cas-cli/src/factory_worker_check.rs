@@ -1,7 +1,7 @@
 //! Capped compile and targeted-test evidence. The runner serializes admission
 //! and holds OS slot/lane locks until Cargo exits; descendants never inherit them.
 //! A separate target lifetime lease is inherited to protect surviving children.
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -971,14 +971,31 @@ fn passing_test_records(
     }
 
     let mut ranges = BTreeMap::new();
-    let mut named_sources = BTreeMap::new();
+    for (receipt_head, package, test) in &ancestors {
+        let key = (package.clone(), test.harness.clone(), test.filter.clone());
+        if exact.contains_key(&key) {
+            continue;
+        }
+        ranges.entry(receipt_head.clone()).or_insert_with(|| {
+            receipt_range_changed_paths(&repo, receipt_head, head)
+        });
+    }
+
+    let changed_paths = ranges
+        .values()
+        .filter_map(Option::as_ref)
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let proof_inputs = delivered_tree_proof_inputs(&repo, head, &changed_paths)
+        .unwrap_or_else(|| changed_paths.clone());
+
     for (receipt_head, package, test) in ancestors {
-        let key = (package, test.harness.clone(), test.filter.clone());
-        if exact.contains_key(&key)
-            || !*ranges.entry(receipt_head.clone()).or_insert_with(|| {
-                receipt_range_has_no_proof_inputs(&repo, &receipt_head, head, &mut named_sources)
-            })
-        {
+        let key = (package.clone(), test.harness.clone(), test.filter.clone());
+        let Some(changes) = ranges.get(&receipt_head).and_then(Option::as_ref) else {
+            continue;
+        };
+        if exact.contains_key(&key) || changes.iter().any(|path| proof_inputs.contains(path)) {
             continue;
         }
         match exact.entry(key) {
@@ -1032,17 +1049,16 @@ fn read_passing_test_record(
         .then_some((record.head, package, test))
 }
 
-fn receipt_range_has_no_proof_inputs(
+fn receipt_range_changed_paths(
     repo: &Path,
     receipt_head: &str,
     delivered_head: &str,
-    named_sources: &mut BTreeMap<String, bool>,
-) -> bool {
+) -> Option<Vec<String>> {
     if !valid_git_oid(receipt_head)
         || !valid_git_oid(delivered_head)
         || !receipt_head_is_ancestor(repo, receipt_head, delivered_head)
     {
-        return false;
+        return None;
     }
     let range = format!("{receipt_head}..{delivered_head}");
     let Ok(changes) = Command::new("git")
@@ -1059,16 +1075,17 @@ fn receipt_range_has_no_proof_inputs(
         .current_dir(repo)
         .output()
     else {
-        return false;
+        return None;
     };
-    changes.status.success()
-        && changes.stdout.split(|byte| *byte == 0).all(|path| {
-            path.is_empty()
-                || std::str::from_utf8(path)
-                    .is_ok_and(|path| {
-                        !is_test_or_build_input_path(repo, delivered_head, path, named_sources)
-                    })
-        })
+    if !changes.status.success() {
+        return None;
+    }
+    changes
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| std::str::from_utf8(path).map(str::to_owned).ok())
+        .collect()
 }
 
 fn receipt_head_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
@@ -1086,15 +1103,9 @@ fn valid_git_oid(oid: &str) -> bool {
     matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn is_test_or_build_input_path(
-    repo: &Path,
-    delivered_head: &str,
-    path: &str,
-    named_sources: &mut BTreeMap<String, bool>,
-) -> bool {
+fn is_test_or_build_input_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
-    if is_workspace_crate_path(repo, delivered_head, path)
-        || lower == ".env"
+    if lower == ".env"
         || lower.ends_with(".capture.txt")
         || lower == "hub-web/dist"
         || lower.starts_with("hub-web/dist/")
@@ -1152,122 +1163,351 @@ fn is_test_or_build_input_path(
             | "exs" | "scala" | "clj" | "vue" | "svelte" | "toml" | "lock" | "json"
             | "json5" | "yaml" | "yml" | "ini" | "cfg" | "conf" | "properties" | "xml"
             | "proto" | "graphql" | "nix"
-    ) || is_named_by_tracked_rust_source(repo, delivered_head, path, named_sources)
-}
-
-/// A Rust source file can embed assets outside its crate directory with
-/// `include_str!` or `include_bytes!`. Use the basename to find candidate
-/// sources, then confirm the repo-relative or source-relative path. Treat git
-/// errors conservatively as proof inputs rather than reusing an unvalidated receipt.
-fn is_named_by_tracked_rust_source(
-    repo: &Path,
-    delivered_head: &str,
-    path: &str,
-    named_sources: &mut BTreeMap<String, bool>,
-) -> bool {
-    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
-        return true;
-    };
-    // The basename only discovers possible source files. Confirm the full
-    // repo-relative path or its spelling relative to each source file; matching
-    // only a basename makes unrelated assets invalidate each other's receipts.
-    *named_sources.entry(path.to_owned()).or_insert_with(|| {
-        let sources = Command::new("git")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .args(["grep", "-lF", "-z", "-e", name, delivered_head, "--", "*.rs"])
-            .current_dir(repo)
-            .output();
-        let Ok(sources) = sources else {
-            return true;
-        };
-        if !sources.status.success() {
-            return sources.status.code() != Some(1);
-        }
-        let sources = sources.stdout.split(|byte| *byte == 0);
-        for source in sources {
-            if source.is_empty() {
-                continue;
-            }
-            let Ok(source) = std::str::from_utf8(source) else {
-                return true;
-            };
-            let tree_prefix = format!("{delivered_head}:");
-            let source = source.strip_prefix(&tree_prefix).unwrap_or(source);
-            let Some(relative_path) = relative_path_from_source(source, path) else {
-                return true;
-            };
-            let matches = Command::new("git")
-                .env("GIT_OPTIONAL_LOCKS", "0")
-                .arg("grep")
-                .arg("-lF")
-                .arg("-e")
-                .arg(path)
-                .arg("-e")
-                .arg(&relative_path)
-                .arg(delivered_head)
-                .arg("--")
-                .arg(source)
-                .current_dir(repo)
-                .output();
-            match matches {
-                Ok(matches) if matches.status.success() => return true,
-                Ok(matches) if matches.status.code() == Some(1) => {}
-                Ok(_) | Err(_) => return true,
-            }
-        }
-        false
-    })
-}
-
-fn relative_path_from_source(source: &str, target: &str) -> Option<String> {
-    let mut source_dir = source.split('/').collect::<Vec<_>>();
-    source_dir.pop()?;
-    let target = target.split('/').collect::<Vec<_>>();
-    if source_dir
-        .iter()
-        .chain(&target)
-        .any(|component| component.is_empty() || *component == "." || *component == "..")
-    {
-        return None;
-    }
-    let shared = source_dir
-        .iter()
-        .zip(&target)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut relative = vec![".."; source_dir.len() - shared];
-    relative.extend_from_slice(&target[shared..]);
-    Some(relative.join("/"))
+    )
 }
 
 /// Cargo inputs are not limited to source-code extensions: `include_str!`,
 /// `include_bytes!`, and package build scripts can consume any file beneath a
-/// crate directory. Treat those files as proof inputs regardless of suffix.
-fn is_workspace_crate_path(repo: &Path, delivered_head: &str, path: &str) -> bool {
-    let path = Path::new(path);
-    let Some(parent) = path.parent() else {
-        return false;
-    };
-    let mut prefix = PathBuf::new();
-    for component in parent.components() {
-        prefix.push(component.as_os_str());
-        if prefix != Path::new(".") {
-            let prefix_for_git = prefix.to_string_lossy().replace('\\', "/");
-            let manifest = format!("{delivered_head}:{prefix_for_git}/Cargo.toml");
-            match Command::new("git")
-                .env("GIT_OPTIONAL_LOCKS", "0")
-                .args(["cat-file", "-e", &manifest])
-                .stderr(std::process::Stdio::null())
-                .current_dir(repo)
-                .status()
-            {
-                Ok(status) if status.success() => return true,
-                Ok(_) => {}
-                Err(_) => return true,
+/// crate directory. Inventory the delivered tree once so proof classification
+/// doesn't start Git once per directory or source candidate.
+fn delivered_tree_proof_inputs(
+    repo: &Path,
+    delivered_head: &str,
+    changed_paths: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    if changed_paths.is_empty() {
+        return Some(BTreeSet::new());
+    }
+    let tree = DeliveredTree::load(repo, delivered_head)?;
+    let mut proof_inputs = BTreeSet::new();
+    let mut external_assets = BTreeSet::new();
+    for path in changed_paths {
+        if is_test_or_build_input_path(path) || tree.is_workspace_crate_path(path) {
+            proof_inputs.insert(path.clone());
+        } else {
+            external_assets.insert(path.clone());
+        }
+    }
+    if external_assets.is_empty() {
+        return Some(proof_inputs);
+    }
+    for (source_path, source) in tree.rust_sources_with_includes(repo, delivered_head)? {
+        let manifest_dir = tree.manifest_dir_for_source(&source_path)?;
+        let targets = include_targets(&source, &source_path, &manifest_dir)?;
+        for target in targets {
+            if external_assets.contains(&target) {
+                proof_inputs.insert(target);
             }
         }
     }
-    false
+    Some(proof_inputs)
+}
+
+struct DeliveredTree {
+    manifests: BTreeSet<String>,
+    rust_sources: BTreeMap<String, String>,
+}
+
+impl DeliveredTree {
+    fn load(repo: &Path, delivered_head: &str) -> Option<Self> {
+        let output = Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["ls-tree", "-r", "-z", "--full-tree", delivered_head])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let mut manifests = BTreeSet::new();
+        let mut rust_sources = BTreeMap::new();
+        for entry in output.stdout.split(|byte| *byte == 0).filter(|entry| !entry.is_empty()) {
+            let (metadata, path) = entry.split_once(|byte| *byte == b'\t')?;
+            let mut fields = metadata.split(|byte| byte.is_ascii_whitespace());
+            let _mode = fields.next()?;
+            let object_type = fields.next()?;
+            let object_id = fields.next()?;
+            let path = std::str::from_utf8(path).ok()?.to_owned();
+            if object_type != b"blob" {
+                continue;
+            }
+            if path == "Cargo.toml" {
+                manifests.insert(String::new());
+            } else if let Some(directory) = path.strip_suffix("/Cargo.toml") {
+                manifests.insert(directory.to_owned());
+            }
+            if path.ends_with(".rs") {
+                rust_sources.insert(path, std::str::from_utf8(object_id).ok()?.to_owned());
+            }
+        }
+        Some(Self { manifests, rust_sources })
+    }
+
+    fn is_workspace_crate_path(&self, path: &str) -> bool {
+        let Some((mut directory, _)) = path.rsplit_once('/') else {
+            return self.manifests.contains("");
+        };
+        loop {
+            if self.manifests.contains(directory) {
+                return true;
+            }
+            let Some((parent, _)) = directory.rsplit_once('/') else {
+                return self.manifests.contains("");
+            };
+            directory = parent;
+        }
+    }
+
+    fn manifest_dir_for_source(&self, source_path: &str) -> Option<String> {
+        let Some((mut directory, _)) = source_path.rsplit_once('/') else {
+            return self.manifests.contains("").then(String::new);
+        };
+        loop {
+            if self.manifests.contains(directory) {
+                return Some(directory.to_owned());
+            }
+            let Some((parent, _)) = directory.rsplit_once('/') else {
+                return self.manifests.contains("").then(String::new);
+            };
+            directory = parent;
+        }
+    }
+
+    fn rust_sources_with_includes(
+        &self,
+        repo: &Path,
+        delivered_head: &str,
+    ) -> Option<Vec<(String, String)>> {
+        let sources = Command::new("git")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args([
+                "grep", "-I", "-l", "-z", "-F", "-e", "include_str", "-e", "include_bytes",
+                delivered_head, "--", "*.rs",
+            ])
+            .current_dir(repo)
+            .output()
+            .ok()?;
+        if !sources.status.success() && sources.status.code() != Some(1) {
+            return None;
+        }
+        let mut paths = BTreeSet::new();
+        if sources.status.success() {
+            let prefix = format!("{delivered_head}:");
+            for path in sources.stdout.split(|byte| *byte == 0).filter(|path| !path.is_empty()) {
+                let path = std::str::from_utf8(path).ok()?;
+                let path = path.strip_prefix(&prefix).unwrap_or(path);
+                if !self.rust_sources.contains_key(path) {
+                    return None;
+                }
+                paths.insert(path.to_owned());
+            }
+        }
+        if paths.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut command = Command::new("git");
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .args(["cat-file", "--batch"])
+            .current_dir(repo)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped());
+        let mut child = command.spawn().ok()?;
+        {
+            use std::io::Write;
+            let stdin = child.stdin.as_mut()?;
+            for path in &paths {
+                writeln!(stdin, "{}", self.rust_sources.get(path)?).ok()?;
+            }
+        }
+        let output = child.wait_with_output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let mut cursor = 0;
+        let mut result = Vec::with_capacity(paths.len());
+        for path in paths {
+            let header_end = output.stdout[cursor..].iter().position(|byte| *byte == b'\n')? + cursor;
+            let mut fields = output.stdout[cursor..header_end].split(|byte| byte.is_ascii_whitespace());
+            let _object_id = fields.next()?;
+            if fields.next()? != b"blob" {
+                return None;
+            }
+            let size = std::str::from_utf8(fields.next()?).ok()?.parse::<usize>().ok()?;
+            cursor = header_end + 1;
+            let end = cursor.checked_add(size)?;
+            let source = std::str::from_utf8(output.stdout.get(cursor..end)?).ok()?.to_owned();
+            if output.stdout.get(end) != Some(&b'\n') {
+                return None;
+            }
+            cursor = end + 1;
+            result.push((path, source));
+        }
+        (cursor == output.stdout.len()).then_some(result)
+    }
+}
+
+fn include_targets(source: &str, source_path: &str, manifest_dir: &str) -> Option<Vec<String>> {
+    let mut targets = Vec::new();
+    let mut cursor = 0;
+    while let Some((end, expression)) = next_include_expression(source, cursor)? {
+        cursor = end;
+        let expression = expression.trim();
+        let uses_manifest_dir = expression.contains("CARGO_MANIFEST_DIR");
+        if !uses_manifest_dir
+            && !expression.starts_with('"')
+            && !expression.starts_with("r#")
+            && !expression.starts_with("concat!")
+        {
+            return None;
+        }
+        let path = string_literals(expression)?
+            .into_iter()
+            .filter(|literal| literal != "CARGO_MANIFEST_DIR")
+            .collect::<String>();
+        if path.is_empty() {
+            return None;
+        }
+        let base = if uses_manifest_dir {
+            manifest_dir
+        } else {
+            source_path.rsplit_once('/')?.0
+        };
+        let path = if uses_manifest_dir { path.trim_start_matches('/') } else { &path };
+        targets.push(normalize_repo_relative_path(base, path)?);
+    }
+    Some(targets)
+}
+
+fn next_include_expression(source: &str, from: usize) -> Option<Option<(usize, &str)>> {
+    let bytes = source.as_bytes();
+    let mut index = from;
+    while index < bytes.len() {
+        if let Some(end) = skip_rust_ignored(bytes, index) {
+            index = end;
+            continue;
+        }
+        let name = [b"include_str".as_slice(), b"include_bytes".as_slice()]
+            .into_iter()
+            .find(|name| bytes[index..].starts_with(name));
+        if let Some(name) = name {
+            if index == 0 || !is_rust_ident_byte(bytes[index - 1]) {
+                let mut marker = index + name.len();
+                while bytes.get(marker).is_some_and(u8::is_ascii_whitespace) { marker += 1; }
+                if bytes.get(marker) == Some(&b'!') {
+                    marker += 1;
+                    while bytes.get(marker).is_some_and(u8::is_ascii_whitespace) { marker += 1; }
+                    if bytes.get(marker) == Some(&b'(') {
+                        let close = matching_rust_paren(bytes, marker)?;
+                        return Some(Some((close + 1, &source[marker + 1..close])));
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    Some(None)
+}
+
+fn is_rust_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn matching_rust_paren(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut index = open + 1;
+    while index < bytes.len() {
+        if let Some(end) = skip_rust_ignored(bytes, index) {
+            index = end;
+            continue;
+        }
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => { depth -= 1; if depth == 0 { return Some(index); } }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn skip_rust_ignored(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index..index + 2) == Some(b"//") {
+        return Some(bytes[index..].iter().position(|byte| *byte == b'\n').map_or(bytes.len(), |offset| index + offset + 1));
+    }
+    if bytes.get(index..index + 2) == Some(b"/*") {
+        let mut depth = 1usize;
+        let mut cursor = index + 2;
+        while cursor + 1 < bytes.len() {
+            if bytes.get(cursor..cursor + 2) == Some(b"/*") { depth += 1; cursor += 2; }
+            else if bytes.get(cursor..cursor + 2) == Some(b"*/") { depth -= 1; cursor += 2; if depth == 0 { return Some(cursor); } }
+            else { cursor += 1; }
+        }
+        return None;
+    }
+    if let Some(end) = rust_string_end(bytes, index) { return Some(end); }
+    if bytes.get(index) == Some(&b'\'') {
+        let mut cursor = index + 1;
+        if bytes.get(cursor) == Some(&b'\\') { cursor += 2; } else { cursor += 1; }
+        if bytes.get(cursor) == Some(&b'\'') { return Some(cursor + 1); }
+    }
+    None
+}
+
+fn rust_string_end(bytes: &[u8], index: usize) -> Option<usize> {
+    if bytes.get(index) == Some(&b'"') {
+        let mut cursor = index + 1;
+        while cursor < bytes.len() {
+            match bytes[cursor] { b'\\' => cursor += 2, b'"' => return Some(cursor + 1), _ => cursor += 1 }
+        }
+        return None;
+    }
+    if bytes.get(index) != Some(&b'r') { return None; }
+    let mut quote = index + 1;
+    while bytes.get(quote) == Some(&b'#') { quote += 1; }
+    if bytes.get(quote) != Some(&b'"') { return None; }
+    let hashes = quote - index - 1;
+    let mut cursor = quote + 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' && bytes.get(cursor + 1..cursor + 1 + hashes) == Some(&vec![b'#'; hashes][..]) { return Some(cursor + 1 + hashes); }
+        cursor += 1;
+    }
+    None
+}
+
+fn string_literals(source: &str) -> Option<Vec<String>> {
+    let bytes = source.as_bytes();
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(end) = skip_rust_ignored(bytes, index) {
+            if bytes.get(index) == Some(&b'"') {
+                result.push(serde_json::from_str(&source[index..end]).ok()?);
+            } else if bytes.get(index) == Some(&b'r') {
+                let quote = source[index..end].find('"')? + index;
+                let hashes = bytes[index + 1..quote].iter().filter(|byte| **byte == b'#').count();
+                let content_end = end.checked_sub(1 + hashes)?;
+                result.push(source.get(quote + 1..content_end)?.to_owned());
+            }
+            index = end;
+        } else {
+            index += 1;
+        }
+    }
+    Some(result)
+}
+
+fn normalize_repo_relative_path(base: &str, path: &str) -> Option<String> {
+    if path.starts_with('/') || path.contains('\0') { return None; }
+    let mut components = base.split('/').filter(|component| !component.is_empty()).map(str::to_owned).collect::<Vec<_>>();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => { components.pop()?; }
+            component => components.push(component.to_owned()),
+        }
+    }
+    (!components.is_empty()).then(|| components.join("/"))
 }
 
 /// Write the receipt a passing targeted run leaves, for tests of the gates

@@ -1209,12 +1209,16 @@ mod tests {
 
     #[test]
     fn new_checkout_syncs_store_parent_and_propagates_failure_cas_34b0() {
-        let store = tempfile::tempdir().unwrap();
-        let checkout = store.path().join("checkout");
+        let scratch = tempfile::tempdir().unwrap();
+        let store = scratch.path().join("cas-checkout-sync");
+        private_dir(&store).unwrap();
+        let checkout = store.join("checkout");
         fs::create_dir(&checkout).unwrap();
+        // Production holds the fresh checkout's lease during ownership publication.
+        let lock = lease(&checkout, true).unwrap();
         let record = Owner {
             schema_version: 1,
-            cas_root: store.path().to_path_buf(),
+            cas_root: scratch.path().to_path_buf(),
             task_id: "cas-checkout-sync".into(),
             dispatch_id: None,
             head: "a".repeat(40),
@@ -1223,7 +1227,7 @@ mod tests {
         };
         let synced = Cell::new(false);
         let result = write_new_checkout_owner_with_parent_sync(&checkout, &record, |parent| {
-            assert_eq!(parent, store.path());
+            assert_eq!(parent, store);
             assert!(checkout.join("owner.json").is_file());
             synced.set(true);
             Err(std::io::Error::other("injected store directory sync failure"))
@@ -1235,5 +1239,46 @@ mod tests {
                 .to_string()
                 .contains("injected store directory sync failure")
         );
+        assert!(!checkout.exists(), "failed publication must not be reusable as a durable checkout");
+        drop(lock);
+        fs::create_dir(&checkout).unwrap();
+        let retried = std::cell::RefCell::new(Vec::new());
+        write_new_checkout_owner_with_parent_sync(&checkout, &record, |parent| {
+            retried.borrow_mut().push(parent.to_path_buf());
+            File::open(parent)?.sync_all()
+        }).unwrap();
+        assert_eq!(*retried.borrow(), [store, scratch.path().to_path_buf()],
+            "retry must sync both directory entries before using the checkout");
+    }
+
+    #[test]
+    fn first_checkout_syncs_task_entry_in_scratch_base_cas_da0a() {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = scratch.path().join("cas-new-task");
+        private_dir(&store).unwrap();
+        let checkout = store.join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let record = Owner {
+            schema_version: 1,
+            cas_root: scratch.path().to_path_buf(),
+            task_id: "cas-new-task".into(),
+            dispatch_id: None,
+            head: "a".repeat(40),
+            created_at: Utc::now(),
+            last_used_at: None,
+        };
+        let synced = std::cell::RefCell::new(Vec::new());
+        let result = write_new_checkout_owner_with_parent_sync(&checkout, &record, |parent| {
+            assert!(checkout.join("owner.json").is_file());
+            synced.borrow_mut().push(parent.to_path_buf());
+            if parent == scratch.path() {
+                Err(std::io::Error::other("injected scratch base sync failure"))
+            } else {
+                File::open(parent)?.sync_all()
+            }
+        });
+        assert!(result.unwrap_err().to_string().contains("injected scratch base sync failure"));
+        assert_eq!(*synced.borrow(), [store, scratch.path().to_path_buf()]);
+        assert!(!checkout.exists(), "an unconfirmed task entry cannot publish a checkout");
     }
 }

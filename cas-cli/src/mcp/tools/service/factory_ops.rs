@@ -13399,7 +13399,7 @@ mod tests {
     }
 
     // GH #1362: fresh registry heartbeats can outlive the owning daemon.
-    fn adopted_fleet_gh1362() -> (
+    fn adopted_fleet_gh1362(caller: &str) -> (
         crate::test_support::TestEnvGuard,
         CasService,
         cas_types::Agent,
@@ -13441,7 +13441,7 @@ mod tests {
                 DependencyType::ParentChild,
             ))
             .unwrap();
-        let metadata = crate::ui::factory::session::create_metadata(
+        let mut metadata = crate::ui::factory::create_metadata(
             "dead-session",
             i32::MAX as u32,
             "old-supervisor",
@@ -13450,14 +13450,15 @@ mod tests {
             env.home().to_str(),
             None,
         );
-        std::fs::create_dir_all(crate::ui::factory::session::sessions_dir()).unwrap();
+        metadata.daemon_pid_starttime = Some(1);
+        std::fs::create_dir_all(crate::ui::factory::sessions_dir()).unwrap();
         std::fs::write(
-            crate::ui::factory::session::metadata_path("dead-session"),
+            crate::ui::factory::metadata_path("dead-session"),
             serde_json::to_vec(&metadata).unwrap(),
         )
         .unwrap();
         let core = CasCore::with_daemon(root, None, None);
-        core.set_agent_id_for_testing("adopter".into());
+        core.set_agent_id_for_testing(caller.into());
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
@@ -13467,8 +13468,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopted_worker_routes_and_replies_to_current_supervisor_gh1362() {
-        let (_env, service, worker) = adopted_fleet_gh1362();
-        service.inner.set_agent_id_for_testing(worker.id);
+        let (_env, service, _) = adopted_fleet_gh1362("orphan-id");
         let request = serde_json::from_value(serde_json::json!({
             "action": "message", "target": "supervisor", "kind": "status",
             "summary": "adopted worker status", "message": "Ready for recovery"
@@ -13484,9 +13484,9 @@ mod tests {
 
     #[tokio::test]
     async fn adopter_can_reset_only_after_original_daemon_dies_gh1362() {
-        let (_env, service, _) = adopted_fleet_gh1362();
-        let path = crate::ui::factory::session::metadata_path("dead-session");
-        let mut metadata: crate::ui::factory::protocol::SessionMetadata =
+        let (_env, service, _) = adopted_fleet_gh1362("adopter");
+        let path = crate::ui::factory::metadata_path("dead-session");
+        let mut metadata: crate::ui::factory::SessionMetadata =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         metadata.daemon_pid = std::process::id();
         metadata.daemon_pid_starttime = crate::mcp::daemon::read_pid_starttime(metadata.daemon_pid);
@@ -13502,7 +13502,7 @@ mod tests {
             "live daemon retains ownership even after epic transfer"
         );
         metadata.daemon_pid = i32::MAX as u32;
-        metadata.daemon_pid_starttime = None;
+        metadata.daemon_pid_starttime = Some(1);
         std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         service
             .inner
@@ -13519,7 +13519,7 @@ mod tests {
 
     #[tokio::test]
     async fn adopter_delivers_to_original_claude_inbox_gh1362() {
-        let (_env, service, worker) = adopted_fleet_gh1362();
+        let (mut env, service, worker) = adopted_fleet_gh1362("adopter");
         let request = serde_json::from_value(serde_json::json!({
             "action": "message", "target": worker.name,
             "summary": "recovery", "message": "Preserve your committed work"
@@ -13531,13 +13531,31 @@ mod tests {
             teams.inbox_has_unread_copy(&worker.name, "supervisor", "Preserve your committed work"),
             "orphan Claude must receive its body in the original team inbox"
         );
+        env.set("CAS_AGENT_NAME", &worker.name);
+        env.set("CAS_FACTORY_SESSION", "dead-session");
+        env.set("CAS_AGENT_ROLE", "worker");
+        let input = cas_core::hooks::types::HookInput {
+            hook_event_name: "UserPromptSubmit".into(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        let context = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
+            Some(&service.inner.cas_root), &input,
+        ).expect("the next actual hook boundary renders the recovery body");
+        assert!(context.contains("Preserve your committed work"));
+        let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
+        let rows = queue.poll_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        let report = queue.message_delivery_report(rows[0].id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::HookSurfaced));
+
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn adopter_shutdown_stops_original_worker_process_gh1362() {
         use std::os::unix::process::CommandExt;
-        let (_env, service, worker) = adopted_fleet_gh1362();
+        let (_env, service, worker) = adopted_fleet_gh1362("adopter");
         let mut command = std::process::Command::new("sleep");
         command.arg("300").process_group(0);
         let mut command = tokio::process::Command::from(command);

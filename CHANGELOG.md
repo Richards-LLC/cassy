@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.78.0] - 2026-10-24
+
 ### Added
 
 - **Slack channel inventory** — Add `cas violet channels` to list configured, Violet and Cloud project channels, report mismatches or incomplete discovery, and let `slack.channels` participate in multi-channel `cas update` reconciliation.

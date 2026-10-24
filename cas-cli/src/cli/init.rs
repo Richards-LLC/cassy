@@ -1663,36 +1663,23 @@ mod integration_flag_tests {
     fn init_design_capture_uses_a_portable_project_path() {
         // The published transcript is a data artifact: its project path must
         // stay portable rather than naming the machine that captured it.
-        for (name, capture) in [
-            (
-                "init-full-yes.ascii",
-                include_str!("../../../docs/design/cli/init-full-yes.ascii.capture.txt"),
-            ),
-            (
-                "init-full-interactive.ascii",
-                include_str!("../../../docs/design/cli/init-full-interactive.ascii.capture.txt"),
-            ),
-            (
-                "init-wordmark.ascii",
-                include_str!("../../../docs/design/cli/init-wordmark.ascii.capture.txt"),
-            ),
-            (
-                "init-wordmark.utf8",
-                include_str!("../../../docs/design/cli/init-wordmark.utf8.capture.txt"),
-            ),
-        ] {
-            let paths: Vec<_> = capture
+        let captures: &[(&str, &str)] =
+            include!(concat!(env!("OUT_DIR"), "/init_design_captures.rs"));
+        assert!(!captures.is_empty(), "no init capture fixtures were generated");
+        let mut checked_paths = 0;
+        for (name, capture) in captures {
+            for path in capture
                 .lines()
                 .filter_map(|line| line.split_once("initialized at ").map(|(_, path)| path))
-                .collect();
-            assert!(!paths.is_empty(), "{name}: missing initialization path");
-            for path in paths {
+            {
+                checked_paths += 1;
                 assert!(
                     !std::path::Path::new(path).is_absolute(),
                     "{name}: non-portable capture path: {path}"
                 );
             }
         }
+        assert!(checked_paths > 0, "init captures contain no initialization paths");
     }
 
     #[test]

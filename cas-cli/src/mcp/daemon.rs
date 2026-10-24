@@ -217,7 +217,14 @@ pub(crate) fn register_session_start_agent(
 ) -> crate::store::Result<(Agent, bool)> {
     let configured_role = parse_agent_role_hint(agent_role);
     let requested_worker = configured_role == Some(AgentRole::Worker);
-    let reusable = if requested_worker {
+    // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its row (see
+    // `cleanup_agent_leases_for_end`), so its post-clear SessionStart must
+    // rebind that row by live PID and name rather than mint a second identity.
+    let rebind_role = match configured_role {
+        Some(role @ (AgentRole::Worker | AgentRole::Supervisor)) => Some(role),
+        _ => None,
+    };
+    let reusable = if let Some(rebind_role) = rebind_role {
         // clear_context records the post-reset transcript id on the existing
         // worker row before Claude emits SessionEnd for the old session.  This
         // exact correlation is stronger than a name/PID hint and also works
@@ -226,7 +233,7 @@ pub(crate) fn register_session_start_agent(
             .get_by_cc_session_id(session_id)
             .ok()
             .flatten()
-            .filter(|existing| existing.role == AgentRole::Worker)
+            .filter(|existing| requested_worker && existing.role == AgentRole::Worker)
             .or_else(|| {
                 agent_name.and_then(|name| {
                     [
@@ -238,7 +245,7 @@ pub(crate) fn register_session_start_agent(
                     .find(|existing| {
                         if existing.id == session_id
                             || existing.name != name
-                            || existing.role != AgentRole::Worker
+                            || existing.role != rebind_role
                         {
                             return false;
                         }

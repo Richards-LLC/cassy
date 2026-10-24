@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.77.0] - 2026-10-24
+
 ### Fixed
 
 - **Spawn base checked before queueing** — Refuse `factory spawn_workers` at once when the resolved spawn base has diverged from its cached origin, naming the `git rebase --autostash` remedy and queuing nothing, instead of answering "queued" for a spawn certain to fail at provision; provision and register failures now reach the owning supervisor as Critical blocker notices that can wake it while idle.

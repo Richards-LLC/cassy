@@ -899,7 +899,12 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     assert!(notes.contains("POST_COMMIT_OUTCOME"), "close outcome missing: {notes}");
-    assert!(notes.contains("Close outcome:") && notes.contains("awaiting_merge"), "{notes}");
+    assert!(
+        notes.contains("task status now `closed`")
+            && notes.contains("Close outcome: Closed task: cas-slowclose-target-cas"),
+        "{notes}"
+    );
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Delivered);
 }
 
 /// cas-96ba: transactional delivery must accept the task binding consumed by

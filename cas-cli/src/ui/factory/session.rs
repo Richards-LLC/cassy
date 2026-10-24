@@ -999,7 +999,7 @@ mod tests {
         recorded_session("cli-dead", i32::MAX as u32);
         stale_socket(&socket_path("cli-dead"));
         stale_socket(&gui_socket_path("cli-dead"));
-        crate::cli::factory::execute_kill(Some("cli-dead"), true).unwrap();
+        crate::cli::factory::execute_kill(Some("cli-dead"), true, false).unwrap();
         assert!(!metadata_path("cli-dead").exists());
         assert!(!socket_path("cli-dead").exists());
         assert!(!gui_socket_path("cli-dead").exists());

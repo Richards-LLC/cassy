@@ -97,9 +97,7 @@ impl CasService {
 
         let resp = self.pattern_api_call("GET", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&resp)?;
 
         Ok(Self::success(format_pattern(pattern)))
     }
@@ -144,9 +142,7 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&resp)?;
 
         Ok(Self::success(format!(
             "Updated pattern: {}\n\n{}",
@@ -204,9 +200,7 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let pattern = resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&resp)?;
 
         Ok(Self::success(format!(
             "Adopted rule {} as personal pattern: {}\n\n{}",
@@ -230,9 +224,7 @@ impl CasService {
         // Update helpful_count by fetching current and incrementing
         let show_resp = self.pattern_api_call("GET", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = show_resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&show_resp)?;
 
         let current_count = pattern
             .get("helpful_count")
@@ -251,9 +243,9 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let updated = resp.get("pattern");
+        let updated = pattern_response_row(&resp)?;
         let new_count = updated
-            .and_then(|p| p.get("helpful_count"))
+            .get("helpful_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(current_count + 1);
 
@@ -272,9 +264,7 @@ impl CasService {
 
         let show_resp = self.pattern_api_call("GET", &format!("/api/patterns/{id}"), None)?;
 
-        let pattern = show_resp
-            .get("pattern")
-            .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))?;
+        let pattern = pattern_response_row(&show_resp)?;
 
         let current_count = pattern
             .get("harmful_count")
@@ -293,9 +283,9 @@ impl CasService {
             Some(serde_json::Value::Object(payload)),
         )?;
 
-        let updated = resp.get("pattern");
+        let updated = pattern_response_row(&resp)?;
         let new_count = updated
-            .and_then(|p| p.get("harmful_count"))
+            .get("harmful_count")
             .and_then(|v| v.as_u64())
             .unwrap_or(current_count + 1);
 
@@ -741,6 +731,13 @@ impl CasService {
                         format!("API error ({code}): {body}"),
                     ))
                 }
+                Err(ureq::Error::Transport(_)) if method == "POST" && path == "/api/patterns" => {
+                    Err(pattern_create_uncertain(
+                        None,
+                        format!("local-{}", uuid::Uuid::new_v4()),
+                        "a network error prevented confirmation of the write",
+                    ))
+                }
                 Err(ureq::Error::Transport(e)) => Err(Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!("Network error: {e}"),
@@ -748,6 +745,40 @@ impl CasService {
             }
         }
     }
+}
+
+/// Both deployed bare rows and legacy wrappers must identify a persisted pattern.
+fn pattern_response_row(response: &serde_json::Value) -> Result<&serde_json::Value, McpError> {
+    let has_id = |row: &&serde_json::Value| {
+        row.is_object()
+            && row.get("id")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+    };
+    response.get("pattern").filter(has_id)
+        .or_else(|| Some(response).filter(has_id))
+        .ok_or_else(|| CasService::error(ErrorCode::INTERNAL_ERROR, "Missing pattern in response"))
+}
+
+/// A non-idempotent write without a usable result needs reconciliation, not a retry.
+fn pattern_create_uncertain(status: Option<u16>, reference: String, reason: &str) -> McpError {
+    let status_text = status.map(|status| format!("Cloud returned HTTP {status}, but ")).unwrap_or_default();
+    let mut error = CasService::error(
+        ErrorCode::INTERNAL_ERROR,
+        format!(
+            "Pattern create outcome uncertain: {status_text}{reason}. \
+             The pattern may already exist. Do not retry create. Reconcile with \
+             pattern action=list and match the original request before creating again. \
+             Reconciliation reference: {reference}",
+        ),
+    );
+    error.data = Some(serde_json::json!({
+        "outcome": "uncertain",
+        "http_status": status,
+        "reconciliation_id": reference,
+        "retry_safe": false,
+    }));
+    error
 }
 
 /// Cloud returns the persisted row directly or in a legacy pattern wrapper.
@@ -761,42 +792,12 @@ fn decode_pattern_create_response(response: ureq::Response) -> Result<serde_json
         .filter(|id| !id.trim().is_empty())
         .map(|id| id.chars().take(200).collect::<String>())
         .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4()));
-    let uncertain = |reason: &str| {
-        let mut error = CasService::error(
-            ErrorCode::INTERNAL_ERROR,
-            format!(
-                "Pattern create outcome uncertain: Cloud returned HTTP {status}, but {reason}. \
-                 The pattern may already exist. Do not retry create. Reconcile with \
-                 pattern action=list and match the original request before creating again. \
-                 Reconciliation reference: {reference}",
-            ),
-        );
-        error.data = Some(serde_json::json!({
-            "outcome": "uncertain",
-            "http_status": status,
-            "reconciliation_id": reference,
-            "retry_safe": false,
-        }));
-        error
-    };
+    let uncertain = |reason: &str| pattern_create_uncertain(Some(status), reference.clone(), reason);
     let pattern: serde_json::Value = response
         .into_json()
         .map_err(|_| uncertain("the response is not valid JSON"))?;
-    let has_id = |row: &serde_json::Value| {
-        row.is_object()
-            && row.get("id")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|id| !id.trim().is_empty())
-    };
-    let pattern = pattern
-        .get("pattern")
-        .filter(|row| has_id(row))
-        .cloned()
-        .unwrap_or(pattern);
-    if !has_id(&pattern) {
-        return Err(uncertain("the response has no pattern ID"));
-    }
-    Ok(pattern)
+    pattern_response_row(&pattern).cloned()
+        .map_err(|_| uncertain("the response has no pattern ID"))
 }
 
 // ============================================================================
@@ -964,34 +965,47 @@ fn format_suggestion_summary(s: &serde_json::Value) -> String {
 mod tests {
     use super::*;
 
+    fn fixture() -> (tempfile::TempDir, std::sync::Arc<tiny_http::Server>, CasService) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        crate::cloud::CloudConfig {
+            endpoint: format!("http://{}", server.server_addr()),
+            token: Some("pattern-fixture-token".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(&root)
+        .unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        (dir, server, service)
+    }
+
     #[tokio::test]
     async fn pattern_create_reports_cloud_write_outcome_cas_d16e() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         // Production deployment 7133052455, Cloud 9ed61999: POST /api/patterns
         // returns the inserted row directly with HTTP 201 (route.ts:90).
-        for (response, created) in [
+        for (response, created, request_id) in [
             (
                 r#"{"id":"pat-fixture-1","content":"Fixture guidance","category":"general","priority":1,"propagation":"all_projects"}"#,
                 true,
+                Some("create-fixture-request"),
             ),
-            (r#"{"accepted":true}"#, false),
-            ("not-json", false),
+            (r#"{"accepted":true}"#, false, Some("create-fixture-request")),
+            ("not-json", false, Some("create-fixture-request")),
+            ("not-json", false, None),
             (
                 r#"{"pattern":{"id":"pat-fixture-1","content":"Fixture guidance","category":"general","priority":1,"propagation":"all_projects"}}"#,
                 true,
+                Some("create-fixture-request"),
             ),
         ] {
-            let dir = tempfile::tempdir().unwrap();
-            let root = dir.path().join(".cas");
-            std::fs::create_dir_all(&root).unwrap();
-            let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
-            crate::cloud::CloudConfig {
-                endpoint: format!("http://{}", server.server_addr()),
-                token: Some("cas-d16e-fixture-token".into()),
-                ..Default::default()
-            }
-            .save_to_cas_dir(&root)
-            .unwrap();
+            let (_dir, server, service) = fixture();
             let http = server.clone();
             let reply = std::thread::spawn(move || {
                 let mut request = http
@@ -1007,25 +1021,12 @@ mod tests {
                     payload["propagation_tags"],
                     serde_json::json!(["cas-d16e-fixture"])
                 );
-                request
-                    .respond(
-                        tiny_http::Response::from_string(response)
-                            .with_status_code(201)
-                            .with_header(
-                                tiny_http::Header::from_bytes(
-                                    "x-request-id",
-                                    "create-fixture-request",
-                                )
-                                .unwrap(),
-                            ),
-                    )
-                    .unwrap();
+                let mut response = tiny_http::Response::from_string(response).with_status_code(201);
+                if let Some(id) = request_id {
+                    response.add_header(tiny_http::Header::from_bytes("x-request-id", id).unwrap());
+                }
+                request.respond(response).unwrap();
             });
-            let core = CasCore::with_daemon(root, None, None);
-            #[cfg(feature = "mcp-proxy")]
-            let service = CasService::new(core, None);
-            #[cfg(not(feature = "mcp-proxy"))]
-            let service = CasService::new(core);
             let result = service
                 .pattern(Parameters(
                     serde_json::from_value(serde_json::json!({
@@ -1055,10 +1056,108 @@ mod tests {
             } else {
                 let error = result.expect_err("an unreadable post-write result is uncertain");
                 assert_eq!(error.data.as_ref().unwrap()["outcome"], "uncertain");
+                assert_eq!(error.data.as_ref().unwrap()["retry_safe"], false);
                 assert!(error.message.contains("Do not retry"), "{error}");
                 assert!(error.message.contains("pattern action=list"), "{error}");
-                assert!(error.message.contains("create-fixture-request"), "{error}");
+                let reference = error.data.as_ref().unwrap()["reconciliation_id"].as_str().unwrap();
+                if let Some(id) = request_id {
+                    assert_eq!(reference, id);
+                } else {
+                    uuid::Uuid::parse_str(reference.strip_prefix("local-").unwrap()).unwrap();
+                }
+                assert!(error.message.contains(reference), "{error}");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn pattern_actions_accept_cloud_rows_and_legacy_wrappers_cas_5f69() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        // Cloud Production 7264056744 / 58f72237: [id]/route.ts GET:33,
+        // PATCH:81 and adopt-rule/route.ts:82 return bare persisted rows.
+        for wrapped in [false, true] {
+            for (action, methods, expected) in [
+                ("show", vec!["GET"], "Pattern: pat-fixture-1"),
+                ("update", vec!["PATCH"], "Updated pattern: pat-fixture-1"),
+                ("adopt", vec!["POST"], "Adopted rule rule-fixture as personal pattern: pat-fixture-1"),
+                ("helpful", vec!["GET", "PATCH"], "marked as helpful (count: 9)"),
+                ("harmful", vec!["GET", "PATCH"], "marked as harmful (count: 5)"),
+            ] {
+                let (_dir, server, service) = fixture();
+                let http = server.clone();
+                let reply = std::thread::spawn(move || {
+                    for method in methods {
+                        let mut request = http.recv_timeout(std::time::Duration::from_secs(5))
+                            .unwrap().expect("expected pattern action request");
+                        assert_eq!(request.method().as_str(), method);
+                        assert_eq!(request.url(), if action == "adopt" {
+                            "/api/patterns/adopt-rule"
+                        } else { "/api/patterns/pat-fixture-1" });
+                        if method != "GET" {
+                            let body: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
+                            match action {
+                                "update" => assert_eq!(body["content"], "Fixture guidance"),
+                                "adopt" => assert_eq!(body["rule_id"], "rule-fixture"),
+                                "helpful" => assert_eq!(body["helpful_count"], 8),
+                                "harmful" => assert_eq!(body["harmful_count"], 4),
+                                _ => unreachable!(),
+                            }
+                        }
+                        let row = serde_json::json!({
+                            "id":"pat-fixture-1", "content":"Fixture guidance",
+                            "helpful_count": if method == "PATCH" { 9 } else { 7 },
+                            "harmful_count": if method == "PATCH" { 5 } else { 3 },
+                        });
+                        let response = if wrapped { serde_json::json!({"pattern":row}) } else { row };
+                        request.respond(tiny_http::Response::from_string(response.to_string())
+                            .with_status_code(if action == "adopt" { 201 } else { 200 })).unwrap();
+                    }
+                });
+                let result = service.pattern(Parameters(serde_json::from_value(serde_json::json!({
+                    "action":action, "id":"pat-fixture-1", "rule_id":"rule-fixture",
+                    "content":"Fixture guidance",
+                })).unwrap())).await;
+                reply.join().unwrap();
+                let result = result.unwrap_or_else(|error| panic!("{action}, wrapped={wrapped}: {error}"));
+                let text = result.content.iter().filter_map(|c| c.as_text().map(|t| t.text.as_str()))
+                    .collect::<Vec<_>>().join("\n");
+                assert!(text.contains(expected), "{action}, wrapped={wrapped}: {text}");
+                assert!(server.try_recv().unwrap().is_none(), "no extra action request");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pattern_create_post_send_timeout_is_uncertain_without_retry_cas_5f69() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_dir, server, service) = fixture();
+        let http = server.clone();
+        let (release, held) = std::sync::mpsc::channel();
+        let reply = std::thread::spawn(move || {
+            let mut request = http.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap().expect("one create request");
+            assert_eq!(request.method().as_str(), "POST");
+            assert_eq!(request.url(), "/api/patterns");
+            let body: serde_json::Value = serde_json::from_reader(request.as_reader()).unwrap();
+            assert_eq!(body["content"], "Fixture guidance");
+            // Hold the fully read write until the production 30-second deadline.
+            // A channel releases the request after the client returns; no sleeps.
+            held.recv_timeout(std::time::Duration::from_secs(40)).unwrap();
+        });
+        let result = service.pattern(Parameters(serde_json::from_value(serde_json::json!({
+            "action":"create", "content":"Fixture guidance",
+        })).unwrap())).await;
+        release.send(()).unwrap();
+        reply.join().unwrap();
+        assert!(server.try_recv().unwrap().is_none(), "an uncertain write must not retry");
+        let error = result.expect_err("request was sent, but no response arrived");
+        let data = error.data.as_ref().expect("structured uncertain write outcome");
+        assert_eq!(data["outcome"], "uncertain");
+        assert_eq!(data["retry_safe"], false);
+        let reference = data["reconciliation_id"].as_str().unwrap();
+        uuid::Uuid::parse_str(reference.strip_prefix("local-").unwrap()).unwrap();
+        assert!(error.message.contains(reference), "{error}");
+        assert!(error.message.contains("Do not retry"), "{error}");
+        assert!(error.message.contains("pattern action=list"), "{error}");
     }
 }

@@ -3055,6 +3055,12 @@ mod stale_anchor_rebind_tests_cas_00eb {
             matches!(result, QaCloseGate::Refuse(_)),
             "new unreviewed delivery needs QA"
         );
+        assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty());
+        // Integration prevents late dispatch; a supervisor can still bind a
+        // waiver to this task's own tip rather than the reused shared lane.
+        assert!(matches!(f.core.independent_qa_close_gate(
+            &f.task, f.dir.path(), "epic", None, Some("Historical delivery verified"),
+        ), QaCloseGate::Waived(_)));
         let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
         assert_eq!(passes.len(), 1);
         assert_eq!(
@@ -3063,15 +3069,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         );
         assert_ne!(passes[0].bound_head, foreign);
         assert_eq!(passes[0].branch, WORKER_TASK_BRANCH);
-        let qa_task = open_task_store(&f.dir.path().join(".cas"))
-            .unwrap()
-            .get(passes[0].qa_task_id.as_deref().unwrap())
-            .unwrap();
-        assert!(
-            !qa_task.description.contains("hub-web/dist/app.css"),
-            "foreign paths must not dispatch unrelated journeys: {}",
-            qa_task.description
-        );
+        assert!(passes[0].qa_task_id.is_none(), "integrated work opens no QA task");
     }
 
     #[test]
@@ -3148,10 +3146,15 @@ mod stale_anchor_rebind_tests_cas_00eb {
                 matches!(result, QaCloseGate::Refuse(_)),
                 "unreviewed own delivery needs QA"
             );
+            assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty());
+            assert!(matches!(f.core.independent_qa_close_gate(
+                &f.task, f.dir.path(), "epic", receipt, Some("Historical delivery verified"),
+            ), QaCloseGate::Waived(_)));
             let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
             assert_eq!(passes.len(), 1);
             assert_eq!(passes[0].bound_head, f.tip);
             assert_ne!(passes[0].bound_head, foreign);
+            assert!(passes[0].qa_task_id.is_none());
         }
     }
 

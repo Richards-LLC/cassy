@@ -981,11 +981,10 @@ async fn pending_round_refuses_both_merge_paths_in_progress_and_awaiting_merge()
     assert!(refusal.contains(&qa_task), "{refusal}");
 }
 
-/// A delivery merged into a non-trunk lane (an epic) outside the guarded
-/// paths is still sent for review before it closes. The supervisor's handoff
-/// reports target ancestry, without assuming it never parked (GH #1026).
+/// A delivery already merged into its epic still owes a verdict or waiver,
+/// but closing it must not dispatch a review of integrated work (GH #1359).
 #[tokio::test]
-async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatched() {
+async fn merged_into_an_epic_without_a_verdict_is_refused_without_dispatch() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core, repo, task_id) = fixture(&mut test_env);
     // cas-de60: an unparked merged delivery needs its own lineage; the
@@ -1020,37 +1019,18 @@ async fn merged_into_an_epic_without_a_verdict_is_refused_at_close_and_dispatche
 
     let refused = close_text(&core, &task_id).await;
     assert!(refused.contains("INDEPENDENT QA REQUIRED"), "{refused}");
-    assert!(refused.contains("INDEPENDENT QA DISPATCHED"), "{refused}");
-    assert!(refused.contains("the close waits for its verdict"), "{refused}");
+    assert!(refused.contains("already on target epic/ui"), "{refused}");
+    assert!(refused.contains(&delivered[..8]), "{refused}");
+    assert!(refused.contains("no QA pass was opened"), "{refused}");
     assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::InProgress);
     let passes = cas_store::list_qa_passes(&cas_dir, &task_id).unwrap();
-    assert_eq!(passes.len(), 1);
-    assert_eq!(passes[0].branch, branch);
-    assert_eq!(passes[0].bound_head, delivered);
-    let handoff = open_prompt_queue_store(&cas_dir)
+    assert!(passes.is_empty());
+    assert!(!open_prompt_queue_store(&cas_dir)
         .unwrap()
         .peek_all(50)
         .unwrap()
-        .into_iter()
-        .find(|row| row.source == format!("qa-dispatch:{}", passes[0].id))
-        .expect("QA handoff queued for the supervisor");
-    assert!(
-        handoff
-            .prompt
-            .contains("delivered tip @"),
-        "{}",
-        handoff.prompt
-    );
-    assert!(handoff.prompt.contains("contained in epic/ui"), "{}", handoff.prompt);
-    assert!(!handoff.prompt.contains("never parked"), "{}", handoff.prompt);
-    assert!(!handoff.prompt.contains("parked for merge"), "{}", handoff.prompt);
-    let guard = cas::qa_pass::supervisor_merge_refusal(
-        &cas_dir,
-        &repo,
-        &format!("git merge --no-ff --no-commit {branch}"),
-    )
-    .expect("the backstop's InProgress round must block a raw merge");
-    assert!(guard.contains(&qa_task_id(&cas_dir, &task_id)), "{guard}");
+        .iter()
+        .any(|row| row.source.starts_with("qa-dispatch:")));
 }
 
 /// A live supervisor registered in `cas_dir`, acting through its own core.

@@ -4998,6 +4998,7 @@ mod tests {
                 last_supervisor_mcp_call_at: None,
                 supervisor_stall: Default::default(),
                 project_dir: None,
+                cas_root: None,
                 team_name: None,
             }
         }

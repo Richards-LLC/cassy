@@ -505,6 +505,7 @@ impl DaemonInitPhase {
             None, // No WebSocket port - using Unix socket
         );
         metadata.team_name = teams.as_ref().map(|t| t.team_name().to_string());
+        metadata.cas_root = Some(app.cas_dir().to_string_lossy().to_string());
         session_manager.save_metadata(&metadata)?;
 
         // The boot client switches to attach as soon as it receives InitComplete.

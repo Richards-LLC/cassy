@@ -682,6 +682,7 @@ pub fn create_metadata(
         last_supervisor_mcp_call_at,
         supervisor_stall,
         project_dir: project_dir.map(|s| s.to_string()),
+        cas_root: None,
         team_name: None,
     }
 }

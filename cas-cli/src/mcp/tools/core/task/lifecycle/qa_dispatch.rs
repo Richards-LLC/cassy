@@ -1430,8 +1430,9 @@ impl CasCore {
             .or_else(|| integrated_dispatch_boundary(task, repo, &head, target_branch));
         if let Some(trunk) = integrated_target {
             if let Some(pass) = passes.iter().find(|pass| pass.state.is_active() && pass.bound_head == head) {
+                let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
                 return QaCloseGate::Refuse(format!(
-                    "INDEPENDENT QA REQUIRED: {} is already on {trunk}; the close waits for the pending verdict for pass {} at @{}. No new QA round was opened. Track the existing review with verification action=qa_status task_id={}; a live supervisor can use verification action=qa_request task_id={} if the round needs recovery. {remedy}.",
+                    "INDEPENDENT QA REQUIRED: {} is already on {trunk}; the close waits for the pending verdict for pass {} at @{}. No new QA round was opened. Track the existing review with {prefix}verification action=qa_status task_id={}; a live supervisor can use {prefix}verification action=qa_request task_id={} if the round needs recovery. {remedy}.",
                     task.id, pass.id, pass.head8(), task.id, task.id,
                 ));
             }

@@ -78,7 +78,7 @@
 ## Factory runtime and terminals
 
 - `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/app/init.rs` - TUI state, startup wiring and warm target seeding (copied build outputs, orphan seed-stage recovery).
-- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session.rs` - attach client signal guard and session records reaped by update.
+- `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session.rs`, `cas-cli/src/ui/factory/session/socket_cleanup*.rs` - attach client signal guard, session records and locked Linux/macOS kernel socket-holder proof before orphan reaping.
 - `cas-cli/src/ui/factory/app/provisioning.rs`, `cas-cli/src/ui/factory/app/render_and_ops/` - provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup delivery, events, probes, relays and render scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs` - lifecycle-owned Slack intake and pause control.

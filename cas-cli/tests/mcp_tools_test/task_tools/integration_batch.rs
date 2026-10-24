@@ -214,7 +214,7 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
 #[tokio::test]
 async fn cas_d8b4_batch_squash_survives_target_evolution() {
     let mut env = TestEnvGuard::temp_home();
-    for (receipt_kind, reverted) in [("anchor", false), ("squash", false), ("anchor", true)] {
+    for (receipt_kind, change) in [("anchor", "evolved"), ("squash", "evolved"), ("anchor", "reverted"), ("anchor", "labelled")] {
         let (temp, _, supervisor, head) = fixture(&mut env);
         let repo = temp.path();
         git(repo, &["checkout", "-q", "batch/X"]);
@@ -224,8 +224,12 @@ async fn cas_d8b4_batch_squash_survives_target_evolution() {
         squash(repo, None);
         let receipt = git(repo, &["rev-parse", "main"]);
         git(repo, &["checkout", "-q", "main"]);
-        if reverted {
+        if change == "reverted" {
             git(repo, &["revert", "--no-edit", &receipt]);
+        } else if change == "labelled" {
+            std::fs::write(repo.join("src/one.rs"), "pub fn replacement() {}\n").unwrap();
+            git(repo, &["add", "src/one.rs"]);
+            git(repo, &["commit", "-q", "-m", "Revert published batch path"]);
         } else {
             commit(repo, "asset.bin", "later\0version");
         }
@@ -241,7 +245,7 @@ async fn cas_d8b4_batch_squash_survives_target_evolution() {
             .task(Parameters(request)).await.unwrap());
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
         let task = tasks.get(TASK).unwrap();
-        if reverted {
+        if change != "evolved" {
             assert_eq!(task.status, TaskStatus::AwaitingMerge, "a reverted squash is not delivered: {text}");
             assert!(text.contains("MERGE REQUIRED"), "{text}");
             continue;

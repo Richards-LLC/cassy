@@ -223,17 +223,21 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
-/// Whether a delivery is already carried by the target, including squash tips.
-/// Integration suppresses dispatch; close still requires a verdict or waiver.
-fn delivery_tip_on_target(task: &Task, repo: &Path, head: &str, target: &str) -> bool {
-    is_ancestor(repo, head, target)
-        || reviewed_tip_carried_by(repo, head, target, target)
-        || task.deliverables.integration_batch.as_ref().is_some_and(|batch| {
+/// Trunk and landed batches suppress late dispatch. Epic-only integration
+/// still owes the GH #1026 review backstop.
+fn integrated_dispatch_boundary(task: &Task, repo: &Path, head: &str, target: &str) -> Option<String> {
+    for trunk in ["main", "staging"] {
+        let reference = freshest_target_ref(repo, trunk);
+        if is_ancestor(repo, head, &reference) || reviewed_tip_carried_by(repo, head, &reference, &reference) {
+            return Some(format!("trunk {trunk}"));
+        }
+    }
+    task.deliverables.integration_batch.as_ref().filter(|batch| {
             resolve_commit(repo, head).as_deref() == Some(batch.delivered_head.as_str())
                 && super::super::integration_batch::landed_batch_squash(
                     task, repo, target, None,
                 ).is_some()
-        })
+        }).map(|_| format!("landed integration batch on {target}"))
 }
 
 /// cas-624f: rejected (failed) rounds on record for a delivery.
@@ -447,7 +451,7 @@ impl CasCore {
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
         let target = freshest_target_ref(repo, parent_branch);
-        if delivery_tip_on_target(task, repo, delivery_ref, &target) {
+        if integrated_dispatch_boundary(task, repo, delivery_ref, &target).is_some() {
             return None;
         }
         let changed = match changed_paths_for_delivery(
@@ -1282,7 +1286,7 @@ impl CasCore {
                 || (pass.state.satisfies_gate()
                     && task.deliverables.integration_batch.is_some()
                     && head.as_deref() == Some(pass.bound_head.as_str())
-                    && delivery_tip_on_target(task, repo, &pass.bound_head, target_branch))
+                    && integrated_dispatch_boundary(task, repo, &pass.bound_head, target_branch).is_some())
         }) {
             return QaCloseGate::Clear;
         }
@@ -1423,9 +1427,14 @@ impl CasCore {
         };
         let integrated_target = trunk_containing(repo, &head)
             .map(|trunk| format!("trunk {trunk}"))
-            .or_else(|| delivery_tip_on_target(task, repo, &head, target_branch)
-                .then(|| format!("target {target_branch}")));
+            .or_else(|| integrated_dispatch_boundary(task, repo, &head, target_branch));
         if let Some(trunk) = integrated_target {
+            if let Some(pass) = passes.iter().find(|pass| pass.state.is_active() && pass.bound_head == head) {
+                return QaCloseGate::Refuse(format!(
+                    "INDEPENDENT QA REQUIRED: {} is already on {trunk}; the close waits for the pending verdict for pass {} at @{}. No new QA round was opened. Track the existing review with verification action=qa_status task_id={}; a live supervisor can use verification action=qa_request task_id={} if the round needs recovery. {remedy}.",
+                    task.id, pass.id, pass.head8(), task.id, task.id,
+                ));
+            }
             return QaCloseGate::Refuse(format!(
                 "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on \
                  {trunk} with no passed or waived QA round. Cassy does not dispatch a review of code \
@@ -2090,7 +2099,7 @@ mod squash_close_tests {
     #[test]
     fn cas_d8b4_unreviewed_landed_squash_never_dispatches_a_round() {
         let mut env = TestEnvGuard::temp_home();
-        for evolved_batch in [false, true] {
+        for (evolved_batch, pending) in [(false, false), (true, false), (false, true)] {
             let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
             let repo = dir.path();
             let head = task.deliverables.factory_branch_anchor.clone().unwrap();
@@ -2109,14 +2118,31 @@ mod squash_close_tests {
                 git(repo, &["commit", "-q", "-m", "later spacing change"]);
                 git(repo, &["checkout", "-q", "factory/worker"]);
             }
+            if pending {
+                let now = chrono::Utc::now();
+                cas_store::open_qa_pass(&repo.join(".cas"), &NewQaPass {
+                    task_id: &task.id,
+                    implementer_agent_id: "worker",
+                    branch: "factory/worker",
+                    bound_head: &head,
+                    deadline_at: now + chrono::Duration::minutes(30),
+                    max_rounds: 3,
+                }, now).unwrap();
+            }
             assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
             let outcome = core.independent_qa_close_gate(&task, repo, "main", None, None);
             let QaCloseGate::Refuse(text) = outcome else {
                 panic!("an integrated delivery without a verdict still requires QA");
             };
-            assert!(text.contains("no QA pass was opened"), "{text}");
             let passes = cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap();
-            assert!(passes.is_empty(), "already merged work must not create a QA task");
+            if pending {
+                assert_eq!(passes.len(), 1);
+                assert!(text.contains(&passes[0].id) && text.contains("pending verdict"), "{text}");
+                assert!(!text.contains("no QA pass was opened"), "{text}");
+            } else {
+                assert!(text.contains("no QA pass was opened"), "{text}");
+                assert!(passes.is_empty(), "already merged work must not create a QA task");
+            }
         }
     }
 
@@ -3055,12 +3081,6 @@ mod stale_anchor_rebind_tests_cas_00eb {
             matches!(result, QaCloseGate::Refuse(_)),
             "new unreviewed delivery needs QA"
         );
-        assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty());
-        // Integration prevents late dispatch; a supervisor can still bind a
-        // waiver to this task's own tip rather than the reused shared lane.
-        assert!(matches!(f.core.independent_qa_close_gate(
-            &f.task, f.dir.path(), "epic", None, Some("Historical delivery verified"),
-        ), QaCloseGate::Waived(_)));
         let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
         assert_eq!(passes.len(), 1);
         assert_eq!(
@@ -3069,7 +3089,15 @@ mod stale_anchor_rebind_tests_cas_00eb {
         );
         assert_ne!(passes[0].bound_head, foreign);
         assert_eq!(passes[0].branch, WORKER_TASK_BRANCH);
-        assert!(passes[0].qa_task_id.is_none(), "integrated work opens no QA task");
+        let qa_task = open_task_store(&f.dir.path().join(".cas"))
+            .unwrap()
+            .get(passes[0].qa_task_id.as_deref().unwrap())
+            .unwrap();
+        assert!(
+            !qa_task.description.contains("hub-web/dist/app.css"),
+            "foreign paths must not dispatch unrelated journeys: {}",
+            qa_task.description
+        );
     }
 
     #[test]
@@ -3146,15 +3174,10 @@ mod stale_anchor_rebind_tests_cas_00eb {
                 matches!(result, QaCloseGate::Refuse(_)),
                 "unreviewed own delivery needs QA"
             );
-            assert!(cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap().is_empty());
-            assert!(matches!(f.core.independent_qa_close_gate(
-                &f.task, f.dir.path(), "epic", receipt, Some("Historical delivery verified"),
-            ), QaCloseGate::Waived(_)));
             let passes = cas_store::list_qa_passes(&f.dir.path().join(".cas"), &f.task.id).unwrap();
             assert_eq!(passes.len(), 1);
             assert_eq!(passes[0].bound_head, f.tip);
             assert_ne!(passes[0].bound_head, foreign);
-            assert!(passes[0].qa_task_id.is_none());
         }
     }
 

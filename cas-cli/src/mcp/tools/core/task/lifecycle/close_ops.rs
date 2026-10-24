@@ -23910,6 +23910,21 @@ where
     answers
 }
 
+/// Retain the existing text ownership/revert fence for a batch squash.
+/// Binary paths have no line proof; the batch guard compares their blobs.
+pub(crate) fn squash_text_paths_survive(
+    repo: &std::path::Path,
+    parent: &str,
+    squash: &str,
+    target: &str,
+    paths: &[String],
+) -> bool {
+    paths.iter().all(|path| matches!(
+        delivery_evolution::line_content_presence(repo, parent, squash, target, path),
+        Ok(None | Some(DeliveryContentPresence::Present { .. } | DeliveryContentPresence::Superseded { .. }))
+    ))
+}
+
 /// Verify delivery content on the authoritative parent view. Prefer the
 /// remote-tracking target when it already contains the delivery commit;
 /// otherwise use the local target. This preserves the existing local-merge

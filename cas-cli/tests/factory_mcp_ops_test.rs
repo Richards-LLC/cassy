@@ -12466,6 +12466,29 @@ async fn test_epic_status_flags_a_stale_stacked_successor_cas_fd4c() {
     assert_eq!(git(&["rev-parse", "epic/succ"]), local_successor, "status must not advance a local ref");
     assert_eq!(git(&["rev-parse", "origin/epic/succ"]), remote_successor);
 
+    // cas-4d34: a stale merge probed against origin must first advance the
+    // local successor; otherwise the suggested push is non-fast-forward.
+    git(&["checkout", "-b", "epic/{a,b}!e", "origin/epic/{a,b}!e"]);
+    let next_predecessor = commit("pred-4.txt", "predecessor advances again");
+    git(&["push", "origin", "epic/{a,b}!e"]);
+    git(&["checkout", "main"]);
+    let behind_advice = status().await;
+    if !behind_advice.contains("fast-forward epic/succ first")
+        || !behind_advice.contains(&next_predecessor[..12])
+        || !behind_advice.contains("lacks 1 of its commit(s)") {
+        failures.push(format!("origin-based remedy omits local fast-forward: {behind_advice}"));
+    }
+    git(&["checkout", "epic/succ"]);
+    let divergent_successor = commit("local-only.txt", "independent successor work");
+    git(&["checkout", "main"]);
+    let divergent_advice = status().await;
+    assert!(divergent_advice.contains("lacks 3 of its commit(s)")
+        && !divergent_advice.contains("fast-forward epic/succ first"),
+        "divergent successor must retain the local view: {divergent_advice}");
+    assert_eq!(git(&["rev-parse", "epic/succ"]), divergent_successor);
+    assert_eq!(git(&["rev-parse", "origin/epic/succ"]), remote_successor);
+    git(&["branch", "-D", "epic/{a,b}!e"]);
+
     // Both copies now agree before introducing an actual twelve-file conflict.
     git(&["update-ref", "refs/heads/epic/succ", &remote_successor]);
     git(&["branch", "epic/{a,b}!e", "origin/epic/{a,b}!e"]);

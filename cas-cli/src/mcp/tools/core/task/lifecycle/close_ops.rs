@@ -2860,19 +2860,31 @@ fn concurrent_close_change(start: &Task, closing: &Task, current: &Task) -> Opti
 #[cfg(test)]
 pub(crate) mod close_race_hook {
     type Hook = Box<dyn FnOnce() + Send>;
-    static HOOKS: std::sync::Mutex<Vec<(String, Hook)>> = std::sync::Mutex::new(Vec::new());
+    static HOOKS: std::sync::Mutex<Vec<(String, bool, Hook)>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn before_terminal_write(task_id: &str, hook: impl FnOnce() + Send + 'static) {
-        HOOKS.lock().unwrap().push((task_id.to_string(), Box::new(hook)));
+        HOOKS.lock().unwrap().push((task_id.to_string(), false, Box::new(hook)));
+    }
+
+    pub(crate) fn before_terminal_cas(task_id: &str, hook: impl FnOnce() + Send + 'static) {
+        HOOKS.lock().unwrap().push((task_id.to_string(), true, Box::new(hook)));
     }
 
     pub(super) fn fire(task_id: &str) {
+        fire_at(task_id, false);
+    }
+
+    pub(super) fn fire_before_cas(task_id: &str) {
+        fire_at(task_id, true);
+    }
+
+    fn fire_at(task_id: &str, after_read: bool) {
         let hook = {
             let mut hooks = HOOKS.lock().unwrap();
             hooks
                 .iter()
-                .position(|(id, _)| id == task_id)
-                .map(|index| hooks.remove(index).1)
+                .position(|(id, phase, _)| id == task_id && *phase == after_read)
+                .map(|index| hooks.remove(index).2)
         };
         if let Some(hook) = hook {
             hook();
@@ -10973,6 +10985,8 @@ impl CasCore {
         // matches the persisted row instead of a second clock read.
         // cas-c202: the write is guarded by the row just re-read, so a
         // correction committed after that read is never overwritten either.
+        #[cfg(test)]
+        close_race_hook::fire_before_cas(&req.id);
         let written = match current.as_ref() {
             Some(current) => task_store.update_if_current(&task, current),
             None => task_store.update(&task),

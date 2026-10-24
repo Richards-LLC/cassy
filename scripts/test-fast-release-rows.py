@@ -798,7 +798,10 @@ sleep 2
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
         """A cut once stopped at preflight on a draft committed hours earlier."""
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
-        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text()
+        # The historical draft predates the User-reply wording check (cas-c5af);
+        # drop its one config-key mention so only the punch length is under test.
+        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
+            "factory.write_roots", "write_roots")
         # The Dev top-level punch: the second line of the third fenced body.
         punch = draft.split("```")[5].strip("\n").splitlines()[2]
         self.write(path, draft)

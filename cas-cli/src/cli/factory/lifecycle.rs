@@ -253,66 +253,80 @@ fn reap_session_worker_groups(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::process::{Command, ExitStatus, Stdio};
+    use std::thread::JoinHandle;
 
-    /// GH #1363: a daemon whose loop is wedged ignores SIGTERM. `cas kill`
-    /// used to give up after 3 s and leave it running; it now escalates to
-    /// SIGKILL, records why in daemon.log, and removes the session. Workers
-    /// run in their own sessions, so a SIGKILLed daemon cannot take them
-    /// down: `cas kill` reaps the session's recorded worker groups (cas-3372).
-    #[test]
-    fn kill_escalates_to_sigkill_when_the_daemon_ignores_sigterm() {
-        use std::os::unix::process::{CommandExt, ExitStatusExt};
-        let _env = crate::test_support::TestEnvGuard::temp_home();
-        let project = tempfile::tempdir().unwrap();
-        let cas_root = project.path().join(".cas");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        let worker = std::process::Command::new("sleep")
-            .arg("30")
+    /// A child in its own process group with no inherited output handles, so
+    /// nothing it leaves behind holds the test's pipes (cas-4b42). The join
+    /// handle reaps it, so a killed child never lingers as a zombie.
+    fn spawn_group(program: &str, args: &[&str]) -> (u32, JoinHandle<std::io::Result<ExitStatus>>) {
+        let mut child = Command::new(program)
+            .args(args)
             .process_group(0)
-            .spawn()
-            .unwrap();
-        let worker_pgid = worker.id();
-        let worker_reaper = std::thread::spawn(move || {
-            let mut worker = worker;
-            worker.wait()
-        });
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        crate::ui::factory::process_groups::track(&cas_root, "w1", "wedged", worker_pgid).unwrap();
-        let child = std::process::Command::new("sh")
-            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap();
         let pid = child.id();
-        // Reap the child so a killed daemon does not linger as a zombie.
-        let reaper = std::thread::spawn(move || {
-            let mut child = child;
-            child.wait()
-        });
+        (pid, std::thread::spawn(move || child.wait()))
+    }
+
+    fn kill_group(pgid: u32) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pgid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+
+    fn save_session(
+        name: &str,
+        pid: u32,
+        project: &std::path::Path,
+    ) -> crate::ui::factory::SessionMetadata {
+        let metadata = crate::ui::factory::create_metadata(
+            name,
+            pid,
+            "supervisor",
+            &[],
+            None,
+            project.to_str(),
+            None,
+        );
+        SessionManager::new().save_metadata(&metadata).unwrap();
+        metadata
+    }
+
+    fn daemon_log(name: &str) -> String {
+        std::fs::read_to_string(crate::ui::factory::daemon_log_path(name)).unwrap_or_default()
+    }
+
+    /// GH #1363: a daemon whose loop is wedged ignores SIGTERM. `cas kill`
+    /// escalates to SIGKILL, records why in daemon.log, and removes the
+    /// session. Workers lead their own sessions, so it then reaps the
+    /// session's worker groups from the store the daemon recorded, which a
+    /// CAS_ROOT daemon keeps outside the project (cas-3372, cas-4b42).
+    #[test]
+    fn kill_escalates_to_sigkill_when_the_daemon_ignores_sigterm() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (pid, daemon) = spawn_group("sh", &["-c", "trap '' TERM; exec sleep 30"]);
         std::thread::sleep(std::time::Duration::from_millis(200));
-        let manager = SessionManager::new();
-        manager
-            .save_metadata(&crate::ui::factory::create_metadata(
-                "wedged",
-                pid,
-                "supervisor",
-                &[],
-                None,
-                project.path().to_str(),
-                None,
-            ))
+        crate::ui::factory::process_groups::track(store.path(), "w1", "wedged", worker_pgid)
             .unwrap();
+        let mut metadata = save_session("wedged", pid, project.path());
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
 
         let outcome = end_session_with_grace("wedged", std::time::Duration::from_millis(300));
-        if outcome.is_err() {
-            let _ = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
-        }
-        let status = reaper.join().unwrap().unwrap();
+        kill_group(pid);
+        let status = daemon.join().unwrap().unwrap();
         // A worker that survived would hold this join for 30 s.
         let started = std::time::Instant::now();
-        let worker_status = worker_reaper.join().unwrap().unwrap();
+        let worker_status = worker.join().unwrap().unwrap();
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "the SIGKILLed daemon's worker group was left running"
@@ -320,10 +334,83 @@ mod tests {
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert_eq!(outcome.unwrap(), EndSessionOutcome::Ended);
         assert_eq!(status.signal(), Some(libc::SIGKILL));
-        assert!(manager.find_session(Some("wedged")).unwrap().is_none());
-        let log =
-            std::fs::read_to_string(crate::ui::factory::daemon_log_path("wedged")).unwrap();
+        assert!(SessionManager::new().find_session(Some("wedged")).unwrap().is_none());
+        let log = daemon_log("wedged");
         assert!(log.contains("\"killed\"") && log.contains("sent SIGKILL"), "{log}");
+    }
+
+    /// cas-4b42: without a positive start-time match SIGKILL is withheld, and
+    /// `cas kill` says so, with the manual remedy, instead of claiming the
+    /// daemon survived SIGKILL.
+    #[test]
+    fn withheld_sigkill_is_reported_and_logged() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let (pid, daemon) = spawn_group("sh", &["-c", "trap '' TERM; exec sleep 30"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let mut metadata = save_session("unverified", pid, project.path());
+        metadata.daemon_pid_starttime = None;
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome = end_session_with_grace("unverified", std::time::Duration::from_millis(300));
+        let alive = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok();
+        kill_group(pid);
+        daemon.join().unwrap().unwrap();
+        let error = outcome.unwrap_err().to_string();
+        assert!(alive, "SIGKILL must not be sent without a start-time match");
+        assert!(
+            error.contains("SIGKILL was withheld because the session record has no daemon start time")
+                && error.contains(&format!("kill -9 {pid}")),
+            "{error}"
+        );
+        assert!(daemon_log("unverified").contains("\"kill_withheld\""));
+    }
+
+    /// cas-4b42: a replacement daemon that took the session name while the
+    /// old one was being killed owns the workers now recorded under it; the
+    /// reap must not touch them.
+    #[test]
+    fn replacement_daemon_workers_survive_the_old_daemons_kill() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = project.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        crate::ui::factory::process_groups::track(&cas_root, "w1", "renamed", worker_pgid)
+            .unwrap();
+        // The replacement (this test process) takes the name when the old
+        // daemon receives SIGTERM.
+        let replacement = crate::ui::factory::create_metadata(
+            "renamed",
+            std::process::id(),
+            "supervisor",
+            &[],
+            None,
+            project.path().to_str(),
+            None,
+        );
+        let staged = project.path().join("replacement.json");
+        std::fs::write(&staged, serde_json::to_string(&replacement).unwrap()).unwrap();
+        let script = format!(
+            "trap 'cp \"{}\" \"{}\"' TERM; while :; do sleep 0.05; done",
+            staged.display(),
+            crate::ui::factory::metadata_path("renamed").display()
+        );
+        let (pid, daemon) = spawn_group("sh", &["-c", &script]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        save_session("renamed", pid, project.path());
+
+        let outcome = end_session_with_grace("renamed", std::time::Duration::from_millis(500));
+        kill_group(pid);
+        daemon.join().unwrap().unwrap();
+        let worker_alive =
+            nix::sys::signal::killpg(nix::unistd::Pid::from_raw(worker_pgid as i32), None).is_ok();
+        kill_group(worker_pgid);
+        worker.join().unwrap().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::Ended);
+        assert!(worker_alive, "the replacement daemon's worker was reaped");
+        assert!(daemon_log("renamed").contains("\"worker_reap_skipped\""));
     }
 }
 

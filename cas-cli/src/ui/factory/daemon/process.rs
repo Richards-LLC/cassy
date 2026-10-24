@@ -191,7 +191,7 @@ pub fn fork_into_daemon(app: FactoryApp, session_name: String) -> anyhow::Result
     // Save session metadata before fork (no ws_port for Unix socket daemon)
     let session_manager = SessionManager::new();
     let project_dir = app.cas_dir().to_string_lossy().to_string();
-    let metadata = create_metadata(
+    let mut metadata = create_metadata(
         &session_name,
         std::process::id(),
         app.supervisor_name(),
@@ -200,6 +200,7 @@ pub fn fork_into_daemon(app: FactoryApp, session_name: String) -> anyhow::Result
         Some(&project_dir),
         None, // ws_port - Unix socket daemon doesn't use WebSocket
     );
+    metadata.cas_root = Some(app.cas_dir().to_string_lossy().to_string());
     session_manager.save_metadata(&metadata)?;
 
     // cas-65cce: close idle pooled SQLite connections before fork(). A child
@@ -362,6 +363,7 @@ pub async fn run_daemon_after_fork(
             None,
         );
         metadata.team_name = Some(teams.team_name().to_string());
+        metadata.cas_root = Some(app.cas_dir().to_string_lossy().to_string());
         let _ = session_manager.save_metadata(&metadata);
     }
 

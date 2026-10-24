@@ -162,7 +162,9 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
             "/api/coordination/bindings/activation",
             token,
             &[("registration_id", &registration)],
-            true,
+            // Discovery uses Cloud's deployed default cache headers. Each
+            // candidate still needs the no-store authority read below.
+            false,
         ) {
             Ok(value) => match inventory_channels(&value, &project_id) {
                 Ok(ids) => {

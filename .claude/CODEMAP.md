@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map regenerated for the 3.77 freeze tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated for the 3.78 v63 code-complete tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -45,8 +45,7 @@
 
 ## CLI, hooks and application services
 
-- `cas-cli/src/main.rs`, `cas-cli/src/lib.rs` - executable entry and module composition.
-- `cas-cli/src/cli/mod.rs` - clap command definitions and dispatch.
+- `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable entry, module composition, command definitions and dispatch.
 - `cas-cli/src/cli/init.rs` - initialization, recovery advice and MCP provisioning.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/account_picker.rs` - account selection, profile setup and login commands.
 - `cas-cli/src/test_env_guard.rs`, `cas-cli/src/test_paths.rs` - isolated test environments and project paths.
@@ -110,14 +109,12 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/registry_upkeep.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/docs_upkeep.rs` - journey registry and documentation gates.
 - `cas-cli/src/mcp/tools/core/task/repo_context/candidate_probe.rs` - bounded repository discovery for lifecycle operations.
 - `cas-cli/src/mcp/tools/core/agent_coordination/branch_adoption.rs` - guarded parked-branch transfers and target-contained receiver HEAD adoption.
-- `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - factory/reminder/server dispatch and request schemas.
-- `cas-cli/src/mcp/tools/service/mod.rs` - dispatcher composition and future-size regression guards.
+- `cas-cli/src/mcp/tools/service/`, `cas-cli/src/mcp/tools/types/` - factory/reminder/server dispatch and request schemas; composition/future-size guards live in `service/mod.rs`.
 - `cas-cli/src/bridge/server/`, `crates/cas-mcp/src/types/` - HTTP/SSE handlers and protocol definitions.
 
 ## QA, storage, retrieval and clients
 
-- `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_seed.rs` - journey safety policy, path filters, planned specs, curation debt and bootstrap coverage.
-- `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - impact analysis, immutable Git snapshots and journey selection.
+- `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_seed.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_impact_io.rs` - journey safety, path filters, impact snapshots and selection.
 - `cas-cli/src/qa_post_release.rs`, `cas-cli/src/cli/qa_post_release.rs` - release observations and persisted verdict state.
 - `cas-cli/src/qa_pass/`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/config/upkeep.rs` - independent QA, proof gates, non-product trace rebinds and upkeep stages.
 - `cas-cli/src/qa_pass/preflight.rs` - QA start checks for declared credentials, forbidden origins and environment readiness.
@@ -135,11 +132,12 @@
 
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, explicit `cas-cli/tests/` harnesses and `cas-cli/tests/integration/` modules.
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright and `scripts/journey-eval.sh` affected selection.
-- **Contributor policy:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`.
+- **Contributor policy / Rust proof:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`, and capped named `cargo nextest` / `cargo check` commands.
 - **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs`; **release records:** `docs/release-notes/`, `docs/release-reports/`.
 - **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs, locale/width captures and `docs/design/cli/captures/`.
 - **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/find-release-prebuild.sh`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`, `cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py`, `scripts/fast-rows-pre-push.sh`.
+- **Runner setup:** `scripts/install-cassy-actions-runner.sh`, `scripts/cassy-actions-runner-registration.sh`, `scripts/test-cassy-actions-runner-registration.sh`, and `ops/systemd/` runner units.
 - **Process-proof safety:** `scripts/run-verified-tests.sh`, `scripts/test-factory-client-terminal.py` - bounded discovery/process groups and PTY exit fixtures.
 - **Doc validation:** `scripts/check-changed-markdown.py`, `scripts/check-design-paths.py`, `scripts/release-train-announce.py` - Markdown, portable paths and four-body draft checks.
 - **Runbooks/config:** `ops/systemd/`, `docs/branch-protection/`, `docs/ci/`, `.mcp.json`, `.env.worktree.template`, `.claude/settings.json`, `.codex/hooks.json`.
@@ -149,5 +147,4 @@
 - CLI/library: `cas-cli/src/main.rs`, `cas-cli/src/lib.rs` (`cas`); TUI/daemon: `cas-cli/src/ui/factory/app/mod.rs`, `cas-cli/src/ui/factory/daemon/mod.rs`.
 - MCP: `cas-cli/src/mcp/daemon.rs` (`cas serve`); HTTP: `cas-cli/src/bridge/server/` (`cas bridge serve`).
 - Commander: `hub-web/src/main.ts` (Vite client served by `cas hub`); setup/hooks: `cas-cli/src/cli/setup.rs`, `cas-cli/src/cli/hook.rs`.
-- Worker Rust proof: capped `cargo nextest run -p <crate> --lib -E 'test(name)'` and `cargo check -p <crate> --lib` or `--tests`; queue owns full assembly.
 - Web proof: `hub-web/package.json` Vitest/typecheck and `scripts/journey-eval.sh` affected journeys.

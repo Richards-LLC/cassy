@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Slack channel inventory** — Add `cas violet channels` to list configured, Violet and Cloud project channels, report mismatches or incomplete discovery, and let `slack.channels` participate in multi-channel `cas update` reconciliation.
+
+### Changed
+
+- **Consistent terminal wrapping** — Use one explicit wrapping policy across initialization, activity, doctor and release-report output, keeping an overlong initialization path on its own row.
+
+- **Responsive terminal resizing** — Keep narrow factory views updating while avoiding shared-layout pauses for full-width viewer resizes that cannot change the layout.
+
+### Fixed
+
+- **Pattern operation responses** — Accept validated bare and wrapped Cloud rows, including archive results; report create and adoption timeouts as uncertain only after sending, preserving the error and reconciliation guidance while leaving pre-send failures as ordinary network errors.
+
+- **Closing batch-merged work** — Accept delivery tips contained in a batch head whose squash reached the target even when later commits changed the same paths, and avoid reopening independent QA for work already merged.
+
+- **Origin-based merge advice** — When the origin-selected successor is ahead of the local branch, name the required fast-forward before merging; a divergent local successor retains the local view.
+
+- **Supervisor identity after `/clear`** — Preserve a live Claude supervisor row across `/clear` and rebind its session after restart rather than creating a duplicate identity.
+
+- **Wake measurements** — Count turns wrapped in pasted-content and `Message from` transcript text so wake token and latency reports include them.
+
+- **macOS socket cleanup** — Require a complete native inventory of stream and datagram socket holders, along with existing ownership and inode checks, before removing an orphan GUI socket; incomplete evidence keeps the path.
+
+- **Review checkout retries** — Sync new task and scratch directories before Git work, and remove only a fresh checkout when either sync fails so a retry performs the sync again.
+
+- **Repository runner registration** — Name both repository and organization token types in installer errors, and omit the organization-only runner-group argument for repository registrations.
+
+- **Release copy validation** — Check forbidden user-facing wording in both User announcement bodies while allowing technical wording in the Dev thread.
+
 ## [3.77.0] - 2026-10-24
 
 ### Fixed

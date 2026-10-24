@@ -140,6 +140,7 @@ pub(crate) fn adopted_worker_supervisor(cas_root: &Path, worker: &Agent) -> Opti
         .ok()?;
     if metadata.name != session
         || metadata.daemon_pid <= 1
+        || metadata.daemon_pid > i32::MAX as u32
         || metadata.daemon_pid_starttime.is_none()
         || project != cas_root.parent()?.canonicalize().ok()?
         || crate::ui::factory::daemon_identity_is_live(&metadata)
@@ -173,6 +174,9 @@ pub(crate) fn adopted_worker_supervisor(cas_root: &Path, worker: &Agent) -> Opti
     let roster = agents.list(None).ok()?;
     let mut successor: Option<Agent> = None;
     for epic in epics {
+        if epic.task_type != crate::types::TaskType::Epic {
+            return None;
+        }
         let owner = epic.epic_verification_owner.as_deref()?.trim();
         let candidate = roster.iter().find(|agent| {
             crate::supervisor_notices::is_live(agent)

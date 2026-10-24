@@ -3465,13 +3465,14 @@ impl CasService {
                 if current.factory_session != worker.factory_session
                     || current.name != worker.name
                     || !crate::factory_session_scope::adopted_worker_supervisor(
-                    &self.inner.cas_root,
-                    &current,
-                )
-                .is_some_and(|owner| {
-                    Some(&owner.id) == caller_id.as_ref()
-                        && owner.factory_session == factory_session
-                }) {
+                        &self.inner.cas_root,
+                        &current,
+                    )
+                    .is_some_and(|owner| {
+                        Some(&owner.id) == caller_id.as_ref()
+                            && owner.factory_session == factory_session
+                    })
+                {
                     return Err(Self::error(
                         ErrorCode::INVALID_REQUEST,
                         "Adoption authority changed before shutdown; nothing further was signalled",

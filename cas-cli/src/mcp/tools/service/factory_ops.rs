@@ -13699,10 +13699,8 @@ mod tests {
         service.message_send(request).await.unwrap();
         let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session");
         let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
-        let rows = queue.poll_all(10).unwrap();
-        let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
-            &rows[0],
-        );
+        let row = queue.latest_session_activity("dead-session").unwrap().unwrap();
+        let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
         assert!(
             teams.inbox_has_unread_copy(&worker.name, "supervisor", &body),
             "orphan Claude must receive its body in the original team inbox"
@@ -13723,13 +13721,14 @@ mod tests {
             .expect("the next actual hook boundary renders the recovery body");
         assert!(context.contains("Preserve your committed work"));
         let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
-        let rows = queue.poll_all(10).unwrap();
-        assert_eq!(rows.len(), 1);
-        let report = queue.message_delivery_report(rows[0].id).unwrap().unwrap();
+        let report = queue.message_delivery_report(row.id).unwrap().unwrap();
         assert_eq!(
             report.recipient_receipt,
             Some(cas_store::SurfacingSource::HookSurfaced)
         );
+        assert!(crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
+            Some(&service.inner.cas_root), &input,
+        ).is_none(), "a second hook cannot render the same recovery body again");
     }
 
     #[cfg(unix)]
@@ -13737,12 +13736,28 @@ mod tests {
     async fn adopter_shutdown_stops_original_worker_process_gh1362() {
         use std::os::unix::process::CommandExt;
         let (_env, service, worker) = adopted_fleet_gh1362("adopter");
-        let mut command = std::process::Command::new("sleep");
-        command.arg("300").process_group(0);
+        use tokio::io::AsyncBufReadExt;
+        let mut command = std::process::Command::new("python3");
+        command.args(["-c", "import subprocess; p = subprocess.Popen(['sleep', '300'], start_new_session=True); print(p.pid, flush=True); p.wait()"])
+            .stdout(std::process::Stdio::piped()).process_group(0);
         let mut command = tokio::process::Command::from(command);
         command.kill_on_drop(true);
         let mut child = command.spawn().unwrap();
         let pid = child.id().unwrap();
+        let mut ready = String::new();
+        tokio::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).await.unwrap();
+        let escaped_pid: u32 = ready.trim().parse().unwrap();
+        let escaped_start = crate::mcp::daemon::read_pid_starttime(escaped_pid).unwrap();
+        struct EscapedChild(u32, u64);
+        impl Drop for EscapedChild {
+            fn drop(&mut self) {
+                if crate::mcp::daemon::pid_matches_fingerprint(self.0, self.1) {
+                    // SAFETY: this fixture captured and rechecked its disposable child identity.
+                    unsafe { libc::kill(self.0 as libc::pid_t, libc::SIGKILL); }
+                }
+            }
+        }
+        let escaped = EscapedChild(escaped_pid, escaped_start);
         crate::ui::factory::process_groups::track(
             &service.inner.cas_root,
             &worker.name,
@@ -13763,6 +13778,7 @@ mod tests {
             .expect("actual process must exit")
             .unwrap();
         assert!(!status.success());
+        assert!(!crate::mcp::daemon::pid_matches_fingerprint(escaped.0, escaped.1), "worker shutdown must also reap a child that started its own session");
         assert_eq!(
             crate::store::open_agent_store(&service.inner.cas_root)
                 .unwrap()

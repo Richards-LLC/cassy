@@ -94,6 +94,8 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
 
     if force_stale {
         let pid = session.metadata.daemon_pid;
+        // What the operator is confirming: this PID as it runs right now.
+        let confirmed_starttime = crate::mcp::daemon::read_pid_starttime(pid);
         if !force {
             use std::io::IsTerminal;
             if !io::stdin().is_terminal() {
@@ -102,11 +104,8 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
                      After checking that `ps -p {pid}` shows another program, rerun with --force."
                 );
             }
-            StatusLine::warning(format!(
-                "This removes session '{name}' and reaps its recorded workers without signalling PID {pid}. \
-                 Only continue if `ps -p {pid}` shows a program other than this factory daemon."
-            ))
-            .render(&mut fmt)?;
+            StatusLine::warning(force_stale_prompt(&name, pid, crate::hub::process_command(pid)))
+                .render(&mut fmt)?;
             write!(io::stdout(), "Continue? [y/N] ")?;
             io::stdout().flush()?;
             let mut input = String::new();
@@ -117,7 +116,12 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
                 return Ok(());
             }
         }
-        match force_clear_stale_session(&name, pid, &crate::mcp::daemon::read_pid_starttime)? {
+        match force_clear_stale_session(
+            &name,
+            pid,
+            confirmed_starttime,
+            &crate::mcp::daemon::read_pid_starttime,
+        )? {
             EndSessionOutcome::NotFound => {
                 StatusLine::info(format!(
                     "Session '{name}' no longer exists; nothing was cleared."
@@ -355,6 +359,7 @@ fn recorded_daemon(
 fn force_clear_stale_session(
     name: &str,
     confirmed_pid: u32,
+    confirmed_starttime: Option<u64>,
     starttime_of: &dyn Fn(u32) -> Option<u64>,
 ) -> Result<EndSessionOutcome> {
     let manager = SessionManager::new();
@@ -370,6 +375,12 @@ fn force_clear_stale_session(
     if pid != confirmed_pid {
         bail!(
             "Session '{name}' now records PID {pid}, not the PID {confirmed_pid} you confirmed; nothing was changed. Run `cas kill {name}` again."
+        );
+    }
+    // The same PID may have been reused by a new process since the prompt.
+    if confirmed_starttime.is_some() && starttime_of(pid) != confirmed_starttime {
+        bail!(
+            "PID {pid} started a new process after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
         );
     }
     // Refuse only on positive proof: a recorded start time that matches the
@@ -396,6 +407,20 @@ fn force_clear_stale_session(
     );
     manager.remove_metadata(name)?;
     Ok(EndSessionOutcome::CleanedStale)
+}
+
+/// The `--force-stale` confirmation: what is removed, and what the recorded
+/// PID runs now, so the operator can tell the daemon from another program.
+fn force_stale_prompt(name: &str, pid: u32, command: Option<String>) -> String {
+    let runs = match command {
+        Some(command) => format!("PID {pid} currently runs: {command}"),
+        None => format!("PID {pid}'s command could not be read; check it with `ps -p {pid}`"),
+    };
+    format!(
+        "This removes session '{name}' and reaps its recorded workers without signalling PID {pid}.\n\
+         {runs}\n\
+         Only continue if that is a program other than this session's factory daemon."
+    )
 }
 
 /// What `cas kill` knows about the process at a session's recorded PID.
@@ -655,7 +680,7 @@ mod tests {
         metadata.cas_root = Some(store.path().to_string_lossy().to_string());
         SessionManager::new().save_metadata(&metadata).unwrap();
 
-        let outcome = force_clear_stale_session("reused", other_pid, &|_| None);
+        let outcome = force_clear_stale_session("reused", other_pid, None, &|_| None);
         let other_alive =
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
         let started = std::time::Instant::now();
@@ -697,6 +722,7 @@ mod tests {
         let outcome = force_clear_stale_session(
             "unstamped",
             other_pid,
+            None,
             &crate::mcp::daemon::read_pid_starttime,
         );
         let other_alive =
@@ -716,6 +742,50 @@ mod tests {
         assert!(elapsed < std::time::Duration::from_secs(4), "the recorded worker was left running");
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert!(SessionManager::new().find_session(Some("unstamped")).unwrap().is_none());
+    }
+
+    /// cas-cb0b: the confirmation shows what the recorded PID runs now.
+    #[test]
+    fn force_stale_prompt_shows_what_the_pid_runs() {
+        let pid = std::process::id();
+        let command = crate::hub::process_command(pid).expect("this test's own command");
+        let prompt = force_stale_prompt("s", pid, Some(command.clone()));
+        assert!(prompt.contains(&command), "{prompt}");
+        // Without a readable command the operator still learns which PID to check.
+        let unreadable = force_stale_prompt("s", pid, None);
+        assert!(!unreadable.contains(&command) && unreadable.contains(&pid.to_string()));
+    }
+
+    /// cas-47037: the operator confirms one PID. A record that names another
+    /// one by the time --force-stale acts is left alone.
+    #[test]
+    fn force_stale_refuses_when_the_recorded_pid_changed() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        save_session("moved", i32::MAX as u32, project.path());
+
+        let error = force_clear_stale_session("moved", 1, None, &|_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not the PID 1 you confirmed"), "{error}");
+        assert!(SessionManager::new().find_session(Some("moved")).unwrap().is_some());
+    }
+
+    /// cas-47037: with no terminal to confirm on and no --force,
+    /// --force-stale exits non-zero and changes nothing.
+    #[test]
+    fn force_stale_without_a_terminal_or_force_changes_nothing() {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            return;
+        }
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        save_session("unconfirmed", i32::MAX as u32, project.path());
+
+        let error = execute_kill(Some("unconfirmed"), false, true).unwrap_err().to_string();
+        assert!(error.contains("no terminal is attached"), "{error}");
+        assert!(SessionManager::new().find_session(Some("unconfirmed")).unwrap().is_some());
     }
 
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and

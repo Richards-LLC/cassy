@@ -825,6 +825,13 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
 async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     let mut env = TestEnvGuard::temp_home();
     let fixture = arm_delivery("slowclose", "slow-close", &mut env).await;
+    let config_path = fixture.cas_root.join("config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap();
+    std::fs::write(
+        &config_path,
+        format!("[project]\ncanonical_id = \"github.com/org/slow-close\"\n{config}"),
+    )
+    .unwrap();
     let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
     run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &fixture.repo.root);
     run_git(
@@ -857,6 +864,11 @@ async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
     assert!(answer.contains("COMMITTED"), "{answer}");
     assert!(answer.contains("local-only target"), "{answer}");
     assert!(answer.contains(&git_stdout(&fixture.repo.root, &["rev-parse", "main"])), "{answer}");
+    assert_eq!(
+        delivery_state(&fixture),
+        WorkerDeliveryState::MergeAuthorized,
+        "early answer must precede the delivery close: {answer}",
+    );
 
     let task_store = open_task_store(&fixture.cas_root).unwrap();
     let mut notes = String::new();

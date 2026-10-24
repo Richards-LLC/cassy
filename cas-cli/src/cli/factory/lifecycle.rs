@@ -93,11 +93,18 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
     let mut fmt = Formatter::stdout(&mut stdout, theme);
 
     if force_stale {
+        let pid = session.metadata.daemon_pid;
         if !force {
+            use std::io::IsTerminal;
+            if !io::stdin().is_terminal() {
+                bail!(
+                    "--force-stale needs confirmation and no terminal is attached; session '{name}' was left unchanged. \
+                     After checking that `ps -p {pid}` shows another program, rerun with --force."
+                );
+            }
             StatusLine::warning(format!(
-                "This removes session '{name}' and reaps its recorded workers without signalling PID {}. \
-                 Only continue if `ps -p {}` shows a program other than this factory daemon.",
-                session.metadata.daemon_pid, session.metadata.daemon_pid
+                "This removes session '{name}' and reaps its recorded workers without signalling PID {pid}. \
+                 Only continue if `ps -p {pid}` shows a program other than this factory daemon."
             ))
             .render(&mut fmt)?;
             write!(io::stdout(), "Continue? [y/N] ")?;
@@ -110,8 +117,17 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
                 return Ok(());
             }
         }
-        force_clear_stale_session(&name, &crate::mcp::daemon::read_pid_starttime)?;
-        StatusLine::success(format!("Cleared stale session: {name}")).render(&mut fmt)?;
+        match force_clear_stale_session(&name, pid, &crate::mcp::daemon::read_pid_starttime)? {
+            EndSessionOutcome::NotFound => {
+                StatusLine::info(format!(
+                    "Session '{name}' no longer exists; nothing was cleared."
+                ))
+                .render(&mut fmt)?;
+            }
+            _ => {
+                StatusLine::success(format!("Cleared stale session: {name}")).render(&mut fmt)?;
+            }
+        }
         return Ok(());
     }
 
@@ -334,9 +350,11 @@ fn recorded_daemon(
 /// `cas kill <name> --force-stale` (cas-47037): the operator has confirmed
 /// that the PID recorded for `name` is not its factory daemon. Remove the
 /// record and reap the recorded workers, fingerprint-checked. The recorded
-/// PID is never signalled, and a PID verifiably still the daemon is refused.
+/// PID is never signalled, and a PID whose readable start time matches the
+/// recorded one, which proves it is the daemon, is refused.
 fn force_clear_stale_session(
     name: &str,
+    confirmed_pid: u32,
     starttime_of: &dyn Fn(u32) -> Option<u64>,
 ) -> Result<EndSessionOutcome> {
     let manager = SessionManager::new();
@@ -347,9 +365,22 @@ fn force_clear_stale_session(
         return Ok(EndSessionOutcome::NotFound);
     }
     let pid = session.metadata.daemon_pid;
-    if let RecordedDaemon::Same = recorded_daemon(&session, starttime_of) {
+    // The operator confirmed one PID; a record rewritten since then belongs
+    // to a daemon nobody has looked at.
+    if pid != confirmed_pid {
         bail!(
-            "Session '{name}': PID {pid} is verifiably still its factory daemon, so --force-stale does not apply. Run `cas kill {name}`."
+            "Session '{name}' now records PID {pid}, not the PID {confirmed_pid} you confirmed; nothing was changed. Run `cas kill {name}` again."
+        );
+    }
+    // Refuse only on positive proof: a recorded start time that matches the
+    // running PID's readable one. No record, or an unreadable start time,
+    // proves nothing, and the operator has checked the PID.
+    if session.is_running
+        && let Some(expected) = session.metadata.daemon_pid_starttime
+        && starttime_of(pid) == Some(expected)
+    {
+        bail!(
+            "Session '{name}': PID {pid} has the start time recorded for this session's daemon, so it is the daemon and --force-stale does not apply. Run `cas kill {name}`."
         );
     }
     crate::ui::factory::record_daemon_lifecycle(
@@ -624,7 +655,7 @@ mod tests {
         metadata.cas_root = Some(store.path().to_string_lossy().to_string());
         SessionManager::new().save_metadata(&metadata).unwrap();
 
-        let outcome = force_clear_stale_session("reused", &|_| None);
+        let outcome = force_clear_stale_session("reused", other_pid, &|_| None);
         let other_alive =
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
         let started = std::time::Instant::now();
@@ -643,6 +674,48 @@ mod tests {
         assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert!(SessionManager::new().find_session(Some("reused")).unwrap().is_none());
         assert!(daemon_log("reused").contains("\"force_stale\""));
+    }
+
+    /// cas-47037: a record with no start time proves nothing about the
+    /// running PID. `cas kill` withholds SIGKILL and points at --force-stale,
+    /// so --force-stale must clear such a session instead of refusing it.
+    #[test]
+    fn force_stale_clears_a_session_recorded_without_a_start_time() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let (worker_pgid, worker) = spawn_group("sleep", &["30"]);
+        let (other_pid, other) = spawn_group("sleep", &["30"]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        crate::ui::factory::process_groups::track(store.path(), "w1", "unstamped", worker_pgid)
+            .unwrap();
+        let mut metadata = save_session("unstamped", other_pid, project.path());
+        metadata.daemon_pid_starttime = None;
+        metadata.cas_root = Some(store.path().to_string_lossy().to_string());
+        SessionManager::new().save_metadata(&metadata).unwrap();
+
+        let outcome = force_clear_stale_session(
+            "unstamped",
+            other_pid,
+            &crate::mcp::daemon::read_pid_starttime,
+        );
+        let other_alive =
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(other_pid as i32), None).is_ok();
+        let started = std::time::Instant::now();
+        let stop_worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            kill_group(worker_pgid);
+        });
+        let worker_status = worker.join().unwrap().unwrap();
+        let elapsed = started.elapsed();
+        kill_group(other_pid);
+        other.join().unwrap().unwrap();
+        stop_worker.join().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
+        assert!(other_alive, "--force-stale signalled the recorded PID");
+        assert!(elapsed < std::time::Duration::from_secs(4), "the recorded worker was left running");
+        assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
+        assert!(SessionManager::new().find_session(Some("unstamped")).unwrap().is_none());
     }
 
     /// cas-4b42: without a positive start-time match SIGKILL is withheld, and

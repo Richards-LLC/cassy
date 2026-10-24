@@ -15414,7 +15414,7 @@ fn run_factory_branch_merge_gate_for_delivery(
         ) {
             let batch = task.deliverables.integration_batch.as_ref().expect("checked above");
             return MergeStateGateOutcome::ProceedWithNote(format!(
-                "integration batch {}@{} delivered {} as target-reachable squash {}; exact changed-path final blobs and modes match (supervisor {}).",
+                "integration batch {}@{} delivered {} as target-reachable squash {}; the squash's own changed-path final blobs and modes match, independently of later target edits (supervisor {}).",
                 batch.branch, batch.tip, batch.delivered_head, squash, batch.supervisor_id
             ));
         }

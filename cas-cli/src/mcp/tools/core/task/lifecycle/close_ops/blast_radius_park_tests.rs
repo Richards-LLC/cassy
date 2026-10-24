@@ -677,6 +677,7 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     let brief = Path::new(doc_path).file_name().unwrap().to_str().unwrap();
     let inventories = git_calls.iter().filter(|args| {
         args.get(1).is_some_and(|arg| arg == "ls-tree")
+            && args.iter().any(|arg| arg == "--full-tree")
             && args.iter().any(|arg| arg == &delivered_tip)
     }).count();
     assert_eq!(inventories, 1, "one delivered-tree inventory per close: {git_calls:?}");

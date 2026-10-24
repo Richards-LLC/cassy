@@ -48,7 +48,7 @@ pub use harness::{CapabilityState, HarnessCapabilities, SupervisorCli};
 pub use input_stream::{BracketedPasteTracker, StreamByteClass, key_stream_marks_submit};
 pub use mux::{
     InjectCompletion, InjectOutcome, InjectStart, InjectTicket, InjectWriteStall, Mux, MuxConfig,
-    MuxEvent,
+    MuxEvent, WorkerTeardown,
 };
 pub use opencode::{
     OPENCODE_PLUGIN_FILE_NAME, OPENCODE_PLUGIN_SOURCE, OPENCODE_STATE_DIRECTORY,

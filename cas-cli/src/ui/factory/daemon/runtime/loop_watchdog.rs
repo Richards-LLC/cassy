@@ -1166,16 +1166,47 @@ fn kill_hung_helpers(_parent: u32, _min_age_secs: u64) -> Vec<String> {
     Vec::new()
 }
 
+/// A shutdown request reaches the loop at its next pass, which a wedged loop
+/// never starts (GH #1363). After the loop has stayed wedged this long past
+/// the request, the watchdog records why and ends the process itself.
+pub(crate) const WEDGED_SHUTDOWN_EXIT: Duration = Duration::from_secs(20);
+
+/// A loop wedge that persists is reported again this often (GH #1363); the
+/// first report alone left a wedged daemon silent for 37 minutes.
+pub(crate) const WEDGE_REPORT_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Start the watchdog thread. It checks the lanes' heartbeats every
 /// [`LANE_HEARTBEAT_MS`] and writes the status file every
 /// [`WATCHDOG_INTERVAL_SECS`], and at once when a lane wedges (cas-6931). It
-/// stops when `shutdown` is set, and removes its status file on the way out
-/// so a closed session does not read as a silent daemon.
+/// stops when `shutdown` is set and the loop is not wedged, and removes its
+/// status file on the way out so a closed session does not read as a silent
+/// daemon. A loop still wedged [`WEDGED_SHUTDOWN_EXIT`] after the request
+/// ends the process with a recorded reason.
 pub(crate) fn spawn_watchdog(
     progress: Arc<LoopProgress>,
     cas_dir: PathBuf,
     session: String,
     shutdown: Arc<AtomicBool>,
+) -> Option<std::thread::JoinHandle<()>> {
+    spawn_watchdog_with_exit(progress, cas_dir, session, shutdown, |_| {
+        // The reason is already on disk. Skip destructors and atexit
+        // handlers: a wedged process may hold any lock they need.
+        // SAFETY: _exit only terminates the calling process.
+        #[cfg(unix)]
+        unsafe {
+            libc::_exit(70)
+        };
+        #[cfg(not(unix))]
+        std::process::exit(70);
+    })
+}
+
+fn spawn_watchdog_with_exit(
+    progress: Arc<LoopProgress>,
+    cas_dir: PathBuf,
+    session: String,
+    shutdown: Arc<AtomicBool>,
+    exit: impl FnOnce(&str) + Send + 'static,
 ) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name("cas-loop-watchdog".to_string())
@@ -1187,8 +1218,55 @@ pub(crate) fn spawn_watchdog(
             let mut window = PassWindow::default();
             let mut phase_latency = std::collections::BTreeMap::new();
             let mut frame_stats = FrameStats::default();
-            while !shutdown.load(Ordering::Relaxed) {
+            let mut shutdown_seen: Option<Instant> = None;
+            let mut last_wedge_report: Option<Instant> = None;
+            loop {
                 let wedge = progress.check_wedge();
+                let loop_wedge = wedge.as_ref().filter(|wedge| wedge.lane != Lane::Jobs);
+                let now = progress.clock.now();
+                if shutdown.load(Ordering::Relaxed) {
+                    let Some(stuck) = loop_wedge else {
+                        break;
+                    };
+                    let since = *shutdown_seen.get_or_insert(now);
+                    if now.saturating_duration_since(since) >= WEDGED_SHUTDOWN_EXIT {
+                        let reason = format!(
+                            "shutdown was requested {} s ago but the daemon loop is wedged in \
+                             {}/{} for {} s; exiting without teardown",
+                            WEDGED_SHUTDOWN_EXIT.as_secs(),
+                            stuck.lane.name(),
+                            stuck.step,
+                            stuck.duration.as_secs(),
+                        );
+                        tracing::error!(target: "cas::loop_watchdog", "daemon exiting: {reason}");
+                        crate::ui::factory::record_daemon_lifecycle(
+                            &session,
+                            "forced_exit",
+                            &reason,
+                        );
+                        exit(&reason);
+                        return;
+                    }
+                }
+                match loop_wedge {
+                    Some(stuck) if stuck.new => last_wedge_report = Some(now),
+                    Some(stuck)
+                        if last_wedge_report.is_none_or(|reported| {
+                            now.saturating_duration_since(reported) >= WEDGE_REPORT_INTERVAL
+                        }) =>
+                    {
+                        tracing::warn!(
+                            target: "cas::loop_watchdog",
+                            lane = %stuck.lane.name(),
+                            step = %stuck.step,
+                            elapsed_ms = stuck.duration.as_millis() as u64,
+                            "daemon lane still wedged"
+                        );
+                        last_wedge_report = Some(now);
+                    }
+                    Some(_) => {}
+                    None => last_wedge_report = None,
+                }
                 let wedged_now = wedge.as_ref().is_some_and(|wedge| wedge.new);
                 if ticks_since_write >= ticks_per_write || wedged_now {
                     let now = Utc::now();
@@ -1350,6 +1428,53 @@ mod tests {
         assert_eq!(
             progress.status_line().as_deref(),
             Some("slow: io/pty output 6 ms")
+        );
+    }
+
+    /// GH #1363: SIGTERM only sets the shutdown flag, which a wedged loop
+    /// never reads. The watchdog used to stop and delete loop.json at once,
+    /// leaving a silent daemon that `cas kill` could not end. It now keeps
+    /// watching, and after WEDGED_SHUTDOWN_EXIT it writes the reason to
+    /// daemon.log and ends the process.
+    #[test]
+    fn gh1363_wedged_loop_exits_with_recorded_reason_after_shutdown() {
+        let _home = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let clock = FakeClock::new();
+        let progress = LoopProgress::with_clock(LoopClock::Fake(Arc::clone(&clock)));
+        progress.begin_pass();
+        progress.enter(LoopPhase::PendingSpawns);
+        clock.advance(Duration::from_secs(2));
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let (exited, reason) = std::sync::mpsc::channel();
+        let handle = spawn_watchdog_with_exit(
+            Arc::clone(&progress),
+            temp.path().to_path_buf(),
+            "gh1363-wedge".to_string(),
+            shutdown,
+            move |why| exited.send(why.to_string()).unwrap(),
+        )
+        .expect("watchdog starts");
+
+        assert!(
+            reason.recv_timeout(Duration::from_millis(750)).is_err(),
+            "a shutdown gets its grace before a forced exit"
+        );
+        assert!(
+            crate::factory_daemon_health::read_status(temp.path(), "gh1363-wedge").is_some(),
+            "the wedge evidence stays in loop.json"
+        );
+        clock.advance(WEDGED_SHUTDOWN_EXIT);
+        let reason = reason
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a wedged loop ends the process after the grace");
+        handle.join().unwrap();
+        assert!(reason.contains("control/pending spawns"), "{reason}");
+        let log = std::fs::read_to_string(crate::ui::factory::daemon_log_path("gh1363-wedge"))
+            .unwrap();
+        assert!(
+            log.contains("\"forced_exit\"") && log.contains("control/pending spawns"),
+            "{log}"
         );
     }
 

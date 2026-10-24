@@ -53,6 +53,37 @@ pub fn daemon_trace_log_path(session_name: &str) -> PathBuf {
     session_log_dir(session_name).join("daemon-trace.log")
 }
 
+/// Append one `daemon_lifecycle` record to the session's daemon.log and
+/// daemon-trace.log (GH #1363).
+///
+/// The daemon's tracing goes to the project runtime log, so before this
+/// record a session that spawned no worker left both files empty and read
+/// as a launch that died. Every start, exit and forced exit writes one line
+/// here, synchronously, so it survives an immediate process exit. The write
+/// is best effort.
+pub(crate) fn record_daemon_lifecycle(session_name: &str, stage: &str, detail: &str) {
+    let record = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "event": "daemon_lifecycle",
+        "factory_session": session_name,
+        "pid": std::process::id(),
+        "stage": stage,
+        "detail": detail,
+    });
+    let line = format!("{record}\n");
+    for path in [
+        daemon_log_path(session_name),
+        daemon_trace_log_path(session_name),
+    ] {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+        }
+    }
+}
+
 /// Log file path for server stderr
 pub fn server_log_path(session_name: &str) -> PathBuf {
     session_log_dir(session_name).join("server.log")

@@ -7,6 +7,13 @@ use crate::ui::components::{Formatter, Renderable, StatusLine};
 use crate::ui::factory::{SessionInfo, SessionManager};
 use crate::ui::theme::ActiveTheme;
 
+/// How long a daemon gets to honour SIGTERM before `cas kill` sends SIGKILL
+/// (GH #1363). A daemon whose loop is wedged never honours it.
+const SIGTERM_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// How long SIGKILL gets before the kill is reported as failed.
+const SIGKILL_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
 fn terminate_process(pid: u32) -> Result<()> {
     #[cfg(unix)]
     {
@@ -132,6 +139,24 @@ pub(crate) enum EndSessionOutcome {
 /// time no longer matches belongs to another process now: it is never
 /// signalled, and the session is cleaned up as stale.
 pub(crate) fn end_session_by_name(name: &str) -> Result<EndSessionOutcome> {
+    end_session_with_grace(name, SIGTERM_GRACE)
+}
+
+fn wait_for_daemon_exit(
+    metadata: &crate::ui::factory::SessionMetadata,
+    grace: std::time::Duration,
+) -> bool {
+    let deadline = std::time::Instant::now() + grace;
+    while crate::ui::factory::daemon_identity_is_live(metadata) {
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    true
+}
+
+fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result<EndSessionOutcome> {
     let manager = SessionManager::new();
     let Some(session) = manager.find_session(Some(name))? else {
         return Ok(EndSessionOutcome::NotFound);
@@ -149,16 +174,26 @@ pub(crate) fn end_session_by_name(name: &str) -> Result<EndSessionOutcome> {
         return Ok(EndSessionOutcome::CleanedStale);
     }
     terminate_process(pid)?;
-    // SIGTERM delivery is not death. Wait before reclaiming socket names; if
-    // shutdown stalls, retain the receipt and leave the live daemon reachable.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while crate::ui::factory::daemon_identity_is_live(&session.metadata) {
-        if std::time::Instant::now() >= deadline {
+    // SIGTERM delivery is not death. Wait before reclaiming socket names.
+    if !wait_for_daemon_exit(&session.metadata, term_grace) {
+        // GH #1363: a daemon whose loop is wedged never acts on SIGTERM.
+        // Escalate, but only against the same daemon identity.
+        #[cfg(unix)]
+        if crate::ui::factory::daemon_identity_is_live(&session.metadata) {
+            let reason = format!(
+                "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
+                term_grace.as_secs()
+            );
+            crate::ui::factory::record_daemon_lifecycle(name, "killed", &reason);
+            tracing::warn!(session = name, pid, "{reason}");
+            use nix::sys::signal::{Signal, kill};
+            let _ = kill(nix::unistd::Pid::from_raw(pid as i32), Signal::SIGKILL);
+        }
+        if !wait_for_daemon_exit(&session.metadata, SIGKILL_GRACE) {
             bail!(
-                "Session '{name}' is still shutting down; sockets retained. Check: cas list --name {name}"
+                "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
             );
         }
-        std::thread::sleep(std::time::Duration::from_millis(20));
     }
     // A replacement daemon may have acquired the same friendly name while
     // shutdown ran. Its receipt and sockets belong to it, not this command.
@@ -171,6 +206,52 @@ pub(crate) fn end_session_by_name(name: &str) -> Result<EndSessionOutcome> {
     }
     manager.remove_metadata(name)?;
     Ok(EndSessionOutcome::Ended)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// GH #1363: a daemon whose loop is wedged ignores SIGTERM. `cas kill`
+    /// used to give up after 3 s and leave it running; it now escalates to
+    /// SIGKILL, records why in daemon.log, and removes the session.
+    #[test]
+    fn kill_escalates_to_sigkill_when_the_daemon_ignores_sigterm() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let child = std::process::Command::new("sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // Reap the child so a killed daemon does not linger as a zombie.
+        let reaper = std::thread::spawn(move || {
+            let mut child = child;
+            child.wait()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let manager = SessionManager::new();
+        manager
+            .save_metadata(&crate::ui::factory::create_metadata(
+                "wedged", pid, "supervisor", &[], None, None, None,
+            ))
+            .unwrap();
+
+        let outcome = end_session_with_grace("wedged", std::time::Duration::from_millis(300));
+        if outcome.is_err() {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        let status = reaper.join().unwrap().unwrap();
+        assert_eq!(outcome.unwrap(), EndSessionOutcome::Ended);
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+        assert!(manager.find_session(Some("wedged")).unwrap().is_none());
+        let log =
+            std::fs::read_to_string(crate::ui::factory::daemon_log_path("wedged")).unwrap();
+        assert!(log.contains("\"killed\"") && log.contains("sent SIGKILL"), "{log}");
+    }
 }
 
 /// Kill all factory sessions

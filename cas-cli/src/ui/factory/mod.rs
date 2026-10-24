@@ -151,7 +151,7 @@ pub use session::{
     generate_session_name, metadata_path, panic_log_path, provisioner_pin_path, session_log_dir,
     socket_path, tui_log_path,
 };
-pub(crate) use session::daemon_identity_is_live;
+pub(crate) use session::{daemon_identity_is_live, record_daemon_lifecycle};
 use std::io;
 use std::path::Path;
 

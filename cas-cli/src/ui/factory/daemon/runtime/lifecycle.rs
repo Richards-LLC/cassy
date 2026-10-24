@@ -3287,6 +3287,16 @@ impl FactoryDaemon {
         // Backstop for every entry path: a gone client must not kill the
         // daemon (cas-5918). The process entry points set it earlier.
         crate::server_signals::ignore_sigpipe_for_server();
+        // GH #1363: daemon.log otherwise holds only stderr, so a healthy
+        // session that spawned no worker left it empty.
+        crate::ui::factory::record_daemon_lifecycle(
+            &self.session_name,
+            "started",
+            &format!(
+                "daemon loop starting; runtime tracing goes to {}",
+                self.app.cas_dir().join("logs").display()
+            ),
+        );
         // cas-ca22: mint this run's Commander relay token into the hub's
         // private directory; only the hub relay presenting it may carry
         // operator_verified. Without it every client is stored unverified.
@@ -4156,6 +4166,11 @@ impl FactoryDaemon {
                 tokio::time::sleep(sleep_dur).await;
             }
         }
+        crate::ui::factory::record_daemon_lifecycle(
+            &self.session_name,
+            "stopping",
+            "shutdown requested (supervisor exit, quit or signal; the cause is in the runtime log); tearing down",
+        );
 
         // End only this session's Violet watches before removing its liveness
         // receipt. Mark stopping without waiting for an in-flight HTTP claim;
@@ -4215,6 +4230,14 @@ impl FactoryDaemon {
             ],
         );
 
+        crate::ui::factory::record_daemon_lifecycle(
+            &self.session_name,
+            "exited",
+            &match &cleanup_result {
+                Ok(()) => "teardown complete".to_string(),
+                Err(error) => format!("teardown finished with an error: {error}"),
+            },
+        );
         cleanup_result?;
 
         Ok(())

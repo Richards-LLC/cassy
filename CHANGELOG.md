@@ -17,19 +17,19 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Consistent terminal wrapping** — Use one explicit wrapping policy across initialization, activity, doctor and release-report output, keeping an overlong initialization path on its own row.
 
-- **Responsive terminal resizing** — Keep narrow factory views updating while avoiding shared-layout pauses for full-width viewer resizes that cannot change the layout.
+- **No-op terminal resizing** — Skip the 100 ms shared-layout pause for full-width viewer resizes and same-size input takeovers that cannot change the layout, while compact transitions and changed owner sizes still refresh.
 
 ### Fixed
 
-- **Pattern operation responses** — Accept validated bare and wrapped Cloud rows, including archive results; report create and adoption timeouts as uncertain only after sending, preserving the error and reconciliation guidance while leaving pre-send failures as ordinary network errors.
+- **Pattern operation responses** — Accept validated bare and wrapped Cloud rows, including archive results; report any create or adoption network failure after request-body transmission as uncertain, preserving the error and reconciliation guidance while leaving pre-send failures as ordinary network errors.
 
 - **Closing batch-merged work** — Accept delivery tips contained in a batch head whose squash reached the target even when later commits changed the same paths, and avoid reopening independent QA for work already merged.
 
 - **Origin-based merge advice** — When the origin-selected successor is ahead of the local branch, name the required fast-forward before merging; a divergent local successor retains the local view.
 
-- **Supervisor identity after `/clear`** — Preserve a live Claude supervisor row across `/clear` and rebind its session after restart rather than creating a duplicate identity.
+- **Supervisor identity after `/clear`** — Preserve a live Claude supervisor row across `/clear` and rebind it on the next session start after `/clear` rather than creating a duplicate identity.
 
-- **Wake measurements** — Count turns wrapped in pasted-content and `Message from` transcript text so wake token and latency reports include them.
+- **Wake measurements** — Count pasted-content and `Message from` wrapped turns with a leading newline or space before the CAS envelope, so wake token and latency reports include them.
 
 - **macOS socket cleanup** — Require a complete native inventory of stream and datagram socket holders, along with existing ownership and inode checks, before removing an orphan GUI socket; incomplete evidence keeps the path.
 

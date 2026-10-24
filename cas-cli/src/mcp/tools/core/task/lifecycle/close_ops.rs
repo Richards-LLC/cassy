@@ -5358,7 +5358,7 @@ impl CasCore {
     /// (perhaps a supervisor on another machine) are never adopted.
     fn adopt_dead_owner_epic(
         &self,
-        task_store: &dyn cas_store::TaskStore,
+        close_notes: &mut CloseNoteTracker<'_>,
         task: &mut Task,
         owner: &str,
     ) -> bool {
@@ -5385,8 +5385,7 @@ impl CasCore {
             return false;
         };
         task.epic_verification_owner = Some(caller.id.clone());
-        append_close_decision_note(
-            task_store,
+        close_notes.record(
             task,
             &format!(
                 "decision: live supervisor `{name}` ({id}) adopted epic `{epic}` from dead \
@@ -7261,12 +7260,7 @@ impl CasCore {
         let close_snapshot = task.clone();
         // Track only this request's unpersisted suffix. Stored history may be
         // rewritten (for example to correct provenance) while gates run.
-        let mut persisted_note_bytes = task.notes.len();
-        let mut record_close_note = |task: &mut Task, note: &str| {
-            if append_close_decision_note(task_store.as_ref(), task, note) {
-                persisted_note_bytes = task.notes.len();
-            }
-        };
+        let mut close_notes = CloseNoteTracker::new(task_store.as_ref(), &task);
 
         // GH #886: local `blocks` edges no longer serialize task start, but
         // they remain a close/merge gate. Check before any close disposition,
@@ -7694,7 +7688,7 @@ impl CasCore {
                     caller_id.as_deref(),
                     caller_name.as_deref(),
                     caller_session.as_deref(),
-                ) && !self.adopt_dead_owner_epic(task_store.as_ref(), &mut task, &owner)
+                ) && !self.adopt_dead_owner_epic(&mut close_notes, &mut task, &owner)
                 {
                     return Err(McpError {
                         code: ErrorCode::INVALID_PARAMS,
@@ -8072,7 +8066,7 @@ impl CasCore {
             ) {
                 EpicCloseGateOutcome::Proceed => {}
                 EpicCloseGateOutcome::ProceedWithNote(note) => {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
                 // cas-b412: the store fact "every child is terminal" is
                 // cheap and checked first. Only then may a live supervisor
@@ -8160,7 +8154,7 @@ impl CasCore {
                     epic_autoclose::default_branch_ref(&close_project_root).and_then(|reference| {
                         resolve_branch_sha(&close_project_root, &format!("{reference}^{{commit}}"))
                     });
-                record_close_note(
+                close_notes.record(
                     &mut task,
                     &format!(
                         "decision: epic branch `{gone}` is gone locally and on origin, so this \
@@ -8289,7 +8283,7 @@ impl CasCore {
                 return Ok(Self::tool_error("INTEGRATION BATCH RECEIPT REJECTED: supplied commit_receipt is neither the recorded delivery nor an exact target-reachable batch squash"));
             }
             let original = batch.delivered_head.clone();
-            record_close_note(&mut task, &format!(
+            close_notes.record(&mut task, &format!(
                 "integration batch receipt {} accepted; QA and executable hooks retain delivery anchor {}.",
                 supplied.expect("validated above"), original
             ));
@@ -8376,7 +8370,7 @@ impl CasCore {
                 }
                 Ok(None) => None,
                 Err(message) if supervisor_override => {
-                    record_close_note(
+                    close_notes.record(
                         &mut task,
                         &format!(
                             "✅ DECISION unresolved parked anchor accepted by supervisor override: {}. {message}",
@@ -8431,7 +8425,7 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(format!(
                     "NO DELIVERY CLOSE REJECTED: {message}"))),
             };
-            record_close_note(&mut task, &format!(
+            close_notes.record(&mut task, &format!(
                 "No delivery declared by {}: {}. {measurement} QA and factory-branch delivery gates do not apply for this attempt; verification and dirty-work checks remain required.",
                 actor.id, req.reason.as_deref().unwrap_or("").trim(),
             ));
@@ -8479,7 +8473,7 @@ impl CasCore {
                 )
             });
             if let Some(anchor) = squash_anchor.as_deref() {
-                record_close_note(
+                close_notes.record(
                     &mut task,
                     &format!(
                         "QA evidence scoped to delivery anchor {anchor}: commit_receipt {} is a batch squash carrying that delivery's paths.",
@@ -8506,7 +8500,7 @@ impl CasCore {
                 )
             });
             match registry_upkeep::at_park(
-                task_store.as_ref(), &mut task, &self.cas_root, &evidence_repo,
+                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
@@ -8514,7 +8508,7 @@ impl CasCore {
                 Err(message) => return Ok(Self::tool_error(message)),
             }
             match docs_upkeep::at_park(
-                task_store.as_ref(), &mut task, &self.cas_root, &evidence_repo,
+                &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
                 &resolved_parent_branch, commit_receipt_window.as_ref(), qa_receipt,
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
@@ -8540,11 +8534,11 @@ impl CasCore {
             ) {
                 Ok(notes) => {
                     for note in notes {
-                        record_close_note(&mut task, &note);
+                        close_notes.record(&mut task, &note);
                     }
                 }
                 Err(message) if supervisor_override => {
-                    record_close_note(
+                    close_notes.record(
                         &mut task,
                         &format!(
                             "✅ DECISION QA evidence gate waived by supervisor override: {}. Waived refusal: {message}",
@@ -8582,7 +8576,7 @@ impl CasCore {
                 // the lane belongs to this task) — record the residue note
                 // on the task and let the close continue.
                 MergeStateGateOutcome::ProceedWithNote(note) => {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
                 MergeStateGateOutcome::Unresolved(message) => {
                     return Ok(Self::tool_error(message));
@@ -8843,7 +8837,7 @@ impl CasCore {
                     return Ok(Self::tool_error(refusal));
                 }
                 super::qa_dispatch::QaCloseGate::Waived(note) => {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
             }
         }
@@ -8886,7 +8880,7 @@ impl CasCore {
                     epic_branch,
                     integration_branch,
                 ) {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
             }
         }
@@ -9020,7 +9014,7 @@ impl CasCore {
                         "Verification rejected (dispatch {}; verdict {}): {}",
                         dispatch.id, verdict.id, verdict.summary
                     );
-                    record_close_note(&mut task, &rejection_note);
+                    close_notes.record(&mut task, &rejection_note);
                     typed_dispatch = None;
                 }
 
@@ -9999,18 +9993,18 @@ impl CasCore {
                     .as_deref()
                     .and_then(|claimed| provenance.merge_evidence_note(claimed))
                 {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
                 if let Some(note) = receipt
                     .discrepancy_note_with_provenance(req.commit_receipt.as_deref(), &provenance)
                 {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
                 // cas-49c0: name main-checkout edits that match this delivery.
                 if let Some(note) =
                     stray_main_checkout_edit_note(worker_wt, &resolved_parent_branch)
                 {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
             }
         }
@@ -10292,7 +10286,7 @@ impl CasCore {
                     Ok(basis) => basis,
                     Err(message) if supervisor_override => {
                         let audit = format!("decision: epic tip already contained in the default branch; supervisor overrode {message} Reason: {}", req.reason.as_deref().unwrap_or_default());
-                        record_close_note(&mut task, &audit);
+                        close_notes.record(&mut task, &audit);
                         Some(audit)
                     }
                     Err(message) => return Ok(Self::tool_error(message)),
@@ -10679,7 +10673,7 @@ impl CasCore {
                 }
                 ZeroCommitCloseOutcome::Proceed => {}
                 ZeroCommitCloseOutcome::ProceedWithReceipt(note) => {
-                    record_close_note(&mut task, &note);
+                    close_notes.record(&mut task, &note);
                 }
             }
         }
@@ -10975,10 +10969,7 @@ impl CasCore {
                 req.id, req.id, req.id
             ))
         };
-        let pending_notes = task.notes[persisted_note_bytes..]
-            .strip_prefix("\n\n")
-            .unwrap_or(&task.notes[persisted_note_bytes..])
-            .to_owned();
+        let pending_notes = close_notes.pending(&task).to_owned();
         let mut current = task_store.get(&req.id).ok();
         let mut retried_notes = false;
         task.updated_at = loop {
@@ -18893,6 +18884,30 @@ fn find_squash_tree_match(
         }
     }
     None
+}
+
+/// Owns the persisted note boundary for one close request. Every helper that
+/// persists audit notes uses this tracker, including upkeep and epic adoption.
+struct CloseNoteTracker<'a> {
+    store: &'a dyn cas_store::TaskStore,
+    persisted_bytes: usize,
+}
+
+impl<'a> CloseNoteTracker<'a> {
+    fn new(store: &'a dyn cas_store::TaskStore, task: &Task) -> Self {
+        Self { store, persisted_bytes: task.notes.len() }
+    }
+
+    fn record(&mut self, task: &mut Task, note: &str) {
+        if append_close_decision_note(self.store, task, note) {
+            self.persisted_bytes = task.notes.len();
+        }
+    }
+
+    fn pending<'t>(&self, task: &'t Task) -> &'t str {
+        let pending = &task.notes[self.persisted_bytes..];
+        pending.strip_prefix("\n\n").unwrap_or(pending)
+    }
 }
 
 fn append_close_decision_note(task_store: &dyn cas_store::TaskStore, task: &mut Task, note: &str) -> bool {

@@ -1521,8 +1521,8 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
     env.set("CAS_AGENT_ROLE", "supervisor");
     let repo = f.dir.path();
     let id = "cas-90ea-upkeep";
-    // Malformed, untouched registry debt generates a persisted warning. New
-    // codemap-owned paths also exercise the supervisor's documentation escape.
+    // Registry escapes and documentation warnings persist audit notes before
+    // the terminal write, without a later close-note writer to mask duplication.
     std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
     std::fs::create_dir_all(repo.join(".claude")).unwrap();
     std::fs::write(repo.join("docs/qa/journeys.yaml"), "journeys: [broken\n").unwrap();
@@ -1558,7 +1558,8 @@ async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
     let upkeep: Vec<_> = closed.notes.split("\n\n")
         .filter(|note| note.contains("UPKEEP WARNING") || note.contains("UPKEEP ESCAPE"))
         .collect();
-    assert!(!upkeep.is_empty(), "the real upkeep writers must run: {}", closed.notes);
+    assert!(closed.notes.contains("UPKEEP ESCAPE G1"), "registry writer must run: {}", closed.notes);
+    assert!(closed.notes.contains("UPKEEP WARNING"), "docs writer must run: {}", closed.notes);
     for note in upkeep {
         assert_eq!(closed.notes.matches(note).count(), 1, "persisted upkeep must appear once: {}", closed.notes);
     }

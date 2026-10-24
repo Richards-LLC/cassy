@@ -74,7 +74,7 @@ impl Fixture {
         config.qa = Some(self.qa.clone());
         config.save(self._db.path()).unwrap();
         at_park(
-            &self.store,
+            &mut CloseNoteTracker::new(&self.store, &self.task),
             &mut self.task,
             self._db.path(),
             self.repo.path(),
@@ -121,7 +121,7 @@ fn registry_upkeep_receipt_uses_target_ownership_for_delivery_files() {
         config.qa = Some(f.qa.clone());
         config.save(f._db.path()).unwrap();
         let result = at_park(
-            &f.store,
+            &mut CloseNoteTracker::new(&f.store, &f.task),
             &mut f.task,
             f._db.path(),
             f.repo.path(),
@@ -200,7 +200,7 @@ fn registry_upkeep_added_surface_requires_ownership_or_reasoned_escape() {
     f.qa.registry.enforce = RegistryEnforcement::Strict;
     assert!(f.run(&head).unwrap_err().contains("src/pages/legacy.ts"));
     at_park(
-        &f.store,
+        &mut CloseNoteTracker::new(&f.store, &f.task),
         &mut f.task,
         f._db.path(),
         f.repo.path(),

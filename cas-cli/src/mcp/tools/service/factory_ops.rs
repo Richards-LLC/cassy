@@ -3429,8 +3429,15 @@ impl CasService {
         // Orphan PTYs cannot be attached to this daemon. Stop only durable,
         // fingerprinted groups from the proven-dead original session; retain
         // the normal queued pane path for every worker already owned here.
-        let groups = crate::ui::factory::process_groups::list(&self.inner.cas_root)
-            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        let groups = if selected
+            .iter()
+            .any(|worker| adopted_workers.contains(&worker.id))
+        {
+            crate::ui::factory::process_groups::list(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        } else {
+            Vec::new()
+        };
         for worker in selected
             .iter()
             .filter(|worker| adopted_workers.contains(&worker.id))
@@ -3455,7 +3462,9 @@ impl CasService {
                 let current = agent_store
                     .get(&worker.id)
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
-                if !crate::factory_session_scope::adopted_worker_supervisor(
+                if current.factory_session != worker.factory_session
+                    || current.name != worker.name
+                    || !crate::factory_session_scope::adopted_worker_supervisor(
                     &self.inner.cas_root,
                     &current,
                 )
@@ -13526,7 +13535,7 @@ mod tests {
         }
         let mut worker = worker_named("orphan-worker", "orphan-id");
         worker.factory_session = Some("dead-session".into());
-        worker.metadata.insert("cli".into(), "claude".into());
+        worker.metadata.insert("worker_cli".into(), "claude".into());
         agents.register(&worker).unwrap();
         let tasks = crate::store::open_task_store(&root).unwrap();
         let mut epic = Task::new("cas-adopted-epic".into(), "Adopted epic".into());
@@ -13561,6 +13570,14 @@ mod tests {
             serde_json::to_vec(&metadata).unwrap(),
         )
         .unwrap();
+        crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session")
+            .init_team_config(
+                &[worker.name.clone()],
+                env.home(),
+                &std::collections::HashMap::new(),
+                "old-supervisor",
+            )
+            .unwrap();
         let core = CasCore::with_daemon(root, None, None);
         core.set_agent_id_for_testing(if caller == "orphan-id" {
             caller.into()

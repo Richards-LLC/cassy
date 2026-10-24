@@ -135,14 +135,13 @@ pub(crate) fn adopted_worker_supervisor(cas_root: &Path, worker: &Agent) -> Opti
     let metadata: crate::ui::factory::SessionMetadata =
         serde_json::from_slice(&std::fs::read(crate::ui::factory::metadata_path(session)).ok()?)
             .ok()?;
+    let project = Path::new(metadata.project_dir.as_deref()?)
+        .canonicalize()
+        .ok()?;
     if metadata.name != session
         || metadata.daemon_pid <= 1
         || metadata.daemon_pid_starttime.is_none()
-        || metadata
-            .project_dir
-            .as_deref()
-            .and_then(|dir| Path::new(dir).canonicalize().ok())
-            != cas_root.parent().and_then(|dir| dir.canonicalize().ok())
+        || project != cas_root.parent()?.canonicalize().ok()?
         || crate::ui::factory::daemon_identity_is_live(&metadata)
     {
         return None;

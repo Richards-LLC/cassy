@@ -175,23 +175,46 @@ fn end_session_with(
         return Ok(EndSessionOutcome::NotFound);
     }
     let pid = session.metadata.daemon_pid;
-    let same_daemon = match session.metadata.daemon_pid_starttime {
-        Some(expected) => starttime_of(pid) == Some(expected),
-        None => true,
+    // cas-47037: the daemon is dead only when its PID is not running or a
+    // readable start time differs. An unreadable one proves nothing.
+    let identity = match session.metadata.daemon_pid_starttime {
+        _ if !session.is_running => DaemonIdentity::Gone,
+        None => DaemonIdentity::Same,
+        Some(expected) => match starttime_of(pid) {
+            Some(actual) if actual == expected => DaemonIdentity::Same,
+            Some(_) => DaemonIdentity::Gone,
+            None => DaemonIdentity::Unknown,
+        },
     };
-    if !session.is_running || !same_daemon {
-        // cas-fcb0: the daemon is already gone, for example after a manual
-        // `kill -9`. Its workers lead their own sessions and outlive it, so
-        // reap the groups it recorded (fingerprint-checked) before the
-        // record that names its store is removed.
-        #[cfg(unix)]
-        reap_session_worker_groups(name, &session.metadata);
-        manager.remove_metadata(name)?;
-        return Ok(EndSessionOutcome::CleanedStale);
+    match identity {
+        DaemonIdentity::Gone => {
+            // cas-fcb0: the daemon is already gone, for example after a
+            // manual `kill -9`. Its workers lead their own sessions and
+            // outlive it, so reap the groups it recorded (fingerprint-
+            // checked) before the record that names its store is removed.
+            #[cfg(unix)]
+            reap_session_worker_groups(name, &session.metadata, "after the daemon exited");
+            manager.remove_metadata(name)?;
+            return Ok(EndSessionOutcome::CleanedStale);
+        }
+        DaemonIdentity::Unknown => {
+            let reason = format!(
+                "cas kill: worker reap skipped; daemon PID {pid} is running but its start time could not be read, so it may still be this session's daemon"
+            );
+            crate::ui::factory::record_daemon_lifecycle(name, "worker_reap_skipped", &reason);
+            tracing::warn!(session = name, pid, "{reason}");
+            bail!(
+                "Session '{name}' was left untouched: PID {pid} is running but its start time could not be read, so it may still be this session's daemon. \
+                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up the session and reap its workers; \
+                 if it shows another program, the daemon is gone and `cas factory gc cleanup --force` removes what it left behind."
+            );
+        }
+        DaemonIdentity::Same => {}
     }
     terminate_process(pid)?;
     // SIGTERM delivery is not death. Wait before reclaiming socket names.
-    let mut sigkilled = false;
+    // Set once the daemon is known dead after an escalation; it names how.
+    let mut reap_cause: Option<&str> = None;
     let mut exited_mid_escalation = false;
     if !wait_for_daemon_exit(&session.metadata, term_grace) {
         // GH #1363: a daemon whose loop is wedged never acts on SIGTERM.
@@ -241,7 +264,11 @@ fn end_session_with(
                 );
             }
         }
-        sigkilled = true;
+        reap_cause = Some(if exited_mid_escalation {
+            "after the daemon exited"
+        } else {
+            "after SIGKILL"
+        });
     }
     // A replacement daemon may have acquired the same friendly name while
     // shutdown ran. Its receipt, sockets and freshly recorded workers belong
@@ -250,7 +277,7 @@ fn end_session_with(
         if current.metadata.daemon_pid != pid
             || current.metadata.daemon_pid_starttime != session.metadata.daemon_pid_starttime
         {
-            if sigkilled {
+            if reap_cause.is_some() {
                 crate::ui::factory::record_daemon_lifecycle(
                     name,
                     "worker_reap_skipped",
@@ -267,14 +294,24 @@ fn end_session_with(
     // them, and a SIGKILL can land before its teardown stopped them. Reap
     // the groups the daemon recorded for this session.
     #[cfg(unix)]
-    if sigkilled {
-        reap_session_worker_groups(name, &session.metadata);
+    if let Some(cause) = reap_cause {
+        reap_session_worker_groups(name, &session.metadata, cause);
     }
     manager.remove_metadata(name)?;
     Ok(EndSessionOutcome::Ended)
 }
 
-/// Kill the worker process groups a SIGKILLed daemon recorded for
+/// What `cas kill` knows about the process at a session's recorded PID.
+enum DaemonIdentity {
+    /// Still the session's daemon, or no start time was recorded to doubt it.
+    Same,
+    /// Not running, or a different process (its start time differs).
+    Gone,
+    /// Running, but its start time could not be read.
+    Unknown,
+}
+
+/// Kill the worker process groups a dead daemon recorded for
 /// `session` (cas-3372). Each reap is fingerprint-checked, so a recycled
 /// PGID is never signalled. The groups live in the daemon's own store,
 /// which a CAS_ROOT daemon records as `cas_root` (cas-4b42).
@@ -282,6 +319,7 @@ fn end_session_with(
 fn reap_session_worker_groups(
     session: &str,
     metadata: &crate::ui::factory::SessionMetadata,
+    cause: &str,
 ) {
     let skipped = |why: String| {
         let detail = format!("cas kill: worker reap skipped; {why}");
@@ -304,7 +342,7 @@ fn reap_session_worker_groups(
     for record in records.iter().filter(|record| record.factory_session == session) {
         let outcome = crate::ui::factory::process_groups::reap_blocking(&cas_root, record);
         let detail = format!(
-            "cas kill: reaped worker '{}' process group {} after SIGKILL: {outcome:?}",
+            "cas kill: reaped worker '{}' process group {} {cause}: {outcome:?}",
             record.worker_name, record.pgid
         );
         tracing::info!(session, "{detail}");
@@ -455,6 +493,7 @@ mod tests {
         let elapsed = started.elapsed();
         reaped.join().unwrap();
         assert_eq!(outcome.unwrap(), EndSessionOutcome::CleanedStale);
+        assert_eq!(worker_status.signal(), Some(libc::SIGKILL));
         assert!(
             elapsed < std::time::Duration::from_secs(4),
             "the dead daemon's worker group was left running"

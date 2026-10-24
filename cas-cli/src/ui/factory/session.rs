@@ -298,7 +298,6 @@ impl SessionManager {
         }
     }
 
-    /// Save session metadata
     /// Save the metadata a running daemon publishes, naming the store it
     /// tracks its worker process groups in. Every daemon start path saves
     /// through here, so `cas kill` can reap a SIGKILLed daemon's workers
@@ -313,6 +312,7 @@ impl SessionManager {
         Ok(metadata)
     }
 
+    /// Save session metadata
     pub fn save_metadata(&self, metadata: &SessionMetadata) -> std::io::Result<()> {
         if !valid_session_name(&metadata.name) {
             return Err(std::io::Error::new(

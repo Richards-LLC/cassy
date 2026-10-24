@@ -1512,3 +1512,52 @@ async fn integrated_parked_receipt_survives_reused_lane_cas_79fc() {
         assert_eq!(git(repo, &["rev-parse", LANE]), next_tip, "never move the next task's lane");
     }
 }
+
+/// Upkeep writes its audit before the terminal CAS, through the real handler.
+#[tokio::test]
+async fn terminal_close_keeps_persisted_upkeep_notes_once_cas_90ea() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let repo = f.dir.path();
+    let id = "cas-90ea-upkeep";
+    // Malformed, untouched registry debt generates a persisted warning. New
+    // codemap-owned paths also exercise the supervisor's documentation escape.
+    std::fs::create_dir_all(repo.join("docs/qa")).unwrap();
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(repo.join("docs/qa/journeys.yaml"), "journeys: [broken\n").unwrap();
+    std::fs::write(repo.join(".claude/CODEMAP.md"), "- `src/` — Product\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "seed upkeep inputs"]);
+    let base = git(repo, &["rev-parse", "HEAD"]);
+    std::fs::create_dir_all(repo.join("src/new")).unwrap();
+    std::fs::write(repo.join("src/new/entry.rs"), "pub fn entry() {}\n").unwrap();
+    git(repo, &["add", "."]);
+    git(repo, &["commit", "-q", "-m", "fix(cas-90ea-upkeep): delivered entry"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let mut config = crate::config::Config::load(&f.cas_dir()).unwrap();
+    config.set("qa.enabled", "false").unwrap();
+    config.save(&f.cas_dir()).unwrap();
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.assignee = None;
+    task.deliverables.factory_branch_anchor = Some(receipt.clone());
+    task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+        work_target: task.deliverables.work_target.clone().unwrap(),
+        assignee: WORKER.into(), branch: "main".into(), base_sha: base,
+    });
+    f.put(&task);
+    let response = call(&f.supervisor, serde_json::json!({
+        "action": "close", "id": id, "commit_receipt": receipt,
+        "supervisor_override": true, "reason": "Reviewed integrated delivery and upkeep debt",
+    })).await;
+    let closed = f.task(id);
+    assert_eq!(closed.status, TaskStatus::Closed, "{response}");
+    let upkeep: Vec<_> = closed.notes.split("\n\n")
+        .filter(|note| note.contains("UPKEEP WARNING") || note.contains("UPKEEP ESCAPE"))
+        .collect();
+    assert!(!upkeep.is_empty(), "the real upkeep writers must run: {}", closed.notes);
+    for note in upkeep {
+        assert_eq!(closed.notes.matches(note).count(), 1, "persisted upkeep must appear once: {}", closed.notes);
+    }
+}

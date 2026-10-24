@@ -669,16 +669,25 @@ async fn park_requires_a_focused_receipt_in_the_changed_crate_cas_eac2() {
     // Count real Git commands rather than inspecting cache internals. Both
     // receipt filters and the close's package/audit readers share this lookup.
     let trace = std::fs::read_to_string(trace).unwrap();
-    let greps: Vec<Vec<String>> = trace.lines()
+    let git_calls: Vec<Vec<String>> = trace.lines()
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|event| event["event"] == "start")
         .filter_map(|event| Some(event["argv"].as_array()?.iter().filter_map(|arg| arg.as_str().map(str::to_owned)).collect::<Vec<_>>()))
-        .filter(|args| args.get(1).is_some_and(|arg| arg == "grep") && args.iter().any(|arg| arg == "-lF"))
         .collect();
     let brief = Path::new(doc_path).file_name().unwrap().to_str().unwrap();
-    assert_eq!(greps.iter().filter(|args| args.iter().any(|arg| arg == brief)).count(), 1, "one doc lookup per close: {greps:?}");
-    assert!(greps.iter().all(|args| !args.iter().any(|arg| arg == "operator.py")), "cheap extension checks run before grep: {greps:?}");
-    assert!(greps.iter().all(|args| args.iter().any(|arg| arg == &delivered_tip)), "source searches use the delivered tree: {greps:?}");
+    let inventories = git_calls.iter().filter(|args| {
+        args.get(1).is_some_and(|arg| arg == "ls-tree")
+            && args.iter().any(|arg| arg == &delivered_tip)
+    }).count();
+    assert_eq!(inventories, 1, "one delivered-tree inventory per close: {git_calls:?}");
+    let source_batches = git_calls.iter().filter(|args| {
+        args.get(1).is_some_and(|arg| arg == "cat-file")
+            && args.iter().any(|arg| arg == "--batch")
+    }).count();
+    assert_eq!(source_batches, 1, "one Rust-source batch per close: {git_calls:?}");
+    assert!(git_calls.iter().all(|args| {
+        args.get(1).is_none_or(|arg| arg != "grep") || !args.iter().any(|arg| arg == brief)
+    }), "the include lookup should use the batched delivered tree: {git_calls:?}");
 }
 
 /// AC2: a worker receipt in `widget` at the parked tip already covers

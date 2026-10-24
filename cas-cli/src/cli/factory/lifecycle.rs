@@ -175,14 +175,33 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
     }
     terminate_process(pid)?;
     // SIGTERM delivery is not death. Wait before reclaiming socket names.
+    let mut sigkilled = false;
     if !wait_for_daemon_exit(&session.metadata, term_grace) {
         // GH #1363: a daemon whose loop is wedged never acts on SIGTERM.
-        // Escalate, but only against the same daemon identity.
-        // cas-3372: SIGKILL needs a positive identity. An unreadable or
+        // Escalate only on a positive identity (cas-3372): an unreadable or
         // unrecorded start time is not a match.
+        let identity = match session.metadata.daemon_pid_starttime {
+            None => Err("the session record has no daemon start time"),
+            Some(expected) => match crate::mcp::daemon::read_pid_starttime(pid) {
+                Some(actual) if actual == expected => Ok(()),
+                Some(_) => Err("the PID's start time no longer matches the daemon's"),
+                None => Err("the daemon's start time could not be read"),
+            },
+        };
+        if let Err(why) = identity {
+            // cas-4b42: say what actually happened, and leave a record.
+            let reason = format!(
+                "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; SIGKILL withheld because {why}",
+                term_grace.as_secs()
+            );
+            crate::ui::factory::record_daemon_lifecycle(name, "kill_withheld", &reason);
+            tracing::warn!(session = name, pid, "{reason}");
+            bail!(
+                "Session '{name}' (PID {pid}) did not exit after SIGTERM, and SIGKILL was withheld because {why}. \
+                 If `ps -p {pid}` shows this factory daemon, run `kill -9 {pid}`, then `cas kill {name}` to clean up."
+            );
+        }
         #[cfg(unix)]
-        if let Some(expected) = session.metadata.daemon_pid_starttime
-            && crate::mcp::daemon::read_pid_starttime(pid) == Some(expected)
         {
             let reason = format!(
                 "cas kill: daemon PID {pid} did not exit within {} s of SIGTERM; sent SIGKILL",
@@ -198,20 +217,34 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
                 "Session '{name}' (PID {pid}) survived SIGTERM and SIGKILL; sockets retained. Check: cas list --name {name}"
             );
         }
-        // Workers lead their own sessions, so the daemon's death does not
-        // reach them, and a SIGKILL can land before its teardown stopped
-        // them. Reap the groups the daemon recorded for this session.
-        #[cfg(unix)]
-        reap_session_worker_groups(name, &session.metadata);
+        sigkilled = true;
     }
     // A replacement daemon may have acquired the same friendly name while
-    // shutdown ran. Its receipt and sockets belong to it, not this command.
+    // shutdown ran. Its receipt, sockets and freshly recorded workers belong
+    // to it, not this command, so this check precedes the reap (cas-4b42).
     if let Some(current) = manager.find_session(Some(name))? {
         if current.metadata.daemon_pid != pid
             || current.metadata.daemon_pid_starttime != session.metadata.daemon_pid_starttime
         {
+            if sigkilled {
+                crate::ui::factory::record_daemon_lifecycle(
+                    name,
+                    "worker_reap_skipped",
+                    &format!(
+                        "cas kill: worker reap skipped; replacement daemon PID {} now owns this session",
+                        current.metadata.daemon_pid
+                    ),
+                );
+            }
             return Ok(EndSessionOutcome::Ended);
         }
+    }
+    // Workers lead their own sessions, so the daemon's death does not reach
+    // them, and a SIGKILL can land before its teardown stopped them. Reap
+    // the groups the daemon recorded for this session.
+    #[cfg(unix)]
+    if sigkilled {
+        reap_session_worker_groups(name, &session.metadata);
     }
     manager.remove_metadata(name)?;
     Ok(EndSessionOutcome::Ended)
@@ -219,26 +252,31 @@ fn end_session_with_grace(name: &str, term_grace: std::time::Duration) -> Result
 
 /// Kill the worker process groups a SIGKILLed daemon recorded for
 /// `session` (cas-3372). Each reap is fingerprint-checked, so a recycled
-/// PGID is never signalled.
+/// PGID is never signalled. The groups live in the daemon's own store,
+/// which a CAS_ROOT daemon records as `cas_root` (cas-4b42).
 #[cfg(unix)]
 fn reap_session_worker_groups(
     session: &str,
     metadata: &crate::ui::factory::SessionMetadata,
 ) {
-    let Some(project_dir) = metadata.project_dir.as_deref() else {
-        return;
+    let skipped = |why: String| {
+        let detail = format!("cas kill: worker reap skipped; {why}");
+        tracing::warn!(session, "{detail}");
+        crate::ui::factory::record_daemon_lifecycle(session, "worker_reap_skipped", &detail);
     };
-    let project_dir = std::path::Path::new(project_dir);
-    let own_store = project_dir.join(".cas");
-    let cas_root = if own_store.is_dir() {
-        own_store
-    } else {
-        match crate::store::find_cas_root_ignoring_env(project_dir) {
-            Ok(root) => root,
-            Err(_) => return,
+    let cas_root = match session_store(metadata) {
+        Ok(root) => root,
+        Err(why) => return skipped(why),
+    };
+    let records = match crate::ui::factory::process_groups::list(&cas_root) {
+        Ok(records) => records,
+        Err(error) => {
+            return skipped(format!(
+                "could not list worker process groups in {}: {error}",
+                cas_root.display()
+            ));
         }
     };
-    let records = crate::ui::factory::process_groups::list(&cas_root).unwrap_or_default();
     for record in records.iter().filter(|record| record.factory_session == session) {
         let outcome = crate::ui::factory::process_groups::reap_blocking(&cas_root, record);
         let detail = format!(
@@ -248,6 +286,32 @@ fn reap_session_worker_groups(
         tracing::info!(session, "{detail}");
         crate::ui::factory::record_daemon_lifecycle(session, "worker_reaped", &detail);
     }
+}
+
+/// The store a session's daemon recorded its worker groups in.
+#[cfg(unix)]
+fn session_store(
+    metadata: &crate::ui::factory::SessionMetadata,
+) -> std::result::Result<std::path::PathBuf, String> {
+    if let Some(root) = metadata.cas_root.as_deref() {
+        let root = std::path::PathBuf::from(root);
+        return if root.is_dir() {
+            Ok(root)
+        } else {
+            Err(format!("the daemon's recorded store {} is gone", root.display()))
+        };
+    }
+    let Some(project_dir) = metadata.project_dir.as_deref() else {
+        return Err("the session record names no store or project directory".to_string());
+    };
+    let project_dir = std::path::Path::new(project_dir);
+    let own_store = project_dir.join(".cas");
+    if own_store.is_dir() {
+        return Ok(own_store);
+    }
+    crate::store::find_cas_root_ignoring_env(project_dir).map_err(|error| {
+        format!("no store found for project {}: {error}", project_dir.display())
+    })
 }
 
 #[cfg(all(test, unix))]

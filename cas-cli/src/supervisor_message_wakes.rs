@@ -386,13 +386,13 @@ fn machine_turn_names(text: &str, id: i64) -> bool {
         let Some((_, body)) = text.split_once('>') else {
             return false;
         };
-        text = body;
+        text = body.trim_start();
     }
     if text.starts_with("Message from ") {
         let Some((_, body)) = text.split_once(": ") else {
             return false;
         };
-        text = body;
+        text = body.trim_start();
     }
     text.starts_with(&format!("[cas #{id} "))
 }

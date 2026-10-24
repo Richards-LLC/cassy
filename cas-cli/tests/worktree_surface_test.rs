@@ -3384,6 +3384,10 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
         }
         let result = service.coordination(Parameters(request.clone())).await.unwrap();
         let text = get_text(&result);
+        assert!(text.contains(&format!("Target: origin/main @ {before}")), "{text}");
+        if local_behind {
+            assert_eq!(std::fs::read_to_string(repo.root.join("delivery.rs")).unwrap(), "pub fn delivered() {}\n");
+        }
         if !text.contains("nothing new to merge") || !text.contains("already in main") {
             failures.push(format!("contained source (local behind={local_behind}) must be explicit: {text}"));
         }
@@ -3391,6 +3395,7 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
             failures.push(format!("no-op (local behind={local_behind}) opened verification {}", dispatch.id));
         }
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "main"]), before);
+        assert_eq!(git_stdout(remote.path(), &["rev-parse", "refs/heads/main"]), before);
     }
 
     // cas-e718: a worker-only request cannot guess among parked tasks,

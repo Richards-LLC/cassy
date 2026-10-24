@@ -212,7 +212,7 @@ fn cas_0a4c_real_binary_missing_selector_is_one_secret_free_json_error() {
 
 /// Read the real CLI's report against isolated ordinary-auth REST services.
 /// No registration, mapping mutation, Slack body read or activation is allowed.
-fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authorities: Vec<(&str, serde_json::Value)>, registration: bool) -> serde_json::Value {
+fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authorities: Vec<(&str, serde_json::Value)>, registration: bool, expected_exit: i32) -> serde_json::Value {
     use serde_json::json;
     let temp = TempDir::new().unwrap();
     let root = temp.path().join(".cas");
@@ -238,8 +238,15 @@ fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authoritie
             assert_eq!(request.method(), &tiny_http::Method::Get, "report is read only");
             assert_eq!(request.url(), path);
             assert!(request.headers().iter().any(|h| h.field.equiv("Authorization") && h.value.as_str() == "Bearer ordinary-fixture-user"));
+            // Deployed activation inventory is discovery, with Vercel's default
+            // caching header; Violet and binding authority explicitly use no-store.
+            let cache_control = if path.starts_with("/api/coordination/bindings/activation?") {
+                "public, max-age=0, must-revalidate"
+            } else {
+                "no-store"
+            };
             request.respond(tiny_http::Response::from_string(body.to_string()).with_header(
-                tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap()
+                tiny_http::Header::from_bytes("Cache-Control", cache_control).unwrap()
             )).unwrap();
         }
         assert!(server.try_recv().unwrap().is_none(), "no activation or registration");
@@ -250,7 +257,7 @@ fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authoritie
     let output = command.output().unwrap();
     // Join even when the CLI fails, so no fixture server outlives this test.
     let served = remote.join();
-    assert_eq!(output.status.code(), Some(1), "findings must exit 1: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.status.code(), Some(expected_exit), "unexpected report status: {}", String::from_utf8_lossy(&output.stderr));
     served.unwrap();
     assert!(!root.join("cas.db").exists(), "listing must not create a local agent database");
     serde_json::from_slice(&output.stdout).unwrap()
@@ -278,7 +285,7 @@ fn channels_report_unions_both_stores_and_configured_unmapped_channels() {
         ("C01BOTH",channel_authority("C01BOTH","qa.invalid/channels",true)),
         ("C02CLOUD",channel_authority("C02CLOUD","qa.invalid/channels",false)),
         ("C03CONFIG",absent.clone()), ("C04VIOLET",absent),
-    ], true);
+    ], true, 1);
     assert_eq!(report["complete"], true);
     let rows = report["channels"].as_array().unwrap();
     assert_eq!(rows.iter().map(|r| r["channel_id"].as_str().unwrap()).collect::<Vec<_>>(), ["C01BOTH","C02CLOUD","C03CONFIG","C04VIOLET"]);
@@ -294,7 +301,7 @@ fn channels_report_unions_both_stores_and_configured_unmapped_channels() {
     ]), vec![], vec![
         ("C01BOTH",channel_authority("C01BOTH","qa.invalid/channels",true)),
         ("C03CONFIG",json!({"schema":"cassy.binding-reconciliation/v1","code":"completed","binding":null,"strict_activation":null})),
-    ], false);
+    ], false, 1);
     assert_eq!(without_registration["complete"],false);
     assert_eq!(without_registration["channels"].as_array().unwrap().len(),2);
     assert!(without_registration["errors"].to_string().contains("Cloud-only discovery unavailable"));
@@ -310,7 +317,7 @@ fn channels_flags_project_mismatches_and_never_calls_them_verified_matches() {
         ("C01BOTH",channel_authority("C01BOTH","another/project",true)),
         ("C02CLOUD",channel_authority("C02CLOUD","qa.invalid/channels",true)),
         ("C03CONFIG",json!({"schema":"cassy.binding-reconciliation/v1","code":"completed","binding":null,"strict_activation":null})),
-    ], true);
+    ], true, 1);
     let rows=report["channels"].as_array().unwrap();
     for row in &rows[..2] {
         assert_eq!(row["flags"],json!(["project_mismatch"]),"{row}");
@@ -318,4 +325,17 @@ fn channels_flags_project_mismatches_and_never_calls_them_verified_matches() {
         assert!(row["remedy"].as_str().unwrap().contains("inspect"),"a mismatch must not silently remap a channel");
     }
     assert_eq!(report["ok"],false);
+}
+
+#[test]
+fn channels_registered_inventory_accepts_deployed_discovery_cache_headers() {
+    let report = channels_report(serde_json::json!([
+        {"channel_id":"C03CONFIG","channel_name":"configured","project_id":"qa.invalid/channels"}
+    ]), vec!["C03CONFIG"], vec![
+        ("C03CONFIG",channel_authority("C03CONFIG","qa.invalid/channels",true)),
+    ], true, 0);
+    assert_eq!(report["complete"],true);
+    assert_eq!(report["ok"],true);
+    assert_eq!(report["channels"].as_array().unwrap().len(),1);
+    assert_eq!(report["channels"][0]["cloud_verified"],true);
 }

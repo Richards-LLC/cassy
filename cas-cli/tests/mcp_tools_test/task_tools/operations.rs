@@ -4872,11 +4872,13 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
 
 #[tokio::test]
 async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
-    for (caller, message, allowed) in [
-        ("test-agent", "unnamed WIP before review", true),
-        ("test-agent", "fix(cas-abcd): another task's work", false),
-        ("other-worker", "unnamed WIP before review", false),
-        ("other-worker", "fix(cas-abcd): another task's work", false),
+    for (caller, message, refusal, reassign_to_caller) in [
+        ("test-agent", "unnamed WIP before review", None, false),
+        ("test-agent", "fix(cas-abcd): another task's work", Some("foreign commit"), false),
+        ("other-worker", "unnamed WIP before review", Some("not you"), false),
+        // Reassignment makes this caller authorized, so the old worker's
+        // branch history must be refused by commit ownership instead.
+        ("other-worker", "unnamed WIP before review", Some("foreign commit"), true),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
@@ -4922,25 +4924,31 @@ async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
             })).unwrap();
             service.task(Parameters(request)).await.expect("hold transition");
         }
+        if reassign_to_caller {
+            let mut reassigned = tasks.get(&task.id).expect("task after review hold");
+            reassigned.assignee = Some(caller.into());
+            tasks.update(&reassigned).expect("reassign task after review hold");
+        }
         let result = if caller == worker.name {
             service.task(Parameters(start())).await
         } else {
-            let other = Agent::new_with_role("other-worker-id".into(), caller.into(), AgentRole::Worker);
+            let mut other = Agent::new_with_role("other-worker-id".into(), caller.into(), AgentRole::Worker);
+            other.metadata.insert("clone_path".into(), root.display().to_string());
             agents.register(&other).unwrap();
             let other_core = CasCore::with_daemon(cas_dir.clone(), None, None);
             other_core.set_agent_id_for_testing(other.id);
             CasService::new(other_core, None).task(Parameters(start())).await
         };
-        if allowed {
+        if refusal.is_none() {
             result.unwrap_or_else(|error| panic!("same worker's WIP must resume: {error}"));
         } else {
-            let error = result.expect_err("foreign worker or other-task commits must refuse");
-            // pin: refusal must identify foreign-task provenance or the unauthorized caller.
-            assert!(error.message.contains("foreign commit") || error.message.contains("not you"),
-                "{caller}, {message}: {error}");
+            let error = result.expect_err("foreign worker or foreign commits must refuse");
+            // pin: distinguish commit ownership from the assignment gate.
+            assert!(error.message.contains(refusal.unwrap()),
+                "{caller}, {message}: expected {refusal:?}, got {error}");
         }
         let saved = tasks.get(&task.id).unwrap();
-        assert_eq!(saved.status, if allowed { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
+        assert_eq!(saved.status, if refusal.is_none() { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
         assert_eq!(saved.deliverables.factory_branch_start, boundary);
         assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
         assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);

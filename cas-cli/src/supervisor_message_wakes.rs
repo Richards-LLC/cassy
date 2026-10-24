@@ -386,13 +386,13 @@ fn machine_turn_names(text: &str, id: i64) -> bool {
         let Some((_, body)) = text.split_once('>') else {
             return false;
         };
-        text = body;
+        text = body.trim_start();
     }
     if text.starts_with("Message from ") {
         let Some((_, body)) = text.split_once(": ") else {
             return false;
         };
-        text = body;
+        text = body.trim_start();
     }
     text.starts_with(&format!("[cas #{id} "))
 }
@@ -849,7 +849,8 @@ mod tests {
             (
                 "claude",
                 serde_json::json!([
-                    {"type":"user","timestamp":"2026-10-20T17:00:00Z","message":{"content":"[cas #42 peer] field report"}},
+                    // Claude inserts a newline inside its pasted-content wrapper (cas-7176).
+                    {"type":"user","timestamp":"2026-10-20T17:00:00Z","message":{"content":"\n\n<pasted_content id=\"x\">\n[cas #42 peer] field report\n</pasted_content>"}},
                     {"type":"assistant","message":{"id":"a","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}},
                     {"type":"user","message":{"content":[{"type":"tool_result","content":"tool response"}]}},
                     {"type":"assistant","message":{"id":"a","stop_reason":"end_turn","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":9}}},
@@ -862,7 +863,7 @@ mod tests {
                 "codex",
                 serde_json::json!([
                     {"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":500,"output_tokens":100}}}},
-                    {"type":"response_item","timestamp":"2026-10-20T17:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"[cas #42 peer] field report"}]}},
+                    {"type":"response_item","timestamp":"2026-10-20T17:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Message from peer: \n[cas #42 peer] field report"}]}},
                     {"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":700,"output_tokens":140}}}},
                     {"type":"event_msg","payload":{"type":"task_complete"}},
                     {"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"unrelated"}]}},

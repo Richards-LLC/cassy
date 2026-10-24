@@ -263,7 +263,13 @@ fn compact_activity_item(
         ]));
     }
 
-    let wrapped = wrap_text(&activity_summary, summary_width);
+    let wrapped = crate::ui::word_wrap::wrap_words(
+        &activity_summary,
+        summary_width,
+        |text| text.chars().count(),
+        crate::ui::word_wrap::OverlongWordPolicy::HardWrap { spare_columns: 0 },
+    )
+    .lines;
     let mut lines = Vec::with_capacity(wrapped.len().max(1));
     let first = wrapped.first().cloned().unwrap_or_default();
     lines.push(Line::from(vec![
@@ -332,46 +338,6 @@ fn event_category_style(event_type: &EventType, styles: &crate::ui::theme::Style
             styles.text_error
         }
         EventType::WorkerFileEdited | EventType::WorkerGitCommit | EventType::WorkerActivity => styles.text_accent,
-    }
-}
-
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-
-    let width = width.max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        let word_len = word.chars().count();
-        if current.is_empty() {
-            push_wrapped_word(word, width, &mut current, &mut lines);
-        } else if current.chars().count() + 1 + word_len <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(std::mem::take(&mut current));
-            push_wrapped_word(word, width, &mut current, &mut lines);
-        }
-    }
-
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
-}
-
-fn push_wrapped_word(word: &str, width: usize, current: &mut String, lines: &mut Vec<String>) {
-    for ch in word.chars() {
-        if current.chars().count() >= width {
-            lines.push(std::mem::take(current));
-        }
-        current.push(ch);
     }
 }
 

@@ -94,7 +94,7 @@ def lint_body(index: int, body: str, pre_publication: bool = False) -> None:
             fail(f"body {BODY_NAMES[index]} line {line_number} starts with #")
         if re.match(r"^-\s", line):
             fail(f"body {BODY_NAMES[index]} line {line_number} uses a hyphen bullet")
-        if index == 0:
+        if index in (0, 1):
             lowered = line.lower()
             for forbidden in USER_FORBIDDEN:
                 if forbidden in lowered:

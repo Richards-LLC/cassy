@@ -2588,6 +2588,102 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         );
     }
 
+    #[test]
+    fn ancestor_test_receipt_runtime_read_keeps_the_old_path_match_floor_cas_27f8() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".cas");
+        let repo = root.join("worktrees/worker");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("cas-cli/tests")).unwrap();
+        std::fs::write(
+            repo.join("cas-cli/Cargo.toml"),
+            "[package]\nname = \"cas\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(repo.join(".markdownlint-cli2.jsonc"), "old rules\n").unwrap();
+        std::fs::write(
+            repo.join("cas-cli/tests/release_report_test.rs"),
+            "fn read_rules() { let _ = std::fs::read_to_string(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../.markdownlint-cli2.jsonc\")); }\n",
+        )
+        .unwrap();
+        fixture_commit_as(&repo, "runtime-read fixture");
+        let receipt_head = fixture_head(&repo);
+        record_passing_test_for_tests(&root, &repo, &receipt_head, "cas", "test(cached)");
+
+        std::fs::write(repo.join(".markdownlint-cli2.jsonc"), "updated rules\n").unwrap();
+        fixture_commit_as(&repo, "runtime-read config change");
+        let delivered_head = fixture_head(&repo);
+
+        assert!(
+            passing_test_receipts(&root, &repo, &delivered_head).is_empty(),
+            "a runtime read of a nonstandard extension still invalidates the ancestor test receipt"
+        );
+    }
+
+    #[test]
+    fn ancestor_test_receipt_reads_cat_file_while_writing_large_batches_cas_27f8() {
+        use std::process::Stdio;
+        use std::time::{Duration, Instant};
+
+        const TEST: &str = "factory_worker_check::tests::ancestor_test_receipt_reads_cat_file_while_writing_large_batches_cas_27f8";
+        const REPO: &str = "CAS_27F8_BATCH_REPO";
+        const HEAD: &str = "CAS_27F8_BATCH_HEAD";
+        if let (Some(repo), Some(head)) = (std::env::var_os(REPO), std::env::var_os(HEAD)) {
+            let repo = PathBuf::from(repo);
+            let tree = DeliveredTree::load(&repo, head.to_str().unwrap()).unwrap();
+            assert_eq!(tree.rust_sources(&repo).unwrap().len(), 3_500);
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fixture_commit(&repo);
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        for index in 0..3_500 {
+            std::fs::write(
+                repo.join(format!("src/source-{index}.rs")),
+                "pub const SOURCE: u8 = 1;\n",
+            )
+            .unwrap();
+        }
+        fixture_commit_as(&repo, "large source batch");
+        let head = fixture_head(&repo);
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(REPO, &repo)
+            .env(HEAD, head)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                let output = child.wait_with_output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "large cat-file batch child failed:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                assert!(stdout.contains("1 passed; 0 failed"), "{stdout}");
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(15) {
+                child.kill().unwrap();
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "cat-file batch blocked before completing 3,500 sources:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     #[cfg(unix)]
     fn path_test_child(name: &str, path: &OsStr, bin: &Path) {
         let test = format!("factory_worker_check::tests::{name}");

@@ -4874,10 +4874,13 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
 async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
     for (caller, message, refusal, reassign_to_caller) in [
         ("test-agent", "unnamed WIP before review", None, false),
+        // pin: this exact refusal phrase identifies the commit-ownership gate.
         ("test-agent", "fix(cas-abcd): another task's work", Some("foreign commit"), false),
+        // pin: the unauthorized caller must reach the assignment gate.
         ("other-worker", "unnamed WIP before review", Some("not you"), false),
         // Reassignment makes this caller authorized, so the old worker's
         // branch history must be refused by commit ownership instead.
+        // pin: reassignment must expose the same commit-ownership refusal.
         ("other-worker", "unnamed WIP before review", Some("foreign commit"), true),
     ] {
         let mut env = TestEnvGuard::temp_home();

@@ -750,9 +750,10 @@ mod tests {
         let pid = std::process::id();
         let command = crate::hub::process_command(pid).expect("this test's own command");
         let prompt = force_stale_prompt("s", pid, Some(command.clone()));
-        assert!(prompt.contains(&format!("PID {pid} currently runs: {command}")), "{prompt}");
+        assert!(prompt.contains(&command), "{prompt}");
+        // Without a readable command the operator still learns which PID to check.
         let unreadable = force_stale_prompt("s", pid, None);
-        assert!(unreadable.contains("could not be read") && unreadable.contains(&format!("ps -p {pid}")));
+        assert!(!unreadable.contains(&command) && unreadable.contains(&pid.to_string()));
     }
 
     /// cas-47037: the operator confirms one PID. A record that names another

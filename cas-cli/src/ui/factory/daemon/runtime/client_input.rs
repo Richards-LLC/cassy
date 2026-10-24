@@ -96,10 +96,12 @@ impl FactoryDaemon {
 
         // Read from all clients
         for client_id in client_ids {
-            let owner_is_full = self
+            let prev_owner_mode = self
                 .owner_client_id
                 .and_then(|id| self.clients.get(&id))
-                .is_some_and(|owner| owner.view_mode == ClientViewMode::Full);
+                .map(|owner| owner.view_mode);
+            let owner_is_full = prev_owner_mode == Some(ClientViewMode::Full);
+            let prev_owner_compact = prev_owner_mode == Some(ClientViewMode::Compact);
             if let Some(client) = self.clients.get_mut(&client_id) {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -159,14 +161,15 @@ impl FactoryDaemon {
                         if self.owner_client_id != Some(client_id)
                             && client.client_cols > 0
                             && client.client_rows > 0
-                            && (client.view_mode == ClientViewMode::Compact
+                            && (prev_owner_compact
+                                || client.view_mode == ClientViewMode::Compact
                                 || (client.client_cols, client.client_rows) != (self.cols, self.rows))
                         {
                             // A keystroke can take ownership without a Resize frame.
                             // Feed the new owner's recorded size through the same
                             // debounced layout/PTY path as an explicit resize.
-                            // Compact ownership also changes which Full viewers
-                            // determine geometry, even at the same recorded size.
+                            // Entering or leaving Compact ownership changes the
+                            // fallback viewers, even at the same recorded size.
                             resize_event = Some((client.client_cols, client.client_rows));
                         }
                         self.owner_client_id = Some(client_id);

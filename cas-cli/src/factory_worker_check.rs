@@ -1255,34 +1255,47 @@ impl DeliveredTree {
             let mut child = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0")
                 .args(["cat-file", "--batch"]).current_dir(repo)
                 .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().ok()?;
-            {
-                use std::io::Write;
-                let input = child.stdin.as_mut()?;
-                for (_, oid) in &self.sources { writeln!(input, "{oid}").ok()?; }
-            }
-            let output = child.wait_with_output().ok()?;
-            if !output.status.success() { return None; }
+            use std::io::{Read, Write};
+            let mut input = child.stdin.take()?;
+            let oids = self.sources.iter().map(|(_, oid)| oid.clone()).collect::<Vec<_>>();
+            let writer = std::thread::spawn(move || {
+                for oid in oids { writeln!(input, "{oid}")?; }
+                Ok::<_, std::io::Error>(())
+            });
+            let mut stdout = child.stdout.take()?;
+            let mut output = Vec::new();
+            let read_result = stdout.read_to_end(&mut output);
+            drop(stdout);
+            let status = child.wait().ok()?;
+            let write_result = writer.join().ok()?;
+            if !status.success() || read_result.is_err() || write_result.is_err() { return None; }
             let mut cursor = 0;
             let bodies = self.sources.iter().map(|(path, oid)| {
-                let end = cursor + output.stdout.get(cursor..)?.iter().position(|b| *b == b'\n')?;
-                let mut fields = output.stdout[cursor..end].split(|b| b.is_ascii_whitespace());
+                let end = cursor + output.get(cursor..)?.iter().position(|b| *b == b'\n')?;
+                let mut fields = output[cursor..end].split(|b| b.is_ascii_whitespace());
                 if fields.next()? != oid.as_bytes() || fields.next()? != b"blob" { return None; }
                 let size = std::str::from_utf8(fields.next()?).ok()?.parse::<usize>().ok()?;
                 cursor = end + 1;
                 let body_end = cursor.checked_add(size)?;
-                let body = std::str::from_utf8(output.stdout.get(cursor..body_end)?).ok()?.to_owned();
-                if output.stdout.get(body_end) != Some(&b'\n') { return None; }
+                let body = std::str::from_utf8(output.get(cursor..body_end)?).ok()?.to_owned();
+                if output.get(body_end) != Some(&b'\n') { return None; }
                 cursor = body_end + 1;
                 Some((path.clone(), body))
             }).collect::<Option<Vec<_>>>()?;
-            (cursor == output.stdout.len()).then_some(bodies)
+            (cursor == output.len()).then_some(bodies)
         }).as_deref()
     }
 }
 
 fn source_references_path(source: &str, source_path: &str, manifest: Option<&str>, target: &str) -> bool {
-    if !source.contains("include_str") && !source.contains("include_bytes") { return false; }
     let dir = source_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    if let Some(name) = target.rsplit('/').next()
+        && source.contains(name)
+        && (source.contains(target)
+            || relative_repo_path(dir, target).is_some_and(|relative| source.contains(&relative)))
+    {
+        return true;
+    }
     [Some(dir), manifest].into_iter().flatten().any(|base| {
         let Some(relative) = relative_repo_path(base, target) else { return false; };
         if normalize_repo_path(base, &relative).as_deref() != Some(target) { return false; }

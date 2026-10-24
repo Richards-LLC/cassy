@@ -2528,7 +2528,7 @@ printf '     Summary [ 0.01s] 0 tests run: 0 passed, 0 skipped\n'"#);
         std::fs::write(repo.join("docs/assets/guide.md"), "old guide\n").unwrap();
         std::fs::write(
             repo.join("crates/nested/widget/src/lib.rs"),
-            "const GUIDE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../../docs/assets/guide.md\"));\n",
+            "const GUIDE: &str = include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../../../docs/assets/\", \"guide.md\"));\n",
         )
         .unwrap();
         fixture_commit_as(&repo, "nested include fixture");

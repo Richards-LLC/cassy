@@ -106,10 +106,16 @@ pub(crate) fn record(
 /// Remove this process's receipt at clean shutdown. Another process's
 /// receipt for the same session name is left alone.
 pub(crate) fn retire(cas_dir: &Path, factory_session: &str) {
+    retire_after_read(cas_dir, factory_session, || {});
+}
+
+// Deterministic boundary for testing concurrent publication, without sleeps.
+fn retire_after_read(cas_dir: &Path, factory_session: &str, after_read: impl FnOnce()) {
     let Some(path) = receipt_path(cas_dir, factory_session) else {
         return;
     };
     if read(&path).is_some_and(|receipt| receipt.pid == std::process::id()) {
+        after_read();
         let _ = std::fs::remove_file(path);
     }
 }
@@ -191,7 +197,10 @@ pub(crate) fn observe(
                 ConsumerState::PushWakeOff
             };
             status.detail = match &receipt.not_started {
-                None => format!("v1 consumer {}", receipt.consumer_id.as_deref().unwrap_or("?")),
+                None => format!(
+                    "v1 consumer {}",
+                    receipt.consumer_id.as_deref().unwrap_or("?")
+                ),
                 Some(reason) => format!("push-wake not started ({reason})"),
             };
             if receipt.wake_enabled_at_start != wake_enabled_now {
@@ -203,7 +212,10 @@ pub(crate) fn observe(
         (None, Some(receipt)) if !daemon_running => {
             status.state = ConsumerState::Stale;
             status.daemon_build = Some(receipt.build.clone());
-            status.detail = format!("daemon pid {} is not running; its receipt is stale", receipt.pid);
+            status.detail = format!(
+                "daemon pid {} is not running; its receipt is stale",
+                receipt.pid
+            );
         }
         (None, None) if !daemon_running => return None,
         (None, stale) => {
@@ -236,7 +248,11 @@ impl ConsumerStatus {
         if !self.capabilities.is_empty() {
             rows.push(format!("capabilities: {}", self.capabilities.join(", ")));
         }
-        if let Some(build) = self.daemon_build.as_deref().filter(|_| self.state != ConsumerState::Unknown) {
+        if let Some(build) = self
+            .daemon_build
+            .as_deref()
+            .filter(|_| self.state != ConsumerState::Unknown)
+        {
             rows.push(format!("daemon build {build}"));
         }
         rows
@@ -259,7 +275,13 @@ pub(crate) fn project_statuses(cas_dir: &Path) -> Vec<ConsumerStatus> {
                 .cas_root
                 .as_ref()
                 .map(PathBuf::from)
-                .or_else(|| session.metadata.project_dir.as_ref().map(|dir| Path::new(dir).join(".cas")));
+                .or_else(|| {
+                    session
+                        .metadata
+                        .project_dir
+                        .as_ref()
+                        .map(|dir| Path::new(dir).join(".cas"))
+                });
             ours.is_some() && root.and_then(|root| root.canonicalize().ok()) == ours
         })
         .filter_map(|session| observe(cas_dir, &session.metadata, true))

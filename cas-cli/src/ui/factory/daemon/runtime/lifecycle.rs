@@ -4183,6 +4183,8 @@ impl FactoryDaemon {
                 Err(error) => tracing::warn!(%error, "Violet session stop task failed"),
             }
         }
+        // cas-ef94: a cleanly stopped daemon leaves no consumer receipt.
+        super::violet_consumer::retire(self.app.cas_dir(), &self.session_name);
 
         // cas-223f review M4: prompts waiting for their fresh re-check are not
         // dropped at shutdown. Finished re-checks are delivered as decided;

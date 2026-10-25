@@ -768,7 +768,9 @@ mod large_artifact_staging_tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         crate::cloud::CloudConfig {
             endpoint: format!("http://{}", server.server_addr()),
-            token: Some("ordinary-fixture-user".into()),
+            // Cached diagnostics work while logged out. This also avoids the
+            // handler's unrelated personal-pattern/suggestion GETs.
+            token: None,
             team_id: Some("qa-team".into()),
             ..Default::default()
         }

@@ -200,7 +200,7 @@ pub fn fork_into_daemon(app: FactoryApp, session_name: String) -> anyhow::Result
         Some(&project_dir),
         None, // ws_port - Unix socket daemon doesn't use WebSocket
     );
-    session_manager.save_metadata(&metadata)?;
+    session_manager.save_daemon_metadata(metadata, app.cas_dir())?;
 
     // cas-65cce: close idle pooled SQLite connections before fork(). A child
     // that inherits an open connection shares its file descriptors and locks
@@ -362,7 +362,7 @@ pub async fn run_daemon_after_fork(
             None,
         );
         metadata.team_name = Some(teams.team_name().to_string());
-        let _ = session_manager.save_metadata(&metadata);
+        let _ = session_manager.save_daemon_metadata(metadata, app.cas_dir());
     }
 
     // Bind notification socket for instant prompt queue wakeup

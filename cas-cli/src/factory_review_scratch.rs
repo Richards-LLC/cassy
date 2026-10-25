@@ -395,11 +395,15 @@ fn read_owner(cas: &Path, directory: &Path) -> Result<Owner> {
 
 /// Only marker-verified review paths widen capped admission beyond worker lanes.
 pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
+    // Match create's scratch base even when the caller uses an aliased root.
+    let Ok(cas) = cas.canonicalize() else {
+        return false;
+    };
     let Some(directory) = repo.parent() else {
         return false;
     };
     if directory
-        .strip_prefix(base(cas))
+        .strip_prefix(base(&cas))
         .ok()
         .is_none_or(|path| path.components().count() != 2)
         || repo.file_name() != Some(std::ffi::OsStr::new("repo"))
@@ -407,7 +411,7 @@ pub(crate) fn is_managed_checkout(cas: &Path, repo: &Path) -> bool {
     {
         return false;
     }
-    owner(cas, directory)
+    owner(&cas, directory)
         .is_ok_and(|record| git(repo, &["rev-parse", "HEAD"]).is_ok_and(|head| head == record.head))
 }
 

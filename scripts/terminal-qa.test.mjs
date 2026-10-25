@@ -13,7 +13,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { analyzeCapture, contrastRatio, displayWidth, runTerminalQa, PALETTES, UsageError } from "./terminal-qa.mjs";
+import { analyzeCapture, contrastRatio, displayWidth, lineText, parseAnsi, runTerminalQa, PALETTES, UsageError } from "./terminal-qa.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, "terminal-qa.mjs");
@@ -40,6 +40,17 @@ async function gate(t, name, extra = {}) {
 }
 
 const checks = (report) => [...new Set(report.findings.map((f) => f.check))];
+
+test("parseAnsi preserves CRCRLF rows and overwrites from column zero after bare CR", () => {
+  const raw = "C05WRONG\r\nViolet project: qa.invalid/channels (discovery)\r\r\nCloud project: other/project; verified: yes\r\n";
+  assert.deepEqual(parseAnsi(raw).map(lineText), [
+    "C05WRONG",
+    "Violet project: qa.invalid/channels (discovery)",
+    "Cloud project: other/project; verified: yes",
+  ]);
+  assert.deepEqual(parseAnsi("Violet project\rX\r\n").map(lineText), ["Xiolet project"]);
+  assert.deepEqual(parseAnsi("long text\r\u001b[2Kshort").map(lineText), ["short"]);
+});
 
 // ---------------------------------------------------------------------------
 // Contrast math

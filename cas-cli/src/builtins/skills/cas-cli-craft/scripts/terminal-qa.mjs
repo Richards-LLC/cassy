@@ -284,16 +284,18 @@ const CONTROL_FINALS = new Set(["A", "B", "C", "D", "G", "H", "J", "K", "f", "S"
  * Parse a raw capture into visual lines.
  *
  * Each line: { cells: [{ch, w, style}], redraws, controls: [seq] }. A carriage
- * return not followed by a newline overwrites the line from column 0 (the
- * progress-redraw idiom); a backspace removes the last cell; a tab pads to the
- * next multiple of 8. OSC/DCS strings are dropped. Non-SGR CSI sequences are
- * recorded on the line (for the piped check) and dropped from the text.
+ * return resets the cursor to column 0 without clearing existing cells; later
+ * text overwrites them in place. A backspace removes the last cell; a tab pads
+ * to the next multiple of 8. OSC/DCS strings are dropped. Non-SGR CSI
+ * sequences are recorded on the line (for the piped check) and dropped from
+ * the text.
  */
 export function parseAnsi(raw) {
   const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
   const lines = [];
   let line = { cells: [], redraws: 0, controls: [], sgr: [] };
   let style = defaultStyle();
+  let cursorColumn = 0;
   const chars = Array.from(text);
   const n = chars.length;
   let i = 0;
@@ -302,6 +304,66 @@ export function parseAnsi(raw) {
   const pushLine = () => {
     lines.push(line);
     line = { cells: [], redraws: 0, controls: [], sgr: [] };
+    cursorColumn = 0;
+  };
+  const writeCell = (cell) => {
+    let column = 0;
+    let index = 0;
+    while (index < line.cells.length && column + line.cells[index].w <= cursorColumn) {
+      column += line.cells[index].w;
+      index += 1;
+    }
+    if (index === line.cells.length) {
+      let width = col();
+      while (width < cursorColumn) {
+        line.cells.push({ ch: " ", w: 1, style });
+        width += 1;
+      }
+      line.cells.push(cell);
+      cursorColumn += cell.w;
+      return;
+    }
+
+    const existing = line.cells[index];
+    const offset = cursorColumn - column;
+    let overwrittenWidth = existing.w - offset;
+    let end = index + 1;
+    while (overwrittenWidth < cell.w && end < line.cells.length) {
+      overwrittenWidth += line.cells[end].w;
+      end += 1;
+    }
+    const paddingStyle = existing.style;
+    const prefix = Array.from({ length: offset }, () => ({ ch: " ", w: 1, style: paddingStyle }));
+    const suffix = Array.from({ length: Math.max(0, overwrittenWidth - cell.w) }, () => ({ ch: " ", w: 1, style }));
+    line.cells.splice(index, end - index, ...prefix, cell, ...suffix);
+    cursorColumn += cell.w;
+  };
+  const eraseLine = (mode) => {
+    if (mode === 2) {
+      line.cells = [];
+      return;
+    }
+    const kept = [];
+    let column = 0;
+    for (const cell of line.cells) {
+      if (cell.w === 0) {
+        if (mode === 0 ? column <= cursorColumn : column > cursorColumn) kept.push(cell);
+        continue;
+      }
+      const end = column + cell.w;
+      if (mode === 0) {
+        if (end <= cursorColumn) kept.push(cell);
+        else if (column < cursorColumn) {
+          for (let k = 0; k < cell.w; k += 1) kept.push({ ch: " ", w: 1, style });
+        }
+      } else if (column > cursorColumn) {
+        kept.push(cell);
+      } else {
+        for (let k = 0; k < cell.w; k += 1) kept.push({ ch: " ", w: 1, style });
+      }
+      column = end;
+    }
+    line.cells = kept;
   };
 
   while (i < n) {
@@ -323,6 +385,10 @@ export function parseAnsi(raw) {
           style = applySgr(list, style);
         } else {
           line.controls.push(seq);
+          if (final === "K") {
+            const mode = params === "" ? 0 : Number(params);
+            if (mode === 0 || mode === 1 || mode === 2) eraseLine(mode);
+          }
         }
         i = j + 1;
         continue;
@@ -347,30 +413,35 @@ export function parseAnsi(raw) {
     }
     if (ch === "\n") { pushLine(); i += 1; continue; }
     if (ch === "\r") {
-      if (chars[i + 1] === "\n" || i + 1 === n) { i += 1; continue; }
-      if (line.cells.length > 0) {
+      if (chars[i + 1] !== "\n" && i + 1 !== n && line.cells.length > 0) {
         line.redraws += 1;
-        line.cells = [];
       }
+      cursorColumn = 0;
       i += 1;
       continue;
     }
-    if (ch === "\b") { line.cells.pop(); i += 1; continue; }
+    if (ch === "\b") { line.cells.pop(); cursorColumn = Math.min(cursorColumn, col()); i += 1; continue; }
     if (ch === "\t") {
-      const c = col();
+      const c = cursorColumn;
       const pad = 8 - (c % 8);
-      for (let k = 0; k < pad; k += 1) line.cells.push({ ch: " ", w: 1, style });
+      for (let k = 0; k < pad; k += 1) writeCell({ ch: " ", w: 1, style });
       i += 1;
       continue;
     }
     if (ch === "\u0007") { i += 1; continue; }
     const w = charWidth(ch);
     if (w === 0 && line.cells.length > 0 && ch.codePointAt(0) >= 0x300) {
-      line.cells[line.cells.length - 1].ch += ch; // combining mark
+      let column = 0;
+      let previous = -1;
+      for (let j = 0; j < line.cells.length; j += 1) {
+        if (line.cells[j].w > 0 && column + line.cells[j].w <= cursorColumn) previous = j;
+        column += line.cells[j].w;
+      }
+      line.cells[previous < 0 ? line.cells.length - 1 : previous].ch += ch; // combining mark
       i += 1;
       continue;
     }
-    line.cells.push({ ch, w, style });
+    writeCell({ ch, w, style });
     i += 1;
   }
   if (line.cells.length > 0 || line.controls.length > 0 || line.sgr.length > 0 || lines.length === 0) {

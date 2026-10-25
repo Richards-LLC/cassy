@@ -731,26 +731,68 @@ impl CasCore {
             });
         }
 
-        // cas-bebc (GH #1023 finding 9): a supervisor sharing this clone must
-        // not force-release another live session's worker's task. `force`
-        // bypasses the liveness guard below, never ownership.
-        if let Some(assignee) = task.assignee.as_deref()
-            && let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
-                &self.cas_root,
-                |agents, caller, now| {
-                    crate::factory_session_scope::foreign_owner_of_worker(
-                        agents, caller, assignee, now,
-                    )
-                },
-            )
+        // GH #1362: a fresh old supervisor row is not proof its daemon is
+        // alive. Cross-session recovery still requires an authenticated epic
+        // owner and positive evidence that the original daemon is dead.
+        let caller_id = self.get_registered_agent_id_read_only().ok();
+        let caller_session = caller_id
+            .as_deref()
+            .and_then(|id| agent_store.get(id).ok())
+            .and_then(|caller| caller.factory_session)
+            .or_else(crate::factory_session_scope::caller_factory_session);
+        if let (Some(session), Some(assignee)) =
+            (caller_session.as_deref(), task.assignee.as_deref())
         {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    owner.refusal(&format!("task reset of {}", req.task_id), &caller),
-                ),
+            let roster = agent_store.list(None).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(error.to_string()),
                 data: None,
-            });
+            })?;
+            let worker = roster
+                .iter()
+                .filter(|worker| {
+                    worker.role == cas_types::AgentRole::Worker
+                        && (worker.id == assignee || worker.name.eq_ignore_ascii_case(assignee))
+                })
+                .max_by_key(|worker| {
+                    (
+                        worker.factory_session.as_deref() == Some(session),
+                        worker.registered_at,
+                    )
+                });
+            if let Some(worker) = worker
+                && let Some(original) = worker
+                    .factory_session
+                    .as_deref()
+                    .filter(|original| *original != session)
+                && (worker.is_alive()
+                    || crate::mcp::tools::service::agent_liveness::agent_process_is_alive(worker))
+                && !crate::factory_session_scope::adopted_worker_supervisor(&self.cas_root, worker)
+                    .is_some_and(|owner| {
+                        Some(&owner.id) == caller_id.as_ref()
+                            && owner.factory_session.as_deref() == Some(session)
+                    })
+            {
+                let owner = crate::factory_session_scope::ForeignOwner {
+                    worker: worker.name.clone(),
+                    session: original.into(),
+                    supervisor: roster
+                        .iter()
+                        .find(|agent| {
+                            agent.role == cas_types::AgentRole::Supervisor
+                                && agent.factory_session.as_deref() == Some(original)
+                        })
+                        .map(|agent| agent.name.clone())
+                        .unwrap_or_else(|| "unknown".into()),
+                };
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        owner.refusal(&format!("task reset of {}", req.task_id), session),
+                    ),
+                    data: None,
+                });
+            }
         }
 
         // cas-86c5: Alive-worker safety guard.

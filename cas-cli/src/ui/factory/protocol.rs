@@ -822,6 +822,11 @@ pub struct SessionMetadata {
     /// Project directory this session belongs to (for multi-project isolation)
     #[serde(default)]
     pub project_dir: Option<String>,
+    /// The Cassy store the daemon runs against, which differs from the
+    /// project's `.cas` when the daemon was started with CAS_ROOT. `cas kill`
+    /// reaps the worker groups recorded there (cas-4b42).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cas_root: Option<String>,
     /// Native Agent Teams team name (when Teams messaging is enabled)
     #[serde(default)]
     pub team_name: Option<String>,

@@ -847,6 +847,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for (name, records, expected) in [
             (
+                "claude-bare",
+                serde_json::json!([
+                    {"type":"user","timestamp":"2026-10-20T17:00:00Z","message":{"content":"[cas #42 peer] field report"}},
+                    {"type":"assistant","message":{"id":"a","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":5}}},
+                    {"type":"user","message":{"content":[{"type":"tool_result","content":"tool response"}]}},
+                    {"type":"assistant","message":{"id":"a","stop_reason":"end_turn","usage":{"input_tokens":10,"cache_read_input_tokens":90,"output_tokens":9}}}
+                ]),
+                (100, 9),
+            ),
+            (
                 "claude",
                 serde_json::json!([
                     // Claude inserts a newline inside its pasted-content wrapper (cas-7176).

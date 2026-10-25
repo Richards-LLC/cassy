@@ -78,6 +78,10 @@ pub(super) fn resolve_live_worker_harness(cas_dir: &std::path::Path) -> cas_mux:
 /// worktree. The daemon reaper (Unit 3) reads this to drive TTL-based salvage.
 const DIRTY_ON_SHUTDOWN_KEY: &str = "dirty_on_shutdown";
 
+/// Longest a worker's kill-and-drop may hold a shutdown (GH #1363): the
+/// 3 s TERM grace, SIGKILL and reap, with margin.
+const WORKER_TEARDOWN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(15);
+
 /// Resolve the branch a dynamically-spawned worker should be cut from: the
 /// active epic branch when pinned, else the configured epic base
 /// (`.cas/config.toml` `[factory] epic_base_branch`, cas-b082), else the
@@ -3198,7 +3202,29 @@ impl FactoryApp {
         // SIGTERM when false), ensuring the full node→codex tree is terminated,
         // not just the direct PTY child that SIGHUP-on-drop would reach.
         let process_group = self.mux.pane_process_group_id(name);
-        self.mux.kill_worker(name, force).await?;
+        // GH #1363: this runs on the daemon loop. A teardown that never
+        // returned here silenced the whole factory, so it runs off the loop
+        // and a stall is named instead.
+        if let cas_mux::WorkerTeardown::Stalled {
+            stage,
+            process_group,
+        } = self
+            .mux
+            .kill_worker_within(name, force, WORKER_TEARDOWN_DEADLINE)
+            .await?
+        {
+            let detail = format!(
+                "Worker '{name}' teardown stalled in {stage} (process group {}) for {}s; \
+                 the daemon continues and the teardown thread finishes when the call returns",
+                process_group.map_or_else(|| "unknown".to_string(), |pgid| pgid.to_string()),
+                WORKER_TEARDOWN_DEADLINE.as_secs(),
+            );
+            tracing::error!(worker = name, stage, ?process_group, "GH #1363: {detail}");
+            if let Some(session) = self.factory_session.as_deref() {
+                crate::ui::factory::record_daemon_lifecycle(session, "teardown_stalled", &detail);
+            }
+            self.set_error(detail);
+        }
         if let Some(pgid) = process_group {
             self.untrack_worker_process_group_if_gone(pgid).await;
         }

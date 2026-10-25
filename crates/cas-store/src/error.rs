@@ -52,6 +52,16 @@ pub enum StoreError {
     #[error("parse error: {0}")]
     Parse(String),
 
+    /// Another close already owns the exact active proof cycle. Preserve its
+    /// transactional snapshot so callers can report it without a racy re-read.
+    #[error(
+        "verification dispatch {} is already active for this task with a different requester, owner or proof boundary",
+        .dispatch.id
+    )]
+    VerificationDispatchConflict {
+        dispatch: Box<cas_types::VerificationDispatch>,
+    },
+
     #[error(
         "local {entity_type} {operation} committed, but cloud sync is degraded; durable retry intent retained for {entity_id}: {reason}"
     )]

@@ -8,7 +8,7 @@ use std::path::Path;
 /// One close-path entry point, sharing the QA gate's delivery head and attribution window.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn at_park(
-    store: &dyn cas_store::TaskStore,
+    notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
     cas_root: &Path,
     repo: &Path,
@@ -21,7 +21,7 @@ pub(super) fn at_park(
         Ok(config) => config,
         Err(error) => {
             return warning(
-                store,
+                notes,
                 task,
                 format!("UPKEEP WARNING: config unreadable (not blocking): {error}"),
             );
@@ -45,7 +45,7 @@ pub(super) fn at_park(
     }
     let (base, head, paths) = match delivery_snapshot(task, repo, target, window, receipt) {
         Ok(snapshot) => snapshot,
-        Err(message) => return warning(store, task, message),
+        Err(message) => return warning(notes, task, message),
     };
     let target_tip = freshest_target_ref(repo, target);
     // A landed ownership repair can satisfy an older receipt. An unmerged
@@ -56,7 +56,7 @@ pub(super) fn at_park(
         &head
     };
     check(
-        store,
+        notes,
         task,
         repo,
         &qa,
@@ -103,11 +103,11 @@ fn snapshot_range(
 }
 
 pub(super) fn warning(
-    store: &dyn cas_store::TaskStore,
+    notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
     text: String,
 ) -> Result<Vec<String>, String> {
-    append_close_decision_note(store, task, &text);
+    notes.record(task, &text);
     Ok(vec![text])
 }
 
@@ -175,7 +175,7 @@ fn decision_reason<'a>(notes: &'a str, token: &str) -> Option<&'a str> {
 }
 
 pub(super) fn finish(
-    store: &dyn cas_store::TaskStore,
+    notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
     stage: RegistryEnforcement,
     input_path: &str,
@@ -185,7 +185,7 @@ pub(super) fn finish(
 ) -> Result<Vec<String>, String> {
     let mut notices = warnings.to_vec();
     for warning in warnings {
-        append_close_decision_note(store, task, warning);
+        notes.record(task, warning);
     }
     let mut refusals = Vec::new();
     for finding in findings {
@@ -199,8 +199,7 @@ pub(super) fn finish(
             crate::mcp::tools::core::guidance::caller_prefix(),
         );
         if let Some(reason) = override_reason.filter(|reason| !reason.trim().is_empty()) {
-            append_close_decision_note(
-                store,
+            notes.record(
                 task,
                 &format!(
                     "✅ DECISION UPKEEP ESCAPE {}: supervisor override: {}. Waived refusal: {}",
@@ -214,15 +213,13 @@ pub(super) fn finish(
                 "UPKEEP OBSERVE {}: {} (see task notes)",
                 finding.gate, finding.title
             ));
-            append_close_decision_note(
-                store,
+            notes.record(
                 task,
                 &format!("UPKEEP OBSERVE {}: {text}", finding.gate),
             );
         } else if let Some(reason) = decision_reason(&task.notes, finding.token).map(str::to_owned)
         {
-            append_close_decision_note(
-                store,
+            notes.record(
                 task,
                 &format!("UPKEEP ESCAPE {}: {} {reason}", finding.gate, finding.token),
             );
@@ -285,7 +282,7 @@ fn has_changed_case(registry: &Registry, before: Option<&Registry>, id: &str) ->
 
 #[allow(clippy::too_many_arguments)]
 fn check(
-    store: &dyn cas_store::TaskStore,
+    notes: &mut CloseNoteTracker<'_>,
     task: &mut Task,
     repo: &Path,
     qa: &QaConfig,
@@ -333,7 +330,7 @@ fn check(
     let result = inspect(task, repo, &qa, base, head, ownership_head, paths);
     match result {
         Ok((findings, warnings)) => finish(
-            store,
+            notes,
             task,
             qa.registry.enforce,
             &qa.registry.path,
@@ -343,7 +340,7 @@ fn check(
         ),
         // Git failures cannot establish causality. Never brick unrelated deliveries.
         Err(error) => warning(
-            store,
+            notes,
             task,
             format!("UPKEEP WARNING: registry inputs unavailable (not blocking): {error:#}"),
         ),

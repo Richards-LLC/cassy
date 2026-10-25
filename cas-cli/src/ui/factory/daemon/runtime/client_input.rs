@@ -96,6 +96,12 @@ impl FactoryDaemon {
 
         // Read from all clients
         for client_id in client_ids {
+            let prev_owner_mode = self
+                .owner_client_id
+                .and_then(|id| self.clients.get(&id))
+                .map(|owner| owner.view_mode);
+            let owner_is_full = prev_owner_mode == Some(ClientViewMode::Full);
+            let prev_owner_compact = prev_owner_mode == Some(ClientViewMode::Compact);
             if let Some(client) = self.clients.get_mut(&client_id) {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -134,15 +140,18 @@ impl FactoryDaemon {
                         || self.owner_last_activity.elapsed()
                             > Duration::from_secs(INPUT_OWNER_IDLE_SECS);
                     if !can_take {
-                        // Viewers retain their own latest size for owner loss,
-                        // without changing input ownership or the shared layout.
+                        // Viewers retain their latest size without taking ownership.
                         for event in &events {
                             if let ControlEvent::Resize(cols, rows) = event {
                                 let was_compact = client.view_mode == ClientViewMode::Compact;
                                 record_client_resize(client, client_id, *cols, *rows);
                                 // Compact membership/geometry affects its render target.
-                                // A full viewer cannot change the owner's layout.
-                                if was_compact || client.view_mode == ClientViewMode::Compact {
+                                // Full viewers also determine the full layout when
+                                // the input owner is Compact.
+                                if was_compact
+                                    || client.view_mode == ClientViewMode::Compact
+                                    || !owner_is_full
+                                {
                                     resize_event = Some((*cols, *rows));
                                 }
                             }
@@ -152,11 +161,15 @@ impl FactoryDaemon {
                         if self.owner_client_id != Some(client_id)
                             && client.client_cols > 0
                             && client.client_rows > 0
-                            && (client.client_cols, client.client_rows) != (self.cols, self.rows)
+                            && (prev_owner_compact
+                                || client.view_mode == ClientViewMode::Compact
+                                || (client.client_cols, client.client_rows) != (self.cols, self.rows))
                         {
                             // A keystroke can take ownership without a Resize frame.
                             // Feed the new owner's recorded size through the same
                             // debounced layout/PTY path as an explicit resize.
+                            // Entering or leaving Compact ownership changes the
+                            // fallback viewers, even at the same recorded size.
                             resize_event = Some((client.client_cols, client.client_rows));
                         }
                         self.owner_client_id = Some(client_id);

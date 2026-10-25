@@ -1121,8 +1121,12 @@ impl CasService {
         // whose ambient environment was inherited from the wrong harness.
         // The registered caller row is the authoritative owner; the
         // environment remains a compatibility fallback for legacy callers.
-        let factory_session = agent_from_store
+        let adopted_supervisor = agent_from_store.as_ref().and_then(|worker| {
+            crate::factory_session_scope::adopted_worker_supervisor(&self.inner.cas_root, worker)
+        });
+        let factory_session = adopted_supervisor
             .as_ref()
+            .or(agent_from_store.as_ref())
             .and_then(|agent| agent.factory_session.clone())
             .filter(|session| !session.trim().is_empty())
             .or_else(|| {
@@ -1948,7 +1952,10 @@ impl CasService {
                         })?;
                     let registered_worker = agent_from_store.as_ref().is_some_and(|agent| {
                         agent.role == cas_types::AgentRole::Worker
-                            && agent.factory_session.as_deref() == Some(session)
+                            && (agent.factory_session.as_deref() == Some(session)
+                                || adopted_supervisor.as_ref().is_some_and(|owner| {
+                                    owner.factory_session.as_deref() == Some(session)
+                                }))
                     });
                     let same_session_supervisor =
                         resolved_target_agent.as_ref().is_some_and(|agent| {
@@ -2961,6 +2968,79 @@ impl CasService {
                         }
                     }
                 }
+            }
+        }
+
+        if let (Some(sender), Some(worker)) =
+            (agent_from_store.as_ref(), resolved_target_agent.as_ref())
+            && sender.role == cas_types::AgentRole::Supervisor
+            && crate::factory_session_scope::adopted_worker_supervisor(&self.inner.cas_root, worker)
+                .is_some_and(|owner| owner.id == sender.id)
+            && crate::mcp::tools::service::factory_ops::worker_cli_from_agent(worker)
+                == cas_mux::SupervisorCli::Claude
+            && queue
+                .recipient_receipt(message_id, &worker.name)
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            // The original PTY master died with its daemon. Deliver to the
+            // surviving Claude team's actual inbox; the next hook/turn renders
+            // and receipts the body. This does not claim an idle model wake.
+            let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new(
+                worker.factory_session.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Adopted worker has no original factory session",
+                    )
+                })?,
+            );
+            let view = teams.view_for_config_dir(
+                worker
+                    .metadata
+                    .get("worker_account_dir")
+                    .map(String::as_str),
+            );
+            let inbox = view.as_ref().unwrap_or(&teams);
+            let row = queue
+                .queued_prompt(message_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        "queued recovery message disappeared",
+                    )
+                })?;
+            if let Some(token) = queue
+                .claim_recipient_transport_token(message_id, &worker.name)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            {
+                let body =
+                    crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
+                        &row,
+                    );
+                if let Err(error) = inbox.write_to_inbox(
+                    &worker.name,
+                    &row.source,
+                    &body,
+                    row.summary.as_deref(),
+                    None,
+                ) {
+                    let _ =
+                        queue.release_recipient_transport_claim(message_id, &worker.name, token);
+                    return Err(Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Recovery message #{message_id} remains queued; original Claude inbox write failed: {error}"
+                        ),
+                    ));
+                }
+                queue
+                    .record_deferred_inbox(message_id, 0)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                queue.record_pending_reason(message_id, cas_store::PendingReason::GatedNotReady,
+                    Some("Original daemon is dead; recovery body waits for the worker's next turn or tool boundary (no idle wake)"))
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             }
         }
 

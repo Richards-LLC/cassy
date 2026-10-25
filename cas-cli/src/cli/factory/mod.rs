@@ -701,9 +701,20 @@ pub struct KillArgs {
     /// Session name to kill (interactive picker if omitted)
     pub name: Option<String>,
 
-    /// Force kill without confirmation
+    /// Skip confirmation prompts, including the --force-stale one
     #[arg(long, short = 'f')]
     pub force: bool,
+
+    /// Clear a session whose recorded PID now runs another program, reaping its workers
+    ///
+    /// Use when `cas kill` reports the session's PID as running but could not
+    /// confirm it is the factory daemon, and `ps -p <pid>` shows a different
+    /// program. Removes the session record and reaps its recorded worker
+    /// process groups (each checked against its recorded start time) without
+    /// signalling that PID. Refuses when the PID has the daemon's recorded
+    /// start time. Asks for confirmation unless --force is also given.
+    #[arg(long)]
+    pub force_stale: bool,
 }
 
 /// Arguments for `cas kill-all`

@@ -28,6 +28,21 @@ pub enum InjectOutcome {
     DeferredComposerDirty,
 }
 
+/// How a [`Mux::kill_worker_within`] teardown ended (GH #1363).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerTeardown {
+    /// The process group was signalled and reaped and the pane dropped.
+    Completed,
+    /// The teardown thread was still inside `stage` at the deadline.
+    Stalled {
+        stage: &'static str,
+        process_group: Option<u32>,
+    },
+}
+
+const TEARDOWN_SIGNAL: u8 = 0;
+const TEARDOWN_DROP: u8 = 1;
+
 /// One normal or urgent injection started by [`Mux::begin_inject`] or
 /// [`Mux::begin_interrupt_and_inject`]
 /// (factory loop v2 C4a, spec §3.5 and §4.3).
@@ -1098,6 +1113,53 @@ impl Mux {
         // Remove the pane (drops the PTY master, sends residual SIGHUP)
         self.remove_pane(name);
         Ok(())
+    }
+
+    /// [`Self::kill_worker`] that cannot hold the caller past `deadline`
+    /// (GH #1363).
+    ///
+    /// The pane leaves the registry at once. Its signal, reap and drop run on
+    /// a blocking thread. If that thread is still running at the deadline,
+    /// the caller gets the stage it reached and the process group, so the
+    /// daemon loop can record the stall and carry on. The thread keeps going
+    /// and finishes the teardown whenever the stalled call returns.
+    pub async fn kill_worker_within(
+        &mut self,
+        name: &str,
+        force: bool,
+        deadline: std::time::Duration,
+    ) -> Result<WorkerTeardown> {
+        match self.panes.get(name) {
+            Some(pane) if *pane.kind() != PaneKind::Worker => {
+                return Err(Error::pty(format!(
+                    "Pane '{}' is not a worker (is {:?})",
+                    name,
+                    pane.kind()
+                )));
+            }
+            Some(_) => {}
+            None => return Err(Error::pane_not_found(name)),
+        }
+        let mut pane = self.remove_pane(name).expect("checked above");
+        let process_group = pane.process_group_id();
+        let stage = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(TEARDOWN_SIGNAL));
+        let reached = std::sync::Arc::clone(&stage);
+        let runtime = tokio::runtime::Handle::current();
+        let teardown = tokio::task::spawn_blocking(move || {
+            runtime.block_on(pane.kill_tree(force));
+            reached.store(TEARDOWN_DROP, std::sync::atomic::Ordering::Release);
+            drop(pane);
+        });
+        match tokio::time::timeout(deadline, teardown).await {
+            Ok(_) => Ok(WorkerTeardown::Completed),
+            Err(_) => Ok(WorkerTeardown::Stalled {
+                stage: match stage.load(std::sync::atomic::Ordering::Acquire) {
+                    TEARDOWN_SIGNAL => "signal and reap (Pty::kill_tree)",
+                    _ => "pane drop (PTY master close, terminal free)",
+                },
+                process_group,
+            }),
+        }
     }
 
     /// Get the supervisor pane

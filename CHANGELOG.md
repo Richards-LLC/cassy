@@ -11,7 +11,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 
-- **Clearing a session whose PID was reused** — Add `cas kill <name> --force-stale` for a session whose recorded PID now runs another program. It shows what that PID currently runs, asks for confirmation (skipped with `--force`, refused without a terminal), pins the confirmed PID and its start time and changes nothing if that process is replaced or exits before the clear, refuses while the recorded daemon is still running, never signals the recorded PID, reaps the session's fingerprint-checked worker process groups and removes the record.
+- **Clearing a session whose PID was reused** — Add `cas kill <name> --force-stale` for a session whose recorded PID now runs another program. It shows what that PID currently runs, asks for confirmation (skipped with `--force`, refused without a terminal), pins the confirmed PID and its start time and changes nothing if that process is replaced or exits before the clear, refuses when the PID's start time matches the one recorded for the session's daemon, never signals the recorded PID, reaps the session's fingerprint-checked worker process groups and removes the record.
 
 ### Fixed
 
@@ -25,7 +25,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Close notes during concurrent edits** — Keep task notes that were rewritten while a close was running, and retry the close when only a note was added in the gap instead of refusing it.
 
-- **Faster close proof checks** — Scan the delivered tree once per close and share it across worktrees at the same commit, bound file reads, and match a relative `include_str!` path written with any `../` spelling.
+- **Faster close proof checks** — Scan the delivered tree once per close and share it across worktrees at the same commit, stream the batched source read so large trees cannot deadlock, and match a relative `include_str!` path written with any `../` spelling.
 
 - **Shared terminal layout with a compact input owner** — Refresh the layout when a full-width viewer resizes while a compact client owns input, and when input moves to or from a compact client at the same size.
 
@@ -33,7 +33,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Review checkouts through symlinked paths** — Recognize managed review checkouts when the CAS root is reached through a symlink, such as macOS `/var` and `/private/var`.
 
-- **macOS socket cleanup diagnostics** — Log at debug level why socket cleanup keeps a GUI socket path, such as an incomplete or unreadable holder inventory.
+- **macOS socket cleanup diagnostics** — Log at debug level why socket cleanup keeps a factory socket path, such as an incomplete or unreadable holder inventory.
 
 ## [3.78.0] - 2026-10-24
 

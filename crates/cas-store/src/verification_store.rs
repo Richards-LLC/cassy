@@ -1073,9 +1073,9 @@ fn create_verification_dispatch_bound_in_transaction(
         {
             return Ok(existing);
         }
-        return Err(StoreError::Parse(
-            "a different verification proof boundary is already active for this task".to_string(),
-        ));
+        return Err(StoreError::VerificationDispatchConflict {
+            dispatch: Box::new(existing),
+        });
     }
     if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         && existing.state == VerificationDispatchState::TimedOut
@@ -4323,11 +4323,10 @@ mod tests {
             false,
         )
         .expect_err("conflicting owner must remain rejected");
-        assert!(
-            conflicting
-                .to_string()
-                .contains("different verification proof boundary")
-        );
+        assert!(matches!(
+            conflicting,
+            StoreError::VerificationDispatchConflict { dispatch } if dispatch.id == dispatch_id
+        ));
         let counts_after = conn
             .query_row(
                 "SELECT

@@ -90,7 +90,7 @@ fn within_deadline(
         })
         .map_err(|_| {
             VioletError::local(
-                "check_unavailable",
+                "local_request_failed",
                 "channel check could not start; run `cas violet channels`",
             )
         })?;
@@ -101,7 +101,7 @@ fn within_deadline(
 
 fn check_timeout() -> VioletError {
     VioletError::local(
-        "check_timeout",
+        "local_request_failed",
         "doctor channel check exceeded its 3-second budget; run `cas violet channels`",
     )
 }
@@ -776,6 +776,22 @@ mod tests {
         })
         .err()
         .expect("expired budget is an unchecked result");
-        assert_eq!(error.code, "check_timeout");
+        assert_eq!(error.code, "local_request_failed");
+        // A stalled resolver/probe cannot hold the caller. The gate stays
+        // closed until after the timeout result, with no sleeps or timing assertions.
+        let (release, held) = std::sync::mpsc::channel();
+        let (finished, complete) = std::sync::mpsc::channel();
+        let error = within_deadline(Duration::from_millis(1), move |_| {
+            let _ = held.recv();
+            let _ = finished.send(());
+            Err(VioletError::local("local_request_failed", "probe finished"))
+        })
+        .err()
+        .expect("blocked probe must return an unchecked result");
+        assert!(error.message.contains("budget"));
+        drop(release);
+        complete
+            .recv()
+            .expect("release the probe thread before ending the test");
     }
 }

@@ -205,6 +205,14 @@ fn cas_a6f2_failed_publication_cleans_temp_and_reports_write_failure() {
         "{}",
         other.detail
     );
+    let mut reused_pid = live_session("s1");
+    reused_pid.daemon_pid_starttime = Some(reused_pid.daemon_pid_starttime.unwrap() + 1);
+    let reused_pid = observe(root, &reused_pid, true).unwrap();
+    assert!(
+        !reused_pid.detail.contains("receipt write failed"),
+        "{}",
+        reused_pid.detail
+    );
     std::fs::remove_dir(&path).unwrap();
     record(root, "s1", true, Some("consumer"), None, None).unwrap();
     retire(root, "s1");

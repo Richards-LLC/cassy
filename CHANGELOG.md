@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.79.0] - 2026-10-25
+
 ### Added
 
 - **Clearing a session whose PID was reused** — Add `cas kill <name> --force-stale` for a session whose recorded PID now runs another program. It shows what that PID currently runs, asks for confirmation (skipped with `--force`, refused without a terminal), pins the confirmed PID and its start time and changes nothing if that process is replaced or exits before the clear, refuses while the recorded daemon is still running, never signals the recorded PID, reaps the session's fingerprint-checked worker process groups and removes the record.

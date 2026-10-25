@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 use anyhow::{Result, bail};
 
@@ -67,6 +67,15 @@ pub(super) fn session_picker_item(s: &SessionInfo) -> PickerItem {
 
 /// Kill a factory session. If no name is given, show an interactive picker.
 pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Result<()> {
+    execute_kill_with_terminal_check(name, force, force_stale, || io::stdin().is_terminal())
+}
+
+fn execute_kill_with_terminal_check(
+    name: Option<&str>,
+    force: bool,
+    force_stale: bool,
+    stdin_is_terminal: impl Fn() -> bool,
+) -> Result<()> {
     let manager = SessionManager::new();
 
     let (name, picked) = match name {
@@ -97,8 +106,7 @@ pub fn execute_kill(name: Option<&str>, force: bool, force_stale: bool) -> Resul
         // What the operator is confirming: this PID as it runs right now.
         let confirmed_starttime = crate::mcp::daemon::read_pid_starttime(pid);
         if !force {
-            use std::io::IsTerminal;
-            if !io::stdin().is_terminal() {
+            if !stdin_is_terminal() {
                 bail!(
                     "--force-stale needs confirmation and no terminal is attached; session '{name}' was left unchanged. \
                      After checking that `ps -p {pid}` shows another program, rerun with --force."
@@ -771,19 +779,50 @@ mod tests {
         assert!(SessionManager::new().find_session(Some("moved")).unwrap().is_some());
     }
 
+    /// cas-cb0b: if the PID exited while confirmation was pending, refuse
+    /// with that fact instead of claiming a new process started.
+    #[test]
+    fn force_stale_reports_when_the_confirmed_pid_exited() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let pid = i32::MAX as u32;
+        save_session("exited", pid, project.path());
+
+        let error = force_clear_stale_session("exited", pid, Some(1), &|_| None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("PID {pid} exited")), "{error}");
+        assert!(!error.contains("started a new process"), "{error}");
+        assert!(SessionManager::new().find_session(Some("exited")).unwrap().is_some());
+    }
+
+    /// cas-cb0b: refuse a new start-time fingerprint after confirmation and
+    /// leave the session record in place.
+    #[test]
+    fn force_stale_refuses_when_the_confirmed_pid_start_time_changed() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let project = tempfile::tempdir().unwrap();
+        let pid = std::process::id();
+        save_session("reused", pid, project.path());
+
+        let error = force_clear_stale_session("reused", pid, Some(1), &|_| Some(2))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("started a new process"), "{error}");
+        assert!(SessionManager::new().find_session(Some("reused")).unwrap().is_some());
+    }
+
     /// cas-47037: with no terminal to confirm on and no --force,
     /// --force-stale exits non-zero and changes nothing.
     #[test]
     fn force_stale_without_a_terminal_or_force_changes_nothing() {
-        use std::io::IsTerminal;
-        if std::io::stdin().is_terminal() {
-            return;
-        }
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
         save_session("unconfirmed", i32::MAX as u32, project.path());
 
-        let error = execute_kill(Some("unconfirmed"), false, true).unwrap_err().to_string();
+        let error = execute_kill_with_terminal_check(Some("unconfirmed"), false, true, || false)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("no terminal is attached"), "{error}");
         assert!(SessionManager::new().find_session(Some("unconfirmed")).unwrap().is_some());
     }

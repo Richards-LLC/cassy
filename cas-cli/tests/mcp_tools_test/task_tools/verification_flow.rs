@@ -1602,7 +1602,9 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
         .output()
         .expect("resolve target head");
     assert!(target_head.status.success());
-    let target_head = String::from_utf8_lossy(&target_head.stdout).trim().to_string();
+    let target_head = String::from_utf8_lossy(&target_head.stdout)
+        .trim()
+        .to_string();
 
     // cas-3792: the merge close runs as the supervisor before the worker
     // retries. Both callers must target the same owner and repository proof.
@@ -1639,12 +1641,25 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
     let before = dispatch.clone();
     let worker_env = FactoryWorkerEnv::enter(&mut test_env);
     let retry = extract_text(
-        service.cas_task_close(Parameters(close_request(&task_id, "worker re-close after merge")))
-            .await.expect("worker re-close must return verification guidance, not INTERNAL_ERROR"),
+        service
+            .cas_task_close(Parameters(close_request(
+                &task_id,
+                "worker re-close after merge",
+            )))
+            .await
+            .expect("worker re-close must return verification guidance, not INTERNAL_ERROR"),
     );
     drop(worker_env);
-    assert!(retry.contains("VERIFICATION REQUIRED") && retry.contains(&dispatch.id), "{retry}");
-    assert_eq!(cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().unwrap(), before);
+    assert!(
+        retry.contains("VERIFICATION REQUIRED") && retry.contains(&dispatch.id),
+        "{retry}"
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
     supervisor
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: task_id.clone(),

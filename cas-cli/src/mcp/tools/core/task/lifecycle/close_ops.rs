@@ -97,17 +97,25 @@ fn request_close_verification_dispatch(
     boundary: &cas_types::VerificationProofBoundary,
     supervisor_recovery: bool,
 ) -> Result<CloseVerificationDispatch, McpError> {
-    cas_store::create_verification_dispatch_bound(
-        cas_root, task_id, requester_id, owner_id, boundary,
+    match cas_store::create_verification_dispatch_bound(
+        cas_root,
+        task_id,
+        requester_id,
+        owner_id,
+        boundary,
         chrono::Utc::now() + chrono::Duration::seconds(VERIFICATION_DISPATCH_TIMEOUT_SECS),
         supervisor_recovery,
-    )
-    .map(CloseVerificationDispatch::Requested)
-    .map_err(|error| McpError {
-        code: ErrorCode::INTERNAL_ERROR,
-        message: Cow::from(format!("Failed to persist verification dispatch: {error}")),
-        data: None,
-    })
+    ) {
+        Ok(dispatch) => Ok(CloseVerificationDispatch::Requested(dispatch)),
+        Err(cas_store::StoreError::VerificationDispatchConflict { dispatch }) => {
+            Ok(CloseVerificationDispatch::AlreadyActive(*dispatch))
+        }
+        Err(error) => Err(McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to persist verification dispatch: {error}")),
+            data: None,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -124,26 +132,61 @@ mod verification_dispatch_tests {
         std::fs::create_dir_all(&root).unwrap();
         let boundary = cas_types::VerificationProofBoundary::task();
         let original = cas_store::create_verification_dispatch_bound(
-            &root, "cas-racing-close", "supervisor", "supervisor", &boundary,
-            chrono::Utc::now() + chrono::Duration::minutes(10), false,
-        ).unwrap();
+            &root,
+            "cas-racing-close",
+            "supervisor",
+            "supervisor",
+            &boundary,
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .unwrap();
 
         for claimed in [false, true] {
             if claimed {
                 cas_store::claim_verification_dispatch_bound(
-                    &root, &original.id, "supervisor", "verifier", "capability",
-                ).unwrap();
+                    &root,
+                    &original.id,
+                    "supervisor",
+                    "verifier",
+                    "capability",
+                )
+                .unwrap();
             }
             let before = cas_store::get_verification_dispatch(&root, &original.id).unwrap();
-            // Requester is the ONLY changed field, not the owner or proof.
-            let outcome = request_close_verification_dispatch(
-                &root, &original.task_id, "worker", "supervisor", &boundary, false,
-            ).expect("active dispatch is verification-pending, never INTERNAL_ERROR");
-            match outcome {
-                CloseVerificationDispatch::AlreadyActive(active) => assert_eq!(active, before),
-                other => panic!("must return the exact active dispatch without reusing its authority: {other:?}"),
+            let different_boundary = cas_types::VerificationProofBoundary::delivery(
+                "receipt-for-other-proof".into(),
+                "transaction-for-other-proof".into(),
+            );
+            for (requester, owner, requested) in [
+                // First row is the RED reproducer: requester is the ONLY
+                // changed field, not the owner or full proof boundary.
+                ("worker", "supervisor", &boundary),
+                ("supervisor", "other-owner", &boundary),
+                ("supervisor", "supervisor", &different_boundary),
+            ] {
+                let outcome = request_close_verification_dispatch(
+                    &root,
+                    &original.task_id,
+                    requester,
+                    owner,
+                    requested,
+                    false,
+                )
+                .expect("active dispatch is verification-pending, never INTERNAL_ERROR");
+                match outcome {
+                    CloseVerificationDispatch::AlreadyActive(active) => assert_eq!(active, before),
+                    other => panic!(
+                        "must return the exact active dispatch without reusing its authority: {other:?}"
+                    ),
+                }
+                assert_eq!(
+                    cas_store::get_latest_verification_dispatch(&root, &original.task_id)
+                        .unwrap()
+                        .unwrap(),
+                    before
+                );
             }
-            assert_eq!(cas_store::get_latest_verification_dispatch(&root, &original.task_id).unwrap().unwrap(), before);
         }
     }
 }
@@ -9590,14 +9633,35 @@ impl CasCore {
                                 agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
                             });
                         let dispatch = match request_close_verification_dispatch(
-                            &self.cas_root, &req.id, &requester_id, &owner_id,
-                            &proof_boundary, supervisor_direct_recovery,
+                            &self.cas_root,
+                            &req.id,
+                            &requester_id,
+                            &owner_id,
+                            &proof_boundary,
+                            supervisor_direct_recovery,
                         )? {
                             CloseVerificationDispatch::Requested(dispatch) => dispatch,
                             CloseVerificationDispatch::AlreadyActive(dispatch) => {
-                                return Ok(Self::tool_error(format!(
-                                    "VERIFICATION REQUIRED: task {} close is pending dispatch {}, owned by {}. Wait for its verdict, then retry task close.",
-                                    req.id, dispatch.id, dispatch.owner_agent_id,
+                                // Do not adopt this cycle as the requested one,
+                                // especially when a genuinely different proof
+                                // boundary won the race. Its owner/verifier can
+                                // still finish the original verdict unchanged.
+                                let conflict = if dispatch.receipt_id != proof_boundary.receipt_id
+                                    || dispatch.delivery_transaction_id != proof_boundary.delivery_transaction_id
+                                    || dispatch.repository != proof_boundary.repository
+                                {
+                                    "This close requested a different proof boundary. The active dispatch was neither reused nor replaced."
+                                } else if dispatch.owner_agent_id != owner_id {
+                                    "This close requested a different verification owner. The active dispatch was neither reused nor replaced."
+                                } else {
+                                    "The proof boundary and owner are unchanged; the requester differs."
+                                };
+                                return Ok(Self::tool_error(gate_text::worker_verification_required(
+                                    &req.id,
+                                    &format!(
+                                        "Task {} close is pending existing dispatch {}, owned by {}, deadline {}. {} Ask the supervisor to finish this exact dispatch's verdict, then retry task close.",
+                                        req.id, dispatch.id, dispatch.owner_agent_id, dispatch.deadline_at, conflict,
+                                    ),
                                 )));
                             }
                         };

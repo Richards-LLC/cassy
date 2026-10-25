@@ -753,6 +753,52 @@ mod large_artifact_staging_tests {
     }
 
     #[test]
+    fn session_start_reports_channel_evidence_without_network_cas_cf25() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = staging_env("worker");
+        std::fs::write(tmp.path().join("config.toml"),
+            "[project]\ncanonical_id = 'qa.invalid/channels'\n[slack]\nchannels = ['C03CONFIG', 'C04NEW']\n").unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: format!("http://{}", server.server_addr()),
+            token: Some("ordinary-fixture-user".into()),
+            team_id: Some("qa-team".into()), ..Default::default()
+        }.save_to_cas_dir(tmp.path()).unwrap();
+        let input = session_input(tmp.path().to_str().unwrap());
+        let unchecked = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(unchecked.contains("C03CONFIG: unchecked"), "{unchecked}");
+        let now = chrono::Utc::now();
+        let path = tmp.path().join("violet-channel-check.json");
+        let mut snapshot = serde_json::json!({
+            "schema": 1, "project_id": "qa.invalid/channels", "team_id": "qa-team",
+            "checked_at": now, "channels": [{"channel_id":"C03CONFIG", "flags":["cloud_unverified"]}]
+        });
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let flagged = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(flagged.contains("C03CONFIG: cloud_unverified"), "{flagged}");
+        assert!(flagged.contains("C04NEW: unchecked"), "{flagged}");
+        snapshot["checked_at"] = serde_json::json!(now - chrono::Duration::hours(25));
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let stale = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(stale.contains("C03CONFIG: stale"), "{stale}");
+        assert!(stale.contains("cloud_unverified"), "{stale}");
+        snapshot["team_id"] = serde_json::json!("different-team");
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let foreign = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(foreign.contains("C03CONFIG: unchecked"), "{foreign}");
+        assert!(!foreign.contains("cloud_unverified"), "{foreign}");
+        snapshot["team_id"] = serde_json::json!("qa-team");
+        snapshot["checked_at"] = serde_json::json!(now);
+        snapshot["channels"] = serde_json::json!([
+            {"channel_id":"C03CONFIG", "flags":[]}, {"channel_id":"C04NEW", "flags":[]}
+        ]);
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let healthy = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(!healthy.contains("Configured Slack channels"), "{healthy}");
+        assert!(server.try_recv().unwrap().is_none(), "session-start channel diagnostics must stay offline");
+    }
+
+    #[test]
     fn session_start_includes_staging_banner_for_worker() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(

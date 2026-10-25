@@ -31,3 +31,12 @@ leaves the renderer unchanged; final candidate captures are stored with the task
 
 Scored by the implementing worker on 2026-10-24. This is self-check evidence;
 independent delivery review remains separate.
+
+## Configured-channel evidence
+
+The command now saves a local diagnostic snapshot at
+`.cas/violet-channel-check.json`, including incomplete/flagged configured rows.
+This is a local evidence write; all service calls remain read-only. Doctor uses
+the same inspection with a bounded configured-only scope. Session start reads
+only that snapshot and warns about unchecked, stale (24 hours) or flagged
+configured channels. See [diagnostic output contract](violet-channel-diagnostics.brief.md).

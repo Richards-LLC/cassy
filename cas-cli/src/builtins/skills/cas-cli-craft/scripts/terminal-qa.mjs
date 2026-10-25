@@ -314,6 +314,11 @@ export function parseAnsi(raw) {
       index += 1;
     }
     if (index === line.cells.length) {
+      let width = col();
+      while (width < cursorColumn) {
+        line.cells.push({ ch: " ", w: 1, style });
+        width += 1;
+      }
       line.cells.push(cell);
       cursorColumn += cell.w;
       return;
@@ -332,6 +337,33 @@ export function parseAnsi(raw) {
     const suffix = Array.from({ length: Math.max(0, overwrittenWidth - cell.w) }, () => ({ ch: " ", w: 1, style }));
     line.cells.splice(index, end - index, ...prefix, cell, ...suffix);
     cursorColumn += cell.w;
+  };
+  const eraseLine = (mode) => {
+    if (mode === 2) {
+      line.cells = [];
+      return;
+    }
+    const kept = [];
+    let column = 0;
+    for (const cell of line.cells) {
+      if (cell.w === 0) {
+        if (mode === 0 ? column <= cursorColumn : column > cursorColumn) kept.push(cell);
+        continue;
+      }
+      const end = column + cell.w;
+      if (mode === 0) {
+        if (end <= cursorColumn) kept.push(cell);
+        else if (column < cursorColumn) {
+          for (let k = 0; k < cell.w; k += 1) kept.push({ ch: " ", w: 1, style });
+        }
+      } else if (column > cursorColumn) {
+        kept.push(cell);
+      } else {
+        for (let k = 0; k < cell.w; k += 1) kept.push({ ch: " ", w: 1, style });
+      }
+      column = end;
+    }
+    line.cells = kept;
   };
 
   while (i < n) {
@@ -353,6 +385,10 @@ export function parseAnsi(raw) {
           style = applySgr(list, style);
         } else {
           line.controls.push(seq);
+          if (final === "K") {
+            const mode = params === "" ? 0 : Number(params);
+            if (mode === 0 || mode === 1 || mode === 2) eraseLine(mode);
+          }
         }
         i = j + 1;
         continue;

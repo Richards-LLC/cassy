@@ -49,6 +49,7 @@ test("parseAnsi preserves CRCRLF rows and overwrites from column zero after bare
     "Cloud project: other/project; verified: yes",
   ]);
   assert.deepEqual(parseAnsi("Violet project\rX\r\n").map(lineText), ["Xiolet project"]);
+  assert.deepEqual(parseAnsi("long text\r\u001b[2Kshort").map(lineText), ["short"]);
 });
 
 // ---------------------------------------------------------------------------

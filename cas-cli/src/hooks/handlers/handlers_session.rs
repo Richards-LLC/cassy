@@ -316,7 +316,7 @@ pub fn handle_session_start(
         }
     }
 
-    if let Some(channels) = crate::cli::violet_cmd::channels::session_start_summary(cas_root, chrono::Utc::now()) {
+    if let Some(channels) = crate::cli::session_start_channels(cas_root, chrono::Utc::now()) {
         assembler.append_degradable_with_priority(
             "Configured Slack channels", channels.clone(), channels,
             DegradationPriority::Context,

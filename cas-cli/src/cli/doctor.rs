@@ -280,7 +280,8 @@ impl CheckGroup {
             | "sessionstart budget"
             | "managed commits" => Self::Config,
             "issue repositories" | "shipped issues" | "journey registry" => Self::Config,
-            "integrations" | "violet" | "violet wake" | "violet claims" | "violet channels" | "github origin" => {
+            "integrations" | "violet" | "violet wake" | "violet claims"
+            | "violet consumers" | "violet channels" | "github origin" => {
                 Self::Integrations
             }
             name if name.starts_with("integration") => Self::Integrations,
@@ -1421,6 +1422,28 @@ fn violet_claim_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Op
     Some(Check::new(
         "violet claims",
         if healthy { CheckStatus::Ok } else { CheckStatus::Warning },
+        message,
+    ))
+}
+
+/// cas-ef94 (GH #1267): each running factory daemon's own consumer receipt.
+/// An old daemon writes none and is reported unknown, never inferred from the
+/// CLI on PATH. Local evidence only: no Cloud consumer exemption.
+fn violet_consumer_check(cas_root: &Path) -> Option<Check> {
+    use crate::ui::factory::daemon::runtime::violet_consumer::{ConsumerState, project_statuses};
+    let statuses = project_statuses(cas_root);
+    if statuses.is_empty() {
+        return None;
+    }
+    let unknown = statuses.iter().any(|status| status.state == ConsumerState::Unknown);
+    let message = statuses
+        .iter()
+        .map(|status| format!("{}: {}", status.factory_session, status.rows().join(" · ")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(Check::new(
+        "violet consumers",
+        if unknown { CheckStatus::Warning } else { CheckStatus::Ok },
         message,
     ))
 }
@@ -3052,6 +3075,7 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // cas-a897: Violet push-wake watches and the Cloud relay claim loop.
     checks.extend(violet_wake_check(&cas_root, chrono::Utc::now()));
     checks.extend(violet_claim_check(&cas_root, chrono::Utc::now()));
+    checks.extend(violet_consumer_check(&cas_root));
     checks.extend(violet_channel_check(&cas_root));
     recorder.mark("violet hub", &checks);
 

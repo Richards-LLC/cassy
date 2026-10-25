@@ -46,6 +46,7 @@ pub(crate) mod prompt_queue_jobs;
 pub(crate) mod teams;
 pub(super) mod terminal_exchange;
 pub(crate) mod violet_activity;
+pub(crate) mod violet_consumer;
 pub(crate) mod violet_intake;
 pub(crate) mod violet_reader;
 mod violet_body;

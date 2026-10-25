@@ -7,6 +7,34 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.79.0] - 2026-10-25
+
+### Added
+
+- **Clearing a session whose PID was reused** — Add `cas kill <name> --force-stale` for a session whose recorded PID now runs another program. It shows what that PID currently runs, asks for confirmation (skipped with `--force`, refused without a terminal), pins the confirmed PID and its start time and changes nothing if that process is replaced or exits before the clear, refuses when the PID's start time matches the one recorded for the session's daemon, never signals the recorded PID, reaps the session's fingerprint-checked worker process groups and removes the record.
+
+### Fixed
+
+- **Factory daemon wedged on worker shutdown (macOS)** — Run each worker's kill and pane drop off the daemon loop with a 15-second deadline, logging the stalled stage and process group instead of blocking the loop. A loop that stays wedged is re-reported every 30 seconds; 20 seconds after a shutdown request it records the reason in `daemon.log` and exits. `daemon.log` now records daemon start, stop and exit, and the daemon waits at most 5 seconds for a stalled teardown thread when it exits.
+
+- **`cas kill` on a stuck or dead daemon** — Escalate to SIGKILL when SIGTERM is ignored, but only on an exact daemon start-time match, and report when SIGKILL was withheld. After the daemon is gone, reap its recorded worker process groups (fingerprint-checked) from the daemon's own store, including after a manual `kill -9`, and check for a replacement daemon first. A running daemon whose start time cannot be read is no longer treated as dead: its workers and record are kept, the skipped reap is logged, and the error names a command that clears the session. Every daemon start path, including hub, bridge and Commander launches, now records its store.
+
+- **Workers stranded by an unresponsive supervisor** — When a live supervisor has adopted an epic and the original daemon is confirmed dead by its PID and start-time fingerprint, the original session's workers send `target=supervisor` messages to the adopting supervisor, accept its messages, and can be reset or shut down from the adopting session. Shutdown checks the recorded process group and each captured descendant, including children that started their own session, and keeps worktrees. A retired adopted worker no longer blocks a later shutdown.
+
+- **Concurrent close conflict** — When another close already owns the task's active verification dispatch, report that exact dispatch and whether its requester, owner or proof boundary differs, leaving it unchanged rather than failing with a generic proof-boundary error.
+
+- **Close notes during concurrent edits** — Keep task notes that were rewritten while a close was running, and retry the close when only a note was added in the gap instead of refusing it.
+
+- **Faster close proof checks** — Scan the delivered tree once per close and share it across worktrees at the same commit, stream the batched source read so large trees cannot deadlock, and match a relative `include_str!` path written with any `../` spelling.
+
+- **Shared terminal layout with a compact input owner** — Refresh the layout when a full-width viewer resizes while a compact client owns input, and when input moves to or from a compact client at the same size.
+
+- **Terminal QA captures** — `terminal-qa` keeps a row's text after a carriage return redraw, overwriting cells in place, and applies erase-in-line controls, so a capture no longer drops visible text while reporting PASS.
+
+- **Review checkouts through symlinked paths** — Recognize managed review checkouts when the CAS root is reached through a symlink, such as macOS `/var` and `/private/var`.
+
+- **macOS socket cleanup diagnostics** — Log at debug level why socket cleanup keeps a factory socket path, such as an incomplete or unreadable holder inventory.
+
 ## [3.78.0] - 2026-10-24
 
 ### Added

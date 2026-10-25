@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map regenerated for the 3.78 v63 code-complete tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated for the 3.79 v64 code-complete tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -56,6 +56,7 @@
 - `cas-cli/src/capability.rs`, `cas-cli/src/cli/hub_service.rs` - account probes, bounded auth cache and readiness.
 - `cas-cli/src/cli/codemap_cmd.rs`, `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs` - map commands, immutable documentation measurements and calling-checkout document reads.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations, cache GC and integration commands.
+- `cas-cli/src/cli/factory/lifecycle.rs`, `cas-cli/src/cli/factory/daemon.rs` - `cas kill` start-time-pinned escalation, `--force-stale`, fingerprint-checked worker-group reaping and bounded daemon runtime exit.
 - `cas-cli/src/cli/violet_cmd/channels.rs` - read-only configured/Violet/Cloud channel inventory, binding verification and project mismatch reporting.
 - `cas-cli/src/hooks/handlers/`, `cas-cli/src/cli/hook/` - session/tool policy, native dispatch and hook generation.
 - `cas-cli/src/cloud/`, `cas-cli/src/hub/` - synchronization, identity, pairing, inbox and presence.
@@ -80,11 +81,14 @@
 - `cas-cli/src/ui/factory/client.rs`, `cas-cli/src/ui/factory/session.rs`, `cas-cli/src/ui/factory/session/socket_cleanup*.rs` - attach client signal guard, session records and locked Linux/macOS kernel socket-holder proof before orphan reaping.
 - `cas-cli/src/ui/factory/app/provisioning.rs`, `cas-cli/src/ui/factory/app/render_and_ops/` - provisioning, rendering and worker/worktree actions.
 - `cas-cli/src/ui/factory/daemon/runtime/` - lifecycle, startup delivery, events, probes, relays and render scheduling.
+- `cas-cli/src/ui/factory/daemon/runtime/loop_watchdog.rs`, `cas-cli/src/ui/factory/daemon/runtime/client_input.rs` - wedged-loop reporting and shutdown exit; input ownership and layout resize scheduling.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_intake.rs` - lifecycle-owned Slack intake and pause control.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_reader.rs` - managed delivery decoding, recovery ordering and idempotent wake intake.
 - `cas-cli/src/ui/factory/daemon/runtime/violet_activity.rs` - managed wake presentation, source age and addressing.
+- `cas-cli/src/ui/factory/daemon/runtime/violet_consumer.rs` - per-session daemon consumer receipt; running/stale/unknown consumer status for factory status and doctor.
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry/` - dispatch, reminders, stalls and owned servers.
 - `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_branch_recovery.rs` - durable succession and authenticated worker-branch recovery.
+- `cas-cli/src/factory_session_scope.rs`, `cas-cli/src/mcp/tools/service/factory_ops.rs` - session ownership, adopted-orphan worker routing, reset and fingerprinted shutdown.
 - `cas-cli/src/ui/factory/app/assignment_evidence.rs`, `cas-cli/src/supervisor_message_wakes.rs` - assignment receipts and wake batching.
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_binary_skew.rs`, `cas-cli/src/history/epochs.rs` - live binary/version identity and runtime epoch history.
@@ -93,7 +97,7 @@
 - `cas-cli/src/factory_worker_check.rs` - capped checks/tests, receipt rebinding and supervisor-recorded evidence.
 - `cas-cli/src/factory_target_cache.rs`, `cas-cli/src/factory_target_cache/` - cache inventory/GC, ownership, baselines and retirement.
 - `crates/cas-mux/src/backend/`, `crates/cas-mux/src/pane/` - harness launch, readiness and terminal snapshots.
-- `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, input injection and submit gating.
+- `crates/cas-mux/src/mux.rs`, `crates/cas-mux/src/submit_gate.rs` - multiplexer events, input injection, deadline-bounded worker teardown and submit gating.
 - `crates/cas-pty/src/store_isolation.rs`, `crates/cas-pty/conformance/` - credential-store masking and harness conformance proofs.
 - `crates/cas-pty/src/display.rs` - shared terminal character policy for hook/readiness labels and CLI Git remedies.
 

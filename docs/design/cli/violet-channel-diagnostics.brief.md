@@ -9,7 +9,8 @@
 | Omitted | No credential, activation, consumer exemption or claim authority is inferred from a local diagnostic snapshot. Healthy cached channels add no startup context. |
 
 Doctor checks at most 16 configured channels under a shared three-second HTTP
-budget, using GETs only. Extra configured channels remain unchecked. It does not
+budget, using GETs only. A caller deadline also bounds blocking DNS resolution;
+probes that finish after the deadline do not refresh cached evidence. Extra configured channels remain unchecked. It does not
 enumerate Cloud-only channels or create a supervisor registration. The full
 `cas violet channels` inventory remains the detailed read-only diagnostic.
 

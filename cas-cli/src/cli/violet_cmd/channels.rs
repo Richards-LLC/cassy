@@ -76,7 +76,34 @@ fn within_deadline(
     budget: Duration,
     probe: impl FnOnce(Instant) -> Result<Report, VioletError> + Send + 'static,
 ) -> Result<Report, VioletError> {
-    probe(Instant::now() + budget)
+    if budget.is_zero() {
+        return Err(check_timeout());
+    }
+    let deadline = Instant::now() + budget;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // ureq cannot interrupt OS DNS resolution. Bound the caller as peers'
+    // session-start lookup does, rather than relying on HTTP timeouts alone.
+    std::thread::Builder::new()
+        .name("cas-doctor-channels".into())
+        .spawn(move || {
+            let _ = sender.send(probe(deadline));
+        })
+        .map_err(|_| {
+            VioletError::local(
+                "check_unavailable",
+                "channel check could not start; run `cas violet channels`",
+            )
+        })?;
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| check_timeout())?
+}
+
+fn check_timeout() -> VioletError {
+    VioletError::local(
+        "check_timeout",
+        "doctor channel check exceeded its 3-second budget; run `cas violet channels`",
+    )
 }
 
 fn inspect_inner(
@@ -305,6 +332,10 @@ fn inspect_inner(
             flags,
             remedy,
         });
+    }
+    // An abandoned slow resolver must not later refresh the cached evidence.
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(check_timeout());
     }
     if let Err(error) = save_snapshot(root, &team, &report) {
         report
@@ -599,6 +630,7 @@ fn get_json_until(
     let response = ureq::AgentBuilder::new()
         .redirects(0)
         .timeout(timeout)
+        .timeout_connect(timeout)
         .build()
         .get(url.as_str())
         .set("Authorization", &format!("Bearer {token}"))

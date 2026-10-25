@@ -19,3 +19,23 @@ credentials. Session start only reads local files. Missing, invalid or different
 scoped evidence and newly configured channels are unchecked. Evidence at least
 24 hours old, or dated in the future, is stale. Stale flags are retained and
 labeled stale; current bindings require another check.
+
+## Critique
+
+terminal-qa: PASS channel-startup-complete · 11 runs · 0 fail · 0 warn · 0 allowed
+
+Receipt: task `cas-cf25`, `terminal-qa/channel-startup-complete/report.json`.
+The capture extracts the complete diagnostic section from the real candidate's
+SessionStart JSON; service responses are isolated HTTP fixtures. Existing
+personal-pattern and suggestion reads are recorded separately from channel
+reads. This does not establish deployed binding health or consumer authority.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | First line gives the affected count and cached-evidence label; line two gives the refresh command. |
+| Fit | 4 | Healthy cached channels add no warning; stale or flagged IDs get one row each, bounded to eight rows. |
+| Craft | 4 | Wrapped flags retain a hanging indent; the full stale finding remains visible at 80 columns. |
+| Theme safety | 5 | Plain text passes light, dark, Solarized, NO_COLOR and C-locale captures. |
+| Machine contract | 5 | Actual channels/doctor/hook invocations retain one JSON document; extraction is confined to the QA harness. |
+
+Scored by the implementing worker on 2026-10-25; independent review is separate.

@@ -5,7 +5,7 @@
 //! capabilities compiled into that process. `cas factory status` and
 //! `cas doctor` trust a receipt only when its PID and start time match the
 //! session's live daemon. Without a matching receipt, a running daemon is
-//! reported as unknown: an old daemon writes none. The CLI on PATH never
+//! reported as unknown: an old daemon writes none, and writing can fail. The CLI on PATH never
 //! stands in for the daemon's build or capability.
 //!
 //! This is local evidence. It is not a Cloud `capable_v1_consumers`
@@ -68,6 +68,24 @@ fn compiled_capabilities() -> Vec<String> {
     capabilities
 }
 
+// Keep the lock inode: deleting it could give simultaneous callers different
+// locks for the same session. Publication and retirement use this same lock.
+fn lock_receipt(path: &Path) -> Result<std::fs::File, String> {
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_extension("lock"))
+        .map_err(|e| format!("open consumer receipt lock: {e}"))?;
+    fs2::FileExt::lock_exclusive(&lock).map_err(|e| format!("lock consumer receipt: {e}"))?;
+    Ok(lock)
+}
+
+fn failure_path(path: &Path, pid: u32) -> PathBuf {
+    path.with_extension(format!("json.{pid}.failed"))
+}
+
 /// Write this process's receipt for `factory_session`, replacing any older one.
 pub(crate) fn record(
     cas_dir: &Path,
@@ -95,12 +113,25 @@ pub(crate) fn record(
     };
     let parent = path.parent().ok_or("receipt path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    let _lock = lock_receipt(&path)?;
     let tmp = path.with_extension(format!("json.{pid}.tmp"));
     let bytes = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
-    let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-    file.write_all(&bytes).map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("rename {}: {e}", path.display()))
+    let result = (|| {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        file.write_all(&bytes).map_err(|e| e.to_string())?;
+        file.sync_all().map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| format!("rename {}: {e}", path.display()))
+    })();
+    let failure = failure_path(&path, pid);
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+        // Best effort: a completely unwritable directory may prevent even this
+        // evidence. Only this PID + start time can use it as a known failure.
+        let _ = std::fs::write(failure, bytes);
+    } else {
+        let _ = std::fs::remove_file(failure);
+    }
+    result
 }
 
 /// Remove this process's receipt at clean shutdown. Another process's
@@ -114,10 +145,14 @@ fn retire_after_read(cas_dir: &Path, factory_session: &str, after_read: impl FnO
     let Some(path) = receipt_path(cas_dir, factory_session) else {
         return;
     };
+    let Ok(_lock) = lock_receipt(&path) else {
+        return;
+    };
     if read(&path).is_some_and(|receipt| receipt.pid == std::process::id()) {
         after_read();
-        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(&path);
     }
+    let _ = std::fs::remove_file(failure_path(&path, std::process::id()));
 }
 
 fn read(path: &Path) -> Option<ConsumerReceipt> {
@@ -131,7 +166,7 @@ pub(crate) enum ConsumerState {
     Running,
     /// The live daemon's receipt: push-wake did not start.
     PushWakeOff,
-    /// The live daemon wrote no matching receipt (an older daemon).
+    /// The live daemon wrote no matching receipt (older build or write failure).
     Unknown,
     /// The daemon is gone; a receipt from it remains.
     Stale,
@@ -165,7 +200,7 @@ pub(crate) fn observe(
         .slack
         .unwrap_or_default()
         .wake_enabled();
-    let verified = receipt.as_ref().filter(|receipt| {
+    let matches_daemon = |receipt: &&ConsumerReceipt| {
         daemon_running
             && receipt.pid == session.daemon_pid
             && receipt.pid_starttime.is_some()
@@ -173,7 +208,13 @@ pub(crate) fn observe(
             && session
                 .daemon_pid_starttime
                 .is_none_or(|expected| Some(expected) == receipt.pid_starttime)
-    });
+    };
+    let verified = receipt.as_ref().filter(matches_daemon);
+    let write_failed = receipt_path(cas_dir, &session.name)
+        .and_then(|path| read(&failure_path(&path, session.daemon_pid)))
+        .as_ref()
+        .filter(matches_daemon)
+        .is_some();
     let mut status = ConsumerStatus {
         factory_session: session.name.clone(),
         state: ConsumerState::Unknown,
@@ -222,8 +263,13 @@ pub(crate) fn observe(
             let ignored = stale
                 .map(|receipt| format!(" (ignored a receipt from pid {})", receipt.pid))
                 .unwrap_or_default();
+            let reason = if write_failed {
+                "consumer receipt write failed; see the daemon log"
+            } else {
+                "reporting unavailable (older build or receipt write failure); see the daemon log"
+            };
             status.detail = format!(
-                "daemon pid {} (build {}) wrote no consumer receipt{ignored}: it predates consumer reporting; restart the factory to report it",
+                "daemon pid {} (build {}) wrote no consumer receipt{ignored}: {reason}; restart the factory to report it",
                 session.daemon_pid,
                 session.daemon_build_hash.as_deref().unwrap_or("unrecorded"),
             );

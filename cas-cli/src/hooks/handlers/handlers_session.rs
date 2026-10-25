@@ -316,6 +316,13 @@ pub fn handle_session_start(
         }
     }
 
+    if let Some(channels) = crate::cli::violet_cmd::channels::session_start_summary(cas_root, chrono::Utc::now()) {
+        assembler.append_degradable_with_priority(
+            "Configured Slack channels", channels.clone(), channels,
+            DegradationPriority::Context,
+        );
+    }
+
     // cas-97ff (GH #1215 §1): name the other live supervisors of this repo,
     // from the same Cassy Cloud snapshot `cas peers` renders, so a `/clear`
     // never hides a live peer. Supervisors only, bounded by its own deadline;
@@ -762,8 +769,11 @@ mod large_artifact_staging_tests {
         crate::cloud::CloudConfig {
             endpoint: format!("http://{}", server.server_addr()),
             token: Some("ordinary-fixture-user".into()),
-            team_id: Some("qa-team".into()), ..Default::default()
-        }.save_to_cas_dir(tmp.path()).unwrap();
+            team_id: Some("qa-team".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(tmp.path())
+        .unwrap();
         let input = session_input(tmp.path().to_str().unwrap());
         let unchecked = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
         assert!(unchecked.contains("C03CONFIG: unchecked"), "{unchecked}");
@@ -795,9 +805,11 @@ mod large_artifact_staging_tests {
         std::fs::write(&path, snapshot.to_string()).unwrap();
         let healthy = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
         assert!(!healthy.contains("Configured Slack channels"), "{healthy}");
-        assert!(server.try_recv().unwrap().is_none(), "session-start channel diagnostics must stay offline");
+        assert!(
+            server.try_recv().unwrap().is_none(),
+            "session-start channel diagnostics must stay offline"
+        );
     }
-
     #[test]
     fn session_start_includes_staging_banner_for_worker() {
         let tmp = tempfile::tempdir().unwrap();

@@ -9259,6 +9259,62 @@ mod tests {
     }
 
     #[test]
+    fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<_> = (0..18).map(|n| format!("C{n:02}CONFIG")).collect();
+        std::fs::write(dir.path().join("config.toml"), format!(
+            "[project]\ncanonical_id = 'qa.invalid/channels'\n[slack]\nchannels = {}\n",
+            serde_json::to_string(&ids).unwrap()
+        )).unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        crate::cloud::CloudConfig {
+            endpoint: endpoint.clone(), token: Some("ordinary-fixture-user".into()),
+            team_id: Some("qa-team".into()), ..Default::default()
+        }.save_to_cas_dir(dir.path()).unwrap();
+        let remote = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            for index in 0..17 {
+                let request = server.recv_timeout(std::time::Duration::from_secs(10)).unwrap().expect("configured-channel GET");
+                assert_eq!(request.method(), &tiny_http::Method::Get);
+                paths.push(request.url().to_owned());
+                let body = if index == 0 {
+                    json!({"channels": [{"channel_id":"C00CONFIG", "project_id":"qa.invalid/channels"}]})
+                } else if index == 1 {
+                    json!({"schema":"cassy.binding-reconciliation/v1", "code":"completed",
+                        "binding":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "provider":"slack",
+                            "team_id":"qa-team", "workspace_id":"T0QA", "channel_id":"C00CONFIG",
+                            "project_id":"qa.invalid/channels", "mode":"managed", "verified":false,
+                            "fence_generation":0, "activated_at":null, "legacy_fenced_at":null},
+                        "strict_activation":"legacy"})
+                } else {
+                    json!({"schema":"cassy.binding-reconciliation/v1", "code":"completed", "binding":null, "strict_activation":null})
+                };
+                request.respond(tiny_http::Response::from_string(body.to_string()).with_header(
+                    tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap()
+                )).unwrap();
+            }
+            assert!(server.try_recv().unwrap().is_none());
+            paths
+        });
+        let check = violet_channel_check_at(dir.path(), &crate::cli::violet_cmd::channels::ChannelsArgs {
+            url: endpoint, registration_id: None,
+        }).unwrap();
+        let paths = remote.join().unwrap();
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("cloud_unverified"), "{}", check.message);
+        assert!(check.message.contains("cloud_unmapped"), "{}", check.message);
+        assert!(check.message.contains("unchecked"), "{}", check.message);
+        assert_eq!(paths.len(), 17, "one discovery GET plus at most 16 authority GETs");
+        assert!(paths.iter().all(|path| !path.contains("activation") && !path.contains("registration")));
+        let evidence: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            dir.path().join("violet-channel-check.json")
+        ).unwrap()).unwrap();
+        assert_eq!(evidence["channels"].as_array().unwrap().len(), 16);
+    }
+
+    #[test]
     fn violet_wake_check_reads_the_watch_book_cas_a897() {
         let dir = tempfile::tempdir().unwrap();
         let now = chrono::Utc::now();

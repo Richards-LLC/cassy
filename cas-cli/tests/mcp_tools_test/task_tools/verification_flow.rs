@@ -1604,8 +1604,19 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
     assert!(target_head.status.success());
     let target_head = String::from_utf8_lossy(&target_head.stdout).trim().to_string();
 
+    // cas-3792: the merge close runs as the supervisor before the worker
+    // retries. Both callers must target the same owner and repository proof.
+    let supervisor_id = "post-merge-target-supervisor";
+    let supervisor = registered_supervisor(&cas_dir, supervisor_id).await;
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let worker_id = format!("test-session-{}", std::process::id());
+    let mut worker = agents.get(&worker_id).unwrap();
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("post-merge-factory".into());
+    agents.update(&worker).unwrap();
+
     let post_merge = extract_text(
-        service
+        supervisor
             .cas_task_close(Parameters(close_request(&task_id, "merged delivered work")))
             .await
             .expect("post-merge close"),
@@ -1623,7 +1634,54 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
         target_head,
         "post-merge proof must bind the published target checkout"
     );
-    let supervisor = registered_supervisor(&cas_dir, "post-merge-target-supervisor").await;
+    assert_eq!(dispatch.requester_agent_id, supervisor_id);
+    assert_eq!(dispatch.owner_agent_id, supervisor_id);
+    let boundary = cas_types::VerificationProofBoundary {
+        receipt_id: dispatch.receipt_id.clone(),
+        delivery_transaction_id: dispatch.delivery_transaction_id.clone(),
+        repository: dispatch.repository.clone(),
+    };
+    // Vary ONLY the requester: the unchanged owner and complete proof
+    // boundary reproduce the store conflict behind the worker's close.
+    let conflict = cas_store::create_verification_dispatch_bound(
+        &cas_dir, &task_id, &worker_id, supervisor_id, &boundary,
+        dispatch.deadline_at, false,
+    ).expect_err("requester-only mismatch must not replace the active dispatch");
+    eprintln!("requester-only conflict (owner and full boundary unchanged): {conflict}");
+
+    for claimed in [false, true] {
+        if claimed {
+            let capability = cas_store::issue_verifier_capability(&cas_dir, &task_id, supervisor_id).unwrap();
+            cas_store::bind_verifier_capability(&cas_dir, &capability.token, "post-merge-verifier").unwrap();
+            cas_store::claim_verification_dispatch_bound(
+                &cas_dir, &dispatch.id, supervisor_id, "post-merge-verifier", &capability.capability.id,
+            ).unwrap();
+        }
+        let before = cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap();
+        let worker_env = FactoryWorkerEnv::enter(&mut test_env);
+        let retry = extract_text(
+            service.cas_task_close(Parameters(close_request(&task_id, "worker re-close after merge")))
+                .await.expect("worker re-close must return verification guidance, not INTERNAL_ERROR"),
+        );
+        drop(worker_env);
+        assert!(retry.contains("VERIFICATION REQUIRED") && retry.contains(&dispatch.id), "{retry}");
+        assert!(retry.contains(supervisor_id) && retry.contains("retry"), "{retry}");
+        assert_eq!(cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().unwrap(), before);
+        let pending = task_store.get(&task_id).unwrap();
+        assert_eq!(pending.status, TaskStatus::AwaitingMerge);
+        assert!(pending.pending_verification);
+    }
+
+    // A different, still-valid anchor boundary must be refused explicitly,
+    // without being treated as the existing dispatch's proof.
+    let before = cas_store::get_verification_dispatch(&cas_dir, &dispatch.id).unwrap();
+    let mut different = close_request(&task_id, "review a different boundary");
+    different.commit_receipt = Some(target_head);
+    let worker_env = FactoryWorkerEnv::enter(&mut test_env);
+    let refused = extract_text(service.cas_task_close(Parameters(different)).await.unwrap());
+    drop(worker_env);
+    assert!(refused.contains(&dispatch.id) && refused.contains("different proof boundary"), "{refused}");
+    assert_eq!(cas_store::get_latest_verification_dispatch(&cas_dir, &task_id).unwrap().unwrap(), before);
     supervisor
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: task_id.clone(),

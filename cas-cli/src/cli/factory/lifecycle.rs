@@ -386,10 +386,21 @@ fn force_clear_stale_session(
         );
     }
     // The same PID may have been reused by a new process since the prompt.
-    if confirmed_starttime.is_some() && starttime_of(pid) != confirmed_starttime {
-        bail!(
-            "PID {pid} started a new process after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
-        );
+    // A missing fingerprint is different: check whether the confirmed process
+    // exited, and otherwise refuse without guessing why its identity is unreadable.
+    if let Some(confirmed_starttime) = confirmed_starttime {
+        match starttime_of(pid) {
+            Some(current) if current != confirmed_starttime => bail!(
+                "PID {pid} started a new process after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
+            ),
+            Some(_) => {}
+            None if !crate::mcp::daemon::pid_alive(pid) => bail!(
+                "PID {pid} exited while you were confirming it; nothing was changed. Run `cas kill {name} --force-stale` again."
+            ),
+            None => bail!(
+                "PID {pid}'s start time could not be read after you confirmed it; nothing was changed. Run `cas kill {name} --force-stale` again."
+            ),
+        }
     }
     // Refuse only on positive proof: a recorded start time that matches the
     // running PID's readable one. No record, or an unreadable start time,

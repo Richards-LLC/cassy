@@ -779,7 +779,7 @@ mod tests {
         assert_eq!(error.code, "local_request_failed");
         // A stalled resolver/probe cannot hold the caller. The gate stays
         // closed until after the timeout result, with no sleeps or timing assertions.
-        let (release, held) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel::<()>();
         let (finished, complete) = std::sync::mpsc::channel();
         let error = within_deadline(Duration::from_millis(1), move |_| {
             let _ = held.recv();

@@ -65,11 +65,18 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
 
 /// Doctor's configured-only check shares one deadline across all HTTP reads.
 pub(crate) fn inspect_configured(root: &Path, args: &ChannelsArgs) -> Result<Report, VioletError> {
-    inspect_inner(
-        Some(root),
-        args,
-        Some(Instant::now() + Duration::from_secs(3)),
-    )
+    let root = root.to_path_buf();
+    let args = args.clone();
+    within_deadline(Duration::from_secs(3), move |deadline| {
+        inspect_inner(Some(&root), &args, Some(deadline))
+    })
+}
+
+fn within_deadline(
+    budget: Duration,
+    probe: impl FnOnce(Instant) -> Result<Report, VioletError> + Send + 'static,
+) -> Result<Report, VioletError> {
+    probe(Instant::now() + budget)
 }
 
 fn inspect_inner(
@@ -724,4 +731,19 @@ fn channel_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_doctor_budget_never_starts_a_probe_cas_cf25() {
+        let error = within_deadline(Duration::ZERO, |_| {
+            panic!("expired doctor budget must not start DNS or HTTP work")
+        })
+        .err()
+        .expect("expired budget is an unchecked result");
+        assert_eq!(error.code, "check_timeout");
+    }
 }

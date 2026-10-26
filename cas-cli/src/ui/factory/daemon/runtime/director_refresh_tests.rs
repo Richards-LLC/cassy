@@ -47,7 +47,7 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             task_id: task.id, task_title: task.title, worker: "merge-w".into(),
         };
         let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
-        assert_eq!(prompts.len(), 1, "{cause}: retain the notification");
+        assert_eq!(prompts.len(), 1);
         // pin: the cause labels select the recipient/dispatch/independent-hold table above.
         assert_eq!(crate::supervisor_message_wakes::quiet(&prompts[0].text), cause == "owned",
             "{cause}: only the recipient's sole active verification wait is quiet");

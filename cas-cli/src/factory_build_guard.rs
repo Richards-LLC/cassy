@@ -698,7 +698,7 @@ mod tests {
     /// provenance, process/lifetime/Cargo locks and deletion remain real.
     #[cfg(target_os = "linux")]
     #[test]
-    fn admission_reclaims_stale_scratch_and_remeasures_cas_2e6e() {
+    fn admission_reclaims_previous_session_scratch_and_remeasures_cas_ed60() {
         use std::fs;
         use std::time::{Duration, SystemTime};
         let env = crate::test_support::TestEnvGuard::temp_home();
@@ -730,6 +730,8 @@ mod tests {
             }
             targets.push((worker, target));
         }
+        // Previous factory sessions leave durable target provenance after checkout cleanup.
+        fs::remove_dir_all(&targets[0].0).unwrap();
         let _live = crate::factory_target_cache::owner::acquire(&cas, &targets[2].0)
             .unwrap()
             .unwrap();

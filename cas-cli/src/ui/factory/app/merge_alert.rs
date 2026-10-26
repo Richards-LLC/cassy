@@ -68,6 +68,8 @@ pub(super) fn prune_ready_receipts(cache: &ProbeCache, cas_dir: &Path, now: Date
             .and_then(|bytes| serde_json::from_slice::<ReadyReceipt>(&bytes).ok()) else { continue; };
         if tasks.get(&receipt.evidence.task_id).is_ok_and(|task| task.is_terminal()) {
             let _ = std::fs::remove_file(path);
+            cache.reads.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&receipt.evidence.task_id);
         }
     }
 }

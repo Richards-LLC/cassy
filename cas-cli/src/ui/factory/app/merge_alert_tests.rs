@@ -227,6 +227,11 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         task.deliverables.factory_branch_anchor = None;
         task.notes = "Close rejected: FAST ROWS REQUIRED".into();
         store.update(&task).unwrap();
+        if status == TaskStatus::Blocked {
+            git(f.repo.path(), &["switch", "-qc", "factory/merge-w-cas-9efb-test"]);
+            git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w-cas-9efb-test"]);
+        }
+        let branch = git(f.repo.path(), &["branch", "--show-current"]);
         let data = DirectorData::load_with_stores_for_project(
             &f.app.cas_dir, None, false, None, None,
         ).unwrap();
@@ -246,8 +251,7 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         let prompt = &mut prompts[0];
         // pin: this heading is the supervisor's immediate merge trigger.
         assert!(prompt.text.contains("READY TO MERGE"), "{}", prompt.text);
-        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch,
-            git(f.repo.path(), &["branch", "--show-current"]));
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch, branch);
         // pin: merge guidance must identify the resolved target and executable action.
         assert!(prompt.text.contains("epic/test"), "{}", prompt.text);
         // pin: the supervisor merges directly without a worker relay.
@@ -259,11 +263,11 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
         assert!(!f.app.refresh_prompt_for_delivery(prompt));
-        git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+        git(f.repo.path(), &["push", "-q", "origin", &branch]);
         let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(newer.len(), 1);
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
-        f.advance_target(true);
+        git(f.repo.path(), &["push", "-q", "origin", "HEAD:epic/test"]);
         assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
     }
 }

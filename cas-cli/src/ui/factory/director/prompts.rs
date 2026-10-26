@@ -1196,7 +1196,12 @@ fn merge_delivery_branch(repo_root: &Path, task_id: &str, worker: &str) -> Strin
     let parked = cas_dir.join("cas.db").is_file().then(|| {
         crate::store::open_task_store_cached(&cas_dir).ok()?.get(task_id).ok()?.deliverables.parked_branch
     }).flatten();
-    parked.unwrap_or_else(|| format!("factory/{worker}"))
+    parked.unwrap_or_else(|| super::events::task_delivery_ref(
+        task_id, worker, None, None,
+        |branch| resolve_ref_commit_sha(repo_root, branch)
+            .or_else(|| resolve_ref_commit_sha(repo_root, &format!("origin/{branch}"))),
+        |_, _| false,
+    ).0)
 }
 
 /// Re-validate a MERGE REQUIRED / AwaitingMerge `WorkerIdle` signal against

@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map regenerated for the 3.81 cut-prep tree: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map of the 3.81.0 release tree (its report set is the newest in `docs/release-reports/`): 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 

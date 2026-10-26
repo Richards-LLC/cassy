@@ -10,6 +10,8 @@
 pub mod asset;
 pub mod brand;
 pub mod finalize;
+pub mod capture;
+pub mod pairs;
 
 use serde::{Deserialize, Serialize};
 

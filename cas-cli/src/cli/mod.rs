@@ -36,6 +36,7 @@ mod qa_impact;
 pub(crate) mod qa_post_release;
 mod provider_default;
 mod release_report;
+pub mod deliverable;
 mod sweep;
 mod worktree;
 // `pub` so integration tests in `cas-cli/tests/` can reach
@@ -358,6 +359,10 @@ pub enum Commands {
     #[command(name = "release-report", hide = true)]
     ReleaseReport(ReleaseReportArgs),
 
+    /// Branded deliverables: resolve a project's brand from its DESIGN.md
+    #[command(subcommand)]
+    Deliverable(deliverable::DeliverableCommands),
+
     /// Manage upstream MCP servers
     #[command(subcommand)]
     Mcp(McpCommands),
@@ -480,6 +485,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Changelog(_)
         | Commands::Release(_)
         | Commands::ReleaseReport(_)
+        | Commands::Deliverable(_)
         | Commands::Hook(_)
         | Commands::Factory(_)
         | Commands::Claude(_)
@@ -834,6 +840,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Changelog(_) => "changelog".to_string(),
         Commands::Release(_) => "release".to_string(),
         Commands::ReleaseReport(_) => "release-report".to_string(),
+        Commands::Deliverable(_) => "deliverable".to_string(),
         Commands::Mcp(_) => "mcp".to_string(),
         Commands::Queue(_) => "queue".to_string(),
         Commands::Cloud(_) => "cloud".to_string(),
@@ -981,6 +988,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
+        Commands::Deliverable(cmd) => deliverable::execute(cmd, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Queue(cmd) => queue::execute(cmd, cli),
         Commands::Cloud(cmd) => {

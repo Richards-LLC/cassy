@@ -175,6 +175,8 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(first["issue_count"], 2);
     assert_eq!(first["asset_count"], 1);
     assert_eq!(first["github_repo"], "example/project");
+    // The report wears `cas deliverable brand`: no DESIGN.md here, so the defaults.
+    assert_eq!(first["brand_source"], "defaults");
 
     let source_path = project.path().join("docs/release-reports/v3.19.0.md");
     let html_path = project.path().join("docs/release-reports/v3.19.0.html");
@@ -200,6 +202,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert!(source.contains("[#705](https://github.com/example/project/issues/705)"));
     assert!(source.contains("sha256:abc123"));
     assert!(html.contains("<html lang=\"en\">"));
+    assert!(html.contains("--bg:#F7F4EE") && !html.contains("/*cas:brand*/"), "{html}");
     assert!(html.contains("data-change-map=\"1\""));
     assert!(html.contains("data-area=\"Sessions\""));
     assert!(html.contains("2 GitHub issues closed with this release"));

@@ -68,6 +68,7 @@
 - `cas-cli/src/artifacts/`, `cas-cli/src/task_simulators.rs` - portable proofs, retention and owned simulator cleanup.
 - `cas-cli/src/knowledge/`, `cas-cli/src/daemon/` - knowledge distillation and background maintenance/indexing.
 - `cas-cli/src/extraction/`, `cas-cli/src/consolidation/`, `cas-cli/src/sync/`, `cas-cli/src/test_env_guard.rs` - extraction, memory decay, harness sync and isolated test environments.
+- `cas-cli/src/deliverable/`, `cas-cli/src/cli/deliverable.rs` - `cas deliverable` core: embedded asset workspace, `brand` (DESIGN.md resolution in `assets/brand.py`) and the shared receipt/exit contract.
 - `cas-cli/src/builtins/` - canonical agents, skills, jobs, harness mirrors and sync manifest.
 - `cas-cli/src/builtins/skills/finish/`, `cas-cli/src/builtins/reference-history.json` - shared finish command and per-reference provenance.
 

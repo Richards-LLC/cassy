@@ -12,6 +12,11 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location('release_renderer', ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/render.py')
 renderer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(renderer)
+# `cas deliverable brand` runs this resolver; reports wear what it returns.
+BRAND_SPEC = importlib.util.spec_from_file_location('deliverable_brand', ROOT / 'cas-cli/src/deliverable/assets/brand.py')
+brand = importlib.util.module_from_spec(BRAND_SPEC)
+BRAND_SPEC.loader.exec_module(brand)
+DEFAULTS = ROOT / 'cas-cli/src/builtins/skills/design-spec/references/design-tokens.json'
 EXEMPLAR = (ROOT / 'docs/release-reports/2026-09-08-v3.19.0.md').read_text()
 BY_AREA = '''---
 version: 9.99.1
@@ -88,15 +93,21 @@ class ReleaseRendererTests(unittest.TestCase):
         self.assertIn('break-before:auto', output)
         self.assertNotIn('break-before:page', output)
         self.assertNotIn('{{', output)
-        # This repo's root DESIGN.md supplies the tokens: hub variables behind the
+        # The renderer holds no brand: `cas deliverable` fills these markers.
+        self.assertEqual(output.count('/*cas:brand*/'), 1)
+        self.assertEqual(output.count('<!--cas:brand-mark-->'), 1)
+        # This repo's root DESIGN.md supplies the brand: hub variables behind the
         # report roles, Commander's faces inlined, the brand mark, no self-alias.
-        self.assertIn('--verdict:var(--color-verdict)', output)
-        self.assertEqual(output.count('url("data:font/woff2;base64,'), 2)
-        self.assertIn('<img class="mark" src="data:image/svg+xml;base64,', output)
-        self.assertNotIn('--ink:var(--ink)', output)
+        found = brand.resolve(ROOT, defaults=DEFAULTS)
+        css = found['css']
+        self.assertEqual((found['receipt']['source'], found['receipt']['design']['path']), ('design-md-css', 'DESIGN.md'))
+        self.assertIn('--verdict:var(--color-verdict)', css)
+        self.assertEqual(css.count('url("data:font/woff2;base64,'), 2)
+        self.assertTrue(found['mark_uri'].startswith('data:image/svg+xml;base64,'))
+        self.assertNotIn('--ink:var(--ink)', css)
         # Print is the light set without the beforeprint hook: dark blocks are screen-only.
-        self.assertIn('@media screen and (prefers-color-scheme: dark)', output)
-        self.assertNotRegex(output, r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark')
+        self.assertIn('@media screen and (prefers-color-scheme: dark)', css)
+        self.assertNotRegex(css, r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark')
 
     def test_publication_over_budget_row_survives_html_rendering(self):
         source = EXEMPLAR.replace("| Green to published |",
@@ -120,18 +131,18 @@ class ReleaseRendererTests(unittest.TestCase):
             output = renderer.render(EXEMPLAR.replace('Cassy', 'Orchard').replace('v3.19.0', 'v9.99.1'), project_root=root)
             self.assertIn('Orchard v9.99.1', output)
             self.assertNotIn('Cassy', output)
-            self.assertIn('--verdict:#123456', output)
-            self.assertIn('--bg:#F7F4EE', output)
+            css = brand.resolve(root, defaults=DEFAULTS)['css']
+            self.assertIn('--verdict:#123456', css)
+            self.assertIn('--bg:#F7F4EE', css)
             # A DESIGN.md source that would reach the network falls back, with a warning.
             (root / 'DESIGN.md').write_text('---\nsource: [tokens.css]\nmaps:\n  bg: "--paper"\n---\n')
             for remote in ('--art:url(https://example.org/a.png)', '}@import "https://example.org/t.css";:root{'):
                 (root / 'tokens.css').write_text(':root{--paper:#fff;' + remote + '}')
-                warning = io.StringIO()
-                with self.subTest(remote=remote), contextlib.redirect_stderr(warning):
-                    output = renderer.render(EXEMPLAR, project_root=root)
-                    self.assertIn('--verdict:#123456', output)
-                    self.assertNotIn('example.org/a.png', output)
-                    self.assertIn('warning: DESIGN.md CSS sources may hold only tokens', warning.getvalue())
+                with self.subTest(remote=remote):
+                    found = brand.resolve(root, defaults=DEFAULTS)
+                    self.assertIn('--verdict:#123456', found['css'])
+                    self.assertNotIn('example.org/a.png', found['css'])
+                    self.assertIn('DESIGN.md CSS sources may hold only tokens', ' '.join(found['receipt']['warnings']))
 
     def test_bad_totals_and_duplicate_issues_fail(self):
         for source in (EXEMPLAR.replace('| Total | 21 |', '| Total | 22 |'),

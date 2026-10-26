@@ -269,10 +269,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
-    },
-    BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
         content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
@@ -998,10 +994,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/references/brief-template.md",
         content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
@@ -1776,10 +1768,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/references/brief-template.md",
         content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
-    },
-    BuiltinFile {
-        path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
     },
     BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
@@ -8615,49 +8603,6 @@ This is the body content."#;
                 "{label} tokens.css dark block drifted from design-tokens.json; rerun \
                  scripts/gen-design-tokens-css.py"
             );
-        }
-    }
-
-    /// Audit L4 F28: the release renderer's bundled defaults are a copy of the
-    /// Petrastella tokens; every value they carry must match design-spec's.
-    #[test]
-    fn release_report_default_tokens_match_the_design_spec_tokens() {
-        fn walk(
-            defaults: &serde_json::Value,
-            design: &serde_json::Value,
-            path: &str,
-            checked: &mut usize,
-            label: &str,
-        ) {
-            if let Some(value) = defaults.get("$value") {
-                *checked += 1;
-                assert_eq!(
-                    Some(value),
-                    design.get("$value"),
-                    "{label} default-tokens.json{path} differs from design-tokens.json"
-                );
-                return;
-            }
-            for (name, child) in wp10_entries(defaults) {
-                walk(child, &design[name.as_str()], &format!("{path}/{name}"), checked, label);
-            }
-        }
-        for (label, catalog) in wp10_catalogs() {
-            let defaults: serde_json::Value = serde_json::from_str(wp10_get(
-                label,
-                catalog,
-                "skills/cas-release-report/references/default-tokens.json",
-            ))
-            .expect("default tokens are JSON");
-            let design: serde_json::Value = serde_json::from_str(wp10_get(
-                label,
-                catalog,
-                "skills/design-spec/references/design-tokens.json",
-            ))
-            .expect("design tokens are JSON");
-            let mut checked = 0;
-            walk(&defaults, &design, "", &mut checked, label);
-            assert!(checked >= 30, "{label}: only {checked} default tokens compared");
         }
     }
 

@@ -12295,7 +12295,78 @@ struct ReminderScanInput {
 /// reminders, the external and CI conditions observed true, and event
 /// reminders matching the tick's director events. Store reads and writes, so
 /// it runs as a job on the write lane, never on the loop.
+/// Reconcile task waits from persisted state, including remote closes and
+/// events predating daemon startup. Notify before allowing TTL expiry: failed
+/// notice writes keep the reminder pending for the next pass.
+fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error::CasError> {
+    let reminders = crate::store::open_reminder_store(&scan.cas_dir)?;
+    let pending = reminders.list_all_pending()?;
+    if pending.is_empty() { return Ok(()) }
+    let tasks = crate::store::open_task_store_local(&scan.cas_dir)?;
+    for reminder in pending {
+        let event = reminder.trigger_event.as_deref();
+        let task_event = matches!(event, Some("task_completed" | "task_blocked"));
+        let filtered_task = task_event.then(|| reminder.trigger_filter.as_ref()
+            .and_then(|filter| filter.get("task_id")).and_then(serde_json::Value::as_str))
+            .flatten().map(str::trim).filter(|id| !id.is_empty());
+        let Some(task_id) = filtered_task.or(reminder.task_id.as_deref()) else { continue };
+        let task = match tasks.get(task_id) {
+            Ok(task) => Some(task),
+            Err(cas_store::StoreError::TaskNotFound(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
+            if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
+                let worker = task.assignee.as_deref().unwrap_or("remote");
+                let worker = scan.agent_id_to_name.get(worker).map(String::as_str).unwrap_or(worker).to_string();
+                let edge = match (event, task.status) {
+                    (Some("task_completed"), cas_types::TaskStatus::Closed) => Some(crate::ui::factory::director::DirectorEvent::TaskCompleted {
+                        task_id: task.id.clone(), task_title: task.title.clone(), worker,
+                    }),
+                    (Some("task_blocked"), cas_types::TaskStatus::Blocked) => Some(crate::ui::factory::director::DirectorEvent::TaskBlocked {
+                        task_id: task.id.clone(), task_title: task.title.clone(), worker,
+                    }),
+                    _ => None,
+                };
+                if let Some(edge) = edge.filter(|edge| matches_event_filter(&reminder, edge)) {
+                    fire_reminder(&reminder, &reminders,
+                        &Some(crate::store::open_supervisor_queue_store(&scan.cas_dir)?),
+                        &Some(crate::store::open_prompt_queue_store(&scan.cas_dir)?),
+                        &scan.session_name, &scan.supervisor_name, &scan.agent_id_to_name,
+                        Some(&ReminderTriggerContext::director(&edge)), &scan.cas_dir);
+                    continue;
+                }
+                if task.is_terminal() {
+                    reminders.cancel(reminder.id, &reminder.owner_id)?;
+                    continue;
+                }
+            }
+        }
+        let ttl_start = reminder.trigger_at.filter(|_| reminder.trigger_type == cas_store::ReminderTriggerType::Time)
+            .unwrap_or(reminder.created_at);
+        if reminder.ttl_secs > 0
+            && chrono::Utc::now().signed_duration_since(ttl_start).num_seconds() > reminder.ttl_secs
+            && task.as_ref().is_none_or(|task| !task.is_terminal())
+        {
+            let owner = crate::store::open_agent_store(&scan.cas_dir)?.get(&reminder.owner_id)?;
+            crate::supervisor_notices::enqueue(&scan.cas_dir,
+                &crate::supervisor_notices::Recipient::agent(&owner), "reminder_expiring",
+                &format!("Reminder #{} reached its {}s deadline while task {} is still unfinished. This wait will expire; inspect the task and re-arm it if needed. {}",
+                    reminder.id, reminder.ttl_secs, task_id, reminder.message),
+                &reminder.id.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 fn run_reminder_scan(scan: ReminderScanInput) {
+    let safe_to_expire = match reconcile_task_reminders(&scan) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "task reminder reconciliation failed; deferring expiry to avoid a silent task wait loss");
+            false
+        }
+    };
     use crate::store::{
         open_prompt_queue_store, open_reminder_store, open_supervisor_queue_store,
     };
@@ -12323,10 +12394,12 @@ fn run_reminder_scan(scan: ReminderScanInput) {
 
     // Expire stale reminders within a small budget. Busy is expected to
     // self-heal on the next pass; other failures are terminal.
-    report_stale_reminder_expiry(cas_store::expire_stale_bounded(
-        &cas_dir,
-        REMINDER_EXPIRY_BUSY_BUDGET,
-    ));
+    if safe_to_expire {
+        report_stale_reminder_expiry(cas_store::expire_stale_bounded(
+            &cas_dir,
+            REMINDER_EXPIRY_BUSY_BUDGET,
+        ));
+    }
 
     // Check time-based reminders
     let due_reminders = match reminder_store.get_due_time_reminders() {

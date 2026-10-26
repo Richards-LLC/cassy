@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.81.0] - 2026-10-26
+
 ### Added
 
 - **Closing merged deliveries after review** — A green `worktree_merge` can park an eligible pushed delivery before its worker parks it and request verification at the merge commit. A dispatch-bound approval closes the task with its merge receipt; a rejection returns it Open to the same assignee with findings. Existing close gates still apply, and an explicit CI override does not authorize automatic close.

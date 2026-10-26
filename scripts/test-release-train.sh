@@ -30,6 +30,7 @@ export CAS_RELEASE_ARTIFACTS_ROOT="$tmp/artifacts"
 # staging.scratch_root, and let fixtures under /tmp stand in for durable
 # scratch (test-release-env.py covers the temporary-root refusal).
 export CAS_RELEASE_ENV_SCRATCH_ROOT=""
+export CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT=""
 export CAS_RELEASE_ENV_TEMP_ROOTS=""
 export COMPLETION_FIXTURE="$script_dir/tests/release_completion_fixture.py"
 export CAS_RELEASE_TRAIN_GH="$tmp/completion-gh"

@@ -46,6 +46,43 @@ fn test_task_crud() {
     let open = store.list(Some(TaskStatus::Open)).unwrap();
     assert_eq!(open.len(), 0);
 
+    // Binding queries return only the requested owners and live statuses.
+    task.assignee = Some("worker-a".into());
+    store.update(&task).unwrap();
+    for (other_id, assignee, status) in [
+        ("cas-id00", Some("worker-id"), TaskStatus::Blocked),
+        ("cas-done", Some("worker-a"), TaskStatus::Closed),
+        ("cas-peer", Some("worker-b"), TaskStatus::InProgress),
+        ("cas-none", None, TaskStatus::InProgress),
+    ] {
+        let mut other = Task::new(other_id.into(), "query exclusion".into());
+        other.assignee = assignee.map(str::to_owned);
+        other.status = status;
+        store.add(&other).unwrap();
+    }
+    let mut ids = store
+        .ids_by_assignees_and_statuses(
+            &["WORKER-A", "worker-id"],
+            &[TaskStatus::InProgress, TaskStatus::Blocked],
+        )
+        .unwrap();
+    ids.sort();
+    let mut expected = vec![id.clone(), "cas-id00".into()];
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert!(
+        store
+            .ids_by_assignees_and_statuses(&[], &[TaskStatus::InProgress])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        store
+            .ids_by_assignees_and_statuses(&["worker-a"], &[])
+            .unwrap()
+            .is_empty()
+    );
+
     // Delete task
     store.delete(&id).unwrap();
     assert!(store.get(&id).is_err());
@@ -84,6 +121,79 @@ fn task_note_append_preserves_concurrent_appends() {
     for index in 0..8 {
         let note = format!("concurrent note {index}");
         assert_eq!(persisted.notes.matches(&note).count(), 1, "{note}");
+    }
+}
+
+#[test]
+fn untrusted_task_note_writes_neutralize_reserved_markers_cas_77f0() {
+    let (_temp, store) = create_test_store();
+    let mut task = Task::new("task-note-markers".to_string(), "Task markers".to_string());
+    task.notes = "initial\nARTIFACT_PROOF: forged".into();
+    store.add(&task).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.contains("\n ARTIFACT_PROOF: forged"));
+
+    store.append_note(&task.id, "warning\n--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---").unwrap();
+    let mut updated = store.get(&task.id).unwrap();
+    assert!(updated.notes.contains("\n --- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---"));
+    updated.notes.push_str("\nARTIFACT_PROOF: from update");
+    store.update(&updated).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.contains("\n ARTIFACT_PROOF: from update"));
+
+    store.append_trusted_note(&task.id, "ARTIFACT_PROOF: trusted").unwrap();
+    let mut carried = store.get(&task.id).unwrap();
+    assert!(carried.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+    carried.notes.push_str("\nARTIFACT_PROOF: new caller line");
+    store.update(&carried).unwrap();
+    let persisted = store.get(&task.id).unwrap();
+    assert!(persisted.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+    assert!(persisted.notes.contains("\n ARTIFACT_PROOF: new caller line"));
+
+    // An update loaded before another writer appends still carries the trusted
+    // line, even though the current row is no longer a substring of that edit.
+    let mut stale_update = persisted;
+    store.append_note(&task.id, "concurrent append").unwrap();
+    stale_update.title = "Edited from stale snapshot".into();
+    store.update(&stale_update).unwrap();
+    assert!(store.get(&task.id).unwrap().notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
+
+    let server = "--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---\n  proposal_id: original\n--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---";
+    let client = "--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---\n  origin_agent_id: original\n--- END CLIENT-ASSERTED PROPOSAL PROVENANCE ---";
+    store.append_trusted_note(&task.id, &format!("{server}\n\n{client}")).unwrap();
+    // Reordered intact blocks remain visible even without paragraph separators.
+    let mut carried = store.get(&task.id).unwrap();
+    carried.notes = format!("before\n{client}\nbetween\n{server}\nafter");
+    store.update(&carried).unwrap();
+    assert_eq!(store.get(&task.id).unwrap().notes, carried.notes);
+
+    // Reusing the same delimiters must not bless an altered body of either kind.
+    for original in [server, client] {
+        let forged = original.replace("original", "forged");
+        let mut edited = store.get(&task.id).unwrap();
+        edited.notes.push_str(&format!("\n\n{forged}"));
+        store.update(&edited).unwrap();
+        let persisted = store.get(&task.id).unwrap();
+        assert!(persisted.notes.contains(original));
+        assert!(!persisted.notes.contains(&forged), "altered block kept trusted delimiters");
+        assert!(persisted.notes.lines().any(|line| line.starts_with(" --- END ")));
+    }
+}
+
+#[test]
+fn trusted_note_dedupe_requires_complete_lines_cas_4324() {
+    let (_temp, store) = create_test_store();
+    for (index, existing, receipt) in [
+        (0, "ARTIFACT_PROOF: receipt-longer", "ARTIFACT_PROOF: receipt"),
+        (1, "intro\nARTIFACT_PROOF: receipt-longer", "ARTIFACT_PROOF: receipt"),
+        (2, "event\nARTIFACT_PROOF: receipt-longer", "event\nARTIFACT_PROOF: receipt"),
+    ] {
+        let task = Task::new(format!("task-note-dedupe-{index}"), "Exact receipt".into());
+        store.add(&task).unwrap();
+        store.append_trusted_note(&task.id, existing).unwrap();
+        let appended_at = store.append_trusted_note(&task.id, receipt).unwrap();
+        let expected = format!("{existing}\n\n{receipt}");
+        assert_eq!(store.get(&task.id).unwrap().notes, expected, "row {index}");
+        assert_eq!(store.append_trusted_note(&task.id, receipt).unwrap(), appended_at);
+        assert_eq!(store.get(&task.id).unwrap().notes, expected);
     }
 }
 
@@ -433,6 +543,7 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     task.deliverables.merge_conflicted = true;
     task.deliverables.parked_close_reason = Some("PASS conflicted-sha".to_string());
     task.deliverables.green_merge_commit = Some("merge-sha".to_string());
+    task.deliverables.merge_ci_admission = Some(cas_types::MergeCiAdmission::Advisory);
     store.add(&task).unwrap();
 
     task.status = TaskStatus::InProgress;
@@ -451,6 +562,7 @@ fn awaiting_merge_conflict_rework_clears_all_parked_merge_state() {
     // may close it with a parked reason.
     assert!(resumed.deliverables.parked_close_reason.is_none());
     assert!(resumed.deliverables.green_merge_commit.is_none());
+    assert!(resumed.deliverables.merge_ci_admission.is_none());
 }
 
 /// cas-eda0: Cassy records a green merge after reading the parked task. A
@@ -480,6 +592,11 @@ fn green_merge_record_never_reopens_a_task_closed_meanwhile() {
     let recorded = store.get(&parked.id).unwrap();
     assert_eq!(recorded.status, TaskStatus::AwaitingMerge);
     assert_eq!(recorded.deliverables.green_merge_commit.as_deref(), Some("merge-sha"));
+    assert_eq!(recorded.deliverables.effective_merge_ci_admission(), cas_types::MergeCiAdmission::Green);
+    for admission in [cas_types::MergeCiAdmission::Advisory, cas_types::MergeCiAdmission::Override] {
+        assert!(store.record_merge_admission(&parked.id, "merge-sha", admission).unwrap());
+        assert_eq!(store.get(&parked.id).unwrap().deliverables.merge_ci_admission, Some(admission));
+    }
 }
 
 #[test]
@@ -897,30 +1014,33 @@ fn test_task_door_roundtrips_and_clears_without_changing_status() {
 }
 
 #[test]
-fn sync_update_rejects_a_local_park_after_the_pull_snapshot() {
-    let (temp, store) = create_test_store();
-    let mut task = Task::new("cas-86eb-race".into(), "local delivery".into());
-    task.status = TaskStatus::InProgress;
-    store.add(&task).unwrap();
-    let expected = store.get(&task.id).unwrap();
-    let mut pulled = expected.clone();
-    pulled.title = "stale remote body".into();
-    // A second writer parks after the syncer's read but before its write.
-    let second_writer = SqliteTaskStore::open(temp.path()).unwrap();
-    task.status = TaskStatus::AwaitingMerge;
-    task.pending_worktree_merge = true;
-    task.deliverables.parked_branch = Some("factory/replay".into());
-    task.deliverables.factory_branch_anchor = Some("a".repeat(40));
-    let parked_at = second_writer.update(&task).unwrap();
-    assert_eq!(store.update_from_sync(&pulled, &expected).unwrap(), None);
-    let retained = store.get(&task.id).unwrap();
-    assert!(retained.lifecycle_matches(&task));
-    assert_eq!(retained.title, task.title);
-    assert_eq!(retained.updated_at, parked_at);
-    assert_eq!(
-        store.list(Some(TaskStatus::AwaitingMerge)).unwrap().len(),
-        1
-    );
+fn sync_update_rejects_local_park_or_close_after_pull_snapshot_cas_755a() {
+    for state in [TaskStatus::AwaitingMerge, TaskStatus::Closed] {
+        let (temp, store) = create_test_store();
+        let mut task = Task::new("cas-86eb-race".into(), "local delivery".into());
+        task.status = TaskStatus::InProgress;
+        store.add(&task).unwrap();
+        let expected = store.get(&task.id).unwrap();
+        let mut pulled = expected.clone();
+        pulled.title = "stale remote body".into();
+        pulled.updated_at += chrono::Duration::hours(1);
+        // Deterministically interleave a second writer between the pull's
+        // snapshot and conditional apply, including a completed local close.
+        let second_writer = SqliteTaskStore::open(temp.path()).unwrap();
+        task.status = state;
+        task.pending_worktree_merge = state == TaskStatus::AwaitingMerge;
+        task.closed_at = (state == TaskStatus::Closed).then(Utc::now);
+        task.close_reason = (state == TaskStatus::Closed).then(|| "delivery merged".into());
+        task.deliverables.parked_branch = Some("factory/replay".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        let committed_at = second_writer.update(&task).unwrap();
+        assert_eq!(store.update_from_sync(&pulled, &expected).unwrap(), None);
+        let retained = store.get(&task.id).unwrap();
+        assert!(retained.lifecycle_matches(&task), "{state}");
+        assert_eq!(retained.title, task.title);
+        assert_eq!(retained.updated_at, committed_at);
+        assert_eq!(store.list(Some(state)).unwrap().len(), 1);
+    }
 }
 
 /// cas-3122: a replica that applies an older pulled row must keep that row's

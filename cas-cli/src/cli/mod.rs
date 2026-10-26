@@ -31,6 +31,9 @@ pub use knowledge_cmd::{
 mod known_repos;
 mod peers;
 mod project_overview_cmd;
+mod qa;
+mod qa_impact;
+pub(crate) mod qa_post_release;
 mod provider_default;
 mod release_report;
 mod sweep;
@@ -76,6 +79,7 @@ mod update;
 pub mod update_transaction;
 pub(crate) mod viktor;
 mod violet_cmd;
+pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
 
 use std::path::{Path, PathBuf};
 
@@ -130,12 +134,21 @@ const CASSY_WORDMARK: &str = r#"
 const CASSY_PLAIN_WORDMARK: &str = "Cassy";
 
 /// Select the wordmark that is safe for the destination before clap renders
-/// help. Piped output and `NO_COLOR` deliberately get a compact text fallback.
+/// help. Piped output, `NO_COLOR` and non-UTF-8 locales get a compact text fallback.
 pub fn help_wordmark() -> &'static str {
-    match crate::ui::components::OutputMode::detect() {
-        crate::ui::components::OutputMode::Styled => CASSY_WORDMARK,
-        crate::ui::components::OutputMode::Plain => CASSY_PLAIN_WORDMARK,
+    help_wordmark_for_mode(crate::ui::components::OutputMode::detect())
+}
+
+fn help_wordmark_for_mode(mode: crate::ui::components::OutputMode) -> &'static str {
+    if supports_styled_glyphs(mode) {
+        CASSY_WORDMARK
+    } else {
+        CASSY_PLAIN_WORDMARK
     }
+}
+
+fn supports_styled_glyphs(mode: crate::ui::components::OutputMode) -> bool {
+    mode == crate::ui::components::OutputMode::Styled && crate::ui::components::locale_is_utf8()
 }
 
 /// Parse with a destination-aware top-level help banner.
@@ -193,15 +206,15 @@ fn hub_tracing_root(
 /// Cassy - Multi-agent coding factory
 #[derive(Parser)]
 #[command(name = "cas")]
-#[command(about = "Cassy — a multi-agent coding factory with persistent memory and task coordination")]
+#[command(about = "Cassy - a multi-agent coding factory with persistent memory and task coordination")]
 #[command(version = build_version())]
-#[command(before_help = CASSY_WORDMARK)]
+#[command(before_help = CASSY_PLAIN_WORDMARK)]
 pub struct Cli {
     /// Output in JSON format
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Include full content in JSON output or a dry-run service definition
+    /// Show complete JSON, service paths/definitions, or GC report details
     #[arg(long, global = true)]
     pub full: bool,
 
@@ -215,7 +228,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Interactive project picker — scan ~/projects/, select, launch or attach
+    /// Interactive project picker: scan ~/projects/, select, launch or attach
     Open(OpenArgs),
 
     /// Initialize Cassy in current directory
@@ -266,7 +279,7 @@ pub enum Commands {
 
     /// Set the default supervisor provider without launching (persist only)
     ///
-    /// `cas default codex` — persists `[llm.supervisor] harness = "codex"` to
+    /// `cas default codex` persists `[llm.supervisor] harness = "codex"` to
     /// `~/.cas/config.toml` and exits.  `cas default claude` is symmetric.
     /// `cas default grok` is symmetric. To launch immediately AND persist,
     /// use `cas factory --supervisor-cli <provider> --default`.
@@ -288,7 +301,7 @@ pub enum Commands {
     /// Show credential-safe provisioning status for the managed Viktor gateway
     Viktor(ViktorArgs),
 
-    /// Post local files and messages to Slack through the Violet hub, or read a channel
+    /// Inspect channel bindings, or read and post Slack through the Violet hub
     Violet(violet_cmd::VioletArgs),
 
     /// Manage configuration
@@ -372,6 +385,10 @@ pub enum Commands {
     /// Codemap staleness info and pending changes
     #[command(subcommand)]
     Codemap(codemap_cmd::CodemapCommands),
+
+    /// Project QA registry and checks
+    #[command(subcommand)]
+    Qa(qa::QaCommand),
 
     /// Structural git-history index (backfill/status)
     #[command(subcommand)]
@@ -485,6 +502,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Mcp(_)
         | Commands::Queue(_)
         | Commands::ClaudeMd(_)
+        | Commands::Qa(_)
         | Commands::Codemap(_)
         | Commands::History(_)
         | Commands::Index(_)
@@ -517,6 +535,14 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         {
             AuthRequirement::NotRequired
         }
+        Commands::Cloud(cloud::CloudCommands::Queue(args))
+            if matches!(
+                args.command.as_ref(),
+                Some(cloud::CloudQueueCommand::MigrateToTeam { apply: false })
+            ) =>
+        {
+            AuthRequirement::NotRequired
+        }
         Commands::Cloud(_) => AuthRequirement::Required,
 
         Commands::Device(_) => AuthRequirement::Required,
@@ -535,6 +561,104 @@ fn ensure_authenticated() -> anyhow::Result<()> {
         }
         anyhow::bail!("Not logged in. Run `cas login` to authenticate.")
     }
+}
+
+/// A failure raised after the command already printed its `--json` report.
+/// The shared error path keeps it off stdout so callers still parse one document.
+#[derive(Debug)]
+pub struct JsonReportedFailure(pub anyhow::Error);
+
+impl std::fmt::Display for JsonReportedFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.0)
+    }
+}
+
+impl std::error::Error for JsonReportedFailure {}
+
+/// Format the machine-readable message and human stderr diagnostic alike.
+pub fn json_error_message(error: &anyhow::Error) -> String {
+    error
+        .downcast_ref::<crate::error::CasError>()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("{error:#}"))
+}
+
+/// Keep every init diagnostic readable, including forced retries of an
+/// existing store that do not carry the incomplete-initialization context.
+/// Reserve eight cells for the widest error mark. As with other presence
+/// prose, indivisible tokens stay whole on their own line.
+pub fn human_init_error_message(error: &anyhow::Error) -> String {
+    let mut message = String::new();
+    for cause in error.chain() {
+        let detail = cause.to_string();
+        // CasError variants can already display their source. Keep outer
+        // context, but do not append that embedded source a second time.
+        if message.ends_with(&detail) {
+            continue;
+        }
+        if !message.is_empty() {
+            message.push_str(": ");
+        }
+        message.push_str(&detail);
+    }
+    let (heading, body) = match message
+        .strip_prefix(init::INCOMPLETE_INIT_RECOVERY)
+        .and_then(|detail| detail.strip_prefix(": "))
+    {
+        Some(cause) => (Some(init::INCOMPLETE_INIT_RECOVERY), cause),
+        None => (None, message.as_str()),
+    };
+    // Wrap the body once: re-wrapping its individual lines strips the
+    // hanging indent that wrap_line gives continuation rows.
+    let body = crate::cloud::presence::wrap_line(body);
+    match heading {
+        Some(heading) => format!("{heading}\n{}", body.trim_end()),
+        None => body.trim_end().to_owned(),
+    }
+}
+
+/// Render the diagnostic for a person while leaving [`json_error_message`]
+/// as the stable machine-readable representation.
+pub fn human_error_message(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    if let Some(cause) = message
+        .strip_prefix(init::INCOMPLETE_INIT_RECOVERY)
+        .and_then(|detail| detail.strip_prefix(": "))
+    {
+        return format!(
+            "{}\n{}",
+            init::INCOMPLETE_INIT_RECOVERY,
+            crate::cloud::presence::wrap_line(cause).trim_end()
+        );
+    }
+    let Some(detail) = message
+        .strip_prefix("refused: ")
+        .filter(|_| message.contains("operator-only because"))
+    else {
+        return message;
+    };
+
+    let detail = if let Some((reason, remedy)) = detail.split_once("; run `") {
+        if let Some((command, context)) = remedy.split_once('`') {
+            let context = context
+                .strip_prefix(" yourself from your own terminal.")
+                .unwrap_or(context)
+                .trim_start();
+            format!(
+                "  {}\n  Run this command yourself from your own terminal:\n  {command}\n  {}",
+                crate::cloud::presence::wrap_line(&format!("{reason}.")).trim_end(),
+                crate::cloud::presence::wrap_line(context).trim_end()
+            )
+        } else {
+            format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+        }
+    } else {
+        format!("  {}", crate::cloud::presence::wrap_line(detail).trim_end())
+    };
+    format!("Operator-only config change refused.\n{detail}")
+        .trim_end()
+        .to_owned()
 }
 
 /// Run the CLI with the given arguments
@@ -574,7 +698,13 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
 
     initialize_telemetry();
 
-    let cas_root: Option<PathBuf> = find_cas_root().ok();
+    // Machine-scoped config follows HOME and does not require an initialized
+    // project. Project telemetry/tracing retain their own discovery paths.
+    let cas_root: Option<PathBuf> = match &cli.command {
+        Some(Commands::Config(cmd)) => config::host_root_for_command(cmd)
+            .or_else(|| find_cas_root().ok()),
+        _ => find_cas_root().ok(),
+    };
 
     // cas-e1c7: a command that would rewrite another store's identity or
     // config is refused before anything else runs (sign-in included).
@@ -710,6 +840,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Device(_) => "device".to_string(),
         Commands::Sync(_) => "sync".to_string(),
         Commands::ClaudeMd(_) => "claude-md".to_string(),
+        Commands::Qa(_) => "qa".to_string(),
         Commands::Codemap(_) => "codemap".to_string(),
         Commands::History(_) => "history".to_string(),
         Commands::Index(_) => "index".to_string(),
@@ -733,6 +864,10 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
 type StoreGuard = Option<(&'static str, Option<store_choice::StoreChoice>)>;
 
 fn config_store_guard(cmd: &config::ConfigCommands) -> StoreGuard {
+    // Host policy ignores project-store selectors, just as the hub daemon does.
+    if config::host_root_for_command(cmd).is_some() {
+        return None;
+    }
     match cmd {
         config::ConfigCommands::Set(args) => Some(("cas config set", args.store.store)),
         config::ConfigCommands::Reset(args) => Some(("cas config reset", args.store.store)),
@@ -803,7 +938,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Setup(args) => setup::execute(args, cli),
         Commands::Attach(args) => factory::execute_attach(args),
         Commands::List(args) => factory::execute_list(cli, args),
-        Commands::Kill(args) => factory::execute_kill(args.name.as_deref(), args.force),
+        Commands::Kill(args) => factory::execute_kill(args.name.as_deref(), args.force, args.force_stale),
         Commands::KillAll(args) => factory::execute_kill_all(args.force),
         Commands::Factory(args) => factory::execute(args, cli, cas_root),
         // cas-7f2c: provider shortcuts — preset supervisor_cli + explicit flag,
@@ -855,6 +990,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Device(cmd) => device::execute(cmd, cli),
         Commands::Sync(cmd) => sync::execute(cmd, cli),
         Commands::ClaudeMd(args) => claude_md::execute(args, cli),
+        Commands::Qa(cmd) => qa::execute(cmd, cli, cas_root),
         Commands::Codemap(cmd) => codemap_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::History(cmd) => history_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Index(cmd) => index_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
@@ -907,7 +1043,37 @@ const SERVE_FAILED_STARTUP_GRACE: std::time::Duration = std::time::Duration::fro
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{CASSY_WORDMARK, Cli, hub_tracing_root};
+    use super::{CASSY_WORDMARK, Cli, help_wordmark_for_mode, hub_tracing_root, run};
+
+    #[test]
+    fn operator_config_refusal_has_a_wrapped_human_form() {
+        let error = anyhow::anyhow!(
+            "refused: CLAUDECODE is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal. If this is your own terminal, it inherited CLAUDECODE from an agent pane: open a fresh terminal and run it there."
+        );
+        let rendered = super::human_error_message(&error);
+
+        assert_eq!(
+            rendered,
+            "Operator-only config change refused.\n  CLAUDECODE is set, so this runs inside an agent session.\n  verification.force_bypass_allowed is operator-only because it relaxes\n  a Cassy guard.\n  Run this command yourself from your own terminal:\n  cas config set verification.force_bypass_allowed <value>\n  If this is your own terminal, it inherited CLAUDECODE from an agent\n  pane: open a fresh terminal and run it there."
+        );
+        assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
+        assert_eq!(
+            super::json_error_message(&error),
+            error.to_string(),
+            "machine output keeps the original one-line refusal"
+        );
+
+        let no_context = anyhow::anyhow!(
+            "refused: CAS_AGENT_NAME is set, so this runs inside an agent session. verification.force_bypass_allowed is operator-only because it relaxes a Cassy guard; run `cas config set verification.force_bypass_allowed <value>` yourself from your own terminal."
+        );
+        let rendered_without_context = super::human_error_message(&no_context);
+        assert!(
+            rendered_without_context
+                .lines()
+                .all(|line| line == line.trim_end()),
+            "human refusal has no trailing whitespace-only line: {rendered_without_context:?}"
+        );
+    }
 
     /// cas-093a: `cas hub serve` traces into the host hub directory
     /// (`<home>/.cas/hub`, so `<home>/.cas/hub/logs/`), however it was
@@ -977,16 +1143,81 @@ mod tests {
         assert!(!help.contains("purge-test-fixtures"));
         assert!(!help.contains("retrieval-parity"));
         assert!(!help.contains("EPIC cas-"));
+        // cas-a0f8: authored help stays ASCII when the destination uses the
+        // plain banner. The actual C-locale CLI also exercises that selection.
+        let help = Cli::command().before_help("Cassy").render_long_help().to_string();
+        assert!(help.is_ascii(), "plain global help must be ASCII: {help}");
+    }
+
+    #[test]
+    fn release_report_help_fits_80_and_120_columns_without_losing_detail() {
+        let details = [
+            "Output in JSON format",
+            "Show complete JSON, service paths/definitions, or GC report details",
+            "Verbose output",
+            "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
+            "Render a PDF with Playwright after rendering the HTML",
+            "Re-fetch sources and replace the Markdown source, including a manual source",
+            "A standalone `release-latency.receipt` from `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run directory is read alongside ~/.cas/artifacts/release",
+        ];
+
+        for width in [80, 120] {
+            let mut command = Cli::command();
+            command.build();
+            let mut report = command
+                .find_subcommand_mut("release")
+                .expect("release subcommand")
+                .find_subcommand_mut("report")
+                .expect("report subcommand")
+                .clone()
+                .term_width(width);
+            let mut help = Vec::new();
+            report.write_long_help(&mut help).expect("render report help");
+            let help = String::from_utf8(help).expect("help is UTF-8");
+
+            for line in help.lines() {
+                assert!(
+                    line.chars().count() <= width,
+                    "{width}-column help line is {} cells wide: {line}",
+                    line.chars().count()
+                );
+            }
+            let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+            for detail in details {
+                assert!(normalized.contains(detail), "help omitted `{detail}`: {help}");
+            }
+        }
     }
 
     #[test]
     fn cassy_wordmark_stays_compact_for_80_column_terminals() {
+        use crate::ui::components::OutputMode;
+
         let rows: Vec<_> = CASSY_WORDMARK
             .lines()
             .filter(|row| !row.is_empty())
             .collect();
         assert_eq!(rows.len(), 6, "the splash must remain at most eight rows");
         assert!(rows.iter().all(|row| row.chars().count() <= 80));
+
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (locale, expected_styled) in [
+            ("C", "Cassy"),
+            ("en_US.ISO-8859-1", "Cassy"),
+            ("C.UTF-8", CASSY_WORDMARK),
+        ] {
+            env.set("LC_ALL", locale);
+            let wordmark = help_wordmark_for_mode(OutputMode::Styled);
+            assert_eq!(wordmark, expected_styled, "styled root help in {locale}");
+            assert_eq!(help_wordmark_for_mode(OutputMode::Plain), "Cassy");
+            let help = Cli::command().before_help(wordmark).render_long_help().to_string();
+            assert!(help.contains("Usage:"), "root help retains command entry");
+            if expected_styled.is_ascii() {
+                assert!(help.is_ascii(), "root help must be ASCII in {locale}: {help}");
+                let default_help = Cli::command().render_long_help().to_string();
+                assert!(default_help.is_ascii(), "raw clap entry must not bypass the locale fallback: {default_help}");
+            }
+        }
     }
 
     #[test]
@@ -998,5 +1229,61 @@ mod tests {
         let help = error.to_string();
 
         assert!(help.contains("Full sync (push then pull)"));
+    }
+
+    #[test]
+    fn cas_5aeb_migrate_preview_dispatch_does_not_cache_user_credentials() {
+        use std::collections::BTreeMap;
+
+        fn snapshot(root: &std::path::Path, base: &std::path::Path, files: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for entry in std::fs::read_dir(root).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.is_dir() {
+                    snapshot(&path, base, files);
+                } else {
+                    files.insert(path.strip_prefix(base).unwrap().to_path_buf(), std::fs::read(path).unwrap());
+                }
+            }
+        }
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set_current_dir(&project);
+        crate::cloud::set_canonical_id_in_config_toml(&root, "project").unwrap();
+        let mut linked = crate::cloud::CloudConfig::default();
+        linked.set_team("team-id", "fixture");
+        linked.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        drop(queue);
+
+        let user_cloud = env.home().join("machine-cloud.json");
+        let user = crate::cloud::CloudConfig {
+            token: Some("machine-token".into()),
+            ..Default::default()
+        };
+        user.save_to(&user_cloud).unwrap();
+        env.set("CAS_USER_CLOUD_JSON", &user_cloud);
+
+        assert_eq!(crate::cloud::CloudConfig::load_effective().token.as_deref(), Some("machine-token"));
+        assert_eq!(
+            crate::cloud::CloudConfig::load_from_cas_dir(&root).unwrap().token.as_deref(),
+            Some("machine-token"),
+            "the fixture confirms auth preflight's cache-write path"
+        );
+        linked.save_to_cas_dir(&root).unwrap();
+
+        let mut before = BTreeMap::new();
+        snapshot(&root, &root, &mut before);
+        let cli = Cli::try_parse_from(["cas", "cloud", "queue", "migrate-to-team"]).unwrap();
+        run(cli).unwrap();
+        let mut after = BTreeMap::new();
+        snapshot(&root, &root, &mut after);
+        assert_eq!(after.keys().collect::<Vec<_>>(), before.keys().collect::<Vec<_>>(), "preview must not create a project .cas file");
+        assert!(after.get(std::path::Path::new("cloud.json")) == before.get(std::path::Path::new("cloud.json")), "preview must not cache machine credentials into project cloud.json");
     }
 }

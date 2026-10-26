@@ -1,4 +1,4 @@
-//! `cas violet post|thread|read`: Slack through the Violet hub from any
+//! `cas violet post|thread|read|channels`: Slack through the Violet hub from any
 //! repository, with local files given by path (cassy#1157).
 //!
 //! An agent that shares a file names its path; this command reads, hashes and
@@ -16,6 +16,7 @@
 
 #[cfg(feature = "mcp-proxy")]
 pub(crate) mod credentials;
+pub mod channels;
 pub mod draft_check;
 pub mod files;
 pub mod hub;
@@ -40,6 +41,8 @@ pub struct VioletArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum VioletCommand {
+    /// List this project's configured, Violet and Cloud channel bindings
+    Channels(channels::ChannelsArgs),
     /// Post a message, or local files by path, to a channel
     Post(PostArgs),
     /// Post a top-level message and its ordered replies as one thread
@@ -53,6 +56,12 @@ pub struct PostArgs {
     /// Channel name, for example cas-internal (one leading # is accepted)
     #[arg(long)]
     pub channel: String,
+    /// Check the epic's post-release receipt before announcing this release
+    #[arg(long)]
+    pub release_notes: bool,
+    /// Epic whose post-release check authorizes this announcement
+    #[arg(long)]
+    pub epic: Option<String>,
     /// Message text; with --file it is the files' shared comment
     #[arg(long)]
     pub text: Option<String>,
@@ -62,6 +71,9 @@ pub struct PostArgs {
     /// Local file to attach, read from disk (repeatable, up to 10)
     #[arg(long = "file", value_name = "PATH")]
     pub files: Vec<PathBuf>,
+    /// Reuse a stable request ID for a managed reply retry
+    #[arg(long = "request-id", value_name = "UUID", requires = "reply_to")]
+    pub request_id: Option<String>,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -69,6 +81,12 @@ pub struct ThreadArgs {
     /// Channel name, for example cas-internal (one leading # is accepted)
     #[arg(long)]
     pub channel: String,
+    /// Check the epic's post-release receipt before announcing this release
+    #[arg(long)]
+    pub release_notes: bool,
+    /// Epic whose post-release check authorizes this announcement
+    #[arg(long)]
+    pub epic: Option<String>,
     /// Top-level message text
     #[arg(long)]
     pub text: String,
@@ -109,10 +127,15 @@ pub struct ReadArgs {
 /// list (only the order of `--reply`/`--reply-file` is read from it), the
 /// publication gate, and a lazy hub connection made after local validation.
 pub struct RunContext<'a> {
+    pub cas_root: Option<&'a Path>,
     pub json: bool,
     pub raw_args: &'a [String],
     pub gate: &'a dyn Fn(&Value) -> Option<String>,
     pub connect: &'a mut dyn FnMut() -> Result<Box<dyn Hub>, VioletError>,
+    /// cas-8239 (GH #1300): the caller's current reply-intent fields
+    /// (`coordination_operation_id`, `expected_generation`) for a reply to
+    /// this message_id, when it holds the thread's claim.
+    pub reply_claim: &'a dyn Fn(&str) -> Option<Value>,
 }
 
 /// CLI entry point.
@@ -125,6 +148,9 @@ pub fn execute(
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     let gate = |post: &Value| {
+        if post.get("kind").and_then(Value::as_str) == Some("message") {
+            return crate::hooks::handlers::handlers_events::violet_post_release_denial(post,cas_root);
+        }
         crate::hooks::handlers::handlers_events::violet_publication_denial(
             "violet_post",
             Some(post),
@@ -132,15 +158,33 @@ pub fn execute(
         )
     };
     let mut connect = || -> Result<Box<dyn Hub>, VioletError> { connect_live(cas_root) };
+    let reply_claim = |reply_to: &str| cas_root.and_then(|root| current_reply_claim(root, reply_to));
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut context = RunContext {
+        cas_root,
         json: cli.json,
         raw_args: &raw_args,
         gate: &gate,
         connect: &mut connect,
+        reply_claim: &reply_claim,
     };
     run_violet(&args.command, &mut context, &mut out).map_err(anyhow::Error::new)
+}
+
+/// cas-8239: the reply intent this session registered for the thread, read
+/// from the project's request journal. No session or no intent is `None`.
+fn current_reply_claim(cas_root: &Path, reply_to: &str) -> Option<Value> {
+    let session = std::env::var("CAS_SESSION_ID")
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .or_else(|| crate::agent_id::read_session_for_mcp(cas_root).ok())?;
+    let agent = crate::store::open_agent_store(cas_root).ok()?.get(&session).ok()?;
+    crate::coordination::external_work::SqliteRequestJournal::open(cas_root)
+        .ok()?
+        .current_reply_post(&agent.id, reply_to, chrono::Utc::now())
+        .ok()
+        .flatten()
 }
 
 #[cfg(feature = "mcp-proxy")]
@@ -164,6 +208,24 @@ pub fn run_violet(
     out: &mut dyn Write,
 ) -> Result<(), VioletError> {
     let result = match command {
+        VioletCommand::Channels(args) => {
+            let report = match channels::inspect(context.cas_root, args) {
+                Ok(report) => report,
+                Err(error) => {
+                    if context.json { print_json(out, &error.to_json()); }
+                    return Err(error);
+                }
+            };
+            if context.json {
+                print_json(out, &serde_json::to_value(&report).expect("serializable channel report"));
+            } else {
+                let _ = write!(out, "{}", channels::render(&report));
+            }
+            // Already rendered one complete report; don't wrap it in a post error.
+            return if report.ok { Ok(()) } else {
+                Err(VioletError::local("bindings_attention", "Slack binding inventory has findings"))
+            };
+        }
         VioletCommand::Post(args) => run_post(args, context, out),
         VioletCommand::Thread(args) => run_thread(args, context, out),
         VioletCommand::Read(args) => run_read(args, context, out),
@@ -242,14 +304,46 @@ fn run_post(
         }])?;
     }
     let route = choose_route(&files);
-    if route != Route::Message {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": route_kind(route)}),
-        )?;
+    // cas-8239 (GH #1300): a reply into a thread this session claimed and
+    // registered a reply intent for carries that intent, so the hub posts it
+    // as the managed reply. Without one the fields stay off and a managed
+    // thread refuses the reply, exactly as before.
+    let managed = reply_to.as_deref().and_then(|reply_to| (context.reply_claim)(reply_to));
+    // cas-d626: the hub accepts a managed reply only inline, so files past
+    // the inline limit fail here instead of as a bare hub refusal.
+    if managed.is_some() && route == Route::External {
+        let total: u64 = files.iter().map(|file| file.size_bytes).sum();
+        return Err(VioletError::local(
+            "invalid_input",
+            format!(
+                "a managed thread reply carries files only inline, at most {} bytes (1 MiB) in total; \
+                 these files total {total} bytes. Attach fewer or smaller files",
+                files::INLINE_LIMIT
+            ),
+        ));
     }
+    let post = json!({
+        "channel": channel,
+        "kind": route_kind(route),
+        "text": text,
+        "release_notes": args.release_notes,
+        "epic_id": args.epic,
+    });
+    if route != Route::Message
+        || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post)
+    {
+        gate_check(context, &post)?;
+    }
+    let request_id = optional(args.request_id.as_ref(), "--request-id")?;
+    let claim = managed.map(|block| {
+        json!({
+            "coordination_operation_id": block["coordination_operation_id"],
+            "expected_generation": block["expected_generation"],
+            "request_id": request_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        })
+    });
     let mut hub = (context.connect)()?;
-    let receipt = post_files(hub.as_mut(), &channel, text, reply_to, &files)?;
+    let receipt = post_files_claimed(hub.as_mut(), &channel, text, reply_to, claim.as_ref(), &files)?;
     if context.json {
         print_json(out, &receipt);
     } else {
@@ -275,10 +369,28 @@ pub fn post_files(
     reply_to: Option<String>,
     files: &[LocalFile],
 ) -> Result<Value, VioletError> {
+    post_files_claimed(hub, channel, text, reply_to, None, files)
+}
+
+/// [`post_files`] for a managed reply: `claim` (the reply intent's fields
+/// and a request_id) goes on every call of the post.
+fn post_files_claimed(
+    hub: &mut dyn Hub,
+    channel: &str,
+    text: Option<String>,
+    reply_to: Option<String>,
+    claim: Option<&Value>,
+    files: &[LocalFile],
+) -> Result<Value, VioletError> {
     let route = choose_route(files);
     let mut args = json!({ "channel": channel, "kind": route_kind(route) });
     if let Some(reply_to) = reply_to {
         args["reply_to"] = json!(reply_to);
+    }
+    if let Some(Value::Object(fields)) = claim {
+        for (key, value) in fields {
+            args[key] = value.clone();
+        }
     }
     match route {
         Route::Message => {
@@ -544,11 +656,13 @@ fn run_thread(
         }
     }
     draft_check::check(&drafts)?;
-    if replies.iter().any(|reply| !reply.files.is_empty()) {
-        gate_check(
-            context,
-            &json!({"channel": channel, "kind": "thread", "replies": [{"files": []}]}),
-        )?;
+    let shares_files = replies.iter().any(|reply| !reply.files.is_empty());
+    let mut post = json!({"channel":channel,"kind":"thread","text":text,"release_notes":args.release_notes,"epic_id":args.epic});
+    if shares_files {
+        post["replies"] = json!([{"files":[]}]);
+    }
+    if shares_files || crate::hooks::handlers::handlers_events::violet_release_notes_post(&post) {
+        gate_check(context, &post)?;
     }
     let mut hub = (context.connect)()?;
     let receipt = post_thread(hub.as_mut(), &channel, &text, &key, &replies)?;
@@ -851,6 +965,7 @@ fn part_ids(message: &Value) -> Option<String> {
 }
 
 fn render_post(out: &mut dyn Write, route: Route, receipt: &Value) {
+    render_contact_warning(out, receipt);
     let files = receipt_files(receipt);
     let detail = match route {
         Route::Message => "message".to_string(),
@@ -917,6 +1032,7 @@ fn posted_lines(out: &mut dyn Write, receipt: &Value) {
 }
 
 fn render_thread(out: &mut dyn Write, receipt: &Value) {
+    render_contact_warning(out, receipt);
     let count = receipt
         .get("posted")
         .and_then(Value::as_array)
@@ -931,6 +1047,7 @@ fn render_thread(out: &mut dyn Write, receipt: &Value) {
 }
 
 fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
+    render_contact_warning(out, envelope);
     if envelope.get("kind").and_then(Value::as_str) != Some("thread") {
         return;
     }
@@ -969,6 +1086,12 @@ fn render_partial_thread(out: &mut dyn Write, envelope: &Value) {
         "read the thread first: cas violet read --thread <root>"
     };
     let _ = writeln!(out, "  -> {hint}");
+}
+
+fn render_contact_warning(out: &mut dyn Write, receipt: &Value) {
+    if let Some(warning) = receipt["dispatch_warning"].as_str() {
+        let _ = writeln!(out, "[WARN] {warning}");
+    }
 }
 
 fn render_read(out: &mut dyn Write, receipt: &Value, args: &ReadArgs) {

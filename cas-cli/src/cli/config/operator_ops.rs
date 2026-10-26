@@ -189,10 +189,20 @@ pub(crate) fn set_project_write_roots(
     }
 
     let mut config = crate::config::Config::load(cas_root)?;
-    let previous = config.factory().write_roots;
     let stored: Vec<String> = roots.iter().map(|root| root.display().to_string()).collect();
-    config.set_factory_write_roots(stored.clone());
-    config.save(cas_root)?;
+    let previous = crate::cli::config::read_ops::update_config_in_place(
+        &mut config,
+        "factory.write_roots",
+        cas_root,
+        |before, after| {
+            let previous = before.factory().write_roots;
+            after.set_factory_write_roots(stored.clone());
+            Ok(previous)
+        },
+        // The worker-cgroup refusal above is this key's operator-only guard:
+        // operator commands from an agent pane are intentionally supported.
+        |_, _| Ok(()),
+    )?;
 
     if !legacy.roots.is_empty() {
         legacy.roots.clear();
@@ -304,6 +314,86 @@ pub(crate) fn execute_revoke_write(args: &ConfigRevokeWriteArgs, cli: &Cli, cas_
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn non_default_roundtrip_value(
+        key: &str,
+        meta: &crate::config::ConfigMeta,
+        before: &crate::config::Config,
+    ) -> String {
+        let mut candidates = Vec::new();
+        match meta.value_type {
+            crate::config::ConfigType::Bool => {
+                candidates.extend(["true".to_owned(), "false".to_owned()]);
+            }
+            crate::config::ConfigType::Int => {
+                if let Ok(default) = meta.default.parse::<i64>() {
+                    for delta in [1, -1, 2, -2] {
+                        if let Some(value) = default.checked_add(delta) {
+                            candidates.push(value.to_string());
+                        }
+                    }
+                }
+                candidates.extend(["0", "1", "2", "5", "10", "60", "100"].into_iter().map(str::to_owned));
+            }
+            crate::config::ConfigType::Float => {
+                if let Ok(default) = meta.default.parse::<f64>() {
+                    candidates.extend([default + 0.25, default - 0.25].into_iter().map(|value| value.to_string()));
+                }
+                candidates.extend(["0.25", "0.5", "0.75", "1.25"].into_iter().map(str::to_owned));
+            }
+            crate::config::ConfigType::String => {}
+            crate::config::ConfigType::StringList => {
+                candidates.extend(["roundtrip-one", "roundtrip-one,roundtrip-two"].into_iter().map(str::to_owned));
+            }
+        }
+        if let crate::config::Constraint::OneOf(values) = &meta.constraint {
+            candidates.extend(values.iter().cloned());
+        }
+        candidates.extend(
+            [
+                "roundtrip-value",
+                "roundtrip-model",
+                "roundtrip/path",
+                "example/repo",
+                "/tmp/cas-config-roundtrip",
+                "https://example.com",
+                "auto",
+                "enabled",
+                "disabled",
+                "claude",
+                "codex",
+                "low",
+                "medium",
+                "high",
+                "required",
+                "loopback",
+                "cloud",
+                "warn",
+                "retrieval,helpful",
+                "[]",
+                r#"[{"workspace_id":"T123","user_id":"U123","minimum_interval_secs":60,"mode":"warn"}]"#,
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        candidates.dedup();
+
+        let before_value = before.get(key);
+        for candidate in &candidates {
+            if before_value.as_deref() == Some(candidate.as_str()) || meta.validate(candidate).is_err() {
+                continue;
+            }
+            let mut probe = before.clone();
+            if probe.set(key, candidate).is_ok() && probe.get(key) != before_value {
+                return candidate.clone();
+            }
+        }
+
+        candidates
+            .into_iter()
+            .find(|candidate| before_value.as_deref() != Some(candidate.as_str()) && meta.validate(candidate).is_ok())
+            .unwrap_or_else(|| panic!("no valid non-default round-trip value for {key}"))
+    }
     use crate::cli::config::read_ops::set_config_value;
     use crate::config::Config;
     use crate::config::operator_policy::{
@@ -376,6 +466,47 @@ mod tests {
         assert_ne!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
 
         let mut config = Config::load(&root).unwrap();
+        let webhook = "https://hooks.example.test/services/secret";
+        let error = set_config_value(
+            &mut config,
+            "notifications.webhook_url",
+            webhook,
+            &root,
+            agent,
+        )
+        .expect_err("agents cannot choose a destination for notification text")
+        .to_string();
+        assert!(
+            error.contains("notifications.webhook_url") && error.contains("operator"),
+            "{error}"
+        );
+        assert_eq!(config.get("notifications.webhook_url").as_deref(), Some(""));
+        assert_eq!(
+            Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+            Some("")
+        );
+
+        // These event switches cause notification text to leave the machine
+        // when an operator has configured a webhook, so keep them under the
+        // same operator gate as the destination.
+        for key in [
+            "notifications.on_permission_prompt",
+            "notifications.on_idle_prompt",
+            "notifications.on_auth_success",
+        ] {
+            let mut config = Config::load(&root).unwrap();
+            let error = set_config_value(&mut config, key, "true", &root, agent)
+                .expect_err("agents cannot enable outbound notification events")
+                .to_string();
+            assert!(error.contains(key) && error.contains("operator"), "{key}: {error}");
+            assert_eq!(
+                Config::load(&root).unwrap().get(key).as_deref(),
+                Some("false"),
+                "{key}"
+            );
+        }
+
+        let mut config = Config::load(&root).unwrap();
         set_config_value(&mut config, "issues.repo", "example/project", &root, agent).unwrap();
         assert_eq!(
             Config::load(&root).unwrap().get("issues.repo").as_deref(),
@@ -385,6 +516,90 @@ mod tests {
         let mut config = Config::load(&root).unwrap();
         set_config_value(&mut config, "slack.transport", "any", &root, operator).unwrap();
         assert_eq!(Config::load(&root).unwrap().get("slack.transport").as_deref(), Some("any"));
+
+        let mut config = Config::load(&root).unwrap();
+        set_config_value(&mut config, "notifications.webhook_url", webhook, &root, operator).unwrap();
+        assert_eq!(
+            Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+            Some(webhook)
+        );
+    }
+
+    #[test]
+    fn notifications_webhook_url_accepts_https_or_http_loopback_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+
+        for url in [
+            "http://example.test/webhook",
+            "http://localhost.example.test/webhook",
+            "http://127.0.0.1\\@evil.example/",
+            "http://localhost\\@evil.example",
+            "ftp://localhost/webhook",
+            "not a url",
+            "https://hooks.example.test/has space",
+            "https://hooks.example.test/has\tcontrol",
+            "https://hooks.example.test/has\ncontrol",
+        ] {
+            let mut config = Config::load(&root).unwrap();
+            let error = set_config_value(
+                &mut config,
+                "notifications.webhook_url",
+                url,
+                &root,
+                operator,
+            )
+            .expect_err("unsafe webhook URL must be refused")
+            .to_string();
+            assert!(
+                error.to_ascii_lowercase().contains("https")
+                    || error.to_ascii_lowercase().contains("url"),
+                "{url}: {error}"
+            );
+            assert_eq!(
+                Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+                Some("")
+            );
+        }
+
+        for url in [
+            "https://hooks.example.test/services/secret",
+            "http://localhost:8123/webhook",
+            "http://127.0.0.1:8123/webhook",
+            "http://[::1]:8123/webhook",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(dir.path()).unwrap();
+            let mut config = Config::load(&root).unwrap();
+            set_config_value(
+                &mut config,
+                "notifications.webhook_url",
+                url,
+                &root,
+                operator,
+            )
+            .unwrap();
+            assert_eq!(
+                Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+                Some(url)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut config = Config::load(&root).unwrap();
+        set_config_value(
+            &mut config,
+            "notifications.webhook_url",
+            "HTTPS://Hooks.Example.Test/services/secret",
+            &root,
+            operator,
+        )
+        .unwrap();
+        assert_eq!(
+            Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(),
+            Some("https://hooks.example.test/services/secret")
+        );
     }
 
     #[test]
@@ -463,6 +678,16 @@ mod tests {
         std::fs::create_dir_all(&models).unwrap();
         std::os::unix::fs::symlink(&models, home.join("models-link")).unwrap();
 
+        let config_path = cas_root.join("config.toml");
+        let original = "# operator-maintained config\n\
+[sync]\n\
+min_helpful = 3 # preserve sync value\n\
+\n\
+[factory]\n\
+# compatibility spelling stays in place\n\
+worker_build_jobs = \"4\"\n";
+        std::fs::write(&config_path, original).unwrap();
+
         let change = set_project_write_roots(
             &format!("~/Downloads, {}", home.join("models-link").display()),
             &cas_root,
@@ -473,7 +698,16 @@ mod tests {
         assert_eq!(change.stored, expected, "`~` expands and symlinks resolve");
         assert!(change.previous.is_empty());
 
-        let text = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        let expected_toml = original.replace(
+            "worker_build_jobs = \"4\"\n",
+            &format!(
+                "worker_build_jobs = \"4\"\nwrite_roots = [\"{}\", \"{}\"]\n",
+                expected[0],
+                expected[1],
+            ),
+        );
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(text, expected_toml);
         assert!(text.contains("write_roots"), "{text}");
         let config = crate::config::Config::load(&cas_root).unwrap();
         assert_eq!(config.factory().write_roots, expected);
@@ -487,8 +721,109 @@ mod tests {
         assert_eq!(change.previous, expected);
         assert!(change.stored.is_empty());
         assert!(crate::config::Config::load(&cas_root).unwrap().factory().write_roots.is_empty());
-        let text = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+        let text = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(text, original);
         assert!(!text.contains("write_roots"), "{text}");
+    }
+
+    #[test]
+    fn config_registry_keys_round_trip_through_set_and_get() {
+        let env = operator_in_agent_pane();
+        let home = env.home().to_path_buf();
+        let project = home.join("projects/roundtrip");
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let downloads = home.join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+        let documents = home.join("Documents");
+        std::fs::create_dir_all(&documents).unwrap();
+
+        let original = format!(
+            "# existing aliases\n\
+[factory]\n\
+worker_build_jobs = \"4\"\n\
+write_roots = [\"{}\"]\n\
+\n\
+[staging]\n\
+large_artifact_dir = \"before\"\n",
+            downloads.display()
+        );
+        std::fs::write(cas_root.join("config.toml"), original).unwrap();
+
+        let registry = crate::config::registry();
+        let mut keys = registry.all_keys();
+        keys.extend(["factory.cargo_build_jobs", "staging.large_artifact_dir"]);
+        keys.sort_unstable();
+        keys.dedup();
+
+        for key in keys {
+            let mut config = Config::load(&cas_root).unwrap();
+            let meta = registry
+                .get(key)
+                .or_else(|| match key {
+                    "factory.cargo_build_jobs" => registry.get("factory.worker_build_jobs"),
+                    "staging.large_artifact_dir" => registry.get("staging.staging_dir"),
+                    _ => None,
+                })
+                .expect("registered key metadata or alias");
+            let value = match key {
+                "factory.worker_build_jobs" => "8".to_owned(),
+                "factory.cargo_build_jobs" => "9".to_owned(),
+                "staging.staging_dir" => "roundtrip-staging-dir".to_owned(),
+                "staging.large_artifact_dir" => "roundtrip-large-artifact-dir".to_owned(),
+                "factory.write_roots" => "~/Documents".to_owned(),
+                // Validated as a JSON list of Slack channel IDs (cas-4e0c).
+                "slack.channels" => r#"["C0123456789"]"#.to_owned(),
+                // The registry intentionally permits only `low` for the
+                // shared worker, so assert its serialized path instead of
+                // inventing an invalid non-default value.
+                "factory.ai_enrichment.effort" => "low".to_owned(),
+                "llm.supervisor.harness" => "codex".to_owned(),
+                "llm.supervisor.model" => "roundtrip-supervisor-model".to_owned(),
+                "llm.supervisor.reasoning_effort" => "medium".to_owned(),
+                "llm.worker.harness" => "claude".to_owned(),
+                "llm.worker.model" => "roundtrip-worker-model".to_owned(),
+                "llm.worker.reasoning_effort" => "high".to_owned(),
+                _ => non_default_roundtrip_value(key, meta, &config),
+            };
+
+            if key == "factory.write_roots" {
+                let before = config.clone();
+                let change = set_project_write_roots(&value, &cas_root, PANE_CGROUP).unwrap();
+                let mut expected = before.clone();
+                expected.set_factory_write_roots(change.stored.clone());
+                let actual = Config::load(&cas_root).unwrap();
+                assert_ne!(actual.get(key), before.get(key), "{key} must use a non-default value");
+                assert_eq!(actual.get(key), expected.get(key), "{key}");
+                continue;
+            }
+
+            let before_value = config.get(key);
+            let mut expected = config.clone();
+            expected
+                .set(key, &value)
+                .unwrap_or_else(|error| panic!("unexpected set rejection for {key}: {error}"));
+            if key != "factory.ai_enrichment.effort" {
+                assert_ne!(expected.get(key), before_value, "{key} must use a non-default value");
+            }
+            set_config_value(&mut config, key, &value, &cas_root, operator).unwrap();
+            let stored_root = if key == "viktor.enabled" || key.starts_with("hub.") {
+                crate::config::host_config_dir()
+            } else {
+                cas_root.clone()
+            };
+            let actual = Config::load(&stored_root).unwrap();
+            assert_eq!(actual.get(key), expected.get(key), "{key} = {value}");
+            if key == "factory.ai_enrichment.effort" {
+                let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+                assert!(saved.contains("[factory.ai_enrichment]"), "{saved}");
+                assert!(saved.contains("effort = \"low\""), "{saved}");
+            }
+            if key == "factory.worker_build_jobs" {
+                let saved = std::fs::read_to_string(cas_root.join("config.toml")).unwrap();
+                assert!(saved.contains("worker_build_jobs = \"8\""), "{saved}");
+                assert!(!saved.contains("cargo_build_jobs ="), "{saved}");
+            }
+        }
     }
 
     /// GH #1182: setting roots refuses inside a factory worker (or server)

@@ -38,7 +38,14 @@ impl Respond for Send {
         };
         let project = body["project_id"].as_str().unwrap();
         let recipient_repo = recipient["metadata"]["canonical_id"].as_str().unwrap_or("");
-        if !cas::cloud::project_ids_match_with_aliases(recipient_repo, project, &[]) {
+        let addressable = if body["scope"] == "user" {
+            sender["user_id"].as_str().is_some()
+                && sender["user_id"] == recipient["user_id"]
+                && recipient["metadata"]["role"] == "supervisor"
+        } else {
+            cas::cloud::project_ids_match_with_aliases(recipient_repo, project, &[])
+        };
+        if !addressable {
             return ResponseTemplate::new(403)
                 .set_body_json(json!({"error": "recipient is not in this project"}));
         }
@@ -54,6 +61,7 @@ impl Respond for Send {
         mailbox.push(json!({
             "id": id,
             "project_id": project,
+            "scope": body.get("scope").cloned().unwrap_or_else(|| json!("project")),
             "recipient_agent_id": body["recipient_agent_id"],
             "sender_agent_id": body["sender_agent_id"],
             "sender_name": sender["name"],
@@ -369,6 +377,7 @@ async fn a_supervisor_messages_a_peer_on_another_machine_and_gets_the_reply() {
             "sup-b",
             "yes, taking it",
             Some("taking cas-1234"),
+            None,
         )
         .unwrap()
         .expect("row is a peer message");
@@ -574,7 +583,12 @@ async fn coordination_message_reaches_a_peer_and_message_status_reads_the_receip
     assert!(replies[0].prompt.ends_with("yes"));
     // pin: pm_1 is the fixture's Cloud parent id and must survive as reply correlation.
     assert!(replies[0].prompt.lines().next().unwrap().contains("in_reply_to=\"pm_1\""), "reply wake metadata must survive Cloud delivery: {}", replies[0].prompt);
-    for (kind, blocker, wakes) in [(Some("blocker"), false, true), (None, true, true), (Some("status"), false, false)] {
+    // Ordinary/status mail wakes too. Only explicit receipt/quiet intent
+    // removes eligibility from an authenticated peer message.
+    for (kind, blocker, wakes) in [
+        (Some("blocker"), false, true), (None, true, true), (Some("status"), false, true),
+        (Some("receipt"), false, false), (Some("quiet"), false, false),
+    ] {
         let body = format!("peer intent {kind:?} blocker={blocker}");
         coordinate(&service_a, json!({"action":"message", "target":"sup-b@machine-beta", "summary":"peer intent", "message":body, "kind":kind, "blocker":blocker})).await.unwrap();
         let bb = b.clone();
@@ -1747,4 +1761,261 @@ async fn cas_4fe2_partial_claim_survivors_are_admitted_and_acked_once() {
         assert_eq!(mail[1]["status"], "queued");
         assert_eq!(mail[2]["status"], "delivered");
     }).await.unwrap();
+}
+
+/// GH #1319 (cas-c922): soundwave's supervisor restarts. Mail prowl sends to
+/// the ended identity, as a reply to its message or by its old name, reaches
+/// the successor's inbox instead of an unread mailbox.
+#[tokio::test]
+async fn gh1319_mail_for_an_ended_supervisor_reaches_its_successor() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let prowl = TestMachine::new("prowl");
+    let soundwave = TestMachine::new("soundwave");
+    seed_project(&prowl, &server.uri(), "github.com/acme/widgets");
+    seed_project(&soundwave, &server.uri(), "github.com/acme/widgets");
+    let (p, s) = (prowl.cas_dir.clone(), soundwave.cas_dir.clone());
+    let (p2, s2) = (p.clone(), s.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&p2, "prowl", "a");
+        supervisor_at(&s2, "soundwave", "old");
+    })
+    .await
+    .unwrap();
+    coordinate(
+        &service_for(&s, "old"),
+        json!({"action": "message", "target": "sup-a@prowl", "summary": "take cas-1?", "message": "can you take cas-1?", "kind": "ask"}),
+    )
+    .await
+    .unwrap();
+    let pp = p.clone();
+    let asked = tokio::task::spawn_blocking(move || {
+        tick(&pp, "a");
+        inbox(&pp)
+    })
+    .await
+    .unwrap();
+    assert_eq!(asked.len(), 1);
+
+    // The restart: the old session shuts down and a new supervisor takes it.
+    registry.lock().unwrap().get_mut("old").unwrap()["status"] = json!("shutdown");
+    let s3 = s.clone();
+    tokio::task::spawn_blocking(move || supervisor_at(&s3, "soundwave", "new"))
+        .await
+        .unwrap();
+    let service_a = service_for(&p, "a");
+    for request in [
+        json!({"action": "message", "target": "sup-old@soundwave", "summary": "taking it", "message": "yes, taking cas-1", "in_reply_to": asked[0].id}),
+        json!({"action": "message", "target": "sup-old", "summary": "and cas-2", "message": "taking cas-2 as well"}),
+    ] {
+        let sent = coordinate(&service_a, request).await.unwrap();
+        assert!(
+            sent.contains("sup-old@soundwave ended")
+                && sent.contains("delivered to its successor sup-new@soundwave"),
+            "{sent}"
+        );
+    }
+    // cas-2db0: a split offer to the old identity names its successor too.
+    let tasks = cas::store::open_task_store(&p).unwrap();
+    let mut epic = cas::types::Task::new("cas-e1".into(), "shared epic".into());
+    epic.task_type = cas::types::TaskType::Epic;
+    tasks.add(&epic).unwrap();
+    tasks.add(&cas::types::Task::new("cas-c1".into(), "child".into())).unwrap();
+    tasks
+        .add_dependency(&cas::types::Dependency::new(
+            "cas-c1".into(),
+            "cas-e1".into(),
+            cas::types::DependencyType::ParentChild,
+        ))
+        .unwrap();
+    let offer: cas_mcp::types::CoordinationRequest = serde_json::from_value(
+        json!({"action": "epic_split", "id": "cas-e1", "target": "sup-old", "theirs": "cas-c1"}),
+    )
+    .unwrap();
+    let offered = service_a
+        .factory(rmcp::handler::server::wrapper::Parameters(offer))
+        .await
+        .map(|result| format!("{:?}", result.content))
+        .unwrap();
+    assert!(offered.contains("delivered to its successor sup-new@soundwave"), "{offered}");
+    assert!(
+        mailbox.lock().unwrap()[1..]
+            .iter()
+            .all(|message| message["recipient_agent_id"] == "new"),
+        "nothing was left in the ended supervisor's mailbox"
+    );
+    let ss = s.clone();
+    let rows = tokio::task::spawn_blocking(move || {
+        tick(&ss, "new");
+        inbox(&ss)
+    })
+    .await
+    .unwrap();
+    for body in ["yes, taking cas-1", "taking cas-2 as well"] {
+        assert!(
+            rows.iter().any(|row| row.target == "sup-new" && row.prompt.ends_with(body)),
+            "{body}: {rows:?}"
+        );
+    }
+}
+
+/// GH #1319: an ended supervisor with no successor on its machine is a typed
+/// refusal naming why, never a send that reads as delivered.
+#[tokio::test]
+async fn gh1319_mail_nobody_can_read_is_refused_with_its_reason() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let prowl = TestMachine::new("prowl");
+    let soundwave = TestMachine::new("soundwave");
+    seed_project(&prowl, &server.uri(), "github.com/acme/widgets");
+    seed_project(&soundwave, &server.uri(), "github.com/acme/widgets");
+    let (p, s) = (prowl.cas_dir.clone(), soundwave.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&p, "prowl", "a");
+        supervisor_at(&s, "soundwave", "old");
+    })
+    .await
+    .unwrap();
+    registry.lock().unwrap().get_mut("old").unwrap()["status"] = json!("shutdown");
+    let error = coordinate(
+        &service_for(&prowl.cas_dir, "a"),
+        json!({"action": "message", "target": "sup-old", "summary": "hold staging", "message": "hold staging"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("sup-old@soundwave ended")
+            && error.contains("no live supervisor of widgets runs on soundwave")
+            && error.contains("Nothing was sent"),
+        "{error}"
+    );
+    assert!(mailbox.lock().unwrap().is_empty());
+}
+
+/// The account-wide path must preserve the same successor receipt across
+/// project boundaries, and admit the message to that successor's real inbox.
+#[tokio::test]
+async fn cas_56c4_cross_project_ended_supervisor_reaches_successor() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let sender = TestMachine::new("prowl");
+    let receiver = TestMachine::new("soundwave");
+    seed_project(&sender, &server.uri(), "github.com/acme/gabber");
+    seed_project(&receiver, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (sender.cas_dir.clone(), receiver.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&a, "prowl", "a");
+        supervisor_at(&b, "soundwave", "old");
+        supervisor_at(&b, "soundwave", "new");
+    }).await.unwrap();
+    for row in registry.lock().unwrap().values_mut() {
+        row["user_id"] = json!("fixture-owner");
+    }
+    registry.lock().unwrap().get_mut("old").unwrap()["status"] = json!("shutdown");
+    let service = service_for(&sender.cas_dir, "a");
+    for target in ["sup-old@soundwave", "supervisor:widgets"] {
+        let sent = coordinate(&service, json!({"action":"message", "target":target,
+            "summary":"cross-project ask", "message":target})).await.unwrap();
+        if target == "sup-old@soundwave" {
+            assert!(sent.contains("sup-old@soundwave ended")
+                && sent.contains("delivered to its successor sup-new@soundwave"), "{sent}");
+        }
+    }
+    let messages = mailbox.lock().unwrap().clone();
+    assert_eq!(messages.len(), 2);
+    assert!(messages.iter().all(|m| m["recipient_agent_id"] == "new" && m["scope"] == "user"));
+    let b = receiver.cas_dir.clone();
+    let rows = tokio::task::spawn_blocking(move || { tick(&b, "new"); inbox(&b) }).await.unwrap();
+    assert_eq!(rows.len(), 2);
+    for target in ["sup-old@soundwave", "supervisor:widgets"] {
+        assert!(rows.iter().any(|row| row.target == "sup-new" && row.prompt.ends_with(target)), "{rows:?}");
+    }
+}
+
+/// A project selector also identifies its ended session when no supervisor
+/// is live; the sender must learn why nothing was sent.
+#[tokio::test]
+async fn cas_56c4_cross_project_without_successor_names_ended_session_and_project() {
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, registry, mailbox) = fake_cloud_with_mailbox().await;
+    let sender = TestMachine::new("prowl");
+    let receiver = TestMachine::new("soundwave");
+    seed_project(&sender, &server.uri(), "github.com/acme/gabber");
+    seed_project(&receiver, &server.uri(), "github.com/acme/widgets");
+    let (a, b) = (sender.cas_dir.clone(), receiver.cas_dir.clone());
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&a, "prowl", "a");
+        supervisor_at(&b, "soundwave", "old");
+    }).await.unwrap();
+    for row in registry.lock().unwrap().values_mut() {
+        row["user_id"] = json!("fixture-owner");
+    }
+    registry.lock().unwrap().get_mut("old").unwrap()["status"] = json!("shutdown");
+    let service = service_for(&sender.cas_dir, "a");
+    for target in ["sup-old@soundwave", "supervisor:widgets"] {
+        let error = coordinate(&service, json!({"action":"message", "target":target,
+            "summary":"cross-project ask", "message":"hold staging"})).await.unwrap_err();
+        assert!(error.contains("sup-old@soundwave ended") && error.contains("ago")
+            && error.contains("no live supervisor") && error.contains("widgets")
+            && !error.contains("no supervisor or worker named"), "{target}: {error}");
+    }
+    assert!(mailbox.lock().unwrap().is_empty());
+    assert!(inbox(&sender.cas_dir).is_empty());
+}
+
+/// GH #1319: a supervisor whose Claude login expired heartbeats like a live
+/// one. Its own transcript is published as the reason, and a peer's send to
+/// it is refused instead of reported delivered.
+#[tokio::test]
+async fn gh1319_a_logged_out_supervisor_is_refused_not_delivered() {
+    let env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (server, _registry, mailbox) = fake_cloud_with_mailbox().await;
+    let prowl = TestMachine::new("prowl");
+    let soundwave = TestMachine::new("soundwave");
+    seed_project(&prowl, &server.uri(), "github.com/acme/widgets");
+    seed_project(&soundwave, &server.uri(), "github.com/acme/widgets");
+    let (p, s) = (prowl.cas_dir.clone(), soundwave.cas_dir.clone());
+    let home = env.home().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        supervisor_at(&s, "soundwave", "a");
+        // patient-badger-31's real record: every turn it was given ended so.
+        let clone = p.parent().unwrap().to_string_lossy().into_owned();
+        let slug: String = clone.chars().map(|c| if c == '/' || c == '.' { '-' } else { c }).collect();
+        let dir = home.join(".claude/projects").join(slug);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("session-b.jsonl"),
+            r#"{"type":"assistant","timestamp":"2026-10-20T16:42:04.720Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}
+"#,
+        )
+        .unwrap();
+        let mut b = Agent::new("b".to_string(), "sup-b".to_string());
+        b.role = AgentRole::Supervisor;
+        b.machine_id = Some("prowl".to_string());
+        b.factory_session = Some("factory-b".to_string());
+        b.cc_session_id = Some("session-b".to_string());
+        b.metadata.insert("clone_path".to_string(), clone);
+        open_agent_store(&p).unwrap().register(&b).unwrap();
+        let coordinator = cas::cloud::CloudCoordinator::new(
+            cas::cloud::CloudConfig::load_from_cas_dir(&p).unwrap(),
+        )
+        .unwrap()
+        .with_canonical_id(cas::cloud::resolve_canonical_id(&p));
+        cas::cloud::presence::register_now(&coordinator, &p, &b, chrono::Utc::now());
+    })
+    .await
+    .unwrap();
+    let error = coordinate(
+        &service_for(&soundwave.cas_dir, "a"),
+        json!({"action": "message", "target": "sup-b", "summary": "take cas-1?", "message": "can you take cas-1?"}),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("sup-b@prowl's harness is logged out")
+            && error.contains("Login expired · Please run /login")
+            && error.contains("Nothing was sent"),
+        "{error}"
+    );
+    assert!(mailbox.lock().unwrap().is_empty());
 }

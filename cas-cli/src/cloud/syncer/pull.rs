@@ -1,3 +1,4 @@
+use crate::mcp::tools::core::task::audit;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -974,41 +975,80 @@ fn unique_complete_provenance_block(notes: &str) -> Option<(usize, usize)> {
     .then_some((start, end))
 }
 
-/// cas-8a252 (GH #1275): the project an accepted cross-project task executes
-/// in. `origin_project` keeps the proposing project, so the attested target is
-/// read back from the provenance block [`render_task_proposal_provenance`]
-/// writes. Answers only for exactly one complete block whose server-attested
-/// `target_task_id` is this task and whose attested origin is this row's
-/// `origin_project`; a missing, duplicated or contradicting block is `None`.
-pub(crate) fn accepted_proposal_execution_project(task: &cas_types::Task) -> Option<String> {
-    let origin = task.origin_project.as_deref()?;
-    let (start, end) = unique_complete_provenance_block(&task.notes)?;
-    let block = &task.notes[start..end];
-    let server = &block[..block.find("--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---")?];
-    let field = |name: &str| -> Option<String> {
-        let prefix = format!("{name}: ");
-        let mut values = server.lines().filter_map(|line| line.trim_start().strip_prefix(prefix.as_str()));
-        let value = values.next()?;
-        values.next().is_none().then_some(())?;
-        serde_json::from_str::<String>(value).ok()
+/// Remove the renderer's marker block from ordinary task text. The caller
+/// persists the body through the untrusted sink, then appends this block with
+/// `TaskStore::append_trusted_note`. A note block alone is never attestation.
+pub(crate) fn take_rendered_provenance(
+    notes: &mut String,
+    rendered_from_provenance: bool,
+) -> Option<String> {
+    if !rendered_from_provenance {
+        return None;
+    }
+    let (start, end) = unique_complete_provenance_block(notes)?;
+    let rendered = notes[start..end].to_string();
+    *notes = format!("{}{}", &notes[..start], &notes[end..])
+        .trim()
+        .to_string();
+    Some(rendered)
+}
+
+/// cas-3556: whether text carries a proposal provenance marker. Only
+/// `render_task_proposal_provenance` writes the block; agent note writes that
+/// contain a marker are refused so a forged block never reaches the notes.
+pub(crate) fn contains_proposal_provenance_marker(text: &str) -> bool {
+    text.lines().any(|line| {
+        [
+            PROPOSAL_PROVENANCE_BEGIN,
+            PROPOSAL_PROVENANCE_END,
+            "--- END SERVER-ATTESTED PROPOSAL PROVENANCE ---",
+            "--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---",
+        ]
+        .iter()
+        .any(|marker| line.starts_with(marker))
+    })
+}
+
+/// cas-3556: remember a pulled, server-attested accepted proposal as this
+/// project's task. Ownership checks read only this record, never notes; the
+/// row is written only when the provenance attests this very task id and
+/// this project as its target.
+pub(crate) fn record_pulled_accepted_proposal(
+    cas_root: &std::path::Path,
+    raw: &serde_json::Value,
+    current_project_id: &str,
+) {
+    if !accepted_proposal_targets_project(raw, current_project_id) {
+        return;
+    }
+    let Some(provenance) = raw.get("proposal_provenance").and_then(|value| {
+        serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(value.clone()).ok()
+    }) else {
+        return;
     };
-    (field("target_task_id")? == task.id
-        && canonical_project_ids_match(&field("origin_project_canonical_id")?, origin))
-    .then(|| field("target_project_canonical_id"))
-    .flatten()
+    let server = &provenance.server_attested;
+    if let Err(error) = cas_store::record_accepted_proposal_target(
+        cas_root,
+        &server.target_task_id,
+        &server.proposal_id,
+        &server.target_project_canonical_id,
+    ) {
+        tracing::warn!(task_id = %server.target_task_id, %error, "could not record accepted proposal");
+    }
 }
 
 /// Persist proposal provenance visibly in the ordinary local task record.
 /// The cloud proposal row remains authoritative; this rendering is explicitly
 /// labeled and is refreshed whenever the materialized task is pulled.
-pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
+/// Returns whether valid server provenance was available to render.
+pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) -> bool {
     let Some(raw_provenance) = raw.get("proposal_provenance").cloned() else {
-        return;
+        return false;
     };
     let Ok(provenance) =
         serde_json::from_value::<crate::cloud::task_proposals::ProposalProvenance>(raw_provenance)
     else {
-        return;
+        return false;
     };
     let server = &provenance.server_attested;
     let client = &provenance.client_asserted;
@@ -1077,6 +1117,7 @@ pub(crate) fn render_task_proposal_provenance(raw: &mut serde_json::Value) {
         format!("{}\n\n{}", notes.trim_end(), rendered)
     };
     raw["notes"] = serde_json::Value::String(updated);
+    true
 }
 
 /// cas-a8e2: one section (server-attested or client-asserted) of a rendered
@@ -1403,7 +1444,7 @@ fn reconcile_web_close(
         Ok(local) => {
             if local.status == TaskStatus::Closed {
                 // Already closed locally — nothing to do.
-                return Ok(UpsertResult::Skipped);
+                return Ok(UpsertResult::Skipped("local_conflict"));
             }
             // Merge ONLY the close signal onto the local row. A full overwrite
             // with the remote tombstone would clobber locally-authored,
@@ -1471,54 +1512,75 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
         .join("\n\n")
 }
 
-/// A terminal row is a durable outcome, not merely the latest version of a
-/// mutable task body. An incoming active row may replace it only when the
-/// remote task carries the audit event written by Cassy's authorised `reopen`
-/// action after the local terminal timestamp.
-fn rejects_terminal_regression(local: &Task, remote: &Task) -> bool {
-    if !local.is_terminal() || remote.is_terminal() {
-        return false;
-    }
-
-    !has_explicit_remote_reopen(remote, local.closed_at)
+/// Parked and terminal deliveries are lifecycle outcomes, not whole-row LWW
+/// projections. A newer body/replica clock alone cannot authorize rework.
+fn rejects_delivery_regression(local: &Task, remote: &Task) -> bool {
+    let regresses = (local.is_terminal() && !remote.is_terminal())
+        || (local.status == crate::types::TaskStatus::AwaitingMerge
+            && matches!(remote.status, crate::types::TaskStatus::Open | crate::types::TaskStatus::InProgress));
+    regresses && !has_explicit_remote_reopen(local, remote)
 }
 
-/// Cassy's `task reopen` action writes `[YYYY-mm-dd HH:MM] Reopened:
-/// actor=<agent> reason=<reason>` into the task's replicated note timeline.
-/// Treat that timestamped, attributed record as the reopening event; a bare
-/// active task row, even one with a newer `updated_at`, is not authorization to
-/// undo a close/cancellation.
-fn has_explicit_remote_reopen(
-    remote: &Task,
-    local_closed_at: Option<chrono::DateTime<chrono::Utc>>,
-) -> bool {
-    let Some(local_closed_at) = local_closed_at else {
-        return false;
-    };
-    remote.notes.split("\n\n").any(|note| {
-        let Some((timestamp, event)) = note.strip_prefix('[').and_then(|note| note.split_once(']'))
-        else {
-            return false;
+fn lifecycle_audit_note(note: &str) -> Option<(chrono::DateTime<chrono::Utc>, &str)> {
+    let (timestamp, event) = note.trim().strip_prefix('[')?.split_once(']')?;
+    let timestamp = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M").ok()?;
+    Some((timestamp.and_utc(), event.trim_start()))
+}
+
+/// The replicated timeline is the existing authorization contract: reopen
+/// names an actor/reason, request_changes a supervisor/reason, reset its
+/// explicit transition/recovery reason. Previously observed actions cannot
+/// undo a later park, even if a replica uploads them under a newer row clock.
+fn has_explicit_remote_reopen(local: &Task, remote: &Task) -> bool {
+    let local_boundary = local.notes.split("\n\n").filter_map(|block| {
+        let (at, event) = lifecycle_audit_note(block)?;
+        let is_boundary = if local.is_terminal() {
+            event.starts_with(audit::CLOSED) || event.starts_with(audit::CANCELLED)
+        } else {
+            event.starts_with(audit::PARKED) && event.contains(audit::PARKED_STATE)
         };
-        let Some(audit) = event.trim_start().strip_prefix("Reopened:") else {
-            return false;
-        };
-        let Some((actor, reason)) = audit
-            .trim()
-            .strip_prefix("actor=")
-            .and_then(|audit| audit.split_once(" reason="))
-        else {
-            return false;
-        };
-        if actor.trim().is_empty() || reason.trim().is_empty() {
+        is_boundary.then_some((at, block.trim()))
+    }).max_by_key(|(at, _)| *at);
+    // A prior cycle can leave closed_at on a reset row. Only a terminal
+    // state uses it; a current park is anchored to its own lifecycle note.
+    // CAS_SYNC_STATUS is apply provenance and never establishes a new park.
+    let boundary = (local.is_terminal().then_some(local.closed_at).flatten())
+        .or(local_boundary.map(|(at, _)| at))
+        .unwrap_or(local.updated_at);
+    remote.notes.split("\n\n").any(|block| {
+        let Some((at, event)) = lifecycle_audit_note(block) else { return false; };
+        if local.notes.split("\n\n").any(|known| known.trim() == block.trim()) {
             return false;
         }
-        let Ok(timestamp) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M")
-        else {
+        let reopen = [audit::REOPENED, audit::REVIEW_SCOPE_RESET, audit::UNBLOCKED]
+            .into_iter().find_map(|prefix| event.strip_prefix(prefix))
+            .and_then(|audit| audit.trim().strip_prefix("actor="))
+            .and_then(|audit| audit.split_once(" reason="))
+            .is_some_and(|(actor, reason)| !actor.trim().is_empty() && !reason.trim().is_empty());
+        let request_changes = event.strip_prefix(cas_store::REQUEST_CHANGES_AUDIT_PREFIX)
+            .is_some_and(|reason| !reason.trim().is_empty());
+        let reset = event.strip_prefix(audit::RESET)
+            .and_then(|audit| audit.split_once("→Open (prior assignee: "))
+            .and_then(|(_, audit)| audit.split_once(") — "))
+            .is_some_and(|(_, reason)| !reason.trim().is_empty());
+        let scope_fix = event.strip_prefix(audit::PROOF_SCOPE_FIX)
+            .is_some_and(|decision| !decision.trim().is_empty());
+        let merge_recovery = remote.status == crate::types::TaskStatus::InProgress
+            && event.strip_prefix(audit::MERGE_RECOVERY)
+                .is_some_and(|decision| !decision.trim().is_empty());
+        if !(reopen || request_changes || reset || scope_fix || merge_recovery) {
             return false;
-        };
-        let timestamp = timestamp.and_utc();
-        timestamp >= local_closed_at - chrono::Duration::minutes(1)
+        }
+        // Notes have minute precision. At an equal minute require causal
+        // ordering in the remote timeline, rather than an arbitrary grace.
+        match at.timestamp().div_euclid(60).cmp(&boundary.timestamp().div_euclid(60)) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Less => false,
+            std::cmp::Ordering::Equal => local_boundary.is_some_and(|(_, prior)| {
+                remote.notes.find(prior).zip(remote.notes.find(block.trim()))
+                    .is_some_and(|(prior, action)| prior < action)
+            }),
+        }
     })
 }
 
@@ -1726,13 +1788,13 @@ impl CloudSyncer {
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
-                if rejects_terminal_regression(&local, &task) {
-                    self.record_terminal_regression_conflict(&local, &task)?;
-                    return Ok(UpsertResult::Skipped);
+                if rejects_delivery_regression(&local, &task) {
+                    self.record_delivery_regression_conflict(&local, &task)?;
+                    return Ok(UpsertResult::Skipped("delivery_lifecycle_event"));
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
                     self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("lifecycle_timestamp"));
                 }
                 let notes_differ = local.notes != task.notes;
                 let mut merged = task;
@@ -1791,7 +1853,7 @@ impl CloudSyncer {
                     CasError::Other(format!("Could not serialize owner sync conflict: {error}"))
                 })?;
                 self.record_owner_conflict_value(&task.id, &discarded)?;
-                return Ok(UpsertResult::Skipped);
+                return Ok(UpsertResult::Skipped("local_conflict"));
             }
         }
 
@@ -1830,7 +1892,7 @@ impl CloudSyncer {
             remote,
             "local_mutation_or_delivery_or_live_execution",
         )?;
-        Ok(UpsertResult::Skipped)
+        Ok(UpsertResult::Skipped("local_mutation_or_delivery_or_live_execution"))
     }
 
     fn record_task_lifecycle_conflict(
@@ -1853,6 +1915,59 @@ impl CloudSyncer {
             None,
             None,
         )
+    }
+
+    fn record_delivery_regression_conflict(&self, local: &Task, remote: &Task) -> Result<(), CasError> {
+        if local.is_terminal() {
+            self.record_terminal_regression_conflict(local, remote)
+        } else {
+            self.record_task_lifecycle_conflict(local, remote, "delivery_lifecycle_event")
+        }
+    }
+
+    /// A consumed peer close remains attention-worthy after its pull cursor
+    /// advances. Both pull scopes report the durable guard until this local
+    /// delivery's lifecycle changes, without fetching or journaling it again.
+    /// Policy conflicts are excluded: LocalWins honors operator choice, a
+    /// non-superseding row has no newer authority, and owner-wins rejects a
+    /// non-owner replica. Those remain ordinary conflict counts/journal rows,
+    /// rather than repeated lifecycle-guard warnings (cas-963f).
+    fn report_guarded_peer_closes(
+        &self,
+        task_store: &dyn TaskStore,
+        result: &mut SyncResult,
+    ) -> Result<(), CasError> {
+        #[derive(Deserialize)]
+        struct GuardedTask {
+            local: Task,
+            rejected_remote: Task,
+            reason: String,
+        }
+
+        for (id, row) in self.queue.latest_task_lifecycle_conflicts()? {
+            let guard: GuardedTask = match serde_json::from_str(&row) {
+                Ok(guard) => guard,
+                Err(error) => {
+                    result.errors.push(format!("Task {id}: lifecycle guard journal error: {error}"));
+                    continue;
+                }
+            };
+            if guard.local.status != TaskStatus::AwaitingMerge || !guard.rejected_remote.is_terminal() {
+                continue;
+            }
+            let current = match task_store.get(&id) {
+                Ok(task) => task,
+                Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if current.lifecycle_matches(&guard.local) {
+                result.errors.push(format!(
+                    "Task {}: remote {} skipped; local awaiting_merge\n      Guard: {}\n      Inspect: cas cloud conflicts --json",
+                    id, guard.rejected_remote.status, guard.reason,
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn record_terminal_regression_conflict(
@@ -1991,6 +2106,10 @@ impl CloudSyncer {
         project_id: Option<&str>,
         params: &[String],
     ) -> Result<(serde_json::Value, String), CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         let (pull_url, project_id) = match project_id {
             Some(project_id) => {
                 build_scoped_pull_url_with(&self.cloud_config.endpoint, params, || {
@@ -2193,7 +2312,7 @@ impl CloudSyncer {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2231,9 +2350,12 @@ impl CloudSyncer {
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
-            render_task_proposal_provenance(&mut raw_task);
+            if let Some(cas_root) = self.push_cas_root.as_deref() {
+                record_pulled_accepted_proposal(cas_root, &raw_task, &current_project_id);
+            }
+            let rendered_from_provenance = render_task_proposal_provenance(&mut raw_task);
             let raw_task_for_parking = raw_task.clone();
-            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     self.park_pulled_task_row(
@@ -2247,6 +2369,11 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let trusted_provenance =
+                take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+                &mut remote_task.notes, &remote_task.id,
+            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -2284,6 +2411,12 @@ impl CloudSyncer {
             };
             match task_outcome {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                    if let Some(block) = trusted_provenance.as_deref() {
+                        task_store.append_trusted_note(&remote_task.id, block)?;
+                    }
+                    for proof in &trusted_proofs {
+                        task_store.append_trusted_note(&remote_task.id, proof)?;
+                    }
                     result.pulled_tasks += 1;
                     if let Some(revision) = task_revision {
                         let _ =
@@ -2300,7 +2433,7 @@ impl CloudSyncer {
                         });
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2365,7 +2498,7 @@ impl CloudSyncer {
                                 .record_revision(EntityType::Rule, &remote_rule_id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2411,7 +2544,7 @@ impl CloudSyncer {
                         );
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2444,7 +2577,7 @@ impl CloudSyncer {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
                     result.pulled_specs += 1;
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -2577,6 +2710,9 @@ impl CloudSyncer {
 
         self.reassert_quarantine();
 
+        if let Err(error) = self.report_guarded_peer_closes(task_store, &mut result) {
+            result.errors.push(format!("Could not report guarded peer closes: {error}"));
+        }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
     }
@@ -2637,13 +2773,13 @@ impl CloudSyncer {
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
-                if rejects_terminal_regression(&local, &task) {
-                    self.record_terminal_regression_conflict(&local, &task)?;
-                    return Ok(UpsertResult::Skipped);
+                if rejects_delivery_regression(&local, &task) {
+                    self.record_delivery_regression_conflict(&local, &task)?;
+                    return Ok(UpsertResult::Skipped("delivery_lifecycle_event"));
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
                     self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("lifecycle_timestamp"));
                 }
                 if self.remote_supersedes_local(
                     EntityType::Task,
@@ -2669,7 +2805,7 @@ impl CloudSyncer {
                         },
                     )
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
@@ -2698,7 +2834,7 @@ impl CloudSyncer {
                     store.update(&rule)?;
                     Ok(UpsertResult::Updated)
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             Err(cas_store::StoreError::RuleNotFound(_)) => {
@@ -2728,7 +2864,7 @@ impl CloudSyncer {
                     store.update(&skill)?;
                     Ok(UpsertResult::Updated)
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             // SqliteSkillStore::get reports a missing row as the generic
@@ -2752,7 +2888,7 @@ impl CloudSyncer {
                     store.update(&spec)?;
                     Ok(UpsertResult::Updated)
                 } else {
-                    Ok(UpsertResult::Skipped)
+                    Ok(UpsertResult::Skipped("local_conflict"))
                 }
             }
             Err(cas_store::StoreError::NotFound(_)) => {
@@ -2822,7 +2958,7 @@ impl CloudSyncer {
         fold_conflicts: &mut Vec<String>,
     ) -> Result<UpsertResult, CasError> {
         if self.preserve_fold_conflict(&local, &remote, remote_updated_at, fold_conflicts)? {
-            return Ok(UpsertResult::Skipped);
+            return Ok(UpsertResult::Skipped("local_conflict"));
         }
         // Re-check after the get→add race too: a recovery key must never
         // overwrite a concurrent insert belonging to another creation.
@@ -2848,7 +2984,7 @@ impl CloudSyncer {
                 store.update(&remote)?;
                 Ok(UpsertResult::Updated)
             }
-            ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+            ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
         }
     }
 
@@ -2863,13 +2999,13 @@ impl CloudSyncer {
     ) -> Result<UpsertResult, CasError> {
         match store.get(&task.id) {
             Ok(local) => {
-                if rejects_terminal_regression(&local, &task) {
-                    self.record_terminal_regression_conflict(&local, &task)?;
-                    return Ok(UpsertResult::Skipped);
+                if rejects_delivery_regression(&local, &task) {
+                    self.record_delivery_regression_conflict(&local, &task)?;
+                    return Ok(UpsertResult::Skipped("delivery_lifecycle_event"));
                 }
                 if !local.lifecycle_matches(&task) && task.updated_at <= local.updated_at {
                     self.record_task_lifecycle_conflict(&local, &task, "lifecycle_timestamp")?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("lifecycle_timestamp"));
                 }
                 let action = self.resolve_conflict(
                     "task",
@@ -2899,7 +3035,7 @@ impl CloudSyncer {
                             },
                         )
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
                 }
             }
             Err(cas_store::StoreError::TaskNotFound(_)) => {
@@ -2935,7 +3071,7 @@ impl CloudSyncer {
                         .unwrap_or(false)
                 {
                     self.keep_local_rule_over_unattributed_row(&rule)?;
-                    return Ok(UpsertResult::Skipped);
+                    return Ok(UpsertResult::Skipped("local_conflict"));
                 }
                 let local_time = local.last_accessed.unwrap_or(local.created);
                 let remote_time = rule.last_accessed.unwrap_or(rule.created);
@@ -2955,7 +3091,7 @@ impl CloudSyncer {
                         store.update(&rule)?;
                         Ok(UpsertResult::Updated)
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
                 }
             }
             Err(cas_store::StoreError::RuleNotFound(_)) => {
@@ -3025,7 +3161,7 @@ impl CloudSyncer {
                         store.update(&skill)?;
                         Ok(UpsertResult::Updated)
                     }
-                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped),
+                    ConflictAction::UseLocal | ConflictAction::Skip => Ok(UpsertResult::Skipped("local_conflict")),
                 }
             }
             // Keep team and personal pulls aligned: a fresh local store may
@@ -3230,6 +3366,10 @@ impl CloudSyncer {
         rule_store: &dyn RuleStore,
         skill_store: &dyn SkillStore,
     ) -> Result<SyncResult, CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         self.clear_conflict_log();
         self.clear_incoming_revisions();
         let mut result = SyncResult::default();
@@ -3365,7 +3505,7 @@ impl CloudSyncer {
                         let _ = self.queue.record_revision(EntityType::Entry, id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3407,14 +3547,17 @@ impl CloudSyncer {
                 continue;
             }
             let mut raw_task = raw_task;
-            render_task_proposal_provenance(&mut raw_task);
+            if let Some(cas_root) = self.push_cas_root.as_deref() {
+                record_pulled_accepted_proposal(cas_root, &raw_task, current_project_id);
+            }
+            let rendered_from_provenance = render_task_proposal_provenance(&mut raw_task);
             let wire_is_owner = task_wire_is_owner(&raw_task);
             let team_task_revision = crate::cloud::wire_revision(&raw_task);
             if let Some(id) = raw_task.get("id").and_then(serde_json::Value::as_str) {
                 self.note_incoming_revision(EntityType::Task, id, &raw_task);
             }
             let raw_task_for_parking = raw_task.clone();
-            let remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
+            let mut remote_task: Task = match deserialize_pulled_entity(raw_task, "task") {
                 Ok(t) => t,
                 Err(e) => {
                     self.park_pulled_task_row(
@@ -3428,6 +3571,11 @@ impl CloudSyncer {
                     continue;
                 }
             };
+            let trusted_provenance =
+                take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+                &mut remote_task.notes, &remote_task.id,
+            );
             // cas-7a63: a row without its own origin cannot be attributed.
             // Its project scope field echoes the request, so stamping it (as
             // this code once did) gave a foreign legacy row the puller's
@@ -3456,6 +3604,12 @@ impl CloudSyncer {
                 "team_pull",
             ) {
                 Ok(UpsertResult::Created) | Ok(UpsertResult::Updated) => {
+                    if let Some(block) = trusted_provenance.as_deref() {
+                        task_store.append_trusted_note(&remote_task.id, block)?;
+                    }
+                    for proof in &trusted_proofs {
+                        task_store.append_trusted_note(&remote_task.id, proof)?;
+                    }
                     result.pulled_tasks += 1;
                     if let Some(revision) = team_task_revision {
                         let _ =
@@ -3472,7 +3626,7 @@ impl CloudSyncer {
                         });
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3538,7 +3692,7 @@ impl CloudSyncer {
                                 .record_revision(EntityType::Rule, &remote_rule_id, revision);
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3584,7 +3738,7 @@ impl CloudSyncer {
                         );
                     }
                 }
-                Ok(UpsertResult::Skipped) => {
+                Ok(UpsertResult::Skipped(_)) => {
                     result.record_local_conflict();
                 }
                 Err(e) => {
@@ -3608,6 +3762,9 @@ impl CloudSyncer {
 
         for conflict in self.take_conflict_log() {
             result.record_conflict_detail(conflict);
+        }
+        if let Err(error) = self.report_guarded_peer_closes(task_store, &mut result) {
+            result.errors.push(format!("Could not report guarded peer closes: {error}"));
         }
         result.duration_ms = start.elapsed().as_millis() as u64;
         Ok(result)
@@ -4258,7 +4415,7 @@ mod web_close_tests {
             "personal_pull",
         )
         .unwrap();
-        assert!(matches!(outcome, UpsertResult::Skipped));
+        assert!(matches!(outcome, UpsertResult::Skipped(_)));
         // The no-op must not clobber the pre-existing local close_reason.
         let got = store.get("t-done").unwrap();
         assert_eq!(got.close_reason.as_deref(), Some("already closed locally"));
@@ -4307,15 +4464,18 @@ mod web_close_tests {
         );
 
         let mut local = Task::new("cas-conflict".to_string(), "local title".to_string());
-        local.notes = "[2026-08-09 10:30] 📝 PROGRESS local note".to_string();
+        local.notes = "[2026-08-09 09:00] 📝 PROGRESS local first".to_string();
         store.add(&local).unwrap();
+        store.append_trusted_note(&local.id, "[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted").unwrap();
+        store.append_note(&local.id, "[2026-08-09 11:00] 📝 PROGRESS local last").unwrap();
+        let local = store.get(&local.id).unwrap();
         queue
             .enqueue(EntityType::Task, &local.id, SyncOperation::Upsert, None)
             .unwrap();
 
         let mut remote = local.clone();
         remote.title = "remote title".to_string();
-        remote.notes = "[2026-08-09 09:30] 📝 PROGRESS remote note".to_string();
+        remote.notes = "[2026-08-09 10:30] 📝 PROGRESS remote note".to_string();
         remote.updated_at += chrono::Duration::minutes(1);
         assert!(matches!(
             syncer.upsert_task(&*store, remote, "sync-test", "personal_pull"),
@@ -4326,12 +4486,13 @@ mod web_close_tests {
         assert_eq!(merged.title, "remote title");
         assert_eq!(
             merged.notes,
-            "[2026-08-09 09:30] 📝 PROGRESS remote note\n\n[2026-08-09 10:30] 📝 PROGRESS local note"
+            "[2026-08-09 09:00] 📝 PROGRESS local first\n\n[2026-08-09 10:00] published\nARTIFACT_PROOF: trusted\n\n[2026-08-09 10:30] 📝 PROGRESS remote note\n\n[2026-08-09 11:00] 📝 PROGRESS local last"
         );
+        assert!(merged.notes.lines().any(|line| line == "ARTIFACT_PROOF: trusted"));
         let conflicts = queue.list_conflicts(1).unwrap();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].winner_side, "merged");
-        assert!(conflicts[0].discarded_row_json.contains("local note"));
+        assert!(conflicts[0].discarded_row_json.contains("local first"));
     }
 
     #[test]
@@ -4362,7 +4523,7 @@ mod web_close_tests {
         stale_remote.updated_at = chrono::Utc::now();
         assert!(matches!(
             syncer.upsert_task(&*store, stale_remote, "sync-gh451", "personal_pull"),
-            Ok(UpsertResult::Skipped)
+            Ok(UpsertResult::Skipped(_))
         ));
 
         let retained = store.get("cas-gh451").unwrap();
@@ -4403,7 +4564,7 @@ mod web_close_tests {
                 "sync-team",
                 "team_pull",
             ),
-            Ok(UpsertResult::Skipped)
+            Ok(UpsertResult::Skipped(_))
         ));
         assert_eq!(
             store.get("cas-team-terminal").unwrap().status,
@@ -4478,7 +4639,7 @@ mod web_close_tests {
 
         assert!(matches!(
             syncer.upsert_task(&*store, remote, "sync-unattributed", "personal_pull"),
-            Ok(UpsertResult::Skipped)
+            Ok(UpsertResult::Skipped(_))
         ));
         assert_eq!(
             store.get("cas-unattributed-reopen").unwrap().status,
@@ -4520,7 +4681,7 @@ mod web_close_tests {
                 ),
             }
             .unwrap();
-            assert!(matches!(outcome, UpsertResult::Skipped));
+            assert!(matches!(outcome, UpsertResult::Skipped(_)));
             let retained = store.get(&local.id).unwrap();
             assert!(retained.lifecycle_matches(&local));
             assert_eq!(retained.updated_at, local.updated_at);

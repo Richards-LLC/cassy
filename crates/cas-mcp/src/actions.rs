@@ -54,6 +54,7 @@ pub const TASK_ACTIONS: &[&str] = &[
     "release",
     "reset",
     "transfer",
+    "rebind_branch",
     "available",
     "mine",
 ];
@@ -75,6 +76,8 @@ pub const RULE_ACTIONS: &[&str] = &[
     "harmful",
     "sync",
     "check_similar",
+    "observe",
+    "candidates",
 ];
 
 pub const SKILL_ACTIONS: &[&str] = &[
@@ -126,6 +129,8 @@ pub const FACTORY_ACTIONS: &[&str] = &[
     "focus_epic",
     "epic_split",
     "restart_spawn_queue",
+    "record_test_receipt",
+    "recover_branch",
     "agent_list",
     "agent_cleanup",
     "lease_history",
@@ -238,7 +243,7 @@ pub const VERIFICATION_ACTIONS: &[&str] = &[
 /// Verification actions dispatched only in builds with the `mcp-proxy` feature.
 pub const VERIFICATION_PROXY_ACTIONS: &[&str] = &["external_verify"];
 
-pub const ARTIFACT_ACTIONS: &[&str] = &["publish", "show", "list", "post"];
+pub const ARTIFACT_ACTIONS: &[&str] = &["publish", "show", "list", "fetch", "post"];
 
 pub const KNOWLEDGE_ACTIONS: &[&str] = &["search", "read", "write", "list", "status"];
 

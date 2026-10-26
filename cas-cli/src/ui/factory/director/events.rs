@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::ui::factory::director::data::{ActiveLeaseSummary, DirectorData, TaskSummary};
+use crate::ui::factory::director::data::{ActiveLeaseSummary, AgentSummary, DirectorData, TaskSummary};
 use cas_types::TaskStatus;
 use chrono::{DateTime, Utc};
 
@@ -398,6 +398,16 @@ pub(crate) fn supervisor_reminder_watches_delivery(
     })
 }
 
+/// cas-73b89: whether a pending reminder or queued message will wake this
+/// worker. A worker with neither will not resume on its own.
+pub(crate) fn worker_has_pending_wake(data: &DirectorData, agent: &AgentSummary) -> bool {
+    agent.pending_messages > 0
+        || data.reminders.iter().any(|reminder| {
+            reminder.status == cas_store::ReminderStatus::Pending
+                && (reminder.target_id == agent.id || reminder.target_id == agent.name)
+        })
+}
+
 /// Marker the close gate writes each time a delivery parks for merge.
 const PARKED_FOR_MERGE_MARKER: &str = "Task parked as awaiting_merge";
 /// Prefix the notes tool writes for a blocker note.
@@ -689,6 +699,7 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
             .iter()
             .filter(|task| {
                 task.status == TaskStatus::Open
+                    && task.task_type != cas_types::TaskType::Gate
                     && task.assignee.is_none()
                     && !data.start_gated_task_ids.contains(&task.id)
                     && can_assign(task)
@@ -737,6 +748,7 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
         .filter(|agent| {
             agent.name != supervisor_name
                 && agent.current_task.is_none()
+                && !agent.qa_reviewer_between_rounds
                 && !held_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.id)
@@ -1666,6 +1678,9 @@ pub struct DirectorEventDetector {
     /// short-circuit below. Set/cleared via [`Self::mark_worker_hold`] /
     /// [`Self::clear_worker_hold`].
     held_workers: HashSet<String>,
+    /// (cas-73b89) Workers released from hold and not yet seen active again,
+    /// with the first tick that observed the release (`None` until then).
+    released_workers: HashMap<String, Option<DateTime<chrono::Utc>>>,
     /// Emitted (task, delivery tip, CI conclusion) merge alerts. Unrelated
     /// target advances and repeated idle episodes cannot manufacture a new decision.
     merge_alert_last_evidence: HashSet<(String, String, String)>,
@@ -1715,6 +1730,7 @@ impl DirectorEventDetector {
             transcript_in_flight_override: None,
             worker_evidence_override: None,
             held_workers: HashSet::new(),
+            released_workers: HashMap::new(),
             merge_alert_last_evidence: HashSet::new(),
         }
     }
@@ -1746,7 +1762,44 @@ impl DirectorEventDetector {
     /// Release a worker from hold — idle detection resumes normally on the
     /// next tick.
     pub fn clear_worker_hold(&mut self, worker_name: &str) {
-        self.held_workers.remove(worker_name);
+        if self.held_workers.remove(worker_name) {
+            self.released_workers.insert(worker_name.to_string(), None);
+        }
+    }
+
+    /// (cas-73b89) A released worker that has an in-progress task, has done
+    /// nothing since its release for the stall threshold, and has no pending
+    /// reminder or message to wake it will not resume on its own. Returns the
+    /// seconds since release once, when that becomes true; any activity after
+    /// the release ends the watch.
+    fn released_worker_unwoken(
+        &mut self,
+        data: &DirectorData,
+        agent: &AgentSummary,
+        worker: &str,
+        now: DateTime<chrono::Utc>,
+    ) -> Option<u64> {
+        let released_at = *self.released_workers.get_mut(worker)?.get_or_insert(now);
+        let active_since_release = agent
+            .latest_activity
+            .as_ref()
+            .map(|(_, at)| *at)
+            .into_iter()
+            .chain(self.observed_worker_activity.get(worker).copied())
+            .any(|at| at > released_at);
+        if active_since_release {
+            self.released_workers.remove(worker);
+            return None;
+        }
+        let quiet_secs = (now - released_at).num_seconds();
+        if quiet_secs < effective_stall_threshold_secs(self.stall_threshold_secs, agent.effort) as i64 {
+            return None;
+        }
+        if worker_has_pending_wake(data, agent) {
+            return None;
+        }
+        self.released_workers.remove(worker);
+        Some(quiet_secs as u64)
     }
 
     /// Whether `worker_name` is currently held (test/inspection helper).
@@ -2064,6 +2117,7 @@ impl DirectorEventDetector {
     pub fn remove_worker(&mut self, name: &str) {
         self.worker_names.retain(|n| n != name);
         self.held_workers.remove(name);
+        self.released_workers.remove(name);
         self.removed_workers.insert(name.to_string());
     }
 
@@ -2384,6 +2438,21 @@ impl DirectorEventDetector {
                 self.stall_escalated.remove(&agent.id);
             }
 
+            if let Some(task_id) = &agent.current_task
+                && let Some(quiet_secs) =
+                    self.released_worker_unwoken(data, agent, &resolved_name, now_utc)
+            {
+                events.push(DirectorEvent::WorkerStalled {
+                    worker: resolved_name.clone(),
+                    task_id: task_id.clone(),
+                    elapsed_secs: quiet_secs,
+                    escalate: true,
+                });
+                self.stall_nudged.insert(agent.id.clone());
+                self.stall_escalated.insert(agent.id.clone());
+                continue;
+            }
+
             if let Some(task_id) = &agent.current_task {
                 // Agent is working — reset the idle streak. The next time this
                 // agent's `current_task` goes to `None`, the counter starts
@@ -2547,6 +2616,20 @@ impl DirectorEventDetector {
                     }
                 }
 
+                continue;
+            }
+
+            if agent.qa_reviewer_between_rounds {
+                // A rejected QA round leaves its reviewer waiting until the
+                // next round is opened or the delivery becomes terminal.
+                // Reset the idle episode while in that gap so it can begin
+                // cleanly once the reviewer is eligible again.
+                self.consecutive_idle_ticks.remove(&agent.id);
+                self.idle_already_emitted.remove(&agent.id);
+                self.idle_transition_at.remove(&resolved_name);
+                self.idle_handled_by_supervisor.remove(&resolved_name);
+                self.stall_nudged.remove(&agent.id);
+                self.stall_escalated.remove(&agent.id);
                 continue;
             }
 

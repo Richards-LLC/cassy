@@ -231,6 +231,7 @@ pub(crate) struct DirectorRefresh {
     delivery_backlog: Vec<DirectorEvent>,
     deliverability_pending: HashMap<u64, PendingDeliverability>,
     deliverability_ready: Vec<DeliverabilityBatch>,
+    merge_alert_inbox_ready: Vec<super::delivery::CompletedMergeAlert>,
     /// Health probes in flight by job key.
     health_in_flight: HashMap<String, HealthInFlight>,
     health_ready: Vec<WorkerHealthReport>,
@@ -269,6 +270,7 @@ impl DirectorRefresh {
             delivery_backlog: Vec::new(),
             deliverability_pending: HashMap::new(),
             deliverability_ready: Vec::new(),
+            merge_alert_inbox_ready: Vec::new(),
             health_in_flight: HashMap::new(),
             health_ready: Vec::new(),
             health_failed: Vec::new(),
@@ -438,6 +440,9 @@ impl DirectorRefresh {
                 if !self.ci_status.finish(generation, evidence) {
                     tracing::debug!(generation, "late CI status ignored");
                 }
+            }
+            FactoryJobOutput::MergeAlertInbox(completed) => {
+                self.merge_alert_inbox_ready.extend(completed);
             }
             FactoryJobOutput::ReminderScan => {}
         }
@@ -850,7 +855,7 @@ impl DirectorRefresh {
         &mut self,
         app: &FactoryApp,
         jobs: &mut QueueJobs,
-        prompts: Vec<Prompt>,
+        mut prompts: Vec<Prompt>,
         events: Vec<DirectorEvent>,
         refresh_started: Instant,
     ) -> Result<(), Vec<Prompt>> {
@@ -871,7 +876,7 @@ impl DirectorRefresh {
             factory_jobs::deliverability_spec(generation),
             move |stores: Option<&DirectorStores>| {
                 hook.run("prompt re-check");
-                let verdicts = request.read(stores, &prompts);
+                let verdicts = request.read(stores, &mut prompts);
                 // cas-4491f: assignment wakes read their task here too.
                 let assignments = request.read_assignments(stores, &prompts);
                 Box::new(FactoryJobOutput::Deliverability(DeliverabilityBatch {
@@ -899,6 +904,14 @@ impl DirectorRefresh {
     pub(crate) fn take_deliverability(&mut self, jobs: &mut QueueJobs) -> Vec<DeliverabilityBatch> {
         self.poll(jobs);
         std::mem::take(&mut self.deliverability_ready)
+    }
+
+    pub(crate) fn take_merge_alert_inbox(
+        &mut self,
+        jobs: &mut QueueJobs,
+    ) -> Vec<super::delivery::CompletedMergeAlert> {
+        self.poll(jobs);
+        std::mem::take(&mut self.merge_alert_inbox_ready)
     }
 
     /// Shutdown (review M4): wait up to `timeout` for prompt re-checks still

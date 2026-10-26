@@ -50,6 +50,8 @@ struct BackoffEntry {
 #[derive(Debug, Default)]
 pub(crate) struct ExternalWakeBackoff {
     entries: HashMap<ExternalProbeKey, BackoffEntry>,
+    // Carried between scans with the probe state, independently per scanner.
+    ttl_orphan_count: usize,
 }
 
 impl ExternalWakeBackoff {
@@ -204,63 +206,108 @@ fn session_gone(
     }
 }
 
-/// Expire pending external reminders (`branch_contained_in`, `tag_exists`,
-/// `ci_completed`) whose owner and target sessions are both gone (see
-/// [`session_gone`]). These rows
-/// are durable by design, so without this a dead session's wake is re-probed
-/// forever, including one already satisfied whose target can never receive
-/// it. Returns the number expired.
-pub(crate) fn expire_dead_session_reminders(
+/// Pending reminders whose owner and target sessions are both gone (see
+/// [`session_gone`]), and whether each should expire: an
+/// external wake (`branch_contained_in`, `tag_exists`, `ci_completed`), or
+/// a never-expiring internal-event or already-due time wake.
+fn orphaned_reminders(
     cas_dir: &Path,
     now: chrono::DateTime<chrono::Utc>,
     process_alive: &dyn Fn(&cas_types::Agent) -> bool,
-) -> usize {
+) -> Option<(std::sync::Arc<dyn cas_store::ReminderStore>, Vec<(cas_store::Reminder, bool)>)> {
     let (Ok(reminders), Ok(agents)) = (
         crate::store::open_reminder_store(cas_dir),
         crate::store::open_agent_store(cas_dir),
     ) else {
-        return 0;
+        return None;
     };
-    let mut expired = 0;
-    for event_type in [
-        EXTERNAL_BRANCH_CONTAINED_EVENT,
-        EXTERNAL_TAG_EXISTS_EVENT,
-        EXTERNAL_CI_COMPLETED_EVENT,
-    ] {
-        let Ok(pending) = reminders.get_event_reminders(event_type) else {
-            continue;
-        };
-        for reminder in pending {
+    let pending = reminders.list_all_pending().ok()?;
+    let orphaned = pending
+        .into_iter()
+        .filter(|reminder| {
             let gone = |agent_id: &str| {
                 session_gone(agents.as_ref(), agent_id, reminder.created_at, now, process_alive)
             };
-            let owner_gone = gone(&reminder.owner_id);
-            let target_gone = owner_gone
-                && (reminder.target_id == reminder.owner_id || gone(&reminder.target_id));
-            if !target_gone {
-                continue;
+            gone(&reminder.owner_id)
+                && (reminder.target_id == reminder.owner_id || gone(&reminder.target_id))
+        })
+        .map(|reminder| {
+            let external = matches!(
+                reminder.trigger_event.as_deref(),
+                Some(EXTERNAL_BRANCH_CONTAINED_EVENT | EXTERNAL_TAG_EXISTS_EVENT | EXTERNAL_CI_COMPLETED_EVENT)
+            );
+            let never_ends = external
+                || (reminder.ttl_secs == 0
+                    && (reminder.trigger_type == cas_store::ReminderTriggerType::Event
+                        || reminder.trigger_at.is_some_and(|due| due <= now)));
+            (reminder, never_ends)
+        })
+        .collect();
+    Some((reminders, orphaned))
+}
+
+/// Expire pending reminders that would otherwise never end once their owner
+/// and target sessions are both gone: external wakes, durable by design and
+/// otherwise re-probed forever (GH #1208), and (cas-c634) never-expiring
+/// internal-event wakes, such as a retired worker's own `task_completed`
+/// wait, which the TTL pass skips, and due time reminders without a TTL.
+/// Other orphans keep their TTL; log their count only when it changes.
+/// Returns the number expired.
+pub(crate) fn expire_dead_session_reminders(
+    cas_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    process_alive: &dyn Fn(&cas_types::Agent) -> bool,
+    last_ttl_orphan_count: &mut usize,
+) -> usize {
+    let Some((reminders, orphaned)) = orphaned_reminders(cas_dir, now, process_alive) else {
+        return 0;
+    };
+    let mut expired = 0;
+    let mut left_to_ttl = 0;
+    for (reminder, never_ends) in orphaned {
+        if !never_ends {
+            if reminder.ttl_secs > 0 {
+                left_to_ttl += 1;
             }
-            match reminders.expire(reminder.id) {
-                Ok(true) => {
-                    expired += 1;
-                    tracing::info!(
-                        reminder_id = reminder.id,
-                        event_type,
-                        owner = %reminder.owner_id,
-                        target = %reminder.target_id,
-                        "expired external reminder whose owning session is gone"
-                    );
-                }
-                Ok(false) => {}
-                Err(error) => tracing::warn!(
+            continue;
+        }
+        match reminders.expire(reminder.id) {
+            Ok(true) => {
+                expired += 1;
+                tracing::info!(
                     reminder_id = reminder.id,
-                    %error,
-                    "failed to expire dead-session external reminder"
-                ),
+                    event_type = reminder.trigger_event.as_deref().unwrap_or("time"),
+                    owner = %reminder.owner_id,
+                    target = %reminder.target_id,
+                    "expired reminder whose issuing and receiving sessions are gone"
+                );
             }
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                reminder_id = reminder.id,
+                %error,
+                "failed to expire dead-session reminder"
+            ),
         }
     }
+    if left_to_ttl > 0 && left_to_ttl != *last_ttl_orphan_count {
+        tracing::info!(
+            count = left_to_ttl,
+            "pending reminders whose issuer and recipient are both gone; they end at their TTL"
+        );
+    }
+    *last_ttl_orphan_count = left_to_ttl;
     expired
+}
+
+/// cas-c634: pending reminders whose issuer and recipient are both gone
+/// (see [`session_gone`]). No live agent sees them otherwise.
+pub(crate) fn orphaned_reminder_count(
+    cas_dir: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+    process_alive: &dyn Fn(&cas_types::Agent) -> bool,
+) -> usize {
+    orphaned_reminders(cas_dir, now, process_alive).map_or(0, |(_, orphaned)| orphaned.len())
 }
 
 /// One complete scan; runs on the scanner thread, never the daemon loop.
@@ -274,6 +321,7 @@ fn run_external_wake_scan(
         cas_dir,
         chrono::Utc::now(),
         &crate::mcp::tools::service::agent_liveness::agent_process_is_alive,
+        &mut backoff.ttl_orphan_count,
     );
     let candidates = external_wake_candidates(cas_dir, session_name);
     if candidates.is_empty() {
@@ -626,8 +674,24 @@ mod tests {
         let live_target = create("dead", "live", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let process_backed = create("zombie", "zombie", EXTERNAL_BRANCH_CONTAINED_EVENT);
         let director_event = create("pruned", "pruned", "task_completed");
+        // cas-c634: a retired worker's reminder to itself that also expires
+        // on its own TTL is left to that TTL, but counted as orphaned.
+        let director_with_ttl = reminders
+            .create_with_scope(
+                "pruned", Some("pruned"), "wake", cas_store::ReminderTriggerType::Event, None,
+                Some("task_blocked"), None, 86_400 * 30, Some("old-factory"), None, true, None,
+            )
+            .unwrap();
+        let time = |due| {
+            reminders.create(
+                "pruned", Some("pruned"), "deadline", cas_store::ReminderTriggerType::Time,
+                Some(due), None, None, 0, None,
+            ).unwrap()
+        };
+        let due_time = time(now - chrono::Duration::hours(1));
+        let future_time = time(now + chrono::Duration::hours(1));
         let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
-        for id in [missing_old, dead_ci, director_event] {
+        for id in [missing_old, dead_ci, director_event, director_with_ttl, due_time, future_time] {
             conn.execute(
                 "UPDATE reminders SET created_at = ?1 WHERE id = ?2",
                 rusqlite::params![(now - chrono::Duration::hours(25)).to_rfc3339(), id],
@@ -636,8 +700,22 @@ mod tests {
         }
 
         let process_alive = |agent: &cas_types::Agent| agent.id == "zombie";
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 3);
-        assert_eq!(expire_dead_session_reminders(&cas_dir, now, &process_alive), 0);
+        // cas-c634: the never-expiring internal-event reminder of a retired
+        // worker (director_event) is expired with the external ones.
+        let mut ttl_orphan_count = 0;
+        assert_eq!(
+            expire_dead_session_reminders(&cas_dir, now, &process_alive, &mut ttl_orphan_count),
+            5
+        );
+        assert_eq!(
+            expire_dead_session_reminders(&cas_dir, now, &process_alive, &mut ttl_orphan_count),
+            0
+        );
+        assert_eq!(
+            orphaned_reminder_count(&cas_dir, now, &process_alive),
+            2,
+            "the TTL'd event and future time reminder are still counted"
+        );
 
         let mut pending: Vec<i64> = reminders
             .list_all_pending()
@@ -648,10 +726,64 @@ mod tests {
         pending.sort_unstable();
         assert_eq!(
             pending,
-            vec![restarted, live, recent, live_target, process_backed, director_event]
+            vec![restarted, live, recent, live_target, process_backed, director_with_ttl, future_time]
         );
-        for expired in [dead_self, missing_old, dead_ci] {
+        for expired in [dead_self, missing_old, dead_ci, director_event, due_time] {
             assert!(!pending.contains(&expired));
         }
+    }
+
+    #[test]
+    fn ttl_orphan_notice_is_logged_only_when_the_scan_count_changes() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+        let create = || {
+            let id = reminders.create(
+                "gone", None, "wait", cas_store::ReminderTriggerType::Event,
+                None, Some("task_blocked"), None, 86_400 * 30, None,
+            ).unwrap();
+            conn.execute("UPDATE reminders SET created_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339(), id],
+            ).unwrap();
+        };
+        create();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let capture = logs.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || Capture(capture.clone())).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let mut backoff = ExternalWakeBackoff::default();
+            for _ in 0..2 {
+                assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            }
+            create();
+            for _ in 0..2 {
+                assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            }
+            // Clearing the set must allow a notice when the same count returns.
+            for reminder in reminders.list_all_pending().unwrap() {
+                assert!(reminders.expire(reminder.id).unwrap());
+            }
+            assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            create();
+            for _ in 0..2 {
+                assert!(run_external_wake_scan(&cas_dir, dir.path(), "factory", &mut backoff).is_empty());
+            }
+        });
+        let logs = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert_eq!(logs.matches("they end at their TTL").count(), 3,
+            "one notice per count change, not per scan: {logs}");
     }
 }

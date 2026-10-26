@@ -1138,14 +1138,14 @@ async fn casb123_proof_scope_fix_rejects_immutable_merged_delivery() {
     );
 }
 
-/// GH #1006 item 3: a worker whose branch sits on a delivery parked for merge
-/// on another target starts a new task: the parked tip is kept as local
-/// branch `parked/<task>` and never pushed over, and the worker branch moves
-/// onto the new task's declared target. Before, start refused with "carries
-/// commits not on target base … git rebase", and the rebase would have
-/// rewritten the tip under independent QA.
+/// GH #1006 item 3 / GH #1353: a worker whose branch sits on a delivery parked
+/// for merge on another target starts a new task: the parked branch stays at
+/// its tip, untouched, and the new task gets its own per-task branch cut from
+/// the task's declared target. Before, start either refused with a rebase
+/// remedy or moved the parked branch, so a later push could alter the parked
+/// delivery under independent QA.
 #[tokio::test]
-async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_1006() {
+async fn start_beside_a_branch_parked_for_another_target_preserves_its_tip_gh_1006() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, core) = setup_cas(&mut test_env);
     let cas_dir = temp.path().join(".cas");
@@ -1210,21 +1210,24 @@ async fn start_moves_a_branch_parked_for_another_target_and_keeps_its_tip_gh_100
         .cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
         .await
         .map(extract_text)
-        .unwrap_or_else(|error| panic!("start must move the parked branch: {}", error.message));
-    assert!(started.contains("PARKED BRANCH MOVED"), "{started}");
-    assert!(started.contains("cas-pk06"), "{started}");
-    // cas-ba4a: the parked anchor SHA is named as the delivery.
+        .unwrap_or_else(|error| panic!("start must preserve the parked branch: {}", error.message));
+    assert!(started.contains("PARKED BRANCH PRESERVED"), "{started}");
+    // The parked task, branch and tip are named as the preserved delivery.
     assert!(
-        started.contains(&format!("at anchor {parked_tip}")) && started.contains("Don't force-push"),
+        started.contains(&format!("cas-pk06 stays on factory/test-agent at {parked_tip}")),
         "{started}"
     );
-    assert_eq!(git(&["rev-parse", "HEAD"]), git(&["rev-parse", "epic/burn-down"]));
-    assert_eq!(git(&["rev-parse", "parked/cas-pk06"]), parked_tip);
+    assert_eq!(
+        git(&["rev-parse", "factory/test-agent"]),
+        parked_tip,
+        "the parked branch keeps its tip"
+    );
     assert_eq!(
         git(&["rev-parse", "--abbrev-ref", "HEAD"]),
-        "factory/test-agent",
-        "the worker stays on its own branch"
+        format!("factory/test-agent-{task_id}"),
+        "the new task works on its own branch"
     );
+    assert_eq!(git(&["rev-parse", "HEAD"]), git(&["rev-parse", "epic/burn-down"]));
 }
 
 #[tokio::test]
@@ -1371,7 +1374,9 @@ async fn cas_4d67_double_retarget_to_fresh_origin_only_epic_still_requires_merge
         loop {
             match notice_socket.accept() {
                 Ok((stream, _)) => {
-                    stream.set_read_timeout(Some(std::time::Duration::from_secs(1))).unwrap();
+                    // Events were written synchronously before accept. Darwin
+                    // rejects SO_RCVTIMEO once a sender has closed its socket.
+                    stream.set_nonblocking(true).unwrap();
                     let mut line = String::new();
                     std::io::BufReader::new(stream).read_line(&mut line).unwrap();
                     captured.push(serde_json::from_str::<cas::mcp::socket::DaemonEvent>(&line).unwrap());

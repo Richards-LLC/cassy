@@ -2,6 +2,29 @@ use crate::ui::factory::daemon::imports::*;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
+fn record_client_resize(client: &mut ClientConnection, client_id: usize, cols: u16, rows: u16) {
+    client.client_cols = cols;
+    client.client_rows = rows;
+    if cols < COMPACT_WIDTH_THRESHOLD && client.view_mode == ClientViewMode::Full {
+        client.view_mode = ClientViewMode::Compact;
+        tracing::info!(
+            "Client {} auto-switched to compact mode ({}x{})",
+            client_id,
+            cols,
+            rows
+        );
+    } else if cols >= COMPACT_WIDTH_THRESHOLD && client.view_mode == ClientViewMode::Compact {
+        client.view_mode = ClientViewMode::Full;
+        tracing::info!(
+            "Client {} auto-switched to full mode ({}x{})",
+            client_id,
+            cols,
+            rows
+        );
+    }
+    client.needs_full_redraw = true;
+}
+
 impl FactoryDaemon {
     pub(super) fn accept_clients(&mut self) -> anyhow::Result<bool> {
         let mut any_new = false;
@@ -46,6 +69,7 @@ impl FactoryDaemon {
                             view_mode: ClientViewMode::Full,
                             client_cols: self.cols,
                             client_rows: self.rows,
+                            detaching: false,
                         },
                     );
                     any_new = true;
@@ -72,6 +96,12 @@ impl FactoryDaemon {
 
         // Read from all clients
         for client_id in client_ids {
+            let prev_owner_mode = self
+                .owner_client_id
+                .and_then(|id| self.clients.get(&id))
+                .map(|owner| owner.view_mode);
+            let owner_is_full = prev_owner_mode == Some(ClientViewMode::Full);
+            let prev_owner_compact = prev_owner_mode == Some(ClientViewMode::Compact);
             if let Some(client) = self.clients.get_mut(&client_id) {
                 let mut buf = [0u8; 4096];
                 loop {
@@ -100,13 +130,48 @@ impl FactoryDaemon {
 
                 // Parse input buffer for control sequences
                 let (input_data, events) = Self::parse_client_input(&mut client.input_buf);
+                if events.iter().any(|event| matches!(event, ControlEvent::Detach)) {
+                    client.detaching = true;
+                }
                 let has_activity = !input_data.is_empty() || !events.is_empty();
                 if has_activity {
                     let can_take = self.owner_client_id.is_none()
                         || self.owner_client_id == Some(client_id)
                         || self.owner_last_activity.elapsed()
                             > Duration::from_secs(INPUT_OWNER_IDLE_SECS);
+                    if !can_take {
+                        // Viewers retain their latest size without taking ownership.
+                        for event in &events {
+                            if let ControlEvent::Resize(cols, rows) = event {
+                                let was_compact = client.view_mode == ClientViewMode::Compact;
+                                record_client_resize(client, client_id, *cols, *rows);
+                                // Compact membership/geometry affects its render target.
+                                // Full viewers also determine the full layout when
+                                // the input owner is Compact.
+                                if was_compact
+                                    || client.view_mode == ClientViewMode::Compact
+                                    || !owner_is_full
+                                {
+                                    resize_event = Some((*cols, *rows));
+                                }
+                            }
+                        }
+                    }
                     if can_take {
+                        if self.owner_client_id != Some(client_id)
+                            && client.client_cols > 0
+                            && client.client_rows > 0
+                            && (prev_owner_compact
+                                || client.view_mode == ClientViewMode::Compact
+                                || (client.client_cols, client.client_rows) != (self.cols, self.rows))
+                        {
+                            // A keystroke can take ownership without a Resize frame.
+                            // Feed the new owner's recorded size through the same
+                            // debounced layout/PTY path as an explicit resize.
+                            // Entering or leaving Compact ownership changes the
+                            // fallback viewers, even at the same recorded size.
+                            resize_event = Some((client.client_cols, client.client_rows));
+                        }
                         self.owner_client_id = Some(client_id);
                         self.owner_last_activity = now;
                         had_activity = true;
@@ -115,34 +180,10 @@ impl FactoryDaemon {
                         }
                         for event in events {
                             match event {
+                                ControlEvent::Detach => {},
                                 ControlEvent::Resize(cols, rows) => {
-                                    // Store per-client dimensions
                                     if let Some(c) = self.clients.get_mut(&client_id) {
-                                        c.client_cols = cols;
-                                        c.client_rows = rows;
-                                        // Auto-detect compact mode on first resize
-                                        if cols < COMPACT_WIDTH_THRESHOLD
-                                            && c.view_mode == ClientViewMode::Full
-                                        {
-                                            c.view_mode = ClientViewMode::Compact;
-                                            tracing::info!(
-                                                "Client {} auto-switched to compact mode ({}x{})",
-                                                client_id,
-                                                cols,
-                                                rows
-                                            );
-                                        } else if cols >= COMPACT_WIDTH_THRESHOLD
-                                            && c.view_mode == ClientViewMode::Compact
-                                        {
-                                            c.view_mode = ClientViewMode::Full;
-                                            tracing::info!(
-                                                "Client {} auto-switched to full mode ({}x{})",
-                                                client_id,
-                                                cols,
-                                                rows
-                                            );
-                                        }
-                                        c.needs_full_redraw = true;
+                                        record_client_resize(c, client_id, cols, rows);
                                     }
                                     resize_event = Some((cols, rows));
                                 }
@@ -320,16 +361,7 @@ impl FactoryDaemon {
         }
 
         // Remove disconnected clients and recalibrate if any left
-        let had_disconnects = !disconnected.is_empty();
-        for id in disconnected {
-            self.clients.remove(&id);
-            if self.owner_client_id == Some(id) {
-                self.owner_client_id = None;
-            }
-        }
-        if had_disconnects {
-            self.recalibrate_after_disconnect();
-        }
+        self.disconnect_tui_clients(&disconnected);
 
         // Debounce resize: store pending event, apply in main loop after 100ms
         if let Some((cols, rows)) = resize_event {
@@ -346,7 +378,7 @@ impl FactoryDaemon {
     }
 
     /// Parse client input, extracting control sequences
-    fn parse_client_input(buf: &mut Vec<u8>) -> (Vec<u8>, Vec<ControlEvent>) {
+    pub(super) fn parse_client_input(buf: &mut Vec<u8>) -> (Vec<u8>, Vec<ControlEvent>) {
         let mut input_data = Vec::new();
         let mut events = Vec::new();
         let mut i = 0;
@@ -429,7 +461,7 @@ impl FactoryDaemon {
                                 _ => {}
                             }
                         } else if cmd_str == "detach" {
-                            // Client wants to detach - just disconnect them
+                            events.push(ControlEvent::Detach);
                         }
                     }
 

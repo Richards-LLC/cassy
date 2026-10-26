@@ -52,12 +52,12 @@ run_case() {
     export CAS_UPDATE_WAIT_STEPS=1
     export CAS_UPDATE_WAIT_SLEEP=0
     export CAS_UPDATE_SOURCE_ONLY=1
-    if [ "$mode" = darwin ]; then
-      mkdir -p "$tmp/tools"
-      printf '#!/usr/bin/env bash\nprintf "Darwin\\n"\n' >"$tmp/tools/uname"
-      chmod +x "$tmp/tools/uname"
-      export PATH="$tmp/tools:$PATH"
-    fi
+    # Platform belongs to the fixture, including simulated Linux procfs on a Mac.
+    case "$mode" in darwin*) fixture_os=Darwin ;; *) fixture_os=Linux ;; esac
+    mkdir -p "$tmp/tools"
+    printf '#!/usr/bin/env bash\nprintf "%s\\n"\n' "$fixture_os" >"$tmp/tools/uname"
+    chmod +x "$tmp/tools/uname"
+    export PATH="$tmp/tools:$PATH"
     # shellcheck source=../cas-update
     source "$helper"
     SCAN_ROOTS="$tmp/home"
@@ -89,6 +89,9 @@ run_case() {
         turnover_old_processes
         verify_runtime_epoch
         ;;
+      darwin-fail)
+        if turnover_old_processes; then printf 'expected hub turnover failure\n' >&2; exit 1; fi
+        ;;
     esac
     MIGRATION_STATUS="complete"; SYNC_STATUS="complete"
     print_summary
@@ -99,6 +102,7 @@ run_case() {
 new_fixture() {
   local tmp
   tmp="$(mktemp -d -t cas-update-test.XXXXXX)"
+  tmp="$(cd "$tmp" && pwd -P)" # macOS /var aliases /private/var; compare physical paths.
   mkdir -p "$tmp/home" "$tmp/bin" "$tmp/source" "$tmp/proc" "$tmp/registry"
   : >"$tmp/signals"
   make_binary "$tmp/bin/cas" 'cas 2.51.0 (old0001)' old
@@ -393,11 +397,65 @@ test_darwin_turnover_is_explicitly_unverified() {
   if run_case darwin "$out" "$tmp" \
     && [ ! -s "$tmp/signals" ] \
     && assert_contains "$out" 'Runtime turnover:   unverified: process inspection unavailable on Darwin' \
-    && assert_contains "$out" 'Manually restart running cas serve clients, the CAS hub service' \
+    && assert_contains "$out" 'Manually restart running cas serve clients and factory daemons' \
     && assert_not_contains "$out" 'verified current' \
     && assert_not_contains "$out" 'no running process uses the old installed CAS bytes'; then
     pass 'Darwin never signals or claims process verification from an empty procfs snapshot'
   else fail 'Darwin never signals or claims process verification from an empty procfs snapshot'; fi
+  rm -rf "$tmp"
+}
+
+# A new `cas` that also answers `--json hub status` and `hub restart` from a
+# state directory: the hub reports the version in $state/running.
+make_hub_cas() {
+  local path="$1" version="$2" semver="$3"
+  cat >"$path" <<EOF
+#!/usr/bin/env bash
+state="\$CAS_FAKE_HUB_STATE"
+case "\$*" in
+  --version) printf '%s\n' '$version' ;;
+  '--json hub status')
+    if [ -f "\$state/running" ]; then
+      printf '{"running":true,"record":{"pid":%s,"bind":"127.0.0.1","version":"%s"},"binary":"$semver"}\n' "\$(cat "\$state/pid")" "\$(cat "\$state/running")"
+    else
+      printf '{"running":false,"record":null,"binary":"$semver"}\n'; exit 1
+    fi ;;
+  'hub restart')
+    printf 'restart\n' >>"\$state/calls"
+    if [ -f "\$state/restart-fails" ]; then exit 1; fi
+    printf '%s' '$semver' >"\$state/running"; printf '2' >"\$state/pid" ;;
+  *) printf 'new-hub-aware\n' ;;
+esac
+EOF
+  chmod +x "$path"
+}
+
+# cas-3f03e (cas-f149 P2-8): on macOS the helper cannot inspect processes, yet
+# it must not leave the old-binary hub running beside the new install. It
+# restarts the hub once through the new CLI and checks the new version runs;
+# a failed restart fails the update instead of passing silently.
+test_darwin_turns_the_hub_over_through_the_cli() {
+  local tmp out state
+  tmp="$(new_fixture)"; out="$tmp/out"; state="$tmp/hub"
+  mkdir -p "$state"; printf '2.51.0' >"$state/running"; printf '1' >"$state/pid"
+  make_hub_cas "$tmp/new-cas" 'cas 2.52.0 (new0002)' 2.52.0
+  if CAS_FAKE_HUB_STATE="$state" run_case darwin "$out" "$tmp" \
+    && [ "$(grep -c restart "$state/calls")" = 1 ] \
+    && [ "$(cat "$state/running")" = 2.52.0 ] \
+    && assert_contains "$out" 'Hub turnover:       restarted on 2.52.0 (was 2.51.0)' \
+    && [ ! -s "$tmp/signals" ]; then
+    pass 'Darwin restarts the old-binary hub once through the CLI and verifies the new version'
+  else fail 'Darwin restarts the old-binary hub once through the CLI and verifies the new version'; fi
+  rm -rf "$tmp"
+
+  tmp="$(new_fixture)"; out="$tmp/out"; state="$tmp/hub"
+  mkdir -p "$state"; printf '2.51.0' >"$state/running"; printf '1' >"$state/pid"; : >"$state/restart-fails"
+  make_hub_cas "$tmp/new-cas" 'cas 2.52.0 (new0002)' 2.52.0
+  if CAS_FAKE_HUB_STATE="$state" run_case darwin-fail "$out" "$tmp" \
+    && assert_contains "$out" 'CAS hub restart failed' \
+    && assert_contains "$out" 'Hub turnover:       FAILED: cas hub restart exited non-zero'; then
+    pass 'Darwin fails the update when the hub restart fails'
+  else fail 'Darwin fails the update when the hub restart fails'; fi
   rm -rf "$tmp"
 }
 
@@ -573,6 +631,7 @@ test_dry_run_and_opt_out
 test_stale_survivor_is_nonzero
 test_no_process_and_flag_semantics
 test_darwin_turnover_is_explicitly_unverified
+test_darwin_turns_the_hub_over_through_the_cli
 test_source_resolution
 test_native_project_refresh_delegation
 test_turnover_precedes_native_project_refresh

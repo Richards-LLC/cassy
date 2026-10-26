@@ -654,9 +654,34 @@ pub fn supervisor_merge_refusal(cas_root: &Path, cwd: &Path, command: &str) -> O
         .or_else(|| github_merge_refusal(cas_root, cwd, command))
 }
 
-/// Check the branch selected by `worktree_merge`, including calls without a
-/// task_id. The raw-git hook uses the same lookup so both merge paths agree.
+/// Check a raw Git merge in the repository where that command will run.
 pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option<String> {
+    branch_merge_refusal_in_repo(cas_root, branch, |_| Ok(cwd.to_path_buf()))
+}
+
+/// A worker-only managed merge has not inferred its parked task yet. Match
+/// recorded rounds first, then resolve each task's declared repository before
+/// reading its branch. This keeps pending QA ahead of parked-task ambiguity.
+pub(crate) fn worktree_branch_merge_refusal(
+    cas_root: &Path,
+    fallback_repo: &Path,
+    branch: &str,
+) -> Option<String> {
+    branch_merge_refusal_in_repo(cas_root, branch, |task| {
+        match task.deliverables.work_target.as_ref() {
+            Some(target) => crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                cas_root, target,
+            ).map(|context| context.repo_root),
+            None => Ok(fallback_repo.to_path_buf()),
+        }
+    })
+}
+
+fn branch_merge_refusal_in_repo(
+    cas_root: &Path,
+    branch: &str,
+    repo_for_task: impl Fn(&Task) -> Result<std::path::PathBuf, String>,
+) -> Option<String> {
     let config = crate::config::Config::load(cas_root).ok()?;
     let qa = config.qa();
     if !qa.independent_pass {
@@ -676,9 +701,15 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
         if !branch_binds_task(task, &qa, &passes, branch, &implementer) {
             continue;
         }
+        let repo = match repo_for_task(task) {
+            Ok(repo) => repo,
+            Err(error) => return Some(format!(
+                "🚫 INDEPENDENT QA REQUIRED before {} merges: {error}", task.id,
+            )),
+        };
         let head = Command::new("git")
             .args(["rev-parse", "--verify", branch])
-            .current_dir(cwd)
+            .current_dir(&repo)
             .output()
             .ok()
             .filter(|out| out.status.success())
@@ -690,7 +721,7 @@ pub fn branch_merge_refusal(cas_root: &Path, cwd: &Path, branch: &str) -> Option
             // into the checked-out branch, so that is the target.
             Some(head) => merge_gate(task, &qa, &passes, &head)
                 .err()
-                .filter(|_| carry_verdict(cas_root, cwd, task, &passes, &head, "HEAD").is_none()),
+                .filter(|_| carry_verdict(cas_root, &repo, task, &passes, &head, "HEAD").is_none()),
             None => Some(format!(
                 "INDEPENDENT QA REQUIRED before {} merges, and {branch} does not resolve here.",
                 task.id
@@ -769,8 +800,15 @@ pub fn delivery_content_paths(repo: &Path, base: &str, head: &str) -> Result<Vec
 
 /// Reviewable paths a delivery brought into `target`: its own content commits
 /// before the first merge on the ancestry path, or its unmerged content
-/// commits. `None` when that merge boundary cannot be found.
-pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<String>> {
+/// commits. A non-merge receipt on the target's first-parent chain is itself
+/// the delivery, measured from its recorded base or its own parent (cas-420af).
+/// `None` when the delivery boundary cannot be found.
+pub fn integrated_paths(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    recorded_base: Option<&str>,
+) -> Option<Vec<String>> {
     let git = |args: &[&str]| -> Option<String> {
         let out = Command::new("git").args(args).current_dir(repo).output().ok()?;
         out.status
@@ -783,6 +821,15 @@ pub fn integrated_paths(repo: &Path, head: &str, target: &str) -> Option<Vec<Str
         .status()
         .is_ok_and(|status| status.success());
     let (from, to) = if merged {
+        // A squash/FF receipt is already an integration commit. Looking for
+        // a later merge instead collapses merge-base(M^1, head) onto head.
+        // Keep merge receipts on their existing content-selection path.
+        if git(&["rev-parse", "--verify", &format!("{head}^2")]).is_none()
+            && crate::qa_evidence::receipt_on_first_parent(repo, head, target)?
+        {
+            let base = crate::qa_evidence::receipt_delivery_base(repo, head, recorded_base)?;
+            return delivery_content_paths(repo, &base, head).ok();
+        }
         let merges = git(&[
             "rev-list",
             "--ancestry-path",
@@ -881,7 +928,7 @@ pub(crate) fn validate_round_evidence(
                 task_id: &task.id,
                 task_artifacts_dir: ledger_path.parent().ok_or("API ledger has no parent")?,
                 repo: &repo, delivered_head: &pass.bound_head, notes: "",
-                deployed_origins: &qa.deployed_origins,
+                deployed_origins: &qa.deployed_origins, rebind_scope: None,
             };
             if verdict == cas_types::QaVerdict::Approved {
                 crate::qa_evidence::validate_ledger(&ctx).map_err(|e| e.problem)?;
@@ -1171,8 +1218,7 @@ pub fn split_qa_issues(issues_json: Option<&str>) -> Result<(Vec<PreExistingIssu
     Ok((pre_existing, delivery))
 }
 
-/// Why a rejection is refused: every issue it names is pre-existing, so it
-/// rejects the delivery for defects it did not cause.
+/// Why a rejection is refused: the reviewer marked every issue pre-existing.
 pub fn rejection_scope_refusal(
     verdict: cas_types::QaVerdict,
     pre_existing: usize,
@@ -1180,9 +1226,10 @@ pub fn rejection_scope_refusal(
 ) -> Option<String> {
     (verdict == cas_types::QaVerdict::Rejected && pre_existing > 0 && delivery == 0).then(|| {
         format!(
-            "every issue ({pre_existing}) is marked \"scope\": \"pre-existing\", and a pre-existing \
-             defect never rejects a delivery. Reject only for a regression the delivery introduced \
-             or an unmet acceptance criterion, and name that issue without the pre-existing scope; \
+            "every issue ({pre_existing}) is marked \"scope\": \"pre-existing\". Reject for a \
+             regression caused by the delivery or a failure within its stated purpose, acceptance \
+             criteria, demo statement, or any journey invariant the diff adds or edits, even when \
+             base shares it. Name that issue without the pre-existing scope; \
              otherwise record status=approved and Cassy files the pre-existing issues as follow-ups."
         )
     })
@@ -1323,19 +1370,20 @@ pub fn round_dir(artifacts_root: &Path, pass: &QaPass) -> std::path::PathBuf {
 pub const QA_REJECTION_BAR: &str = "Rejection bar. Decide by this, not by impression. Judge what the \
 delivery changed (the pages, controls and journeys its diff touches) and its acceptance criteria, not the \
 page's older backlog.\n\
-- Reject on a regression the delivery introduced: a Blocking or High journey finding it causes, or a \
+- Reject on a regression caused by the delivery: a Blocking or High journey finding it causes, or a \
 visual-qa.mjs --strict finding the base build does not have.\n\
 - Reject when a cas-ui-craft critique dimension for what the delivery changed scores below 3, or \
 distinctiveness, fit or hierarchy scores below 4 on a public surface.\n\
-- Reject when an acceptance criterion or the demo statement is not met on the running build. A defect the \
-delivery claims to fix that still reproduces is an unmet criterion.\n\
+- Reject when the delivery's stated purpose, an acceptance criterion, the demo statement, or a journey \
+invariant its diff adds or edits is not met on the running build, even if base shares the same failure.\n\
 - Forced colors, reduced motion and more contrast count only when the capture proves the mode \
 with matchMedia (for example matchMedia('(forced-colors: active)').matches is true).\n\
 - Keyboard-only must reach and complete the demo's primary action.\n\
 - A required mode you did not run is NOT EXERCISED, never PASS, and rejects.\n\
-- A defect the base build already has never rejects, even on a touched page, unless the delivery claims \
-to fix it. Record it under Pre-existing in LEDGER.md and pass it to qa_record with \"scope\": \
-\"pre-existing\"; Cassy files it as a follow-up task linked to the delivery.\n\
+- A failure the base build already has is pre-existing only when it falls outside the delivery's stated \
+purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or \
+edits. Record only those findings under Pre-existing in LEDGER.md and pass them to qa_record with \
+\"scope\": \"pre-existing\"; Cassy files them as follow-up tasks linked to the delivery.\n\
 Otherwise approve, and list Normal and Note findings in the summary.";
 
 /// Brief the reviewer reads when it starts the QA work item.
@@ -1362,6 +1410,14 @@ pub fn qa_task_description(
             delivery.id, ledger_dir.display(),
         );
     }
+    let [baseline] = match crate::worktree::GitOperations::git_remedies([&[
+        "merge-base",
+        parent_branch,
+        &pass.bound_head,
+    ]]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     let demo = if delivery.demo_statement.trim().is_empty() {
         "(none — derive the user goal from the delivery title and diff)".to_string()
     } else {
@@ -1389,7 +1445,7 @@ pub fn qa_task_description(
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \
          screenshots. When a check fails, repeat it on the base build \
-         (git merge-base {parent} {head}) before you count it: a failure the base shares is \
+         ({baseline}) before you count it: a failure the base shares is \
          pre-existing. For visual QA, run the base build over the same pages into \
          visual-qa-baseline/ and set visual_qa_status \"scoped\" with \
          files.visual_qa_baseline_json; only findings the base lacks count. Every finding \
@@ -1415,9 +1471,9 @@ pub fn qa_task_description(
         round = pass.round,
         implementer = pass.implementer_agent_id,
         title = delivery.title.trim(),
-        branch = pass.branch,
+        branch = crate::worktree::GitOperations::visible_git_label(&pass.branch),
         head = pass.bound_head,
-        parent = parent_branch,
+        parent = crate::worktree::GitOperations::visible_git_label(parent_branch),
         reasons = reasons.join(", "),
         ledger = ledger_dir.display(),
         deadline = pass.deadline_at.to_rfc3339(),
@@ -1595,7 +1651,7 @@ mod tests {
         let delivery_head = String::from_utf8(delivery_head.stdout).unwrap();
         git(&["switch", "-q", "main"]);
         git(&["merge", "-q", "--no-ff", "-m", "land worker", "factory/worker"]);
-        let integrated = integrated_paths(repo, delivery_head.trim(), "main").unwrap();
+        let integrated = integrated_paths(repo, delivery_head.trim(), "main", None).unwrap();
         assert!(integrated.iter().any(|path| path == "app.vue"), "{integrated:?}");
         assert!(!integrated.iter().any(|path| path == "incoming.vue"), "{integrated:?}");
     }
@@ -1941,6 +1997,10 @@ mod tests {
     /// supervisor brief and no installed skill reference to decide.
     #[test]
     fn qa_task_description_states_the_rejection_bar_and_evidence_path() {
+        let special = qa_task_description(&task(), &pass("aaaa1111", cas_types::QaPassState::Pending),
+            &["demo_statement".into()], Path::new("/artifacts/qa"), "epic/{a,b}!e");
+        // pin: the baseline command must preserve the configured parent ref.
+        assert!(special.contains("git merge-base 'epic/{a,b}!e' aaaa1111"), "{special}");
         let round = pass("aaaa1111", cas_types::QaPassState::Pending);
         let text = qa_task_description(
             &task(),
@@ -1955,10 +2015,10 @@ mod tests {
             "scores below 3",
             "below 4 on a public surface",
             "page's older backlog",
-            "a regression the delivery introduced",
+            "a regression caused by the delivery",
             "finding the base build does not have",
-            "A defect the delivery claims to fix that still reproduces is an unmet criterion",
-            "never rejects, even on a touched page",
+            "the delivery's stated purpose, an acceptance criterion, the demo statement, or a journey invariant its diff adds or edits is not met on the running build, even if base shares the same failure",
+            "is pre-existing only when it falls outside the delivery's stated purpose, acceptance criteria and demo statement, and outside any journey invariant its diff adds or edits",
             "\"scope\": \"pre-existing\"",
             "visual_qa_status \"scoped\"",
             "files.visual_qa_baseline_json",
@@ -2322,7 +2382,9 @@ mod tests {
     fn a_rejection_needs_an_issue_the_delivery_owns() {
         use cas_types::QaVerdict::*;
         let refusal = rejection_scope_refusal(Rejected, 2, 0).expect("only pre-existing issues");
-        assert!(refusal.contains("never rejects a delivery"), "{refusal}");
+        for scope in ["stated purpose", "acceptance criteria", "demo statement", "journey invariant", "diff adds or edits"] {
+            assert!(refusal.contains(scope), "missing {scope}: {refusal}");
+        }
         assert!(rejection_scope_refusal(Rejected, 2, 1).is_none());
         assert!(rejection_scope_refusal(Rejected, 0, 0).is_none());
         assert!(rejection_scope_refusal(Approved, 3, 0).is_none());

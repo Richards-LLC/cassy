@@ -888,6 +888,17 @@ pub fn get_latest_verification_dispatch(
     get_latest_verification_dispatch_with_conn(&conn, task_id)
 }
 
+/// Whether any proof cycle still owns live verification work for this task.
+/// Do not infer this from the latest row: older claimed work can still exist.
+pub fn has_active_verification_dispatch(cas_dir: &Path, task_id: &str) -> Result<bool> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&store.conn)?;
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM verification_dispatches WHERE task_id = ?1 AND state IN ('pending', 'claimed'))",
+        params![task_id], |row| row.get(0),
+    ).map_err(StoreError::Database)
+}
+
 pub fn get_verification_dispatch_with_conn(
     conn: &Connection,
     dispatch_id: &str,
@@ -1062,9 +1073,9 @@ fn create_verification_dispatch_bound_in_transaction(
         {
             return Ok(existing);
         }
-        return Err(StoreError::Parse(
-            "a different verification proof boundary is already active for this task".to_string(),
-        ));
+        return Err(StoreError::VerificationDispatchConflict {
+            dispatch: Box::new(existing),
+        });
     }
     if let Some(existing) = get_latest_verification_dispatch_with_conn(&conn, task_id)?
         && existing.state == VerificationDispatchState::TimedOut
@@ -1275,6 +1286,114 @@ pub fn expired_verification_dispatches(
     ids.iter()
         .map(|id| get_verification_dispatch_with_conn(&conn, id))
         .collect()
+}
+
+/// Adopt only the latest unresolved proof for an orphaned owner. The caller
+/// supplies positively dead process snapshots; status/PID/fingerprint are
+/// compared again under the write lock so a revived owner is never displaced.
+/// Missing registry rows require matching machine/session retirement evidence.
+pub fn adopt_orphaned_verification_dispatches(
+    cas_dir: &Path,
+    supervisor_id: &str,
+    dead_owners: &[Agent],
+    deadline_at: DateTime<Utc>,
+) -> Result<usize> {
+    let store = SqliteVerificationStore::open(cas_dir)?;
+    let tx = crate::shared_db::begin_immediate_pooled(&store.conn)?;
+    let has_tasks: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !has_tasks {
+        tx.commit()?;
+        return Ok(0);
+    }
+    let local_machine = Agent::get_or_generate_machine_id();
+    let adopter: Option<(String, String)> = tx
+        .query_row(
+            "SELECT machine_id, factory_session FROM agents
+         WHERE id = ?1 AND role = 'supervisor' AND status IN ('active', 'idle')
+           AND machine_id = ?2 AND factory_session IS NOT NULL AND trim(factory_session) != ''",
+            params![supervisor_id, local_machine],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((machine, session)) = adopter else {
+        tx.commit()?;
+        return Ok(0);
+    };
+    let ids = {
+        let mut stmt = tx.prepare(
+            "SELECT d.id FROM verification_dispatches d JOIN tasks t ON t.id = d.task_id
+             WHERE d.state IN ('pending', 'claimed', 'timed_out')
+               AND t.status IN ('in_progress', 'awaiting_merge', 'blocked')
+               AND d.owner_agent_id != ?1
+               AND d.id = (SELECT newest.id FROM verification_dispatches newest
+                           WHERE newest.task_id = d.task_id ORDER BY newest.requested_at DESC, newest.id DESC LIMIT 1)
+               AND NOT EXISTS (SELECT 1 FROM verifications v WHERE v.dispatch_id = d.id)",
+        )?;
+        stmt.query_map([supervisor_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let now = Utc::now().to_rfc3339();
+    let mut adopted = 0;
+    for id in ids {
+        let dispatch = get_verification_dispatch_with_conn(&tx, &id)?;
+        let prior: Option<(String, String, Option<u32>, Option<i64>, Option<String>, Option<String>)> = tx
+            .query_row(
+                "SELECT role, status, pid, pid_starttime, machine_id, factory_session FROM agents WHERE id = ?1",
+                [&dispatch.owner_agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+            )
+            .optional()?;
+        let may_adopt = match prior {
+            Some((role, status, pid, fingerprint, prior_machine, prior_session)) => {
+                role == "supervisor"
+                    && prior_machine.as_deref() == Some(machine.as_str())
+                    && prior_session.as_deref() == Some(session.as_str())
+                    && dead_owners.iter().any(|agent| {
+                        agent.id == dispatch.owner_agent_id
+                            && agent.machine_id.as_deref() == Some(machine.as_str())
+                            && agent.factory_session.as_deref() == Some(session.as_str())
+                            && agent.status.to_string() == status
+                            && agent.pid == pid
+                            && agent.pid_starttime.map(|value| value as i64) == fingerprint
+                    })
+            }
+            None => {
+                let metadata: Option<String> = tx.query_row(
+                    "SELECT metadata FROM events
+                     WHERE event_type = 'agent_shutdown' AND entity_type = 'agent' AND entity_id = ?1
+                     ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                    [&dispatch.owner_agent_id], |row| row.get::<_, Option<String>>(0),
+                ).optional()?.flatten();
+                metadata
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .is_some_and(|metadata| {
+                        let retired = &metadata["retired_agent"];
+                        retired["role"].as_str() == Some("supervisor")
+                            && retired["machine_id"].as_str() == Some(machine.as_str())
+                            && retired["factory_session"].as_str() == Some(session.as_str())
+                    })
+            }
+        };
+        if !may_adopt {
+            continue;
+        }
+        // Old children and bearer material remain auditable but cannot attest
+        // after the new supervisor takes responsibility for this exact proof.
+        tx.execute("UPDATE verification_capabilities SET consumed_at = COALESCE(consumed_at, ?2) WHERE dispatch_id = ?1", params![id, now])?;
+        tx.execute("UPDATE verification_handoffs SET state = 'consumed', consumed_at = COALESCE(consumed_at, ?2)
+                    WHERE capability_id IN (SELECT id FROM verification_capabilities WHERE dispatch_id = ?1) AND state IN ('pending', 'bound')", params![id, now])?;
+        adopted += tx.execute(
+            "UPDATE verification_dispatches SET owner_agent_id = ?2, state = 'pending',
+             verifier_agent_id = NULL, capability_id = NULL, deadline_at = ?3, resolved_at = NULL WHERE id = ?1",
+            params![id, supervisor_id, deadline_at.to_rfc3339()],
+        )?;
+    }
+    tx.commit()?;
+    Ok(adopted)
 }
 
 /// Mark one exact due dispatch timed out. Other tasks are never touched.
@@ -1628,12 +1747,14 @@ pub fn invalidate_verification_dispatch_and_reopen_task_exact(
             "exact reviewed scope was not invalidated".to_string(),
         ));
     }
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, Some(&prior_notes));
     let rows = tx.execute(
         "UPDATE tasks SET status = ?1, notes = ?2, updated_at = ?3
          WHERE id = ?4 AND status = ?5",
         params![
             TaskStatus::Open.to_string(),
-            task.notes,
+            safe_notes.as_ref(),
             task.updated_at.to_rfc3339(),
             task.id,
             expected_status.to_string(),
@@ -1911,6 +2032,8 @@ fn correct_parked_delivery_proof_scope_inner(
         }
     }
 
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![corrected_task.id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&corrected_task.notes, Some(&prior_notes));
     let changed = tx.execute(
         "UPDATE tasks SET status = 'open', notes = ?2, deliverables = ?3,
          proof_targets = ?4, risk = ?5, pending_verification = 0, pending_worktree_merge = 0, updated_at = ?6
@@ -1918,7 +2041,7 @@ fn correct_parked_delivery_proof_scope_inner(
          WHERE id = ?1 AND status IN ('awaiting_merge', 'in_progress', 'blocked') AND updated_at = ?7",
         params![
             corrected_task.id,
-            corrected_task.notes,
+            safe_notes.as_ref(),
             serde_json::to_string(&corrected_task.deliverables).map_err(|error| {
                 StoreError::Parse(format!(
                     "failed to serialize corrected deliverables: {error}"
@@ -2055,13 +2178,17 @@ pub fn request_changes_for_parked_delivery(
             rusqlite::Error::QueryReturnedNoRows => StoreError::TaskNotFound(task_id.to_string()),
             other => StoreError::Database(other),
         })?;
-    if status != TaskStatus::AwaitingMerge.to_string() {
-        return Err(StoreError::Parse(format!(
-            "request_changes requires task status awaiting_merge, found {status}"
-        )));
-    }
     let mut deliverables: TaskDeliverables = serde_json::from_str(&deliverables_json)
         .map_err(|error| StoreError::Parse(format!("invalid task deliverables: {error}")))?;
+    let blocked_parked = status == TaskStatus::Blocked.to_string()
+        && (deliverables.parked_branch.is_some()
+            || deliverables.factory_branch_anchor.is_some()
+            || delivery.is_some());
+    if status != TaskStatus::AwaitingMerge.to_string() && !blocked_parked {
+        return Err(StoreError::Parse(format!(
+            "request_changes requires awaiting_merge or blocked with a recorded parked delivery, found {status}"
+        )));
+    }
     let rejected_branch = deliverables
         .parked_branch
         .as_deref()
@@ -2074,6 +2201,9 @@ pub fn request_changes_for_parked_delivery(
     deliverables.decline_factory_branch_anchor();
     deliverables.parked_branch = None;
     deliverables.merge_conflicted = false;
+    // cas-46ea: the declined delivery's merge no longer authorizes a close.
+    deliverables.green_merge_commit = None;
+    deliverables.merge_ci_admission = None;
     deliverables.review_envelope = None;
     // A corrective close cycle must not keep watching the prior delivery PR;
     // the next parked tip may use the same factory branch with a new PR.
@@ -2089,10 +2219,7 @@ pub fn request_changes_for_parked_delivery(
             "prior commits remain on {rejected_branch}; the assigned worker must add corrective commits (including an explicit revert commit when requested) before re-delivery."
         )
     };
-    let note = format!(
-        "[{}] Decision: changes requested by supervisor. {reason}\n\nBranch handling: {branch_handling}",
-        now.format("%Y-%m-%d %H:%M")
-    );
+    let note = request_changes_audit_note(now, reason, &branch_handling);
     let notes = if notes.is_empty() {
         note.clone()
     } else {
@@ -2171,18 +2298,21 @@ pub fn request_changes_for_parked_delivery(
             ],
         )?;
     }
+    let prior_notes: String = tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task_id], |row| row.get(0))?;
+    let safe_notes = crate::task_note_markers::neutralize_new_markers(&notes, Some(&prior_notes));
     let task_changed = tx.execute(
         "UPDATE tasks
          SET status = 'open', notes = ?2, deliverables = ?3,
              pending_verification = 0, pending_worktree_merge = 0, updated_at = ?4
-         WHERE id = ?1 AND status = 'awaiting_merge'",
+         WHERE id = ?1 AND status = ?5",
         params![
             task_id,
-            notes,
+            safe_notes.as_ref(),
             serde_json::to_string(&deliverables).map_err(|error| {
                 StoreError::Parse(format!("failed to serialize task deliverables: {error}"))
             })?,
             now.to_rfc3339(),
+            status,
         ],
     )?;
     if task_changed != 1 {
@@ -4196,11 +4326,10 @@ mod tests {
             false,
         )
         .expect_err("conflicting owner must remain rejected");
-        assert!(
-            conflicting
-                .to_string()
-                .contains("different verification proof boundary")
-        );
+        assert!(matches!(
+            conflicting,
+            StoreError::VerificationDispatchConflict { dispatch } if dispatch.id == dispatch_id
+        ));
         let counts_after = conn
             .query_row(
                 "SELECT
@@ -4430,10 +4559,14 @@ mod tests {
         )
         .expect("create live dispatch");
 
+        assert!(has_active_verification_dispatch(dir.path(), "cas-timeout-a").unwrap());
+
         let timed_out = timeout_verification_dispatch(dir.path(), "cas-timeout-a", Utc::now())
             .expect("timeout")
             .expect("due dispatch");
         assert_eq!(timed_out.state, VerificationDispatchState::TimedOut);
+        assert!(!has_active_verification_dispatch(dir.path(), "cas-timeout-a").unwrap());
+        assert!(has_active_verification_dispatch(dir.path(), "cas-timeout-b").unwrap());
         assert!(
             timeout_verification_dispatch(dir.path(), "cas-timeout-b", Utc::now())
                 .expect("not due")
@@ -4584,4 +4717,12 @@ mod credential_redaction_tests {
             "the capability and its token HASH stay visible; only the bearer goes: {rendered}"
         );
     }
+}
+
+/// Prefix emitted by the authorized parked-delivery request_changes writer.
+pub const REQUEST_CHANGES_AUDIT_PREFIX: &str = "Decision: changes requested by supervisor. ";
+
+/// Format the replicated decision exactly as the transactional writer does.
+pub fn request_changes_audit_note(at: chrono::DateTime<chrono::Utc>, reason: &str, branch_handling: &str) -> String {
+    format!("[{}] {REQUEST_CHANGES_AUDIT_PREFIX}{reason}\n\nBranch handling: {branch_handling}", at.format("%Y-%m-%d %H:%M"))
 }

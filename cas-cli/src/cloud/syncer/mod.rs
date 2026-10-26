@@ -19,8 +19,9 @@ pub use knowledge::{
 };
 pub(crate) mod pull;
 pub(crate) use pull::{
-    SyncWarningSummary, accepted_proposal_execution_project, collect_sync_warnings,
-    entity_matches_project, render_task_proposal_provenance,
+    SyncWarningSummary, collect_sync_warnings, entity_matches_project,
+    contains_proposal_provenance_marker, record_pulled_accepted_proposal,
+    render_task_proposal_provenance, take_rendered_provenance,
 };
 mod push;
 mod team_push;
@@ -820,7 +821,7 @@ impl CloudSyncer {
 enum UpsertResult {
     Created,
     Updated,
-    Skipped,
+    Skipped(&'static str),
 }
 
 /// Response from pull endpoint
@@ -1079,8 +1080,9 @@ pub(crate) fn push_rejection_is_retryable(reason: &str) -> bool {
 
 /// The operator-facing next step for one cloud rejection reason.
 ///
-/// Reporting a rejection without the repair leaves an operator with a count
-/// and no move; an unknown reason is named honestly rather than guessed at.
+/// When a remote fix makes a rejected payload retryable, keep its content
+/// unchanged and point the operator at a reason-specific retry. Unknown
+/// reasons are named honestly rather than guessed at.
 pub fn push_reason_hint(reason: &str) -> &'static str {
     match reason.trim().to_ascii_lowercase().as_str() {
         "unattributed_origin" => "retained locally: authoring project is unknown; supply creation provenance before requeueing",
@@ -1105,7 +1107,7 @@ pub fn push_reason_hint(reason: &str) -> &'static str {
             "the cloud holds a newer revision; run `cas cloud pull`, then `cas cloud queue --retry`"
         }
         "invalid_json_nul" => {
-            "PostgreSQL jsonb cannot store U+0000; payload retained unchanged. Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184 for lossless roundtrip support, then `cas cloud queue --retry --retry-reason invalid_json_nul`"
+            "U+0000 in task notes now round-trips losslessly; queued payload retained unchanged. Retry with `cas cloud queue --retry --retry-reason invalid_json_nul`"
         }
         "version_gate" => {
             "this build is below the cloud's minimum client version; upgrade cas — the rows requeue themselves on the first push after the upgrade"

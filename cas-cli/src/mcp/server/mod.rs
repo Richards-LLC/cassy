@@ -787,6 +787,25 @@ impl CasCore {
         })?;
 
         self.bind_agent_identity(canonical_id.clone(), source)?;
+        if let Ok(registered) = agent_store.get(&canonical_id)
+            && let Err(error) = crate::supervisor_continuity::resume(&self.cas_root, &registered)
+        {
+            warn!(%error, "supervisor handoff publication will retry at startup");
+        }
+
+
+        if source == AgentIdentitySource::ServerInternal {
+            match agent_store.get(&canonical_id) {
+                Ok(registered) => crate::mcp::daemon::recover_supervisor_verification_dispatches(
+                    &self.cas_root,
+                    agent_store.as_ref(),
+                    &registered,
+                ),
+                Err(error) => {
+                    warn!(agent_id = %canonical_id, %error, "verification recovery could not inspect registered agent; registration continues")
+                }
+            }
+        }
 
         info!(
             agent_id = %canonical_id,

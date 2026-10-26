@@ -212,6 +212,18 @@ impl AttentionInputs {
                 continue;
             }
             if let Some(envelope) = envelope.as_ref() {
+                let lifecycle_handled = task_cache
+                    .entry(envelope.task_id.clone())
+                    .or_insert_with(|| tasks.as_ref()?.get(&envelope.task_id).ok())
+                    .as_ref()
+                    .is_some_and(|task| {
+                        task.updated_at > row.created_at
+                            && task.status != cas_types::TaskStatus::AwaitingMerge
+                    });
+                if lifecycle_handled {
+                    decisions.insert(row.id, MessageAttention::Satisfied);
+                    continue;
+                }
                 let key = format!(
                     "{}:{}:{}",
                     envelope.task_id, envelope.branch_tip, envelope.target_branch

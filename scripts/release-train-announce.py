@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -41,42 +42,59 @@ TOP_LEVEL_LABEL = re.compile(
     r"^\*(?:Live on production|Staging|Source on main) — "
     r"(?:User|Dev) — Cassy(?: v[0-9]+\.[0-9]+\.[0-9]+)?\*$"
 )
+SECTION_HEADING = re.compile(r"\*[^*\n]+\*")
+# The hub's long_line rule (violet_ps apps/violet/lib/readability.ts): a line
+# over 300 code points, counting a <url|label> link as its label.
+HUB_LINE_LIMIT = 300
+SLACK_LINK = re.compile(r"<[^<>\n|]+\|([^<>\n]*)>")
 
 
 def fail(message: str) -> None:
     raise ValueError(message)
 
 
+def normalize_body(body: str) -> str:
+    return body.strip("\r\n")
+
+
 def body_lines(body: str) -> list[str]:
-    return body.strip("\n").splitlines()
+    return normalize_body(body).splitlines()
 
 
-# post-publication fills these from the release PR and the published assets;
-# they are the only tokens a draft may carry before publication (preflight).
-# cas-52de: {{RELEASE_PR}} is known only once the pipeline opens the PR.
-DIGEST_TOKENS = frozenset({"{{LINUX_SHA256}}", "{{MACOS_SHA256}}", "{{RELEASE_PR}}"})
+# release.sh resolves VERSION; publication fills the PR and asset digests.
+# Only these tokens may remain during draft lint/preflight, never when posting.
+PRE_PUBLICATION_TOKENS = frozenset({
+    "{{VERSION}}", "{{LINUX_SHA256}}", "{{MACOS_SHA256}}", "{{RELEASE_PR}}",
+})
 
 
-def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
+def lint_body(index: int, body: str, pre_publication: bool = False) -> None:
     lines = body_lines(body)
     if not lines:
         fail(f"body {BODY_NAMES[index]} is empty")
+    normalized = normalize_body(body)
     token = next(
-        (match for match in re.finditer(r"\{\{.*?\}\}", body.strip("\n"), flags=re.DOTALL)
-         if not (allow_digest_tokens and match.group() in DIGEST_TOKENS)),
+        (match for match in re.finditer(r"\{\{.*?\}\}", normalized, flags=re.DOTALL)
+         if not (pre_publication and match.group() in PRE_PUBLICATION_TOKENS)),
         None,
     )
     if token:
-        line_number = body.strip("\n")[:token.start()].count("\n") + 1
+        line_number = normalized[:token.start()].count("\n") + 1
         fail(f"body {BODY_NAMES[index]} line {line_number} contains unresolved token {token.group()}")
     if "**" in body:
         fail(f"body {BODY_NAMES[index]} contains forbidden ** markdown")
     for line_number, line in enumerate(lines, start=1):
+        visible = len(SLACK_LINK.sub(r"\1", line))
+        if visible > HUB_LINE_LIMIT:
+            fail(
+                f"body {BODY_NAMES[index]} line {line_number} is {visible} characters; "
+                f"the Violet hub refuses lines over {HUB_LINE_LIMIT}"
+            )
         if line.startswith("#"):
             fail(f"body {BODY_NAMES[index]} line {line_number} starts with #")
         if re.match(r"^-\s", line):
             fail(f"body {BODY_NAMES[index]} line {line_number} uses a hyphen bullet")
-        if index == 0:
+        if index in (0, 1):
             lowered = line.lower()
             for forbidden in USER_FORBIDDEN:
                 if forbidden in lowered:
@@ -86,7 +104,9 @@ def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
                     )
     bullets = [number for number, line in enumerate(lines) if line.startswith("• ")]
     if index in (0, 2):
-        if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(lines[0]):
+        # Check the eventual title shape without changing the reviewed text.
+        label = lines[0].replace("{{VERSION}}", "0.0.0") if pre_publication else lines[0]
+        if len(lines) != 2 or not TOP_LEVEL_LABEL.fullmatch(label):
             fail(f"body {BODY_NAMES[index]} top-level must contain exactly two lines")
         if "Was:" not in lines[1] or "→ Now:" not in lines[1]:
             fail(f"body {BODY_NAMES[index]} top-level must use Was → Now")
@@ -100,19 +120,25 @@ def lint_body(index: int, body: str, allow_digest_tokens: bool = False) -> None:
             fail(f"body {BODY_NAMES[index]} bullet lacks a bold label")
         if position and (line_number == 0 or lines[line_number - 1].strip()):
             fail(f"body {BODY_NAMES[index]} bullets need blank lines between items")
-        next_bullet = bullets[position + 1] if position + 1 < len(bullets) else len(lines)
-        nonempty = [line for line in lines[line_number:next_bullet] if line.strip()]
-        if len(nonempty) > 2:
+        # A bullet ends at a blank line or a section heading (a line of only
+        # *bold* text), so a two-line bullet may precede the next section.
+        span = 1
+        for line in lines[line_number + 1:]:
+            if not line.strip() or line.startswith("• ") or SECTION_HEADING.fullmatch(line):
+                break
+            span += 1
+        if span > 2:
             fail(f"body {BODY_NAMES[index]} bullet spans more than two lines")
 
 
-def extract_bodies(draft: Path, allow_digest_tokens: bool = False) -> list[str]:
+def extract_bodies(draft: Path, pre_publication: bool = False) -> list[str]:
     text = draft.read_text(encoding="utf-8")
     bodies = re.findall(r"\x60\x60\x60(?:text)?\r?\n(.*?)\r?\n\x60\x60\x60", text, flags=re.DOTALL)
     if len(bodies) != 4:
         fail(f"draft must contain exactly four fenced bodies; found {len(bodies)}")
     for index, body in enumerate(bodies):
-        lint_body(index, body, allow_digest_tokens)
+        bodies[index] = normalize_body(body)
+        lint_body(index, bodies[index], pre_publication)
     return bodies
 
 
@@ -121,7 +147,7 @@ def validate(draft_arg: str, body_dir_arg: str, pre_publication: bool = False) -
     body_dir = Path(body_dir_arg).expanduser().resolve()
     if not draft.is_file():
         fail(f"draft does not exist: {draft}")
-    bodies = extract_bodies(draft, allow_digest_tokens=pre_publication)
+    bodies = extract_bodies(draft, pre_publication=pre_publication)
     body_dir.mkdir(parents=True, exist_ok=True)
     for name, body in zip(BODY_NAMES, bodies):
         (body_dir / f"{name}.txt").write_text(body + "\n", encoding="utf-8")
@@ -270,7 +296,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
     bodies = extract_bodies(draft)
     for name, body in zip(BODY_NAMES, bodies):
         expected = body_dir / f"{name}.txt"
-        if not expected.is_file() or expected.read_text(encoding="utf-8").strip("\n") != body:
+        if not expected.is_file() or normalize_body(expected.read_text(encoding="utf-8")) != body:
             fail(f"validated body is missing or changed: {expected}")
     credentials = adapter.parse_credentials(adapter.credential_file())
     token = resolve_announce_token(adapter, credentials)
@@ -315,7 +341,7 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
         },
     )
     paths = [body_dir / f"{name}.txt" for name in BODY_NAMES]
-    texts = [path.read_text(encoding="utf-8").rstrip("\n") for path in paths]
+    texts = [normalize_body(path.read_text(encoding="utf-8")) for path in paths]
     # The membership read may take time. Check every captured body again before
     # the first write, then post these same strings without reopening the files.
     for index, text in enumerate(texts):
@@ -343,11 +369,22 @@ def post(version: str, draft_arg: str, receipt_arg: str, body_dir_arg: str) -> N
                   "DEV_TOP_LEVEL" if index == 2 else "DEV_REPLY")
         receipt_values[f"{prefix}_ID"] = message_id
         receipt_values[f"{prefix}_PERMALINK"] = permalink
+        # A single Violet request can return several Slack messages. Keep the
+        # ordered transport receipt as well as the compatibility message ID.
+        part_ids = envelope["message"].get("part_ids", [message_id])
+        if (not isinstance(part_ids, list) or not part_ids
+                or any(not isinstance(part, str) or not part.strip() for part in part_ids)
+                or len(set(part_ids)) != len(part_ids) or message_id not in part_ids):
+            receipt(receipt_path, receipt_values)
+            fail(f"{BODY_NAMES[index]} post returned invalid part_ids; preserve partial receipt, do not retry writes")
+        receipt_values[f"{prefix}_PART_IDS"] = json.dumps(part_ids, separators=(",", ":"))
         receipt(receipt_path, receipt_values)
+        # Violet contract: a split root's thread_id is its first part;
+        # the compatibility message_id identifies its last part.
         if index == 0:
-            parent = message_id
+            parent = part_ids[0]
         elif index == 2:
-            dev_parent = message_id
+            dev_parent = part_ids[0]
         if index < len(texts) - 1:
             time.sleep(1)
     receipt(receipt_path, receipt_values)
@@ -373,7 +410,7 @@ def main(argv: list[str]) -> int:
             # this same implementation; placeholders are still allowed.
             for draft in argv[2:]:
                 try:
-                    extract_bodies(Path(draft), allow_digest_tokens=True)
+                    extract_bodies(Path(draft), pre_publication=True)
                 except ValueError as exc:
                     raise ValueError(f"{draft}: {exc}") from None
                 print(f"announce lint PASS · bodies=4 · draft={draft}")

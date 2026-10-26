@@ -11,7 +11,8 @@ Capture `git rev-parse factory/<name>` (or the active per-task branch).
 
 For `local_merge`, keep the local commit. Otherwise push that branch. Send
 `coordination action=message target=supervisor merge_request=true summary="Merge requested" message="<branch, SHA, target and evidence>"`.
-Re-close after confirmed merge. For an epic,
+Do not re-close after the merge: its verdict closes the task, or reopens it to
+you with findings. For an epic,
 request supervisor merge rather than `gh pr create --base epic/...`.
 A squash/cherry-pick mismatch may need `commit_receipt`; transactional
 `completion_receipt` requires the source tip merged. See [close-gate.md](close-gate.md)
@@ -62,8 +63,11 @@ fails, report that error rather than repeating schema lookup.
 
 - Reassignment or stand-down: checkpoint authorized WIP, push unless local_merge,
   note completed/remaining work and send its SHA; stop edits on that task.
-- Low context: checkpoint before exhaustion, give a durable handoff and request
-  respawn. Do not keep working into compaction.
+- Low context: at about 80% context used, commit and push unless local_merge,
+  then write `HANDOFF.md` in the task artifact directory: done work with SHAs,
+  remaining steps, the next command and open questions. Cite it in a progress
+  note and request respawn; the respawned worker resumes from it. Do not keep
+  working into compaction.
 - Dependency/conflict failure: compare manifests and target state against the
   supervisor's named branch. Checkpoint before rebasing. Resolve owned conflicts;
   escalate unowned ones with affected files and hashes.

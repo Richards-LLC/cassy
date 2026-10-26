@@ -39,6 +39,9 @@ pub struct PeersConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SlackConfig {
+    /// Desired project channel IDs, including channels not yet mapped in Violet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<String>,
     #[serde(default)]
     pub transport: SlackTransport,
     /// cas-e753: whether the factory daemon claims this project's Violet
@@ -50,9 +53,69 @@ pub struct SlackConfig {
     /// started.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub violet_bot_user_ids: Option<Vec<String>>,
+    /// Desired Cloud policies. Until capability negotiation succeeds these
+    /// produce local warnings, never a claim of shared exclusion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stakeholder_contacts: Vec<StakeholderContactPolicy>,
+}
+
+/// Machine-wide managed Viktor upstream setting. Absence keeps the default on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ViktorConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+impl ViktorConfig {
+    pub fn enabled(&self) -> bool {
+        self.enabled.unwrap_or(true)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StakeholderContactPolicy {
+    pub workspace_id: String,
+    pub user_id: String,
+    pub minimum_interval_secs: u64,
+    #[serde(default)]
+    pub mode: StakeholderContactMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StakeholderContactMode {
+    #[default]
+    Refuse,
+    Warn,
+}
+
+impl StakeholderContactPolicy {
+    pub fn validate(&self) -> Result<(), String> {
+        let slack_id = |id: &str, prefix: char| {
+            id.starts_with(prefix) && id.len() > 1 && id.bytes().all(|b| b.is_ascii_alphanumeric())
+        };
+        if !slack_id(&self.workspace_id, 'T') || !(slack_id(&self.user_id, 'U') || slack_id(&self.user_id, 'W'))
+            || self.minimum_interval_secs == 0 || self.minimum_interval_secs > i64::MAX as u64
+        {
+            return Err("stakeholder_contacts requires Slack workspace T…, user U…/W…, and a positive minimum_interval_secs".into());
+        }
+        Ok(())
+    }
 }
 
 impl SlackConfig {
+    pub(crate) fn validate_channels(&self) -> Result<(), String> {
+        if self.channels.iter().any(|id| {
+            !(id.starts_with('C') || id.starts_with('G'))
+                || !(3..=31).contains(&id.len())
+                || !id.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        }) {
+            return Err("slack.channels requires a JSON/TOML list of C... or G... Slack channel IDs".into());
+        }
+        Ok(())
+    }
+
     /// cas-e753: Violet push-wake is on unless explicitly disabled.
     pub fn wake_enabled(&self) -> bool {
         self.wake_enabled.unwrap_or(true)
@@ -63,10 +126,46 @@ impl SlackConfig {
     }
 }
 
+/// Persistent host policy for Commander publication.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HubTransportMode {
+    /// Try Tailscale Serve; interactive failure warns, macOS service failure retries.
+    #[default]
+    Auto,
+    /// Refuse startup unless Tailscale Serve publishes successfully.
+    Required,
+    /// Never request Tailscale Serve.
+    Loopback,
+}
+
+impl HubTransportMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Required => "required",
+            Self::Loopback => "loopback",
+        }
+    }
+
+    pub fn publishes(self) -> bool {
+        self != Self::Loopback
+    }
+
+    pub fn require_publication(self, published: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(self != Self::Required || published,
+            "Hub transport required: Tailscale Serve is unavailable.\nRun `tailscale status`, then `cas hub restart`.");
+        Ok(())
+    }
+}
+
 /// Hub origin configuration. Lives at `[hub]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HubConfig {
-    /// Publish the machine hub through Tailscale Serve by default. Explicit false opts out.
+    /// Host transport intent, preserved across restart, service launch and update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_mode: Option<HubTransportMode>,
+    /// Legacy setting, used only when transport_mode is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tailscale_serve: Option<bool>,
     /// Public origin used when authorizing a Commander page.
@@ -79,6 +178,18 @@ pub struct HubConfig {
     /// An explicit empty list disables browsing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_roots: Option<Vec<String>>,
+}
+
+impl HubConfig {
+    pub fn transport_mode(&self) -> HubTransportMode {
+        self.transport_mode.unwrap_or_else(|| {
+            if self.tailscale_serve == Some(false) {
+                HubTransportMode::Loopback
+            } else {
+                HubTransportMode::Auto
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -362,9 +473,70 @@ impl std::fmt::Display for QaMode {
     }
 }
 
+/// Registry upkeep rollout; strict only expands G2 to modified files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegistryEnforcement {
+    Off,
+    Observe,
+    #[default]
+    Enforce,
+    Strict,
+}
+impl std::fmt::Display for RegistryEnforcement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::Enforce => "enforce",
+            Self::Strict => "strict",
+        })
+    }
+}
+impl std::str::FromStr for RegistryEnforcement {
+    type Err = &'static str;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "off" => Ok(Self::Off),
+            "observe" => Ok(Self::Observe),
+            "enforce" => Ok(Self::Enforce),
+            "strict" => Ok(Self::Strict),
+            _ => Err("qa.registry.enforce must be off, observe, enforce or strict"),
+        }
+    }
+}
+
+/// Journey registry settings at `[qa.registry]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QaRegistryConfig {
+    #[serde(default)]
+    pub enforce: RegistryEnforcement,
+    #[serde(default = "default_registry_path")]
+    pub path: String,
+}
+
+fn default_registry_path() -> String {
+    crate::qa_registry::DEFAULT_PATH.to_owned()
+}
+
+impl Default for QaRegistryConfig {
+    fn default() -> Self {
+        Self {
+            path: default_registry_path(),
+            enforce: RegistryEnforcement::default(),
+        }
+    }
+}
+
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
+    /// Journey registry location and staged upkeep enforcement.
+    #[serde(default)]
+    pub registry: QaRegistryConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_release: Option<crate::qa_post_release::PostReleaseConfig>,
+
     /// Batch mode defers evidence until one staging ledger covers the deliveries.
     #[serde(default, skip_serializing_if = "QaMode::is_per_task")]
     pub mode: QaMode,
@@ -529,7 +701,9 @@ pub fn default_user_facing_labels() -> Vec<String> {
 impl Default for QaConfig {
     fn default() -> Self {
         Self {
+            post_release: None,
             mode: QaMode::PerTask,
+            registry: QaRegistryConfig::default(),
             user_facing_labels: default_user_facing_labels(),
             telemetry_sweep: None,
             independent_pass: default_independent_pass(),
@@ -682,6 +856,14 @@ pub struct FactoryConfig {
     /// workspace contract.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
+
+    /// Seconds to collect directed supervisor messages into one submitted turn.
+    #[serde(default = "default_supervisor_message_debounce_secs")]
+    pub supervisor_message_debounce_secs: u64,
+
+    /// Maximum wakes per sender and recipient in a rolling hour; further messages wait for another turn.
+    #[serde(default = "default_supervisor_message_wakes_per_hour")]
+    pub supervisor_message_wakes_per_hour: u64,
 
     /// Maximum number of characters accepted in an ordinary agent message.
     #[serde(default = "default_message_max_chars")]
@@ -1003,6 +1185,10 @@ pub(crate) fn default_supervisor_queue_retention_days() -> u32 {
     14
 }
 
+fn default_supervisor_message_debounce_secs() -> u64 { 20 }
+
+fn default_supervisor_message_wakes_per_hour() -> u64 { 6 }
+
 fn default_message_max_chars() -> usize {
     1200
 }
@@ -1028,11 +1214,12 @@ fn default_supervisor_stall_after_secs() -> u64 {
 }
 
 fn default_delivery_stalled_priority_secs() -> u64 {
-    10 * 60
+    // cas-badb (GH #1302): an unread message escalates within five minutes.
+    5 * 60
 }
 
 fn default_delivery_stalled_normal_secs() -> u64 {
-    30 * 60
+    5 * 60
 }
 
 fn default_target_cache_high_watermark_percent() -> u8 {
@@ -1079,6 +1266,8 @@ impl Default for FactoryConfig {
             scratch_root: None,
             commander_mirror_enabled: true,
             write_roots: Vec::new(),
+            supervisor_message_debounce_secs: default_supervisor_message_debounce_secs(),
+            supervisor_message_wakes_per_hour: default_supervisor_message_wakes_per_hour(),
             message_max_chars: default_message_max_chars(),
             message_max_chars_escalation: default_message_max_chars_escalation(),
             note_max_chars: default_note_max_chars(),
@@ -2180,11 +2369,12 @@ mod tests {
         assert_eq!(fc.delivery_stalled_normal_secs, 120);
         assert_eq!(
             FactoryConfig::default().delivery_stalled_priority_secs,
-            10 * 60
+            5 * 60,
+            "cas-badb: an unread message escalates within five minutes"
         );
         assert_eq!(
             FactoryConfig::default().delivery_stalled_normal_secs,
-            30 * 60
+            5 * 60
         );
     }
 

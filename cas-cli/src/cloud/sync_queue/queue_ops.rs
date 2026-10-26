@@ -24,7 +24,8 @@ pub(super) fn upsert_queue_row(
             created_at = excluded.created_at,
             project_id = excluded.project_id,
             retry_count = 0,
-            last_error = NULL
+            last_error = NULL,
+            auto_rearm_count = 0
         "#,
         params![
             entity_type.as_str(),

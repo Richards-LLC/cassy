@@ -13,6 +13,235 @@ struct DeliveryRange {
 
 use crate::git_evidence::git_text;
 
+pub(crate) struct StartedDelivery {
+    pub branch: String,
+    pub commits: Vec<String>,
+}
+
+/// cas-ead0: only the graph after the server's start boundary belongs to
+/// this cycle. Old subjects before it cannot claim the new task's lane.
+/// Bound all probes to immutable SHAs and refuse foreign descendants before
+/// any anchor/commit-subject shortcut can grant delivery identity.
+pub(crate) fn started_delivery(
+    repo: &Path,
+    task: &Task,
+) -> Result<Option<StartedDelivery>, String> {
+    let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+        return Ok(None);
+    };
+    if task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(
+            repo,
+            &start.work_target.repo_selector,
+        )
+    {
+        return Ok(None);
+    }
+    let refuse = |reason: &str| {
+        format!(
+            "DELIVERY BRANCH UNRESOLVED: task {} started on {} at {}, but {reason}. \
+         Restore this task's lane from that base and remove foreign work before retrying close.",
+            task.id, start.branch, start.base_sha,
+        )
+    };
+    if !is_safe_git_refname(&start.branch)
+        || !matches!(start.base_sha.len(), 40 | 64)
+        || !start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(refuse("the recorded start boundary is invalid"));
+    }
+    let branch = if git_ref_exists(repo, &format!("refs/heads/{}", start.branch)) {
+        start.branch.clone()
+    } else if git_ref_exists(repo, &format!("refs/remotes/origin/{}", start.branch)) {
+        format!("origin/{}", start.branch)
+    } else {
+        return Ok(None);
+    };
+    let mut tip = resolve_branch_sha(repo, &format!("{branch}^{{commit}}"))
+        .ok_or_else(|| refuse("the delivery tip cannot be read"))?;
+    let target = preferred_diff_target_ref_for_delivery(
+        repo,
+        &start.work_target.target_branch,
+        task.delivery_mode,
+    );
+    // Once parked, later tasks may reuse the lane. Its immutable anchor ends
+    // this delivery; current in-progress commit-hook anchors do not truncate WIP.
+    if matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::Closed)
+        && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
+        && git_commit_is_ancestor(repo, anchor, &tip)
+    {
+        // GH #1355: a target-sync merge may restore a start base absent
+        // from the older park. Validate that fast-forward continuation before
+        // truncating to B, or close would test C's ancestry against stale B.
+        // Persistence still applies the sibling-lease and ownership fences.
+        let restored_start = task.status == TaskStatus::AwaitingMerge
+            && !git_commit_is_ancestor(repo, &start.base_sha, anchor)
+            && git_commit_is_ancestor(repo, &start.base_sha, &tip)
+            && parked_anchor_advance_with_target_is_attributable(
+                repo, anchor, &tip, &task.id, None, &target,
+            );
+        if !restored_start {
+            if !git_commit_is_ancestor(repo, &start.base_sha, anchor)
+                && git_commit_is_ancestor(repo, &start.base_sha, &tip)
+            {
+                return Err(refuse(&format!(
+                    "parked anchor {anchor} predates the start base; current tip {tip} contains \
+                     that base but is not an attributable continuation. Ask the supervisor to \
+                     request_changes or rebind_branch before re-parking"
+                )));
+            }
+            tip = resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))
+                .ok_or_else(|| refuse("the parked delivery cannot be read"))?;
+        }
+    }
+    if !git_commit_is_ancestor(repo, &start.base_sha, &tip) {
+        return Err(refuse("the base is no longer an ancestor of the delivery"));
+    }
+    let range = format!("{}..{tip}", start.base_sha);
+    // Rebasing onto the target puts integrated ordinary commits on the lane
+    // after the start base. They belong to the target, not this delivery.
+    let lane_history = git_text(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "-n",
+            "201",
+            "--format=%H %P%x1f%B%x1e",
+            &range,
+            &format!("^{target}"),
+            "--",
+        ],
+    )
+    .ok_or_else(|| refuse("the lane history cannot be read"))?;
+    // Inspect side-parent work too, excluding integrated target history so a
+    // large target sync does not consume this task's attribution budget.
+    let side_history = git_text(
+        repo,
+        &[
+            "log",
+            "-n",
+            "201",
+            "--format=%H %P%x1f%B%x1e",
+            &tip,
+            &format!("^{}", start.base_sha),
+            &format!("^{target}"),
+            "--",
+        ],
+    )
+    .ok_or_else(|| refuse("the off-target history cannot be read"))?;
+    let mut records = Vec::new();
+    for (on_lane, history) in [(true, &lane_history), (false, &side_history)] {
+        let range: Vec<_> = history
+            .split('\u{1e}')
+            .map(str::trim)
+            .filter(|record| !record.is_empty())
+            .collect();
+        if range.len() > 200 {
+            return Err(refuse("the start-to-delivery range exceeds 200 commits"));
+        }
+        records.extend(range.into_iter().map(|record| (on_lane, record)));
+    }
+    let mut seen = HashSet::new();
+    let identity = task_commit_identity(task, None);
+    let mut commits = Vec::new();
+    for (on_lane, record) in records {
+        let (metadata, message) = record
+            .split_once('\u{1f}')
+            .ok_or_else(|| refuse("the commit metadata cannot be read"))?;
+        let mut metadata = metadata.split_whitespace();
+        let sha = metadata
+            .next()
+            .ok_or_else(|| refuse("a commit id cannot be read"))?;
+        if !seen.insert(sha) {
+            continue;
+        }
+        let parents: Vec<String> = metadata.map(str::to_owned).collect();
+        let merged = parents.get(1..).unwrap_or_default();
+        if is_target_sync_merge(repo, merged, &target) {
+            continue;
+        }
+        if subject_claims_another_task(message, &identity) {
+            let subject = message.trim().lines().next().unwrap_or("");
+            return Err(refuse(&format!(
+                "foreign commit {sha} ({subject}) follows the base"
+            )));
+        }
+        if on_lane
+            && (merged.is_empty()
+                || !merge_brings_foreign_work(repo, &parents[0], merged, &target, &identity))
+        {
+            commits.push(sha.to_string());
+        }
+    }
+    Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
+}
+
+/// A legacy start may name the previous task's lane, before the worker
+/// switched to its own. An already-integrated, attributable receipt can
+/// retire that stale boundary for close; it cannot rebind a live delivery or
+/// waive any of the ordinary receipt/content/review gates.
+/// The validated retirement is kept in memory with its original-base audit;
+/// it may persist if a later gate refuses and saves the task. Retrying close
+/// still runs every other gate against the immutable delivery evidence.
+pub(super) fn recover_stale_start_for_integrated_receipt(
+    repo: &Path,
+    task: &mut Task,
+    receipt: &str,
+    lease_history: &[cas_store::LeaseHistoryEntry],
+) -> bool {
+    let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+        return false;
+    };
+    let Some(target) = task.deliverables.work_target.as_ref() else {
+        return false;
+    };
+    if target != &start.work_target
+        || task.assignee.as_deref() != Some(start.assignee.as_str())
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(repo, &target.repo_selector)
+        || !is_safe_git_refname(&start.branch)
+        || !matches!(start.base_sha.len(), 40 | 64)
+        || !start.base_sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || start.branch == crate::factory_isolation::worker_task_branch(&start.assignee, &task.id)
+        || started_delivery(repo, task).is_ok()
+    {
+        return false;
+    }
+    let Ok(receipt) = resolve_task_commit_receipt_sha(repo, receipt) else {
+        return false;
+    };
+    let identity = task_commit_identity(task, None);
+    if commit_claims_another_task(repo, &receipt, &identity) {
+        return false;
+    }
+    let own_tip = worker_task_branch_ref(repo, &start.assignee, &task.id)
+        .and_then(|branch| resolve_branch_sha(repo, &branch));
+    if own_tip.as_deref() != Some(receipt.as_str())
+        && !commit_is_task_attributable(repo, &receipt, &identity)
+    {
+        return false;
+    }
+    fetch_parent_branch_best_effort(repo, &target.target_branch);
+    let window = resolve_task_commit_receipt_window(task.created_at, lease_history, identity);
+    // No supervisor override here: recovery itself needs actual integrated
+    // content within this task's attributable work window.
+    if validate_task_commit_receipt(repo, &receipt, &target.target_branch, &window).is_err() {
+        return false;
+    }
+    let audit = format!(
+        "[{}] DECISION: integrated commit_receipt {receipt} resolved task {} after a lane switch. \
+         Retired stale start boundary {} at {}; no branch ref was moved. All normal close gates remain required.",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"), task.id, start.branch, start.base_sha,
+    );
+    task.deliverables.factory_branch_start = None;
+    if !task.notes.is_empty() {
+        task.notes.push_str("\n\n");
+    }
+    task.notes.push_str(&audit);
+    true
+}
+
 fn references_foreign_task(message: &str, identity: &TaskCommitIdentity) -> bool {
     message
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
@@ -110,7 +339,7 @@ pub(super) fn lane_commits_all_claim_other_tasks(
 /// and the newest commit claiming only another task (its subject line), if
 /// any, among the last 50 non-merge first-parent commits. `None` when Git
 /// cannot read the branch.
-pub(super) fn branch_task_claims(
+pub(in crate::mcp::tools::core::task) fn branch_task_claims(
     repo: &Path,
     branch: &str,
     identity: &TaskCommitIdentity,
@@ -247,6 +476,17 @@ fn task_delivery_ranges(
     tip: Option<&str>,
 ) -> Option<Vec<DeliveryRange>> {
     task_delivery_selection(repo, parent, window, tip, true).map(|selection| selection.ranges)
+}
+
+/// A no-delivery declaration requires no attributed commits, including
+/// empty commits and changes later reverted to the original tree.
+pub(super) fn has_delivery_commits(
+    repo: &Path,
+    target: &str,
+    window: &TaskCommitReceiptWindow,
+    tip: &str,
+) -> Option<bool> {
+    task_delivery_ranges(repo, target, window, Some(tip)).map(|ranges| !ranges.is_empty())
 }
 
 /// The selected delivery ranges, plus whether a target-sync merge that would
@@ -398,6 +638,7 @@ fn task_delivery_selection(
         while j > 0 {
             let previous = &commits[j - 1];
             if previous.parent.is_empty()
+                || window.identity.start_base.as_deref() == Some(previous.sha.as_str())
                 || previous.foreign
                 || previous.merge
                 || (!historical_receipt && previous.epoch < floor)
@@ -496,7 +737,7 @@ pub(super) fn diff_stat(
 /// Return the paths carried by the same task-attributed delivery ranges used
 /// by the close diff stat. Risk proof must not fall back to an unrelated
 /// branch-wide diff: a proof narrower than this set is a hard close failure.
-pub(super) fn paths(
+pub(crate) fn paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -573,6 +814,21 @@ pub(super) fn qa_paths(
     Some(paths)
 }
 
+/// A creation timestamp alone cannot identify an integrated delivery's base:
+/// the receipt clock-skew allowance may include an unrelated preceding commit.
+/// Both QA gates retain multi-commit attribution only with a durable boundary.
+pub(crate) fn has_recorded_delivery_boundary(
+    task: &Task,
+    history: &[cas_store::LeaseHistoryEntry],
+) -> bool {
+    task.deliverables.factory_branch_start.is_some()
+        || task.deliverables.factory_branch_anchor.is_some()
+        || !task.deliverables.historical_factory_branch_anchors.is_empty()
+        || history.iter().any(|entry| {
+            matches!(entry.event_type.as_str(), "claimed" | "transferred")
+        })
+}
+
 /// The immutable baseline a scoped proof must be measured against: the first
 /// parent of the earliest commit in this task's delivery.
 ///
@@ -589,7 +845,7 @@ pub(super) fn qa_paths(
 /// task window and the receipt, so it does not move when the worktree is
 /// rebased, when the branch is merged, or when the gate happens to inspect a
 /// checkout parked on another branch.
-pub(super) fn delivery_base(
+pub(crate) fn delivery_base(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -790,8 +1046,29 @@ pub(super) fn final_path_snapshot_proven(
     Some(false)
 }
 
-/// Prove the content of a merge-tip delivery from the task's first-parent
-/// commits rather than from the merge tip itself.
+/// Empty checkpoint commits preserve delivery history but supply no content
+/// proof themselves. Unreadable trees remain unknown rather than empty.
+pub(super) fn has_first_parent_tree_effect(repo: &Path, commit: &str) -> Option<bool> {
+    if !is_safe_git_refname(commit) {
+        return None;
+    }
+    let trees = git_text(
+        repo,
+        &[
+            "rev-parse",
+            &format!("{commit}^{{tree}}"),
+            &format!("{commit}^1^{{tree}}"),
+        ],
+    )?;
+    let trees: Vec<_> = trees.lines().collect();
+    match trees.as_slice() {
+        [current, parent] => Some(current != parent),
+        _ => None,
+    }
+}
+
+/// Prove a merge or empty checkpoint delivery from the task's attributed
+/// content commits rather than from the tip itself.
 ///
 /// A worker commonly merges the current integration target into its factory
 /// branch before handing it back to the supervisor. That merge can have no
@@ -918,10 +1195,13 @@ pub(super) fn merge_tip_content_presence(
 
     // Reverts are negative delivery evidence, never a later task delivery.
     // Apply the exclusion to every selection route, including known receipts.
+    // Checkpoints carry the range but supply no positive tree evidence.
     let mut content_commits = Vec::new();
     for commit in commits {
         let message = git_text(repo, &["show", "-s", "--format=%B", &commit])?;
-        if !delivery_evolution::is_revert_message(&message) {
+        if !delivery_evolution::is_revert_message(&message)
+            && has_first_parent_tree_effect(repo, &commit)?
+        {
             content_commits.push(commit);
         }
     }
@@ -1088,16 +1368,23 @@ pub(super) fn merge_tip_content_presence(
             }
         }
     }
-    for commit in &commits {
-        // cas-bdd2: the commit's rebuilt bundles are left to the regeneration
-        // rule below without first walking them through the epic history.
-        match super::delivery_content_presence_in_parent_leaving_artifacts(
-            repo,
-            commit,
-            target,
-            merge_tip,
-            &carries_source,
-        ) {
+    // cas-18aa: every commit is measured first, so an earlier draft can be
+    // judged against the later task commit that replaced it.
+    let measurements: Vec<_> = commits
+        .iter()
+        .map(|commit| {
+            super::delivery_content_presence_in_parent_leaving_artifacts(
+                repo,
+                commit,
+                target,
+                merge_tip,
+                &carries_source,
+            )
+        })
+        .collect();
+    for (index, commit) in commits.iter().enumerate() {
+        let measured = measurements[index].clone();
+        match measured {
             DeliveryContentPresence::Present { paths } => append_unique(&mut present_paths, paths),
             DeliveryContentPresence::Superseded { paths, commits } => {
                 append_unique(&mut superseded_paths, paths);
@@ -1113,6 +1400,36 @@ pub(super) fn merge_tip_content_presence(
                     ) {
                         append_unique(&mut dropped_paths, vec![path]);
                         continue;
+                    }
+                    // cas-18aa: an earlier draft this delivery itself later
+                    // replaced is judged by the delivery's own final tree,
+                    // not by following each draft line through the target.
+                    // Build bundles keep their exact-blob and regeneration
+                    // rules (cas-5f0b, cas-baf7): lines of minified output say
+                    // nothing about a replacement.
+                    let replaced_later = !super::regenerable_build_artifact(repo, &path)
+                        && commits[index + 1..]
+                        .iter()
+                        .zip(&measurements[index + 1..])
+                        .any(|(later, measured)| {
+                            !matches!(measured, DeliveryContentPresence::Unknown { .. })
+                                && !matches!(measured, DeliveryContentPresence::Dropped { paths } if paths.contains(&path))
+                                && adds_meaningful_lines(repo, later, &path)
+                        });
+                    match replaced_later
+                        .then(|| draft_retired_by_delivery(repo, commit, merge_tip, &target_ref, &path))
+                        .unwrap_or(Ok(false))
+                    {
+                        Ok(true) => {
+                            append_unique(&mut superseded_paths, vec![path]);
+                            append_unique(&mut superseding_commits, vec![merge_tip.to_string()]);
+                            continue;
+                        }
+                        Ok(false) => {}
+                        Err(reason) => {
+                            unknown_reason.get_or_insert(reason);
+                            continue;
+                        }
                     }
                     // A resolution may replace only the owned lines in its
                     // novel hunks, on a path whose final effect was proven.
@@ -1216,6 +1533,119 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// Indexed content lines of a unified patch, inside its `@@`
+/// hunks. `---`/`+++` are file headers only before a file's first hunk; inside
+/// one they are real content such as `++i;` or a removed `-- note` (cas-e594).
+/// Original patch indices let metadata readers distinguish even identical
+/// header/content text without duplicating the hunk-state parser.
+pub(super) fn hunk_lines(patch: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut in_hunk = false;
+    patch.lines().enumerate().filter(move |(_, line)| {
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
+        } else if line.starts_with("@@") {
+            in_hunk = true;
+            return false;
+        }
+        in_hunk
+    })
+}
+
+/// cas-18aa: whether `commit` adds a line with a letter or digit to `path`:
+/// a replacement, not only a deletion. Unreadable history is no.
+fn adds_meaningful_lines(repo: &Path, commit: &str, path: &str) -> bool {
+    git_text(repo, &["diff", "--unified=0", "--no-renames", &format!("{commit}^1"), commit, "--", path])
+        .is_some_and(|patch| {
+            hunk_lines(&patch)
+                .any(|(_, line)| line.strip_prefix('+').is_some_and(|line| line.chars().any(char::is_alphanumeric)))
+        })
+}
+
+/// cas-18aa: whether `commit`'s effect on `path`, missing from `target`, was
+/// retired by the delivery itself. That holds when every line it added that
+/// the target lacks is also absent from the delivery's final tree
+/// (`merge_tip`), and every line it removed that the target has again is
+/// also back in that final tree. The delivery's final content is measured
+/// separately, so this never excuses a line the delivery still holds and the
+/// target lost, nor a removal the target reintroduced on its own.
+///
+/// This is the cas-da9a shape: round one of a task landed a draft, round two
+/// (started from the newer target) replaced it, and the target's own later
+/// edits to the file kept the line walk from crediting the replacement. The
+/// caller asks only when a later, non-revert task commit added replacement
+/// lines to the path and was itself not dropped there.
+fn draft_retired_by_delivery(
+    repo: &Path,
+    commit: &str,
+    merge_tip: &str,
+    target: &str,
+    path: &str,
+) -> Result<bool, String> {
+    if commit == merge_tip {
+        return Ok(false);
+    }
+    let patch = git_text(repo, &["diff", "--unified=0", "--no-renames", &format!("{commit}^1"), commit, "--", path])
+        .ok_or_else(|| format!("Git could not render `{commit}`'s effect on `{path}`"))?;
+    if patch.contains("Binary files ") || patch.contains("GIT binary patch") {
+        return Ok(false);
+    }
+    let meaningful = |line: &str| line.trim().chars().any(char::is_alphanumeric);
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    for (_, line) in hunk_lines(&patch) {
+        if let Some(line) = line.strip_prefix('+') {
+            added.push(line);
+        } else if let Some(line) = line.strip_prefix('-') {
+            removed.push(line);
+        }
+    }
+    // A file absent at a revision is empty; any other read failure is not
+    // evidence, so the caller keeps the drop unproven.
+    let lines_at = |revision: &str| -> Result<std::collections::HashMap<String, usize>, String> {
+        let object = format!("{revision}:{path}");
+        let exists = Command::new("git")
+            .args(["cat-file", "-e", &object])
+            .current_dir(repo)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|error| format!("failed to inspect `{object}`: {error}"))?
+            .success();
+        let mut counts = std::collections::HashMap::new();
+        if !exists {
+            return Ok(counts);
+        }
+        let output = Command::new("git")
+            .args(["cat-file", "blob", &object])
+            .current_dir(repo)
+            .output()
+            .map_err(|error| format!("failed to read `{object}`: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("Git could not read `{object}`"));
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            *counts.entry(line.to_string()).or_insert(0) += 1;
+        }
+        Ok(counts)
+    };
+    let (delivered, landed) = (lines_at(merge_tip)?, lines_at(target)?);
+    let count = |counts: &std::collections::HashMap<String, usize>, line: &str| counts.get(line).copied().unwrap_or(0);
+    let mut retired_any = false;
+    for line in added.iter().copied().filter(|line| meaningful(line)) {
+        let wanted = added.iter().filter(|other| **other == line).count();
+        let kept = count(&delivered, line).min(wanted);
+        if count(&landed, line) < kept {
+            return Ok(false);
+        }
+        retired_any |= count(&delivered, line) < wanted;
+    }
+    for line in removed.iter().copied().filter(|line| meaningful(line)) {
+        if count(&landed, line) > count(&delivered, line) {
+            return Ok(false);
+        }
+    }
+    Ok(retired_any)
 }
 
 /// A non-merge receipt can be integrated with a later task-owned QA
@@ -1464,10 +1894,8 @@ fn resolution_has_novel_lines(
         ],
     )?;
     Some(
-        patch
-            .lines()
-            .filter(|line| !line.starts_with("+++"))
-            .filter_map(|line| line.strip_prefix('+'))
+        hunk_lines(&patch)
+            .filter_map(|(_, line)| line.strip_prefix('+'))
             .map(str::trim)
             .any(|line| line.chars().any(|c| c.is_alphanumeric()) && !parent_lines.contains(line)),
     )
@@ -1547,6 +1975,7 @@ mod tests {
             task_floor: floor,
             basis: "fixture",
             identity: TaskCommitIdentity {
+                start_base: None,
                 task_id: Some("cas-taskb".into()),
                 known_commits: vec![],
             },
@@ -2777,6 +3206,7 @@ mod tests {
             &["merge", "--no-ff", "factory/worker", "-m", "integrate"],
         );
         let identity = TaskCommitIdentity {
+            start_base: None,
             task_id: Some("cas-taskb".into()),
             known_commits: vec![tip.clone()],
         };
@@ -3174,8 +3604,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn receipt_upper_boundary_excludes_later_sibling_commit() {
+    #[tokio::test]
+    async fn receipt_upper_boundary_excludes_later_sibling_commit() {
+        use crate::mcp::CasService;
+
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let dir = fixture();
         let p = dir.path();
         commit(p, "first.md", "first\n", "first part");
@@ -3186,6 +3619,59 @@ mod tests {
             stat.contains("first.md") && stat.contains("second.md") && !stat.contains("sibling.rs"),
             "{stat}"
         );
+
+        // cas-7b88: close a parked delivery after its worker starts another
+        // task. The report must use the implicit parked receipt, just as the
+        // close gates do, rather than the unrelated checkout's current HEAD.
+        git(p, &["reset", "--hard", &receipt]);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "-m", "merge delivered task", "factory/worker"]);
+        git(p, &["update-ref", "refs/remotes/origin/main", "main"]);
+        git(p, &["update-ref", "refs/remotes/origin/factory/worker", &receipt]);
+        std::fs::write(p.join(".git/info/exclude"), ".cas/\n").unwrap();
+        let root = crate::store::init_cas_dir(p).unwrap();
+        std::fs::write(root.join("config.toml"), "[worktrees]\nenabled = false\n[verification]\nenabled = false\n").unwrap();
+        env.set("CAS_ROOT", &root);
+        let wt = root.join("worktrees/worker");
+        std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
+        git(p, &["worktree", "add", "-q", "-b", "factory/worker-cas-next", wt.to_str().unwrap(), "main"]);
+        let next_tip = commit(&wt, "next.md", "unrelated work\n", "follow-up on another task");
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-taskb".into(), "Delivered task".into());
+        task.created_at = window().task_floor;
+        task.depth = cas_types::TaskDepth::Light;
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(receipt.clone());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        store.add(&task).unwrap();
+        let mut next = Task::new("cas-next".into(), "Active next task".into());
+        next.status = TaskStatus::InProgress;
+        next.assignee = Some("worker".into());
+        next.deliverables.factory_branch_anchor = Some(next_tip.clone());
+        next.deliverables.parked_branch = Some("factory/worker-cas-next".into());
+        store.add(&next).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        agents.register(&cas_types::Agent::new_with_role(
+            "worker".into(), "worker".into(), cas_types::AgentRole::Worker,
+        )).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("worker".into());
+        let service = CasService::new(core, None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "delivery already merged",
+        })).unwrap();
+        let result = service.task(Parameters(request)).await.unwrap();
+        let text = result.content.into_iter().filter_map(|content| match content.raw {
+            rmcp::model::RawContent::Text(text) => Some(text.text), _ => None,
+        }).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Closed task:"), "{text}");
+        assert!(text.contains("first.md") && text.contains("second.md"), "{text}");
+        assert!(!text.contains("next.md"), "next task's diff was attributed to the old delivery: {text}");
+        assert_eq!(store.get(&task.id).unwrap().status, TaskStatus::Closed);
+        assert_eq!(store.get(&next.id).unwrap().status, TaskStatus::InProgress);
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), next_tip);
     }
 
     #[test]

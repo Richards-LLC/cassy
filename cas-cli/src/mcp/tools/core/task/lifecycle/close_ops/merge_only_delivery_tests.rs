@@ -63,6 +63,7 @@ fn worker_task() -> Task {
 
 fn req(id: &str) -> TaskCloseRequest {
     TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: None,

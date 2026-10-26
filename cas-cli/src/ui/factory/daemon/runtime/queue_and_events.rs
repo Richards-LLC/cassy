@@ -749,19 +749,6 @@ pub(crate) fn delivery_stalled_notice(
     )
 }
 
-fn report_stale_reminder_expiry(result: cas_store::Result<cas_store::ReminderExpiryOutcome>) {
-    match result {
-        Ok(cas_store::ReminderExpiryOutcome::Expired(_)) => {}
-        Ok(cas_store::ReminderExpiryOutcome::DeferredBusy) => {
-            tracing::warn!(
-                budget_ms = REMINDER_EXPIRY_BUSY_BUDGET.as_millis(),
-                "SQLite busy; deferring stale reminder expiry to the next daemon tick"
-            );
-        }
-        Err(error) => tracing::error!("Failed to expire stale reminders: {}", error),
-    }
-}
-
 fn registered_prompt_sweep_agents(
     agents: &[cas_types::Agent],
     factory_session: &str,
@@ -1629,31 +1616,26 @@ pub(super) fn report_provision_failure(
             detail,
         );
     }
-    let notified = enqueue_spawn_outcome_notice(
-        cas_dir,
-        supervisor_name,
-        factory_session,
-        request_id,
-        worker_name,
-        "provision",
-        false,
-        detail,
-    );
-    if notified.is_err() {
-        let request = request_id
-            .map(|id| format!("request {id}"))
-            .unwrap_or_else(|| "a direct spawn".to_string());
-        notify_supervisor_or_defer(
-            cas_dir,
-            supervisor_name,
-            factory_session,
-            format!("Worker spawn failed: {worker_name}"),
-            format!(
-                "Factory spawn {request} for worker '{worker_name}' failed in provisioning: \
-                 {detail}"
-            ),
-        );
-    }
+    // A spent loop budget must not downgrade the deferred notice to ordinary
+    // inbox traffic: retry the same blocker-bearing enqueue off the loop.
+    let cas_dir = cas_dir.to_path_buf();
+    let supervisor = supervisor_name.to_owned();
+    let session = factory_session.to_owned();
+    let worker = worker_name.to_owned();
+    let detail = detail.to_owned();
+    super::store_worker::persist_or_defer("notify supervisor of provision failure", move || {
+        enqueue_spawn_outcome_notice(
+            &cas_dir,
+            &supervisor,
+            &session,
+            request_id,
+            &worker,
+            "provision",
+            false,
+            &detail,
+        )
+        .map(|_| ())
+    });
 }
 
 /// Queue a director notice to the supervisor that must not be lost to a spent
@@ -1717,13 +1699,27 @@ fn enqueue_spawn_outcome_notice(
             ),
         )
     };
-    let id = queue.enqueue_with_summary(
-        "director",
-        supervisor_name,
-        &message,
-        Some(factory_session),
-        Some(&summary),
-    )?;
+    let id = if !success && matches!(stage, "provision" | "register") {
+        queue.enqueue_urgent_with_outcome(
+            "director",
+            supervisor_name,
+            &crate::prompt_revalidation::attach_blocker_envelope(&message, worker_name, None),
+            Some(factory_session),
+            Some(&summary),
+            Some(cas_store::NotificationPriority::Critical),
+            false,
+            Some(&cas_store::QueueOrigin::Daemon),
+        )?
+        .id()
+    } else {
+        queue.enqueue_with_summary(
+            "director",
+            supervisor_name,
+            &message,
+            Some(factory_session),
+            Some(&summary),
+        )?
+    };
     super::delivery::wake_daemon_after_enqueue(cas_dir);
     Ok(id)
 }
@@ -2091,10 +2087,12 @@ pub enum SupervisorWakeClass {
     Lifecycle,
     /// Another registered supervisor on this clone (cas-15f2).
     PeerSupervisor,
+    /// An authenticated ordinary directed message; debounce and cap run in QueueSelect.
+    DirectedMessage,
     /// A peer supervisor of this repo on another machine, relayed by the
     /// Cassy Cloud peer mailbox: a Daemon-stamped row whose first line is a
     /// CAS-written `<cas-peer-message …/>` envelope carrying a direct reply,
-    /// ask or blocker. Peer FYIs remain inbox-only (cas-1f25).
+    /// kind or reply metadata. A no-kind field report wakes too (cas-1e7e2).
     CloudPeerSupervisor,
     /// A registered worker's CAS-framed `<cas-merge-request>` (cas-d9a8).
     MergeRequest,
@@ -2644,6 +2642,8 @@ pub(crate) struct StallNudgeRead {
 /// and never opens a store for them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
+    pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
+    pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
     /// `None` when the read failed.
     pub(crate) wake_gate: Option<(u32, Option<chrono::DateTime<chrono::Utc>>)>,
@@ -2682,7 +2682,7 @@ pub(crate) struct OperatorReplyRetry {
 }
 
 /// Read one selected row's [`RowFacts`] on the selecting job's thread.
-fn read_row_facts(
+pub(crate) fn read_row_facts(
     cas_dir: &std::path::Path,
     queue: &dyn cas_store::PromptQueueStore,
     tasks: Option<&dyn cas_store::TaskStore>,
@@ -2692,7 +2692,17 @@ fn read_row_facts(
     let mut facts = RowFacts {
         wake_gate: queue.wake_gate_state(row.id).ok(),
         deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
-        assignment_stale: super::delivery::assignment_stale_status(cas_dir, &row.prompt, &row.target),
+        assignment_stale: if match queue.is_abandonment_recovery(row.id) {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                tracing::warn!(prompt_id = row.id, %error, "could not classify abandonment recovery");
+                false
+            }
+        } {
+            None
+        } else {
+            super::delivery::assignment_stale_status(cas_dir, &row.prompt, &row.target)
+        },
         ..RowFacts::default()
     };
     if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt)
@@ -2816,7 +2826,7 @@ fn read_operator_replies(
 /// roster, withdraw rows for recipients that shut down, collapse duplicate
 /// worker deaths, then select the batch, stamp it `Selected` and take its
 /// transport claims in one transaction.
-pub(super) fn run_queue_select(
+pub(crate) fn run_queue_select(
     request: &super::prompt_queue_jobs::QueueSelectRequest,
     generation: u64,
 ) -> anyhow::Result<super::prompt_queue_jobs::QueueSelection> {
@@ -2952,6 +2962,22 @@ pub(super) fn run_queue_select(
             Err(error) => tracing::debug!(%error, "operator replies unavailable this selection"),
         }
     }
+    // Batching is optional. Even a late park-write error must leave the
+    // original action rows available to the normal delivery path this pass.
+    let mut batched_rows = selection.rows.clone();
+    let mut batched_facts = selection.facts.clone();
+    match crate::supervisor_message_wakes::schedule(
+        &request.cas_dir, session, &request.supervisor_name, &registered_agents,
+        &mut batched_rows, &mut batched_facts, chrono::Utc::now(),
+    ) {
+        Ok(()) => {
+            selection.rows = batched_rows;
+            selection.facts = batched_facts;
+        }
+        Err(error) => crate::supervisor_message_wakes::warn_batching_failure(
+            &request.cas_dir, &error, std::time::Instant::now(),
+        ),
+    }
     selection.native_agents = native_agents;
     selection.registered_agents = registered_agents;
     // Wake the loop so the batch is delivered now, not after its idle sleep
@@ -2960,6 +2986,13 @@ pub(super) fn run_queue_select(
         let _ = cas_factory::notify_daemon(&request.cas_dir);
     }
     Ok(selection)
+}
+
+/// Shared by the inline budget preview and the admitted transport payload.
+fn batch_member_body(member: &cas_store::QueuedPrompt) -> String {
+    format!("\n\n{}\nFrom: {}\n{}",
+        crate::mcp::tools::service::agent_search_system::message::first_message_provenance(member),
+        member.source, member.prompt)
 }
 
 /// Whether a completed harness turn is newer than the wake attempt that
@@ -3012,7 +3045,14 @@ const URGENT_WAKE_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::fro
 /// How long a normal, transport-delivered message may remain unsurfaced before
 /// the daemon retries a *normal* nudge.  This deliberately does not borrow the
 /// urgent interrupt path: ordinary traffic must never escalate itself.
-const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+/// cas-badb (GH #1302): a recipient should start its turn within 30 seconds.
+const NORMAL_DELIVERY_OBSERVE_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// cas-badb (GH #1302): a recipient that still has not started a turn is
+/// nudged again every [`LIFECYCLE_RENUDGE_INTERVAL`] (60s), this many times in
+/// all, and then flagged. Five nudges from the 30s first check reach about
+/// five minutes, when its sender and the operator are also told.
+pub(super) const NORMAL_DELIVERY_MAX_NUDGES: u32 = 5;
 
 /// cas-ac97 (GH #1153): how often a due probe re-reads the recipient's
 /// transcript while that recipient is still inside a turn that began before
@@ -3035,6 +3075,8 @@ pub(crate) struct NormalDeliveryProbe {
     /// cas-ac97: the queued body, for the per-message transcript match.
     pub(crate) prompt: String,
     pub(crate) nudge_sent_at: Option<std::time::Instant>,
+    /// cas-badb (GH #1302): watchdog nudges typed so far for this row.
+    pub(crate) nudges: u32,
     /// cas-ac97: when the probe is next due for an evidence read. `None`
     /// means one observe window after delivery.
     pub(crate) next_check_at: Option<std::time::Instant>,
@@ -3089,7 +3131,7 @@ pub(super) fn normal_delivery_probe_due(
 /// Called only for a due probe.
 pub(super) fn normal_delivery_probe_action(
     evidence: NormalDeliveryTurnEvidence,
-    nudge_sent_at: Option<std::time::Instant>,
+    nudges: u32,
 ) -> NormalDeliveryProbeAction {
     match evidence {
         NormalDeliveryTurnEvidence::TurnStarted
@@ -3100,10 +3142,13 @@ pub(super) fn normal_delivery_probe_action(
         NormalDeliveryTurnEvidence::NoTurn
         | NormalDeliveryTurnEvidence::Unavailable {
             pane_output_grew: false,
-        } => match nudge_sent_at {
-            None => NormalDeliveryProbeAction::RetryNormalNudge,
-            Some(_) => NormalDeliveryProbeAction::FlagSupervisor,
-        },
+        } => {
+            if nudges < NORMAL_DELIVERY_MAX_NUDGES {
+                NormalDeliveryProbeAction::RetryNormalNudge
+            } else {
+                NormalDeliveryProbeAction::FlagSupervisor
+            }
+        }
     }
 }
 
@@ -4885,7 +4930,7 @@ impl FactoryDaemon {
                 }
                 evidence => evidence,
             };
-            let action = normal_delivery_probe_action(evidence, probe.nudge_sent_at);
+            let action = normal_delivery_probe_action(evidence, probe.nudges);
             tracing::debug!(target: "cas::coordination", stage = "normal_delivery_watchdog_evidence",
                 message_id = row_id, target_agent = %probe.pane, ?evidence, ?action,
                 "cas-ac97: normal delivery watchdog read harness turn evidence");
@@ -4926,7 +4971,8 @@ impl FactoryDaemon {
                     });
                     if let Some(probe) = self.normal_delivery_probes.get_mut(&row_id) {
                         probe.nudge_sent_at = Some(now);
-                        probe.next_check_at = Some(now + NORMAL_DELIVERY_OBSERVE_WINDOW);
+                        probe.nudges += 1;
+                        probe.next_check_at = Some(now + LIFECYCLE_RENUDGE_INTERVAL);
                     }
                     tracing::warn!(
                         target: "cas::coordination",
@@ -5463,6 +5509,16 @@ impl FactoryDaemon {
                 let is_worker = self.app.worker_names().contains(&pane_id);
 
                 if is_supervisor {
+                    if let Ok(agents) = open_agent_store(self.app.cas_dir())
+                        && let Ok(rows) = agents.list(None)
+                    {
+                        let reason = format!("pane_exit: code={exit_code:?}, signal={exit_signal:?}");
+                        for agent in rows.iter().filter(|a| a.name == pane_id && a.factory_session.as_deref() == Some(self.session_name.as_str())) {
+                            if let Err(error) = crate::supervisor_continuity::record_end(self.app.cas_dir(), &agent.id, Some(&reason)) {
+                                tracing::warn!(%error, "could not retain supervisor pane-exit evidence");
+                            }
+                        }
+                    }
                     // Supervisor exited (either /exit or crash) — shut down the whole factory
                     tracing::info!("Supervisor exited with code {exit_code:?}, shutting down");
                     self.shutdown.store(true, Ordering::Relaxed);
@@ -6568,45 +6624,10 @@ impl FactoryDaemon {
         pane_target != supervisor_name && Self::worker_looks_idle(data, pane_target, now)
     }
 
-    /// cas-f02b (GH #101): may this queued row wake an IDLE supervisor pane?
-
-    ///
-    /// cas-dab2 excluded the supervisor from the idle nudge for good reason —
-    /// worker→supervisor chatter was being typed over the operator's
-    /// in-progress input and double-delivered with no attribution. That
-    /// exclusion stays for ordinary traffic. But it also silenced the one
-    /// class of message the factory cannot make progress without: a worker
-    /// parked in `awaiting_merge` (or close-rejected / blocked) is waiting on
-    /// the supervisor, and for a Claude supervisor in teams mode the signal is
-    /// an inbox FILE write that Claude Code reads only at a turn boundary. An
-    /// idle supervisor has no next boundary, so the fleet idles until
-    /// something external creates a turn — the reported behavior, where every
-    /// merge drain came from a scheduled sweep and never from the push the
-    /// factory prompt promises.
-    ///
-    /// Narrow by construction (cas-d9a8 re-keyed the first bullet: the marker
-    /// was a caller-settable string, so it stated intent and proved nothing):
-    /// - only rows CAS itself stamped as written by its own machinery, an
-    ///   authenticated peer supervisor, or a registered worker sending a
-    ///   CAS-framed merge request, typed status/ready action, blocker or
-    ///   verification-dispatch handoff (cas-8725) — never arbitrary messages;
-    /// - only when the pane's own signals are quiet right now — judged by
-    ///   heartbeat/activity freshness alone, since a supervisor owns its epic
-    ///   for the whole session and that ownership is not an in-flight turn;
-    /// - never while the operator has an unsubmitted draft (`composer_dirty`),
-    ///   so cas-dab2's stolen-typing symptom cannot recur through this path
-    ///   even after `Mux::inject`'s bounded defer window elapses;
-    /// - the payload is a self-identifying `<task-lifecycle …>` block, so it
-    ///   cannot be mistaken for operator input the way a bare relayed worker
-    ///   message could.
-    /// Whether this row is a supervisor wake signal at all — independent of
-    /// whether the pane can take it right now (cas-f02b). Used to decide that a
-    /// row must NOT be consumed until it has actually woken the pane.
-    ///
-    /// cas-d9a8: keyed on the server-stamped sender, exactly like
-    /// [`Self::supervisor_wake_decision`]. If these two disagreed, an eligible
-    /// row would either be consumed before it ever woke the pane (the original
-    /// silent stall) or held pending forever.
+    /// Only authenticated directed messages and CAS action envelopes can wake
+    /// a supervisor. Quiet acknowledgements/copies do not. QueueSelect debounces
+    /// and caps directed messages; the existing pane gate protects busy turns,
+    /// composers and drafts. A wake row remains pending until a handoff succeeds.
     fn row_is_supervisor_wake(
         sender: &WakeSender,
         supervisor_name: &str,
@@ -6617,24 +6638,9 @@ impl FactoryDaemon {
             .is_some_and(SupervisorWakeClass::wakes_idle)
     }
 
-    /// The one place that answers "may THIS sender wake the supervisor with
-    /// THIS payload" (cas-d9a8). `None` means the row is not a wake signal.
-    ///
-    /// Two factors, both required, and neither derived from anything the
-    /// sender typed:
-    ///  - WHO: the server-stamped origin, resolved to a registry role.
-    ///  - WHAT: an envelope CAS itself emits, not free text.
-    ///
-    /// `source` is no longer AUTHORITY, only intent. It used to be half the
-    /// authority here — `is_lifecycle_wake_source(source)` is
-    /// `source.starts_with("lifecycle-wake:")` — which meant the property CAS
-    /// actually enforced was "the caller knows a prefix and a tag grammar",
-    /// not "the caller is who it claims to be". It is still READ, but only on
-    /// a row CAS itself stamped, where CAS also wrote the source: the marker
-    /// is how the lifecycle emitter separates a transition that parks a lane
-    /// (`awaiting_merge`) from a progress FYI (`closed`), and dropping it
-    /// would start waking supervisors for exactly the noise cas-dab2 stopped.
-    /// On any other sender the string is not consulted.
+    /// Classification is based on the immutable authenticated origin, never
+    /// a caller's source label. Sender-selected quiet metadata can only remove
+    /// wake eligibility; it cannot create authority or a typed action class.
     pub(crate) fn supervisor_wake_class(
         sender: &WakeSender,
         supervisor_name: &str,
@@ -6642,6 +6648,7 @@ impl FactoryDaemon {
         prompt: &str,
     ) -> Option<SupervisorWakeClass> {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+        if crate::supervisor_message_wakes::quiet(prompt) || crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(prompt).is_some() { return None; }
         match sender {
             // cas-f02b / cas-3dcb: a lifecycle transition, worker death, spawn
             // failure, CI red or worker-attention relay parks a lane behind
@@ -6767,9 +6774,9 @@ impl FactoryDaemon {
                         // close path; accepted from the registered origin on
                         // the same terms as the verification handoff.
                         Some(SupervisorWakeClass::QaDispatch)
-                    } else {
-                        None
-                    }
+                    } else if matches!(role, cas_types::AgentRole::Worker | cas_types::AgentRole::Director) {
+                        Some(SupervisorWakeClass::DirectedMessage)
+                    } else { None }
                 }
             },
             // An unstamped, explicitly-unattributed or no-longer-resolvable
@@ -6928,6 +6935,7 @@ impl FactoryDaemon {
             SupervisorWakeClass::Lifecycle => {
                 "supervisor pane is quiet and the row is a lifecycle wake from CAS"
             }
+            SupervisorWakeClass::DirectedMessage => "supervisor pane is quiet and the row is an authenticated directed message",
             SupervisorWakeClass::PeerSupervisor => {
                 "supervisor pane is quiet and the row is from an authenticated peer supervisor"
             }
@@ -7151,6 +7159,28 @@ impl FactoryDaemon {
         }))
     }
 
+    /// cas-c0d0 (GH #1246): the supervisor's own fired reminder, once its
+    /// transcript records that the last turn ended. A Claude supervisor with a
+    /// running background task repaints its pane, so the 2-second silence bar
+    /// held these wakes until an unrelated turn started (98.5 s in the live
+    /// cas-ca26 probe). The typing, readiness and tool-call vetoes stay. Without that
+    /// transcript evidence the ordinary policy decides. cas-e6d7: that
+    /// evidence is a turn end seen after the last turn start; a read tail with
+    /// no turn record (a turn longer than the read window) does not count.
+    pub fn supervisor_self_reminder_wake(
+        pane_target: &str,
+        supervisor_name: &str,
+        turn_completed: bool,
+        pane: PaneWakeState,
+    ) -> Option<WakeDecision> {
+        if pane_target != supervisor_name || !turn_completed {
+            return None;
+        }
+        Some(Self::parked_worker_veto(pane).unwrap_or_else(|| {
+            WakeDecision::allow("fired self-reminder to a supervisor whose transcript shows its turn ended")
+        }))
+    }
+
     /// cas-cd3f: the startup brief begins a supervisor's first turn. A
     /// just-launched harness has a fresh heartbeat and repaints while it
     /// loads, so the quiet-pane bar would hold the brief until the operator
@@ -7322,6 +7352,12 @@ impl FactoryDaemon {
             .as_ref()
             .filter(|completion| completion.at > after)
             .map(|completion| completion.at)
+    }
+    fn prepared_turn_completed(&self, pane: &str) -> bool {
+        self.queue_jobs
+            .prompt_preparation
+            .recipient(pane)
+            .is_some_and(|inputs| inputs.turn_completed())
     }
     fn prepared_mid_turn(&self, pane: &str) -> Option<bool> {
         self.queue_jobs
@@ -7612,6 +7648,7 @@ impl FactoryDaemon {
         inject_result: anyhow::Result<super::delivery::NudgeReport>,
     ) {
         let super::inject_commands::DirectDelivery {
+            message_batch, message_senders,
             queued,
             pane_target,
             generation: inject_generation,
@@ -7621,6 +7658,26 @@ impl FactoryDaemon {
             urgent_wake_probe_opened,
             delivery_started_at_utc,
         } = delivery;
+        if inject_result.as_ref().is_ok_and(|report| report.outcome == cas_mux::InjectOutcome::Delivered)
+            && !wake_deferred && !message_senders.is_empty() {
+            self.queue_jobs.stamp(self.app.cas_dir(),queued.id,&queued.target,
+                super::prompt_queue_jobs::QueueStamp::DirectedWake { cas_dir: self.app.cas_dir().to_path_buf(),
+                    recipient: pane_target.clone(), senders: message_senders, created_at: queued.created_at,
+                    injected_at: chrono::Utc::now() });
+        }
+        for (member, generation) in message_batch {
+            let report = inject_result.as_ref().map(|report| {
+                let mut report=report.clone();
+                report.wake=cas_store::WakeAttempt::NotAttempted;
+                report.wake_detail=Some(format!("coalesced into supervisor wake #{}",queued.id));
+                report
+            }).map_err(|error| anyhow::anyhow!("{error}"));
+            self.finish_direct_delivery(super::inject_commands::DirectDelivery {
+                queued: member, pane_target: pane_target.clone(), generation,
+                message_batch: Vec::new(), message_senders: Vec::new(), wake_deferred,
+                prior_copy_unread, nudge_only, urgent_wake_probe_opened: false, delivery_started_at_utc,
+            },report);
+        }
         let target = &queued.target;
         let mut success = false;
         // cas-7a01 (GH #155): persist what the wake nudge actually did
@@ -8019,6 +8076,7 @@ impl FactoryDaemon {
                         delivered_at_utc: delivery_started_at_utc,
                         prompt: queued.prompt.clone(),
                         nudge_sent_at: None,
+                        nudges: 0,
                         next_check_at: None,
                     },
                 );
@@ -8612,7 +8670,20 @@ impl FactoryDaemon {
             // once that claim came back.
             let queued = selected;
             if queued.processed_at.is_some() { continue; }
-            let facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            let batch_len = facts.message_batch.len();
+            let leader_held = facts.deferred_inbox.is_some()
+                || self.inbox_deferred_writes.contains_key(&queued.id);
+            facts.message_batch.retain(|member| {
+                !leader_held && !self.inbox_deferred_writes.contains_key(&member.id)
+                    && row_facts.get(&member.id).is_none_or(|fact| fact.deferred_inbox.is_none())
+            });
+            if facts.message_batch.len() != batch_len {
+                crate::supervisor_message_wakes::retain_batch_senders(
+                    &mut facts.message_senders, &queued, &facts.message_batch,
+                    self.app.supervisor_name(), &registered_agents,
+                );
+            }
             if !self.queue_jobs.prompt_preparation.allows_delivery(Instant::now()) {
                 // Earlier injects/probes can outlive this batch's evidence.
                 // Claimed rows stay owned; unclaimed rows remain selectable.
@@ -9128,9 +9199,13 @@ impl FactoryDaemon {
                 ) == super::delivery::DeliveryChannel::TeamsInbox;
             // GH #1231: bounded supervisor events have one delivery path.
             // Preserve already-held legacy copies until their recovery settles.
-            let inline_supervisor_body = claude_inbox_target
+            let batch_body = facts.message_batch.iter().fold(prompt_with_instructions.clone(), |mut body, member| {
+                body.push_str(&batch_member_body(member));
+                body
+            });
+            let inline_supervisor_body = (!facts.message_senders.is_empty() || claude_inbox_target)
                 && (target == "supervisor" || target == self.app.supervisor_name())
-                && cas_store::fits_hook_surface(&prompt_with_instructions)
+                && cas_store::fits_hook_surface(&batch_body)
                 && facts.deferred_inbox.is_none()
                 && !self.inbox_deferred_writes.contains_key(&queued.id);
             // cas-786a6 (H3): the durable marker, read by QueueSelect.
@@ -9807,7 +9882,8 @@ impl FactoryDaemon {
                             continue;
                         }
                     };
-                    tracing::info!(message_id = queued.id, "Injecting prompt to '{}': {}", name,
+                    tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
+                        target_agent = %name, "Attempting prompt injection to '{}': {}", name,
                         queued.prompt.chars().take(50).collect::<String>());
                     super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: transport"));
                     let inject_result: anyhow::Result<cas_mux::InjectOutcome> = if queued.urgent
@@ -9897,6 +9973,20 @@ impl FactoryDaemon {
                 // `ClaimForInject` job on the writer (QA retarget, re-read,
                 // compare-and-set claim); this pass submits it and moves on,
                 // and the row's next pass injects once the claim came back.
+                // Resolve every claim before taking any token. Taking the leader
+                // first would drop its carry while member jobs are still pending.
+                if !facts.message_batch.is_empty() {
+                    let mut ready=self.queue_jobs.claim_resolved(self.app.cas_dir(),&self.session_name,
+                        queued.id,&queued.target,&queued.target);
+                    for member in &facts.message_batch {
+                        ready &= self.queue_jobs.claim_resolved(self.app.cas_dir(),&self.session_name,
+                            member.id,&member.target,&member.target);
+                    }
+                    if !ready {
+                        self.queue_jobs.carry_claimed_row(queued.clone(),facts.clone());
+                        continue;
+                    }
+                }
                 let claim_token = match self.queue_jobs.claim_for_inject(
                     self.app.cas_dir(),
                     &self.session_name,
@@ -9912,8 +10002,27 @@ impl FactoryDaemon {
                         continue;
                     }
                     super::prompt_queue_jobs::ClaimStep::HandedOff
-                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => continue,
+                    | super::prompt_queue_jobs::ClaimStep::NotClaimed => {
+                        for member in &facts.message_batch {
+                            self.queue_jobs.cancel_unadmitted_claim(self.app.cas_dir(),member.id,&member.target);
+                        }
+                        continue;
+                    },
                 };
+                let mut batch_claims = Vec::new();
+                let mut waiting_for_batch = false;
+                for member in &facts.message_batch {
+                    match self.queue_jobs.claim_for_inject(self.app.cas_dir(), &self.session_name,
+                        member.id, &member.target, &member.target) {
+                        super::prompt_queue_jobs::ClaimStep::Claimed(token) => batch_claims.push((member.clone(),token)),
+                        super::prompt_queue_jobs::ClaimStep::Waiting => waiting_for_batch = true,
+                        super::prompt_queue_jobs::ClaimStep::HandedOff | super::prompt_queue_jobs::ClaimStep::NotClaimed => {},
+                    }
+                }
+                if waiting_for_batch {
+                    self.queue_jobs.carry_claimed_row(queued.clone(), facts.clone());
+                    continue;
+                }
                 let normal_wake = if !queued.urgent {
                     let is_supervisor_target = pane_target == self.app.supervisor_name();
                     // cas-45c4: every recipient's pane is sampled now — the
@@ -9938,7 +10047,17 @@ impl FactoryDaemon {
                         // to a worker parked on it wakes promptly; everything
                         // else keeps the ordinary policy.
                         let supervisor_decision = if is_supervisor_target {
-                            None
+                            // cas-c0d0 (GH #1246): the supervisor's own fired reminder.
+                            self_addressed_reminder(&queued)
+                                .then(|| {
+                                    Self::supervisor_self_reminder_wake(
+                                        &pane_target,
+                                        self.app.supervisor_name(),
+                                        self.prepared_turn_completed(&pane_target),
+                                        pane_state,
+                                    )
+                                })
+                                .flatten()
                         } else if self_addressed_reminder(&queued) {
                             // cas-901f: the worker's own fired reminder.
                             self.queue_jobs
@@ -9985,6 +10104,14 @@ impl FactoryDaemon {
                     Some((is_supervisor_target, pane_state, wake_decision, worker_is_idle))
                 } else { None };
                 if inline_supervisor_body && let Some((_, _, wake_decision, false)) = normal_wake {
+                    for (member, token) in &batch_claims {
+                        self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
+                            super::prompt_queue_jobs::QueueStamp::ReleaseClaim { claim_token: *token });
+                        self.queue_jobs.stamp(self.app.cas_dir(),member.id,&member.target,
+                            super::prompt_queue_jobs::QueueStamp::ParkBusy { detail: wake_decision.status_detail(),
+                                recheck_at: chrono::Utc::now()+chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap() });
+                        self.queue_jobs.inline_parked.insert(member.id,(member.clone(),chrono::Utc::now()));
+                    }
                     // No transport admission, cadence spend or attempt: keep the
                     // body surfaceable by the next hook and stop 100ms selection.
                     self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
@@ -10013,10 +10140,21 @@ impl FactoryDaemon {
                     super::prompt_queue_jobs::Admission::InFlight
                     | super::prompt_queue_jobs::Admission::NotClaimed => continue,
                 };
+                let mut message_batch = Vec::new();
+                for (member, token) in batch_claims {
+                    match self.queue_jobs.admit_claimed(self.app.cas_dir(),member.id,&member.target,token,Instant::now()) {
+                        super::prompt_queue_jobs::Admission::Inject { generation } => {
+                            prompt_with_instructions.push_str(&batch_member_body(&member));
+                            message_batch.push((member,generation));
+                        },
+                        super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},
+                    }
+                }
                 if renudge_granted {
                     self.reserve_renudge_attempt(queued.id);
                 }
-                tracing::info!(message_id = queued.id, "Injecting prompt to '{}': {}", target,
+                tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
+                    target_agent = %pane_target, "Attempting prompt injection to '{}': {}", target,
                     queued.prompt.chars().take(50).collect::<String>());
                 let inject_result: anyhow::Result<super::delivery::NudgeReport> = if queued.urgent {
                     // Urgent: interrupt-and-redirect by name via the PTY,
@@ -10068,6 +10206,7 @@ impl FactoryDaemon {
                                 ticket,
                                 super::inject_commands::UrgentInject::Row {
                                     delivery: Box::new(super::inject_commands::DirectDelivery {
+                                        message_batch: Vec::new(), message_senders: Vec::new(),
                                         queued: queued.clone(),
                                         pane_target: pane_target.clone(),
                                         generation: inject_generation,
@@ -10237,6 +10376,7 @@ impl FactoryDaemon {
                                     super::inject_commands::UrgentInject::NormalRow {
                                         inline_supervisor: inline_supervisor_body,
                                         delivery: Box::new(super::inject_commands::DirectDelivery {
+                                            message_batch, message_senders: facts.message_senders.clone(),
                                             queued: queued.clone(), pane_target: pane_target.clone(),
                                             generation: inject_generation, wake_deferred: false,
                                             prior_copy_unread, nudge_only, urgent_wake_probe_opened: false,
@@ -10286,6 +10426,7 @@ impl FactoryDaemon {
                 };
                 self.finish_direct_delivery(
                     super::inject_commands::DirectDelivery {
+                        message_batch, message_senders: facts.message_senders.clone(),
                         queued: queued.clone(),
                         pane_target: pane_target.clone(),
                         generation: inject_generation,
@@ -12053,6 +12194,27 @@ impl ReminderTriggerContext {
         }
     }
 
+    /// The persisted shape `fire_reminder` writes to `fired_event`.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "event_type": self.event_type,
+            "data": self.data,
+            "description": self.description,
+        })
+    }
+
+    /// The event a suspended reminder caught during its worker's hold.
+    fn caught_during_hold(event: &serde_json::Value) -> Option<Self> {
+        Some(Self {
+            event_type: event.get("event_type")?.as_str()?.to_string(),
+            data: event.get("data").cloned().unwrap_or(serde_json::Value::Null),
+            description: format!(
+                "{} (while you were held)",
+                event.get("description")?.as_str()?
+            ),
+        })
+    }
+
     fn ci(wake: &super::ci_watch::CiWake) -> Self {
         Self {
             event_type: super::ci_watch::EXTERNAL_CI_COMPLETED_EVENT.to_string(),
@@ -12086,9 +12248,10 @@ fn resolve_reminder_delivery_target(
         return Some(name.clone());
     }
     // Cross-session rows can outlive their original daemon. A replacement
-    // factory may take over only after this project's store says the target
-    // shut down in the factory that created the reminder. Unknown, stale, or
-    // still-active agents leave the row pending.
+    // factory may take over only a supervisor target that shut down in the
+    // factory that created the reminder. A retired worker is not a delegation
+    // to its supervisor: leave that row pending for its actual target. Unknown,
+    // stale, or still-active agents also leave the row pending.
     let agent = crate::store::open_agent_store(cas_dir)
         .ok()?
         .get(&reminder.target_id)
@@ -12098,7 +12261,9 @@ fn resolve_reminder_delivery_target(
     {
         return None;
     }
-    (agent.status == cas_types::AgentStatus::Shutdown).then(|| supervisor_name.to_string())
+    (agent.role == cas_types::AgentRole::Supervisor
+        && agent.status == cas_types::AgentStatus::Shutdown)
+        .then(|| supervisor_name.to_string())
 }
 
 /// What one reminder pass needs, captured on the loop (cas-223f).
@@ -12113,11 +12278,121 @@ struct ReminderScanInput {
     ci_wakes: Vec<super::ci_watch::CiWake>,
 }
 
+/// Reconcile each pending row independently: an orphan or a failed notice
+/// must not prevent another reminder from firing or reaching its deadline.
+fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error::CasError> {
+    let reminders = crate::store::open_reminder_store(&scan.cas_dir)?;
+    let pending = reminders.list_all_pending()?;
+    if pending.is_empty() { return Ok(()) }
+    let tasks = crate::store::open_task_store_local(&scan.cas_dir)?;
+    for reminder in pending {
+        if let Err(error) = reconcile_task_reminder(scan, &reminder, &reminders, tasks.as_ref()) {
+            tracing::warn!(reminder_id = reminder.id, %error,
+                "reminder reconciliation failed; retrying this reminder next pass");
+        }
+    }
+    Ok(())
+}
+
+fn task_reminder_notice(
+    scan: &ReminderScanInput,
+    reminder: &cas_store::Reminder,
+    kind: &str,
+    detail: &str,
+) -> Result<(), crate::error::CasError> {
+    let agents = crate::store::open_agent_store(&scan.cas_dir)?.list(None)?;
+    let recipient = agents.iter().find(|agent| agent.id == reminder.owner_id && agent.is_alive())
+        .map(crate::supervisor_notices::Recipient::agent)
+        .unwrap_or_else(|| crate::supervisor_notices::resolve(
+            &agents, Some(&reminder.owner_id), reminder.session_id.as_deref()));
+    crate::supervisor_notices::enqueue(&scan.cas_dir, &recipient, kind, detail, &reminder.id.to_string())
+}
+
+fn cancel_task_reminder(
+    reminders: &dyn cas_store::ReminderStore,
+    reminder: &cas_store::Reminder,
+) -> cas_store::Result<()> {
+    match reminders.cancel(reminder.id, &reminder.owner_id) {
+        // Another daemon may have fired/cancelled the row since the snapshot.
+        Err(cas_store::StoreError::NotFound(_)) => Ok(()),
+        result => result,
+    }
+}
+
+fn reconcile_task_reminder(
+    scan: &ReminderScanInput,
+    reminder: &cas_store::Reminder,
+    reminders: &Arc<dyn cas_store::ReminderStore>,
+    tasks: &dyn cas_store::TaskStore,
+) -> Result<(), crate::error::CasError> {
+    let event = reminder.trigger_event.as_deref();
+    let filtered_task = matches!(event, Some("task_completed" | "task_blocked"))
+        .then(|| reminder.trigger_filter.as_ref().and_then(|filter| filter.get("task_id"))
+            .and_then(serde_json::Value::as_str))
+        .flatten().map(str::trim).filter(|id| !id.is_empty());
+    let task_id = filtered_task.or(reminder.task_id.as_deref());
+    let task = match task_id.map(|id| tasks.get(id)) {
+        Some(Ok(task)) => Some(task),
+        Some(Err(cas_store::StoreError::TaskNotFound(_))) | None => None,
+        Some(Err(error)) => return Err(error.into()),
+    };
+    if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
+        if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
+            let worker = task.assignee.as_deref().unwrap_or("remote");
+            let worker = scan.agent_id_to_name.get(worker).map(String::as_str).unwrap_or(worker).to_string();
+            let edge = match (event, task.status) {
+                (Some("task_completed"), cas_types::TaskStatus::Closed) => Some(crate::ui::factory::director::DirectorEvent::TaskCompleted {
+                    task_id: task.id.clone(), task_title: task.title.clone(), worker,
+                }),
+                (Some("task_blocked"), cas_types::TaskStatus::Blocked) => Some(crate::ui::factory::director::DirectorEvent::TaskBlocked {
+                    task_id: task.id.clone(), task_title: task.title.clone(), worker,
+                }),
+                _ => None,
+            };
+            if let Some(edge) = edge.filter(|edge| matches_event_filter(reminder, edge)) {
+                fire_reminder(reminder, reminders,
+                    &Some(crate::store::open_supervisor_queue_store(&scan.cas_dir)?),
+                    &Some(crate::store::open_prompt_queue_store(&scan.cas_dir)?),
+                    &scan.session_name, &scan.supervisor_name, &scan.agent_id_to_name,
+                    Some(&ReminderTriggerContext::director(&edge)), &scan.cas_dir);
+                return Ok(());
+            }
+            if task.is_terminal() {
+                if task.status == cas_types::TaskStatus::Cancelled {
+                    task_reminder_notice(scan, reminder, "reminder_cancelled",
+                        &format!("Reminder #{} ended because task {} was cancelled. Inspect the task before continuing. {}",
+                            reminder.id, task.id, reminder.message))?;
+                }
+                cancel_task_reminder(reminders.as_ref(), reminder)?;
+                return Ok(());
+            }
+        }
+    }
+    let ttl_start = reminder.trigger_at.filter(|_| reminder.trigger_type == cas_store::ReminderTriggerType::Time)
+        .unwrap_or(reminder.created_at);
+    if reminder.ttl_secs > 0
+        && chrono::Utc::now().signed_duration_since(ttl_start).num_seconds() > reminder.ttl_secs
+    {
+        // Keep contention bounded; a failed notification retains only this row.
+        let _expiry_budget = cas_store::wait_budget::bound_waits_for(REMINDER_EXPIRY_BUSY_BUDGET);
+        if let Some(task_id) = task_id.filter(|_| task.as_ref().is_none_or(|task| !task.is_terminal())) {
+            task_reminder_notice(scan, reminder, "reminder_expiring",
+                &format!("Reminder #{} reached its {}s deadline while task {} is still unfinished. This wait will expire; inspect the task and re-arm it if needed. {}",
+                    reminder.id, reminder.ttl_secs, task_id, reminder.message))?;
+        }
+        reminders.expire(reminder.id)?;
+    }
+    Ok(())
+}
+
 /// One reminder pass (`ReminderScan`): expire stale reminders, fire due time
 /// reminders, the external and CI conditions observed true, and event
 /// reminders matching the tick's director events. Store reads and writes, so
 /// it runs as a job on the write lane, never on the loop.
 fn run_reminder_scan(scan: ReminderScanInput) {
+    if let Err(error) = reconcile_task_reminders(&scan) {
+        tracing::warn!(%error, "could not read pending reminders for reconciliation; retrying next pass");
+    }
     use crate::store::{
         open_prompt_queue_store, open_reminder_store, open_supervisor_queue_store,
     };
@@ -12131,6 +12406,10 @@ fn run_reminder_scan(scan: ReminderScanInput) {
         ci_wakes,
     } = scan;
 
+    if let Err(error) = crate::factory_capacity_wait::reconcile(
+        &cas_dir, Some(&session_name), chrono::Utc::now())
+    { tracing::warn!(%error, "capacity wait reconciliation failed; retrying next reminder scan"); }
+
     let reminder_store = match open_reminder_store(&cas_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -12138,13 +12417,6 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             return;
         }
     };
-
-    // Expire stale reminders within a small budget. Busy is expected to
-    // self-heal on the next pass; other failures are terminal.
-    report_stale_reminder_expiry(cas_store::expire_stale_bounded(
-        &cas_dir,
-        REMINDER_EXPIRY_BUSY_BUDGET,
-    ));
 
     // Check time-based reminders
     let due_reminders = match reminder_store.get_due_time_reminders() {
@@ -12155,7 +12427,22 @@ fn run_reminder_scan(scan: ReminderScanInput) {
         }
     };
 
+    let split_ready: Vec<_> = reminder_store.get_event_reminders("epic_split_decided")
+        .unwrap_or_default().into_iter().filter_map(|reminder| {
+            let id = reminder.trigger_filter.as_ref()?.get("split_id")?.as_str()?;
+            let split = cas_store::get_epic_split(&cas_dir, id).ok()??;
+            let data = crate::cloud::epic_split::decision_data(&split)?;
+            if !matches_json_filter(reminder.trigger_filter.as_ref(), &data) { return None }
+            let context = ReminderTriggerContext {
+                event_type: "epic_split_decided".into(),
+                description: format!("Epic split {}: {} (decider {})", split.id, split.state.as_str(),
+                    split.decided_by.as_deref().unwrap_or("unknown")),
+                data,
+            };
+            Some((reminder, context))
+        }).collect();
     let any_due = !due_reminders.is_empty()
+        || !split_ready.is_empty()
         || !events.is_empty()
         || !external_ready.is_empty()
         || !ci_wakes.is_empty();
@@ -12176,6 +12463,9 @@ fn run_reminder_scan(scan: ReminderScanInput) {
         ) {
             continue;
         }
+        // cas-73b89: a reminder whose event arrived during a worker hold is
+        // re-armed as due now and still carries that event.
+        let caught = reminder.fired_event.as_ref().and_then(ReminderTriggerContext::caught_during_hold);
         fire_reminder(
             reminder,
             &reminder_store,
@@ -12184,12 +12474,18 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             &session_name,
             &supervisor_name,
             &agent_id_to_name,
-            None,
+            caught.as_ref(),
             &cas_dir,
         );
     }
 
     for (reminder, context) in &external_ready {
+        if let Err(error) = crate::qa_post_release::start_from_reminder(&cas_dir,reminder) {
+            if !crate::qa_post_release::lock_contention(&error) {
+                tracing::warn!(%error,"post-release fallback start failed; reminder remains pending");
+            }
+            continue;
+        }
         fire_reminder(
             reminder,
             &reminder_store,
@@ -12217,9 +12513,37 @@ fn run_reminder_scan(scan: ReminderScanInput) {
         );
     }
 
+    for (reminder, context) in &split_ready {
+        if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &session_name) {
+            fire_reminder(reminder, &reminder_store, &supervisor_queue, &prompt_queue,
+                &session_name, &supervisor_name, &agent_id_to_name, Some(context), &cas_dir);
+        }
+    }
+
     // Check event-based reminders against detected events
     for event in &events {
         let event_type = event.event_type();
+        // cas-73b89: a held worker's reminder does not fire, but keeps the
+        // first matching event so release can deliver it at once. A store
+        // error here would lose that wake, so it is logged (cas-c5ab).
+        let suspended = reminder_store
+            .get_suspended_event_reminders(event_type)
+            .unwrap_or_else(|error| {
+                tracing::warn!(event_type, %error, "failed to read held workers' reminders; this event will not reach them");
+                Vec::new()
+            });
+        for reminder in suspended {
+            if reminder_matches_factory_session(
+                reminder.session_id.as_deref(),
+                reminder.cross_session,
+                &session_name,
+            ) && matches_event_filter(&reminder, event)
+                && let Err(error) = reminder_store
+                    .catch_suspended_event(reminder.id, &ReminderTriggerContext::director(event).to_json())
+            {
+                tracing::warn!(reminder_id = reminder.id, event_type, %error, "failed to record an event for a held worker's reminder; release will not deliver it");
+            }
+        }
         let candidates = match reminder_store.get_event_reminders(event_type) {
             Ok(r) => r,
             Err(_) => continue,
@@ -12277,13 +12601,7 @@ pub(super) fn fire_reminder(
     };
 
     // Build event JSON for persistence
-    let event_json = triggering_event.map(|event| {
-        serde_json::json!({
-            "event_type": event.event_type,
-            "data": event.data,
-            "description": event.description,
-        })
-    });
+    let event_json = triggering_event.map(ReminderTriggerContext::to_json);
 
     // Mark as fired first to prevent double-fire on next tick
     if let Err(e) = reminder_store.mark_fired(reminder.id, event_json.as_ref()) {
@@ -12471,12 +12789,14 @@ fn matches_event_filter(
     reminder: &cas_store::Reminder,
     event: &crate::ui::factory::director::DirectorEvent,
 ) -> bool {
-    let filter = match &reminder.trigger_filter {
+    matches_json_filter(reminder.trigger_filter.as_ref(), &event.to_json())
+}
+
+fn matches_json_filter(filter: Option<&serde_json::Value>, event_data: &serde_json::Value) -> bool {
+    let filter = match filter {
         Some(f) => f,
         None => return true, // No filter = match any event of this type
     };
-
-    let event_data = event.to_json();
 
     match (filter.as_object(), event_data.as_object()) {
         (Some(filter_obj), Some(event_obj)) => {
@@ -12852,7 +13172,7 @@ mod tests {
         is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
         prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
         registration_timeout_detail, reminder_matches_factory_session,
-        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
+        shutdown_targets, spawn_predates_shutdown,
         spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
         timeout_pane_tail, worker_exit_info,
@@ -12867,7 +13187,7 @@ mod tests {
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::io::Write;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
@@ -12982,7 +13302,9 @@ mod tests {
             Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
         prompt_store.init().unwrap();
         let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
-        let mut old_owner = cas_types::Agent::new("supervisor-1".into(), "old-supervisor".into());
+        let mut old_owner = cas_types::Agent::new_with_role(
+            "supervisor-1".into(), "old-supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
         old_owner.status = cas_types::AgentStatus::Shutdown;
         old_owner.factory_session = Some("old-factory-session".into());
         agent_store.register(&old_owner).unwrap();
@@ -13091,6 +13413,196 @@ mod tests {
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
     }
 
+    #[test]
+    fn accepted_split_last_remote_child_wakes_epic_owner_once_cas_d8a1() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas = root.path();
+        let agents = crate::store::open_agent_store(cas).unwrap();
+        let mut owner = cas_types::Agent::new_with_role(
+            "epic-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        agents.register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(cas).unwrap();
+        let mut epic = Task::new("cas-ready".into(), "Split epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.epic_verification_owner = Some(owner.id.clone());
+        tasks.add(&epic).unwrap();
+        for id in ["cas-remote", "cas-extra"] {
+            let task = Task::new(id.into(), "child".into());
+            tasks.add(&task).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(
+                id.into(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        }
+        let now = chrono::Utc::now();
+        cas_store::insert_epic_split(cas, &cas_store::EpicSplit {
+            id: "split-ready".into(), epic_id: epic.id.clone(), local_agent_id: owner.id.clone(),
+            peer_agent_id: "soundwave-peer".into(), peer_name: "peer".into(), peer_machine: "soundwave".into(),
+            direction: cas_store::SplitDirection::Outgoing, mine: vec![], theirs: vec!["cas-remote".into(), "cas-released".into()],
+            state: cas_store::SplitState::Accepted, reason: None, message_id: None,
+            expires_at: now + chrono::Duration::minutes(30), created_at: now, decided_at: Some(now),
+            decided_by: Some("soundwave-peer".into()), cleanup_pending: false, expiry_notice_pending: false,
+        }).unwrap();
+        // A released share no longer belongs to this epic, even if its old
+        // task row is absent locally. Readiness follows the live split projection.
+        cas_store::mark_epic_split_child_released(cas, "split-ready", "cas-released", now).unwrap();
+        let queue = crate::store::open_prompt_queue_store(cas).unwrap();
+        for id in ["cas-remote", "cas-extra"] {
+            crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();
+            assert!(queue.peek_all(10).unwrap().is_empty());
+            // Apply the same persisted task transition as a Cloud pull, without a local director edge.
+            let old = tasks.get(id).unwrap();
+            let mut closed = old.clone();
+            closed.status = TaskStatus::Closed;
+            tasks.update_from_sync(&closed, &old).unwrap();
+        }
+        owner.status = cas_types::AgentStatus::Shutdown;
+        agents.register(&owner).unwrap();
+        let mut successor = cas_types::Agent::new_with_role(
+            "epic-successor".into(), owner.name.clone(), cas_types::AgentRole::Supervisor);
+        successor.factory_session = Some("successor-session".into());
+        agents.register(&successor).unwrap();
+        for _ in 0..2 {
+            crate::cloud::epic_split::reconcile(cas, "successor-session", now).unwrap();
+        }
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, owner.name);
+        // pin: EPIC READY identifies the actionable release handoff.
+        assert!(rows[0].prompt.contains("EPIC READY: all children closed"));
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(FactoryDaemon::supervisor_wake_class(
+            &super::WakeSender::Daemon, &owner.name, &rows[0].source, &rows[0].prompt).is_some());
+        queue.mark_processed(rows[0].id).unwrap();
+        crate::cloud::epic_split::reconcile(cas, "successor-session", now).unwrap();
+        assert!(queue.peek_all(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ended_reminder_owner_cannot_stall_later_task_waits_cas_d8a1() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas = root.path();
+        let mut owner = cas_types::Agent::new_with_role(
+            "live-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        crate::store::open_agent_store(cas).unwrap().register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(cas).unwrap();
+        for id in ["cas-live", "cas-done"] {
+            tasks.add(&Task::new(id.into(), id.into())).unwrap();
+        }
+        let reminders = crate::store::open_reminder_store(cas).unwrap();
+        let mut ids = Vec::new();
+        for (owner_id, task_id, ttl) in [
+            ("deleted-owner", "cas-live", 60),
+            (owner.id.as_str(), "cas-done", 0),
+            (owner.id.as_str(), "cas-live", 60),
+        ] {
+            ids.push(reminders.create_with_scope(owner_id, None, "watch remote task",
+                cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
+                Some(&serde_json::json!({"task_id": task_id})), ttl,
+                Some("owner-session"), None, true, None).unwrap());
+        }
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE reminders SET created_at = datetime('now', '-2 hours')", []).unwrap();
+        let old = tasks.get("cas-done").unwrap();
+        let mut closed = old.clone(); closed.status = TaskStatus::Closed;
+        tasks.update_from_sync(&closed, &old).unwrap();
+        for _ in 0..2 {
+            super::run_reminder_scan(super::ReminderScanInput {
+                cas_dir: cas.to_path_buf(), session_name: "owner-session".into(), supervisor_name: owner.name.clone(),
+                agent_id_to_name: HashMap::from([(owner.id.clone(), owner.name.clone())]),
+                events: vec![], external_ready: vec![], ci_wakes: vec![],
+            });
+        }
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired.len(), 1, "an orphan before this reminder cannot suppress its remote close");
+        assert_eq!(fired[0].id, ids[1]);
+        assert!(reminders.list_all_pending().unwrap().is_empty(), "orphan and later finite waits must expire");
+        let ended = reminders.list_recently_ended(&owner.id, 86400).unwrap();
+        assert!(ended.iter().any(|row| row.id == ids[2] && row.status == cas_store::ReminderStatus::Expired));
+        let rows = crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap();
+        assert_eq!(rows.iter().filter(|row| cas_store::parse_reminder_delivery_id(&row.prompt) == Some(ids[1])).count(), 1);
+    }
+
+    #[tokio::test]
+    async fn bound_task_reminder_survives_phase_and_observes_remote_close_cas_d8a1() {
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas = root.path();
+        let core = crate::mcp::CasCore::with_daemon(cas.to_path_buf(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "reminder-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.set_agent_id_for_testing(owner.id.clone());
+        let tasks = crate::store::open_task_store(cas).unwrap();
+        tasks.add(&Task::new("cas-remote".into(), "remote task".into())).unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::service::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::service::CasService::new(core);
+        for ttl in [None, Some(60)] {
+            let mut req = serde_json::json!({"action": "remind", "remind_event": "task_completed",
+                "remind_filter": "{\"task_id\":\"cas-remote\"}", "cross_session": true,
+                "remind_message": "release after remote completion"});
+            if let Some(ttl) = ttl { req["remind_ttl_secs"] = serde_json::json!(ttl); }
+            service.coordination(Parameters(serde_json::from_value(req).unwrap())).await.unwrap();
+        }
+        let reminders = crate::store::open_reminder_store(cas).unwrap();
+        let pending = reminders.list_pending(&owner.id).unwrap();
+        assert_eq!(pending[0].ttl_secs, 0, "a filtered task wait must outlive a one-hour phase");
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE reminders SET created_at = datetime('now', '-2 hours')", []).unwrap();
+        let scan = || super::run_reminder_scan(super::ReminderScanInput {
+            cas_dir: cas.to_path_buf(), session_name: "owner-session".into(), supervisor_name: owner.name.clone(),
+            agent_id_to_name: HashMap::from([(owner.id.clone(), owner.name.clone())]),
+            events: vec![], external_ready: vec![], ci_wakes: vec![],
+        });
+        scan(); scan();
+        let queue = crate::store::open_prompt_queue_store(cas).unwrap();
+        let notices = queue.peek_all(10).unwrap();
+        assert_eq!(notices.len(), 1, "explicit expiry must visibly notify its owner exactly once");
+        assert_eq!(notices[0].target, owner.name);
+        assert!(FactoryDaemon::supervisor_wake_class(
+            &super::WakeSender::Daemon, &owner.name, &notices[0].source, &notices[0].prompt).is_some());
+        assert_eq!(reminders.list_pending(&owner.id).unwrap().len(), 1);
+        let old = tasks.get("cas-remote").unwrap();
+        let mut closed = old.clone(); closed.status = TaskStatus::Closed;
+        tasks.update_from_sync(&closed, &old).unwrap();
+        scan(); scan();
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["task_id"], "cas-remote");
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        let wake = rows.iter().find(|row| cas_store::parse_reminder_delivery_id(&row.prompt).is_some()).unwrap();
+        assert!(FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, &owner.name, &wake.source, &wake.prompt).is_some());
+
+        let mut cancelled = Task::new("cas-cancelled".into(), "cancelled wait".into());
+        tasks.add(&cancelled).unwrap();
+        let cancelled_id = reminders.create_with_scope(&owner.id, None, "wait for cancelled task",
+            cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
+            Some(&serde_json::json!({"task_id": cancelled.id})), 0,
+            Some("owner-session"), None, true, None).unwrap();
+        let stale = reminders.list_pending(&owner.id).unwrap().into_iter()
+            .find(|row| row.id == cancelled_id).unwrap();
+        let old = cancelled.clone(); cancelled.status = TaskStatus::Cancelled;
+        tasks.update_from_sync(&cancelled, &old).unwrap();
+        scan(); scan();
+        assert!(reminders.list_pending(&owner.id).unwrap().is_empty());
+        let rows = queue.peek_all(20).unwrap();
+        let notices: Vec<_> = rows.iter().filter(|row| row.prompt.contains("reminder_cancelled")).collect();
+        assert_eq!(notices.len(), 1, "task cancellation must visibly end its wait once");
+        assert_eq!(notices[0].target, owner.name);
+        assert!(FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon,
+            &owner.name, &notices[0].source, &notices[0].prompt).is_some());
+        // A concurrent pass can retain this same stale snapshot after another
+        // daemon cancelled it: cancellation must be idempotent at that seam.
+        super::cancel_task_reminder(reminders.as_ref(), &stale).unwrap();
+    }
+
     /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
     /// satisfied wake fires once with the run conclusions.
     #[test]
@@ -13136,89 +13648,188 @@ mod tests {
         assert!(super::ci_completed_candidates(temp.path(), "factory-a").is_empty());
     }
 
-    /// GH #1015: a foreign factory must not consume a time reminder while
-    /// its original target is still active in this project's agent store.
+    /// cas-73b89: hold, the awaited event during the hold, release, and the
+    /// worker is woken with that event. Cancelling on hold left kind-hound-79
+    /// with no wake for about an hour.
     #[test]
-    fn cross_session_time_reminder_waits_for_its_target_across_factories() {
+    fn held_worker_reminder_wakes_worker_with_event_caught_during_hold() {
         let temp = tempfile::TempDir::new().unwrap();
-        let reminder_store: Arc<dyn cas_store::ReminderStore> =
+        let reminders: Arc<dyn cas_store::ReminderStore> =
             Arc::new(cas_store::SqliteReminderStore::open(temp.path()).unwrap());
-        reminder_store.init().unwrap();
-        let supervisor_store: Arc<dyn cas_store::SupervisorQueueStore> =
-            Arc::new(cas_store::SqliteSupervisorQueueStore::open(temp.path()).unwrap());
-        supervisor_store.init().unwrap();
-        let prompt_store: Arc<dyn cas_store::PromptQueueStore> =
+        reminders.init().unwrap();
+        let prompts: Arc<dyn cas_store::PromptQueueStore> =
             Arc::new(cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap());
-        prompt_store.init().unwrap();
-        let agent_store = crate::store::open_agent_store(temp.path()).unwrap();
-        let mut owner = cas_types::Agent::new("owner-id".into(), "young-swan-22".into());
-        owner.role = cas_types::AgentRole::Supervisor;
-        owner.factory_session = Some("origin-factory".into());
-        agent_store.register(&owner).unwrap();
-
-        let id = reminder_store
-            .create_with_scope(
-                "owner-id",
-                None,
-                "check PR 2514",
-                cas_store::ReminderTriggerType::Time,
-                Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
-                None,
-                None,
-                3600,
-                Some("origin-factory"),
-                Some("creator-session"),
-                true,
-                None,
+        prompts.init().unwrap();
+        let filter = serde_json::json!({"task_id": "cas-927a"});
+        let id = reminders
+            .create(
+                "worker-id", None, "red run finished", cas_store::ReminderTriggerType::Event,
+                None, Some("task_completed"), Some(&filter), 3600, Some("factory-a"),
             )
             .unwrap();
-        let reminder = reminder_store
-            .get_due_time_reminders()
-            .unwrap()
-            .into_iter()
-            .find(|reminder| reminder.id == id)
-            .unwrap();
-        assert!(super::reminder_matches_factory_session(
-            reminder.session_id.as_deref(),
-            reminder.cross_session,
-            "foreign-factory"
-        ));
+        let scan = |events| {
+            super::run_reminder_scan(super::ReminderScanInput {
+                cas_dir: temp.path().to_path_buf(),
+                session_name: "factory-a".to_string(),
+                supervisor_name: "supervisor".to_string(),
+                agent_id_to_name: HashMap::from([("worker-id".to_string(), "kind-hound".to_string())]),
+                events,
+                external_ready: Vec::new(),
+                ci_wakes: Vec::new(),
+            })
+        };
 
-        // The foreign daemon lacks owner-id in its own pane map. Its fallback
-        // supervisor (golden-spider-80) must not receive the prompt.
-        super::fire_reminder(
-            &reminder,
-            &reminder_store,
-            &Some(Arc::clone(&supervisor_store)),
-            &Some(Arc::clone(&prompt_store)),
-            "foreign-factory",
-            "golden-spider-80",
-            &HashMap::new(),
-            None,
-            temp.path(),
-        );
-        assert_eq!(reminder_store.get_due_time_reminders().unwrap().len(), 1);
-        assert!(prompt_store.peek_all(10).unwrap().is_empty());
-        assert!(supervisor_store.peek("owner-id", 10).unwrap().is_empty());
+        assert_eq!(reminders.suspend_pending_for_target("worker-id").unwrap(), 1);
+        scan(vec![crate::ui::factory::director::DirectorEvent::TaskCompleted {
+            task_id: "cas-927a".to_string(),
+            task_title: "red run".to_string(),
+            worker: "kind-hound".to_string(),
+        }]);
+        assert_eq!(prompts.peek_all(10).unwrap().len(), 0);
 
-        // The owner is present in its factory's map, so the same due row can
-        // fire to that exact pane without changing the cross-session gate.
-        super::fire_reminder(
-            &reminder,
-            &reminder_store,
-            &Some(Arc::clone(&supervisor_store)),
-            &Some(Arc::clone(&prompt_store)),
-            "origin-factory",
-            "origin-supervisor",
-            &HashMap::from([("owner-id".into(), "young-swan-22".into())]),
-            None,
-            temp.path(),
-        );
-        let prompts = prompt_store.peek_all(10).unwrap();
-        assert_eq!(prompts.len(), 1);
-        assert_eq!(prompts[0].target, "young-swan-22");
-        assert_eq!(prompts[0].factory_session.as_deref(), Some("origin-factory"));
-        assert!(reminder_store.get_due_time_reminders().unwrap().is_empty());
+        assert_eq!(reminders.resume_suspended_for_target("worker-id").unwrap(), 1);
+        scan(Vec::new());
+        let woken = prompts.peek_all(10).unwrap();
+        assert_eq!(woken.len(), 1);
+        assert_eq!(woken[0].target, "kind-hound");
+        assert_eq!(cas_store::parse_reminder_delivery_id(&woken[0].prompt), Some(id));
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["task_id"], "cas-927a");
+    }
+
+    /// cas-923c / GH #1015: a missing worker pane is not a delegation to the
+    /// supervisor. Only a retired supervisor's target can move to its successor.
+    #[test]
+    fn reminder_delivery_preserves_owner_and_target_across_retirement_cas_923c() {
+        use cas_types::{Agent, AgentRole, AgentStatus};
+
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let mut mismatches = Vec::new();
+        for role in [
+            AgentRole::Worker,
+            AgentRole::Standard,
+            AgentRole::Director,
+            AgentRole::Supervisor,
+        ] {
+            for delegated in [false, true] {
+                for cross_session in [false, true] {
+                    let temp = tempfile::TempDir::new().unwrap();
+                    let reminders = crate::store::open_reminder_store(temp.path()).unwrap();
+                    let prompts = crate::store::open_prompt_queue_store(temp.path()).unwrap();
+                    let agents = crate::store::open_agent_store(temp.path()).unwrap();
+                    let mut target =
+                        Agent::new_with_role("target-id".into(), "original-target".into(), role);
+                    target.factory_session = Some("origin-factory".into());
+                    agents.register(&target).unwrap();
+                    let owner_id = if delegated { "worker-id" } else { &target.id };
+                    if delegated {
+                        let mut worker = Agent::new_with_role(
+                            owner_id.into(),
+                            "issuing-worker".into(),
+                            AgentRole::Worker,
+                        );
+                        worker.factory_session = Some("origin-factory".into());
+                        agents.register(&worker).unwrap();
+                    }
+                    let id = reminders
+                        .create_with_scope(
+                            owner_id,
+                            delegated.then_some(target.id.as_str()),
+                            "checkpoint",
+                            cas_store::ReminderTriggerType::Time,
+                            Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+                            None,
+                            None,
+                            3600,
+                            Some("origin-factory"),
+                            Some("creator-session"),
+                            cross_session,
+                            None,
+                        )
+                        .unwrap();
+                    let scan = |session: &str, names| {
+                        super::run_reminder_scan(super::ReminderScanInput {
+                            cas_dir: temp.path().to_path_buf(),
+                            session_name: session.into(),
+                            supervisor_name: "replacement-supervisor".into(),
+                            agent_id_to_name: names,
+                            events: Vec::new(),
+                            external_ready: Vec::new(),
+                            ci_wakes: Vec::new(),
+                        })
+                    };
+
+                    // A foreign factory cannot consume a still-active target's row,
+                    // even when the reminder explicitly survives its creator session.
+                    scan("foreign-factory", HashMap::new());
+                    assert!(prompts.peek_all(10).unwrap().is_empty());
+                    assert_eq!(reminders.list_pending(owner_id).unwrap().len(), 1);
+
+                    target.status = AgentStatus::Shutdown;
+                    agents.register(&target).unwrap();
+                    scan("origin-factory", HashMap::new());
+                    scan("origin-factory", HashMap::new());
+                    let rows = prompts.peek_all(10).unwrap();
+                    let observed: Vec<_> = rows
+                        .iter()
+                        .map(|row| (row.source.as_str(), row.target.as_str()))
+                        .collect();
+                    let expected = if role == AgentRole::Supervisor {
+                        vec![(
+                            if delegated {
+                                "issuing-worker"
+                            } else {
+                                "replacement-supervisor"
+                            },
+                            "replacement-supervisor",
+                        )]
+                    } else {
+                        Vec::new()
+                    };
+                    if observed != expected {
+                        mismatches.push(format!("{role} delegated={delegated} cross_session={cross_session}: expected {expected:?}, got {observed:?}"));
+                    }
+                    if role != AgentRole::Supervisor && rows.is_empty() {
+                        assert_eq!(reminders.list_pending(owner_id).unwrap().len(), 1);
+                        // The original target returns: only it gets the reminder,
+                        // retaining the issuer rather than impersonating a supervisor.
+                        target.status = AgentStatus::Active;
+                        agents.register(&target).unwrap();
+                        scan(
+                            "origin-factory",
+                            HashMap::from([(target.id.clone(), target.name.clone())]),
+                        );
+                        let rows = prompts.peek_all(10).unwrap();
+                        assert_eq!(rows.len(), 1);
+                        assert_eq!(rows[0].target, "original-target");
+                        assert_eq!(
+                            rows[0].source,
+                            if delegated {
+                                "issuing-worker"
+                            } else {
+                                "original-target"
+                            }
+                        );
+                        assert_eq!(
+                            cas_store::parse_reminder_delivery_id(&rows[0].prompt),
+                            Some(id)
+                        );
+                        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+                    }
+                    let fired = reminders.list_recently_fired(60).unwrap();
+                    assert_eq!(fired.len(), 1);
+                    assert_eq!(
+                        fired[0].owner_id, owner_id,
+                        "durable issuer stays unchanged"
+                    );
+                    assert_eq!(
+                        fired[0].target_id, target.id,
+                        "durable target stays unchanged"
+                    );
+                }
+            }
+        }
+        assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
 
     /// cas-207e: a Commander ask's deadline reminder fires as a
@@ -13343,20 +13954,6 @@ mod tests {
         }
         assert_eq!(super::delivery_stalled_threshold_before_abandonment(10 * 60), 10 * 60);
         assert_eq!(super::delivery_stalled_threshold_before_abandonment(0), 0);
-    }
-
-    #[derive(Clone)]
-    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     /// Trust is a possible diagnosis only with a missing project entry in the
@@ -13831,49 +14428,6 @@ mod tests {
     }
 
     #[test]
-    fn reminder_expiry_defers_transient_busy_at_warn() {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let writer_logs = Arc::clone(&logs);
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            report_stale_reminder_expiry(Ok(cas_store::ReminderExpiryOutcome::DeferredBusy));
-        });
-
-        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("WARN "));
-        assert!(output.contains("deferring stale reminder expiry"));
-        assert!(!output.contains("ERROR "));
-    }
-
-    #[test]
-    fn reminder_expiry_logs_terminal_failure_at_error() {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let writer_logs = Arc::clone(&logs);
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            report_stale_reminder_expiry(Err(cas_store::StoreError::NotFound(
-                "reminder table missing".to_string(),
-            )));
-        });
-
-        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("ERROR "));
-        assert!(output.contains("Failed to expire stale reminders"));
-    }
-
-    #[test]
     fn composer_deferred_delivery_stays_durable_across_restart_cas_0b64() {
         let temp = tempfile::TempDir::new().unwrap();
         let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
@@ -14196,6 +14750,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }
     }
 
@@ -14408,10 +14963,9 @@ mod tests {
         assert!(!stale.allowed, "{}", stale.reason);
     }
 
-    /// Ordinary worker traffic keeps cas-dab2's inbox-only rule — this task
-    /// deliberately did not widen that; cas-d9a8 owns it.
+    /// Authenticated worker field reports use the same idle gate as peers.
     #[test]
-    fn an_ordinary_worker_message_is_still_inbox_only() {
+    fn an_ordinary_worker_message_wakes_an_idle_supervisor_cas_1e7e2() {
         let now = chrono::Utc::now();
         let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
 
@@ -14426,9 +14980,8 @@ mod tests {
             now,
         );
 
-        assert!(!decision.allowed);
-        assert_eq!(decision.kind, WakeOutcome::NotApplicable);
-        assert!(decision.reason.contains("cas-dab2"), "{}", decision.reason);
+        assert!(decision.allowed);
+        assert_eq!(decision.kind, WakeOutcome::Allowed);
     }
 
     /// THE BUG cas-d9a8 EXISTS FOR. A registered worker's merge request is the
@@ -14475,7 +15028,7 @@ mod tests {
             decision.reason
         );
 
-        // Same sender, same claim, no CAS envelope: still inbox-only.
+        // Ordinary authenticated text now qualifies too, without a typed merge class.
         let free_text = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
@@ -14486,8 +15039,8 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!free_text.allowed, "{}", free_text.reason);
-        assert_eq!(free_text.kind, WakeOutcome::NotApplicable);
+        assert!(free_text.allowed, "{}", free_text.reason);
+        assert_eq!(free_text.kind, WakeOutcome::Allowed);
 
         // Same envelope, unstamped row: a client that copies the envelope
         // grammar out of a transcript still cannot type into the pane.
@@ -14535,9 +15088,7 @@ mod tests {
         );
         assert_eq!(decision.kind, WakeOutcome::Allowed);
 
-        // THE HALF THAT KEEPS cas-dab2 CLOSED. The same worker shouting the
-        // same word, with no CAS envelope, is still inbox-only: the gate reads
-        // the envelope, never the vocabulary.
+        // Ordinary text wakes too; the typed blocker class still requires its envelope.
         let shouted = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
@@ -14548,8 +15099,8 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!shouted.allowed, "{}", shouted.reason);
-        assert_eq!(shouted.kind, WakeOutcome::NotApplicable);
+        assert!(shouted.allowed, "{}", shouted.reason);
+        assert_eq!(shouted.kind, WakeOutcome::Allowed);
 
         // And an unstamped row carrying a byte-identical envelope — what
         // `cas factory message --from …` and bridge POST /message produce —
@@ -14589,6 +15140,7 @@ mod tests {
             "swift-fox",
             "demo_statement",
             crate::prompt_revalidation::QaDeliveryLocation::ParkedForMerge,
+            None,
         );
         let source = "qa-dispatch:qapass-1";
         let decision = FactoryDaemon::supervisor_wake_decision(
@@ -14614,7 +15166,7 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!free_text.allowed, "{}", free_text.reason);
+        assert!(free_text.allowed, "{}", free_text.reason);
     }
 
     /// cas-8725: the measured stall. A worker's close enters verification, CAS
@@ -14682,8 +15234,7 @@ mod tests {
         );
         assert!(!unstamped.allowed, "{}", unstamped.reason);
 
-        // Free text naming the same dispatch stays inbox-only — this is the
-        // exact message shape that failed, and it must keep failing.
+        // Ordinary authenticated text wakes too, without borrowing a dispatch class.
         let retyped = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
@@ -14694,8 +15245,8 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!retyped.allowed, "{}", retyped.reason);
-        assert_eq!(retyped.kind, WakeOutcome::NotApplicable);
+        assert!(retyped.allowed, "{}", retyped.reason);
+        assert_eq!(retyped.kind, WakeOutcome::Allowed);
     }
 
     /// A Daemon-stamped row that is neither a lifecycle wake nor one of the
@@ -14755,14 +15306,14 @@ mod tests {
         );
         assert_eq!(refused.kind.as_str(), "wake_declined_by_policy");
 
-        // Ordinary chatter on the same quiet pane: nothing is wrong.
+        // A pure acknowledgement on the same quiet pane deliberately stays quiet.
         let routine = FactoryDaemon::supervisor_wake_decision(
             &data,
             "cosmic-bear-43",
             "cosmic-bear-43",
             &worker_sender("swift-fox"),
             "swift-fox",
-            "status: still building",
+            "thanks, received",
             quiet_pane(),
             now,
         );
@@ -14828,7 +15379,7 @@ mod tests {
             quiet_pane(),
             now,
         );
-        assert!(!ordinary.allowed, "free text remains inbox-only");
+        assert!(ordinary.allowed, "authenticated ordinary directed messages wake after scheduling");
 
         let mismatched_sender = crate::prompt_revalidation::attach_worker_action_envelope(
             "status: review my update",
@@ -14843,8 +15394,8 @@ mod tests {
                 "swift-fox",
                 &mismatched_sender,
             ),
-            None,
-            "the envelope worker must match the registry sender"
+            Some(SupervisorWakeClass::DirectedMessage),
+            "a mismatched envelope carries only ordinary directed-message intent"
         );
     }
 
@@ -14896,8 +15447,8 @@ mod tests {
                     "swift-fox",
                     &neutralized,
                 ),
-                None,
-                "worker-authored CAS tags must stay inbox-only"
+                Some(SupervisorWakeClass::DirectedMessage),
+                "neutralized tags cannot grant a typed action class"
             );
         }
     }
@@ -15065,9 +15616,9 @@ mod tests {
         let now = chrono::Utc::now();
         let data = director_data_with(vec![agent_summary("cosmic-bear-43", None, None, None)]);
 
-        // Plain worker→supervisor message: unchanged, inbox only.
+        // Authenticated directed messages qualify; the pane veto still protects drafts.
         assert!(
-            !FactoryDaemon::delivery_should_nudge_pane(
+            FactoryDaemon::delivery_should_nudge_pane(
                 &data,
                 "cosmic-bear-43",
                 "cosmic-bear-43",
@@ -15077,7 +15628,7 @@ mod tests {
                 quiet_pane(),
                 now,
             ),
-            "cas-dab2: relayed worker chatter must never PTY-inject into the supervisor pane"
+            "authenticated directed messages may wake an idle supervisor"
         );
 
         // Forged source + arbitrary body: rejected, because no lifecycle
@@ -16205,9 +16756,9 @@ mod tests {
         );
     }
 
-    /// Only genuine lifecycle wake rows enter the throttle — the daemon gates
-    /// on `row_is_supervisor_wake`, so ordinary traffic keeps its existing
-    /// delivery semantics untouched.
+    /// The wake-row cadence covers authenticated directed messages as well
+    /// as lifecycle events. Quiet acknowledgements and untrusted sources do
+    /// not acquire wake bookkeeping (cas-1e7e2).
     #[test]
     fn the_throttle_only_covers_genuine_lifecycle_wake_rows() {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
@@ -16225,13 +16776,22 @@ mod tests {
             "the storm rows (lifecycle-wake source + lifecycle envelope) must be throttled"
         );
         assert!(
-            !FactoryDaemon::row_is_supervisor_wake(
+            FactoryDaemon::row_is_supervisor_wake(
                 &worker_sender("swift-fox"),
                 "cosmic-bear-43",
                 "supervisor",
                 "plain worker message"
             ),
-            "an ordinary message must not be routed through the lifecycle throttle"
+            "an authenticated directed message shares the bounded wake retry cadence"
+        );
+        assert!(
+            !FactoryDaemon::row_is_supervisor_wake(
+                &worker_sender("swift-fox"),
+                "cosmic-bear-43",
+                "swift-fox",
+                "thanks, received"
+            ),
+            "a pure acknowledgement must not acquire wake bookkeeping"
         );
         assert!(
             !FactoryDaemon::row_is_supervisor_wake(
@@ -16581,8 +17141,8 @@ mod tests {
             &source,
             &awaiting_merge_payload("cas-f02b")
         ));
-        // Ordinary traffic is consumed normally — no retry semantics.
-        assert!(!FactoryDaemon::row_is_supervisor_wake(
+        // Authenticated directed traffic remains pending until it can wake.
+        assert!(FactoryDaemon::row_is_supervisor_wake(
             &worker_sender("swift-fox"),
             "cosmic-bear-43",
             "swift-fox",
@@ -17310,6 +17870,14 @@ mod tests {
         assert!(prompts[0].prompt.contains("request 407"));
         // pin: worker status relies on the registration-failure stage saved in the notice.
         assert!(prompts[0].prompt.contains("stage=register"));
+        assert_eq!(prompts[0].priority, cas_store::NotificationPriority::Critical);
+        assert_eq!(prompts[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(
+                &WakeSender::Daemon, "keen-crane", &prompts[0].source, &prompts[0].prompt,
+            ),
+            Some(SupervisorWakeClass::Blocker),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -18327,6 +18895,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         };
 
         assert!(
@@ -18629,42 +19198,42 @@ mod urgent_wake_probe_tests {
     #[test]
     fn normal_watchdog_retries_idle_codex_then_flags_cas_6e76() {
         use super::{
-            NORMAL_DELIVERY_OBSERVE_WINDOW, NormalDeliveryProbeAction, NormalDeliveryTurnEvidence,
+            NORMAL_DELIVERY_MAX_NUDGES, NormalDeliveryProbeAction, NormalDeliveryTurnEvidence,
             normal_delivery_probe_action, normal_delivery_probe_due,
         };
 
         let start = Instant::now();
         assert!(
-            !normal_delivery_probe_due(start, None, start + Duration::from_secs(30)),
+            !normal_delivery_probe_due(start, None, start + Duration::from_secs(20)),
             "inside the first window the probe reads no evidence at all"
         );
-        assert!(normal_delivery_probe_due(
-            start,
-            None,
-            start + NORMAL_DELIVERY_OBSERVE_WINDOW
-        ));
+        // cas-badb (GH #1302): the first check is 30s after delivery.
+        assert!(normal_delivery_probe_due(start, None, start + Duration::from_secs(30)));
+        // cas-badb (GH #1302): a turnless recipient is re-woken at every
+        // check until the nudges run out, never just once.
+        for nudges in 0..NORMAL_DELIVERY_MAX_NUDGES {
+            assert_eq!(
+                normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, nudges),
+                NormalDeliveryProbeAction::RetryNormalNudge,
+                "nudge {nudges} of {NORMAL_DELIVERY_MAX_NUDGES}"
+            );
+        }
         assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, None),
-            NormalDeliveryProbeAction::RetryNormalNudge,
-            "an idle normal recipient gets exactly one normal retry at the cadence"
-        );
-        let nudged_at = start + NORMAL_DELIVERY_OBSERVE_WINDOW;
-        assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::TurnStarted, Some(nudged_at)),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::TurnStarted, 1),
             NormalDeliveryProbeAction::Observed,
-            "a recipient that takes a turn after the normal nudge retires the probe"
+            "a recipient that takes a turn after a normal nudge retires the probe"
         );
         assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, Some(nudged_at)),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::NoTurn, NORMAL_DELIVERY_MAX_NUDGES),
             NormalDeliveryProbeAction::FlagSupervisor,
-            "the second turnless window is a supervisor-visible flag, never an auto-urgent"
+            "after the last nudge the stall is a supervisor-visible flag, never an auto-urgent"
         );
         assert_eq!(
             normal_delivery_probe_action(
                 NormalDeliveryTurnEvidence::Unavailable {
                     pane_output_grew: true
                 },
-                None,
+                0,
             ),
             NormalDeliveryProbeAction::Observed,
             "without a readable transcript, post-delivery pane output stays the fallback"
@@ -18674,7 +19243,7 @@ mod urgent_wake_probe_tests {
                 NormalDeliveryTurnEvidence::Unavailable {
                     pane_output_grew: false
                 },
-                None,
+                0,
             ),
             NormalDeliveryProbeAction::RetryNormalNudge
         );
@@ -18694,15 +19263,15 @@ mod urgent_wake_probe_tests {
 
         let echo_only = NormalDeliveryTurnEvidence::NoTurn;
         assert_eq!(
-            normal_delivery_probe_action(echo_only, None),
+            normal_delivery_probe_action(echo_only, 0),
             NormalDeliveryProbeAction::RetryNormalNudge
         );
         assert_eq!(
-            normal_delivery_probe_action(echo_only, Some(Instant::now())),
+            normal_delivery_probe_action(echo_only, super::NORMAL_DELIVERY_MAX_NUDGES),
             NormalDeliveryProbeAction::FlagSupervisor
         );
         assert_eq!(
-            normal_delivery_probe_action(NormalDeliveryTurnEvidence::RecipientBusy, None),
+            normal_delivery_probe_action(NormalDeliveryTurnEvidence::RecipientBusy, 0),
             NormalDeliveryProbeAction::WaitForTurnBoundary,
             "a recipient still inside an earlier turn has the message queued; typing a \
              nudge into a working pane is not the fix"
@@ -18867,6 +19436,7 @@ mod supervisor_decision_wake_tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         };
         DirectorData {
             ready_tasks: vec![],
@@ -19930,6 +20500,7 @@ mod gh_1153_idle_pty_delivery_tests {
                 delivered_at_utc,
                 prompt: prompt.to_string(),
                 nudge_sent_at: None,
+                nudges: 0,
                 next_check_at: None,
             },
         );
@@ -20001,6 +20572,7 @@ mod gh_1153_idle_pty_delivery_tests {
             .get_mut(&row)
             .unwrap()
             .nudge_sent_at = Some(Instant::now());
+        daemon.normal_delivery_probes.get_mut(&row).unwrap().nudges = super::NORMAL_DELIVERY_MAX_NUDGES;
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
         let report = queue.message_delivery_report(row).unwrap().unwrap();
         assert_ne!(
@@ -20195,13 +20767,13 @@ mod gh_1153_idle_pty_delivery_tests {
             .expect("the probe stays open after the nudge");
         assert!(probe.nudge_sent_at.is_some());
 
-        // The nudge also lands only as echo; the second window elapses.
+        assert_eq!(probe.nudges, 1);
+
+        // cas-badb: every nudge lands only as echo until they run out.
         drain_for(&mut daemon, Duration::from_millis(800)).await;
-        daemon
-            .normal_delivery_probes
-            .get_mut(&row)
-            .unwrap()
-            .next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
+        let probe = daemon.normal_delivery_probes.get_mut(&row).unwrap();
+        probe.nudges = super::NORMAL_DELIVERY_MAX_NUDGES;
+        probe.next_check_at = Instant::now().checked_sub(Duration::from_secs(1));
         daemon.resolve_normal_delivery_probes(queue.as_ref()).await;
 
         let report = queue.message_delivery_report(row).unwrap().unwrap();
@@ -20682,7 +21254,8 @@ mod supervisor_notice_wake_tests {
                 "supervisor-notice:42",
                 body
             ),
-            None
+            Some(SupervisorWakeClass::DirectedMessage),
+            "an authenticated worker may wake, but cannot borrow the daemon's Blocker class"
         );
         assert_eq!(
             FactoryDaemon::supervisor_wake_class(

@@ -445,6 +445,7 @@ impl CasService {
                 state_patch,
                 req.delivery_mode.as_deref(),
                 req.merged_into.as_deref(),
+                req.supervisor_override.unwrap_or(false),
             )
             .await
     }
@@ -483,6 +484,7 @@ impl CasService {
             }
         });
         let inner_req = TaskCloseRequest {
+            no_delivery: req.no_delivery,
             // cas-b192: forwarded, not dropped — this is the only path by which
             // the unified `task` tool can reach the epic close override.
             stranded_branch_override: req.stranded_branch_override,
@@ -742,6 +744,17 @@ impl CasService {
         self.inner.cas_task_transfer(Parameters(inner_req)).await
     }
 
+    pub(super) async fn task_rebind_branch(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
+        let id = req.id.ok_or_else(|| self.missing_id("task", "rebind_branch"))?;
+        let branch = req.branch.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "branch required for rebind_branch"))?;
+        let reason = req.reason.ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "reason required for rebind_branch"))?;
+        let core = self.inner.clone();
+        super::mutation_receipt::run_on_blocking_pool(async move {
+            core.rebind_task_branch(&id, &branch, &reason)
+        }).await.unwrap_or_else(|error| Err(Self::error(
+            ErrorCode::INTERNAL_ERROR, format!("Branch approval failed: {error}"))))
+    }
+
     pub(super) async fn task_available(
         &self,
         req: TaskRequest,
@@ -889,6 +902,27 @@ impl CasService {
         self.inner.cas_rule_sync().await
     }
 
+    pub(super) async fn rule_observe(&self, req: RuleRequest) -> Result<CallToolResult, McpError> {
+        let content = req
+            .content
+            .ok_or_else(|| Self::error(ErrorCode::INVALID_PARAMS, "content required for observe"))?;
+        let verdict_link = req.source_ids.ok_or_else(|| {
+            Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "source_ids=<task-id>:<verification-id> required for observe",
+            )
+        })?;
+        let category = req
+            .tags
+            .unwrap_or_default()
+            .split(',')
+            .find_map(|tag| tag.trim().strip_prefix("category:").map(str::to_owned))
+            .unwrap_or_default();
+        self.inner
+            .cas_rule_observe(req.id, content, category, verdict_link)
+            .await
+    }
+
     pub(super) async fn rule_check_similar(
         &self,
         req: RuleRequest,
@@ -924,9 +958,33 @@ impl CasService {
             .filter(|r| r.score >= threshold as f64)
             .collect();
 
+        // cas-f0a1: candidates are matched too, so a repeat observation
+        // counts against the lesson it repeats instead of starting over.
+        let candidates = cas_store::similar_rule_candidates(&self.inner.cas_root, &content)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "Failed to read similar rule candidates");
+                Vec::new()
+            });
+        let mut candidate_report = String::new();
+        if !candidates.is_empty() {
+            candidate_report.push_str(&format!(
+                "\n\nSimilar rule candidates ({}), never surfaced to agents:\n",
+                candidates.len()
+            ));
+            for (candidate, score) in &candidates {
+                candidate_report.push_str(&format!(
+                    "- {} (similarity: {:.0}%, {} task(s)): {}\n",
+                    candidate.id,
+                    score * 100.0,
+                    candidate.distinct_tasks(),
+                    candidate.content.chars().take(200).collect::<String>()
+                ));
+            }
+        }
+
         if similar.is_empty() {
             return Ok(Self::success(format!(
-                "No similar rules found (threshold: {:.0}%)\n\nYou can create a new rule with this content.",
+                "No similar rules found (threshold: {:.0}%){candidate_report}\n\nYou can create a new rule with this content.",
                 threshold * 100.0
             )));
         }
@@ -966,6 +1024,7 @@ impl CasService {
         output.push_str(
             "Consider marking an existing rule as `helpful` instead of creating a duplicate.",
         );
+        output.push_str(&candidate_report);
 
         Ok(Self::success(output))
     }
@@ -1124,4 +1183,59 @@ impl CasService {
     }
 
     // Agent implementations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Seek};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_similar_warns_on_candidate_read_failure_cas_0ab2() {
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        assert!(core.cached_config.set(crate::config::Config::default()).is_ok());
+        let rule = crate::types::Rule::new("cas-0ab2".into(), "Keep candidate reads visible".into());
+        core.open_rule_store().unwrap().init().unwrap();
+        core.open_rule_store().unwrap().add(&rule).unwrap();
+        core.open_search_index().unwrap().index_rule(&rule).unwrap();
+        cas_store::observe_rule_candidate(&root, None, &rule.content, "testing", "cas-0ab2", "ver-1")
+            .unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+
+        for failed_read in [false, true] {
+            if failed_read {
+                // Keep the table present so schema initialization cannot repair it.
+                cas_store::shared_db::shared_connection(&root.join("cas.db"))
+                    .unwrap().lock().unwrap()
+                    .execute_batch("ALTER TABLE rule_candidates RENAME COLUMN category TO missing_category")
+                    .unwrap();
+            }
+            let mut log = tempfile::tempfile().unwrap();
+            let capture = log.try_clone().unwrap();
+            let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || capture.try_clone().unwrap()).finish();
+            let guard = tracing::subscriber::set_default(subscriber);
+            let result = service.rule(Parameters(serde_json::from_value(serde_json::json!({
+                "action": "check_similar", "content": rule.content, "threshold": 0.0
+            })).unwrap())).await.unwrap();
+            drop(guard);
+            let text = result.content.iter().filter_map(|part| part.as_text())
+                .map(|part| part.text.as_str()).collect::<Vec<_>>().join("\n");
+            assert!(text.contains("Found 1 similar rule(s)") && text.contains(&rule.id), "{text}");
+            assert_eq!(text.contains("Similar rule candidates (1)"), !failed_read, "{text}");
+            log.rewind().unwrap();
+            let mut warning = String::new();
+            log.read_to_string(&mut warning).unwrap();
+            assert_eq!(warning.contains("WARN"), failed_read, "{warning}");
+            if failed_read {
+                assert!(warning.contains("candidate") && warning.contains("no such column"), "{warning}");
+            }
+        }
+    }
 }

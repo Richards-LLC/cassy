@@ -1057,6 +1057,7 @@ fn retry_failed_by_reason_requeues_only_matching_terminal_rows() {
     for (id, reason) in [
         ("project-mismatch", "project_mismatch"),
         ("scope-mismatch", "scope_mismatch"),
+        ("nul-notes", "invalid_json_nul"),
     ] {
         queue
             .enqueue(EntityType::Task, id, SyncOperation::Upsert, Some("{}"))
@@ -1077,13 +1078,23 @@ fn retry_failed_by_reason_requeues_only_matching_terminal_rows() {
 
     assert_eq!(
         queue
-            .retry_failed_for_reason("project_mismatch", MAX_RETRIES)
+            .retry_failed_for_reason("invalid_json_nul", MAX_RETRIES)
             .unwrap(),
         1
     );
     let pending = queue.pending(10, MAX_RETRIES).unwrap();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].entity_id, "project-mismatch");
+    assert_eq!(pending[0].entity_id, "nul-notes");
+    assert_eq!(
+        queue
+            .retry_failed_for_reason("project_mismatch", MAX_RETRIES)
+            .unwrap(),
+        1
+    );
+    let pending = queue.pending(10, MAX_RETRIES).unwrap();
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().any(|row| row.entity_id == "nul-notes"));
+    assert!(pending.iter().any(|row| row.entity_id == "project-mismatch"));
     assert_eq!(
         queue
             .failed_for_entity_type(None, MAX_RETRIES, 10)

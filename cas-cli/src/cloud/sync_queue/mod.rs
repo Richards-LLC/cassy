@@ -35,6 +35,7 @@ pub(crate) const MEMORY_FOLD_CONFLICT: &str = "fold_conflict";
 pub(crate) use dependency_repair::DependencyEndpointState;
 pub(crate) use task_intents::{
     TaskSyncFulfillMode, TaskSyncFulfillResult, TaskSyncIntent, TaskSyncPayload,
+    TaskSyncRecoveryRecord,
 };
 
 pub use dependency_tombstones::{
@@ -154,6 +155,7 @@ impl SyncQueue {
         // team_id migration because that path can rebuild sync_queue from an
         // explicit legacy column list.
         self.migrate_row_outcomes(&conn)?;
+        self.migrate_auto_rearm_count(&conn)?;
 
         Ok(())
     }

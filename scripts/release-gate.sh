@@ -1694,7 +1694,10 @@ check_test_targets() {
 }
 
 check_markdown_lint() {
-    python3 scripts/check-changed-markdown.py "${fast_base:-HEAD^}"
+    local status=0
+    python3 scripts/check-design-paths.py || status=1
+    python3 scripts/check-changed-markdown.py "${fast_base:-HEAD^}" || status=1
+    return "$status"
 }
 
 check_test_env() {

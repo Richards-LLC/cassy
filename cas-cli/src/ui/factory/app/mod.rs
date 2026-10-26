@@ -324,6 +324,14 @@ fn git_head(path: &Path) -> anyhow::Result<String> {
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }
 
+fn git_common_dir(repo: &Path) -> anyhow::Result<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(repo).output()?;
+    anyhow::ensure!(output.status.success(), "cannot resolve seed repository");
+    Ok(PathBuf::from(String::from_utf8(output.stdout)?.trim()).canonicalize()?)
+}
+
 fn git_changed_paths(repo: &Path, from: &str, to: &str) -> anyhow::Result<Vec<String>> {
     let output = std::process::Command::new("git")
         .args(["diff", "--name-only", from, to, "--"])
@@ -534,6 +542,92 @@ pub(crate) fn seed_worker_target_from_baseline(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
+    publish_target_seed(&staging, &target)?;
+    Ok(Some(stats))
+}
+
+/// A review can reuse its assigned worker's completed target even when no
+/// immutable baseline has been published. Hold every writer/retirement lock
+/// until the private seed is published; never borrow a live Cargo target.
+pub(crate) fn seed_review_target_from_worker(
+    cas_dir: &Path,
+    worker: &Path,
+    review: &Path,
+) -> anyhow::Result<Option<TargetSeedStats>> {
+    use fs2::FileExt;
+    if std::env::var("CAS_FACTORY_DISABLE_TARGET_SEED").as_deref() == Ok("1") {
+        return Ok(None);
+    }
+    let worker = worker.canonicalize()?;
+    anyhow::ensure!(
+        worker.parent() == Some(cas_dir.join("worktrees").canonicalize()?.as_path()),
+        "review seed must belong to a managed worker"
+    );
+    let target = review.join("target");
+    if target.join("debug").exists() {
+        return Ok(None);
+    }
+    let source = crate::factory_scratch::worker_target_dir(&worker);
+    if !source.join("debug").is_dir() {
+        return Ok(None);
+    }
+    let Some(_lane) = crate::factory_worker_check::try_lock_lane(cas_dir, &worker)? else {
+        return Ok(None);
+    };
+    #[cfg(unix)]
+    let Some(_target_lease) = crate::factory_target_cache::owner::for_retirement(cas_dir, &worker)? else {
+        return Ok(None);
+    };
+    for path in [&source, &source.join("debug"), &target] {
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()),
+            "review seed target must not be a symlink"
+        );
+    }
+    // Capped writers own the lane and target lease. Cargo's own lock also
+    // fences any uncapped writer before we inspect provenance or link files.
+    let cargo_lock_path = source.join("debug/.cargo-lock");
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(&cargo_lock_path).is_ok_and(|meta| meta.file_type().is_symlink()),
+        "review seed Cargo lock must not be a symlink"
+    );
+    let cargo_lock = std::fs::OpenOptions::new().read(true).write(true)
+        .create(true).truncate(false).open(cargo_lock_path)?;
+    if cargo_lock.try_lock_exclusive().is_err() {
+        return Ok(None);
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&worker).output()?;
+    anyhow::ensure!(status.status.success() && status.stdout.is_empty(), "worker seed source changed");
+    anyhow::ensure!(
+        git_common_dir(&worker)? == git_common_dir(review)?,
+        "worker seed belongs to another repository"
+    );
+    crate::factory_scratch::ensure_same_filesystem(&source, &target)?;
+    let source_commit = git_head(&worker)?;
+    let skipped_crates = changed_workspace_crates(review, &source_commit, &git_head(review)?)?;
+    // Keep interrupted seeds in the owned scratch wrapper, outside Git. An
+    // aborted seed must not make its review checkout appear source-dirty.
+    let staging = review.with_file_name(".target-seed-in-progress");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    let mut stats = TargetSeedStats {
+        snapshot: source.display().to_string(),
+        source_commit,
+        skipped_crates: skipped_crates.clone(),
+        ..TargetSeedStats::default()
+    };
+    if let Err(error) = hardlink_seed_tree_with_skips(&source, &staging, &target, &mut stats, &skipped_crates) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
+    publish_target_seed(&staging, &target)?;
+    Ok(Some(stats))
+}
+
+fn publish_target_seed(staging: &Path, target: &Path) -> anyhow::Result<()> {
     if target.exists() {
         // Keep proof logs/reports at their original paths. Re-seeding only
         // supplies missing output entries and never overwrites evidence.
@@ -548,7 +642,7 @@ pub(crate) fn seed_worker_target_from_baseline(
     } else {
         std::fs::rename(&staging, &target)?;
     }
-    Ok(Some(stats))
+    Ok(())
 }
 
 fn hardlink_seed_tree(
@@ -600,11 +694,16 @@ fn hardlink_seed_tree_inner(
                 skipped_crates,
             )?;
         } else if file_type.is_file() {
-            // Cargo coordinates writes through target/**/.cargo-lock.  A
-            // hardlink would make independently seeded worker targets share
-            // that inode, serializing their otherwise private builds. Cargo
-            // recreates the lock file on first use, so omit it at every depth.
-            if entry.file_name() == ".cargo-lock" {
+            // Cargo recreates its locks on first use. Sharing their inodes
+            // would serialize independently seeded targets. Keep every Cargo
+            // lock private, including other .lock files within a profile.
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if matches!(
+                name.as_ref(),
+                ".cargo-lock" | ".cargo-build-lock" | ".cargo-artifact-lock"
+            ) || (source != source_root && name.ends_with(".lock"))
+            {
                 continue;
             }
             #[cfg(unix)]
@@ -633,10 +732,10 @@ fn hardlink_seed_tree_inner(
                 .path()
                 .strip_prefix(source_root)?
                 .components()
-                .any(|part| part.as_os_str() == ".fingerprint")
+                .any(|part| matches!(part.as_os_str().to_str(), Some(".fingerprint" | "build")))
             {
-                // Cargo rewrites freshness records in place. Sharing their
-                // inode lets one lane bless another lane's old rmeta as fresh.
+                // Cargo rewrites fingerprint and build-script outputs in place.
+                // Sharing their inode lets one lane change another's target.
                 // Keep the original mtime: making dep-info newer during a
                 // seed would also hide source changes from Cargo's mtime check.
                 std::fs::copy(entry.path(), &destination_entry)?;
@@ -694,13 +793,18 @@ fn ensure_task_lane_reusable(
         );
     }
     if !status.stdout.is_empty() {
+        let path = worktree_path.to_string_lossy();
+        let [discard] =
+            crate::worktree::GitOperations::git_remedies([&["-C", &path, "checkout", "--", "."]])
+                .map_err(anyhow::Error::msg)?;
+        let worker_name = crate::worktree::GitOperations::visible_git_label(worker_name);
+        let lane = crate::worktree::GitOperations::visible_git_label(lane);
         anyhow::bail!(
             "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}' with \
              uncommitted tracked changes, so a new session cannot take it over. Commit them on \
-             '{lane}' and push, or discard them with `git -C {} checkout -- .`, then retry the \
+             '{lane}' and push, or discard them with `{discard}`, then retry the \
              spawn.",
-            worktree_path.display(),
-            worktree_path.display(),
+            crate::worktree::GitOperations::visible_git_label(&worktree_path.to_string_lossy()),
         );
     }
     let resolve = |reference: &str| {
@@ -717,17 +821,24 @@ fn ensure_task_lane_reusable(
                 .unwrap_or(false)
         };
         if !ancestor(&local, &pushed) && !ancestor(&pushed, &local) {
+            let path = worktree_path.to_string_lossy();
+            let origin_lane = format!("origin/{lane}");
+            let [rebase, reset] = crate::worktree::GitOperations::git_remedies([
+                &["-C", &path, "pull", "--rebase", "origin", lane],
+                &["-C", &path, "reset", "--hard", &origin_lane],
+            ])
+            .map_err(anyhow::Error::msg)?;
+            let lane = crate::worktree::GitOperations::visible_git_label(lane);
+            let worker_name = crate::worktree::GitOperations::visible_git_label(worker_name);
             anyhow::bail!(
                 "Worker '{worker_name}': its kept worktree {} is on its task lane '{lane}', \
                  which has diverged from origin/{lane} (local {}, origin {}). Reconcile it \
-                 first: rebase onto the pushed lane with `git -C {} pull --rebase origin {lane}`, \
-                 or keep the pushed lane with `git -C {} reset --hard origin/{lane}`. Then retry \
+                 first: rebase onto the pushed lane with `{rebase}`, \
+                 or keep the pushed lane with `{reset}`. Then retry \
                  the spawn.",
                 worktree_path.display(),
                 &local[..local.len().min(12)],
                 &pushed[..pushed.len().min(12)],
-                worktree_path.display(),
-                worktree_path.display(),
             );
         }
     }
@@ -1559,6 +1670,7 @@ impl FactoryApp {
         }
 
         let DeliveryInputs {
+            verification_waits,
             data: loaded_data,
             blocks_deps,
             idle_liveness,
@@ -1566,7 +1678,7 @@ impl FactoryApp {
             assignment,
             session: session_progress,
             mut merge_alerts,
-            worker_ci_waits,
+            worker_waits,
         } = inputs;
         let session_progress = session_progress.unwrap_or_default();
         // cas-223f review M3: revalidation joins the fresh read's store facts
@@ -1615,7 +1727,7 @@ impl FactoryApp {
 
         // cas-9fff: pass session-focused epic so EpicAllSubtasksClosed can
         // use session-affinity routing (not just epic_verification_owner).
-        let focused_epic_id = self.current_epic_id.as_deref();
+        let focused_epic_id = self.current_epic_id.clone();
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
@@ -1642,16 +1754,19 @@ impl FactoryApp {
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
-                        focused_epic_id,
+                        focused_epic_id.as_deref(),
                         self.event_detector.worker_idle_since(worker),
                     )?;
-                    if let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = &current
-                        && let Some((waiting_task, tip)) = worker_ci_waits.get(worker)
-                        && *waiting_task == task.task_id
-                        && task.task_status == cas_types::TaskStatus::InProgress
-                    {
-                        tracing::debug!(worker = %worker, task = %waiting_task, tip = %tip,
-                            "suppressing idle relay while pushed-tip CI is pending");
+                    let active = match &current {
+                        DirectorEvent::WorkerIdle { active_task, .. } => active_task.as_ref(),
+                        _ => None,
+                    };
+                    if merge_alert::worker_has_pending_reminder(
+                        &unfiltered_data, worker, active.map(|task| task.task_id.as_str()), merge_now,
+                    ) || worker_waits.get(worker).is_some_and(|read| {
+                        active.is_some_and(|task| task.task_id == read.task) && read.waiting
+                    }) {
+                        self.merge_alert_retries.waiting(worker);
                         return None;
                     }
                     Some(current)
@@ -1670,7 +1785,7 @@ impl FactoryApp {
                         event,
                         &unfiltered_data,
                         &self.supervisor_name,
-                        focused_epic_id,
+                        focused_epic_id.as_deref(),
                     )
                 }
             })
@@ -1683,7 +1798,28 @@ impl FactoryApp {
             crate::ui::factory::director::compute_gated_task_ids(&non_closed_ids, &blocks_deps);
 
         let mut prompts: Vec<Prompt> = Vec::with_capacity(delivery_events.len());
+        // Readiness belongs to the delivery, not the worker's idle/park state.
+        // Render it before reminder/liveness relays and consume the same tip
+        // dedupe used by parked CI signals.
+        let active_ready_ids: HashSet<_> = merge_alerts.values()
+            .filter(|ready| ready.worker.is_some()).map(|ready| ready.evidence.task_id.clone()).collect();
+        for task_id in &active_ready_ids {
+            let ready = merge_alerts.remove(task_id).expect("ready delivery was just observed");
+            let Some(worker) = ready.worker.as_deref() else { continue; };
+            if !self.director_data.agents.iter().any(|agent| agent.name == worker)
+                || self.event_detector.is_worker_held(worker)
+            { continue; }
+            if let Some(prompt) = merge_alert::ready_prompt(&ready, &unfiltered_data, &self.supervisor_name, self.supervisor_cli)
+                && merge_alert::admit_ready(&self.cas_dir, &ready)
+                && self.event_detector.merge_alert_should_emit(task_id, &ready.tip, ready.ci)
+            {
+                prompts.push(prompt);
+            }
+        }
         for event in &delivery_events {
+            if let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = event
+                && active_ready_ids.contains(&task.task_id)
+            { continue; }
             // cas-d4ae: taskless idle and escalated stall events are factory
             // health incidents, not ordinary one-shot director chatter.  The
             // daemon persists and wakes the owning supervisor through its
@@ -1726,6 +1862,14 @@ impl FactoryApp {
                 merge_alert_evidence,
                 snapshot_at,
             ) {
+                if let DirectorEvent::TaskBlocked { task_id, worker, .. } = event
+                    && let Some(dispatch) = verification_waits.get(task_id)
+                {
+                    prompt.text = format!(
+                        "{}\nWorker {worker} is waiting for verification on task {task_id}; active dispatch {dispatch} is already owned by {}.",
+                        crate::supervisor_message_wakes::QUIET, self.supervisor_name,
+                    );
+                }
                 if let DirectorEvent::WorkerIdle { worker, .. } = event {
                     // cas-223f: observed off the loop beside the delivery read
                     // (cas-3b16: on the blocking lane). A worker it could not
@@ -1740,6 +1884,10 @@ impl FactoryApp {
                     }
                 }
                 if let Some(ready) = ready {
+                    prompt.merge_alert = Some(ready.evidence.clone());
+                    if ready.ci == "success" && !merge_alert::admit_ready(&self.cas_dir, &ready) {
+                        continue;
+                    }
                     if !self.event_detector.merge_alert_should_emit(
                         &ready.evidence.task_id, &ready.tip, ready.ci,
                     ) { continue; }
@@ -1760,7 +1908,21 @@ impl FactoryApp {
                             prompt.text = super::director::with_response_instructions(&text, worker, self.supervisor_cli);
                         }
                     } else {
-                        prompt.text = format!("CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
+                        prompt.text = format!("READY TO MERGE — CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
+                    }
+                }
+                if let DirectorEvent::WorkerIdle { worker, active_task: Some(task) } = event
+                    && task.task_status == cas_types::TaskStatus::InProgress
+                {
+                    // Missing refs or an unavailable fresh read still owe one
+                    // liveness relay, not an unbounded relay every retry minute.
+                    let unknown = merge_alert::WorkerWait {
+                        task: task.task_id.clone(), tip: None, ci: "unknown", waiting: false,
+                    };
+                    let read = worker_waits.get(worker)
+                        .filter(|read| read.task == task.task_id).unwrap_or(&unknown);
+                    if !self.merge_alert_retries.admit_idle(worker, read, merge_now) {
+                        continue;
                     }
                 }
                 prompts.push(prompt);
@@ -1771,8 +1933,9 @@ impl FactoryApp {
         (delivery_events, prompts, sweep_data)
     }
 
-    /// Re-check a state-bearing prompt at the narrowest point before transport
-    /// injection. Batch revalidation happens earlier in the tick; a worker
+    /// Refresh a state-bearing prompt and its body at the narrowest point before
+    /// transport injection. The caller must deliver this same mutated prompt.
+    /// Batch revalidation happens earlier in the tick; a worker
     /// assignment, epic close, subtask reopen, or — cas-6eab (GH #74) — the
     /// merge this alert is asking for may all land after that snapshot and
     /// before this prompt's turn in the delivery loop. The merge case is not
@@ -1784,9 +1947,9 @@ impl FactoryApp {
     /// cached data. The daemon runs the same check as a `RevalidateFresh` job
     /// ([`DeliverabilityRequest`], cas-223f); this synchronous form reads on
     /// the caller's thread.
-    pub(crate) fn prompt_is_still_deliverable(&self, prompt: &Prompt) -> bool {
+    pub(crate) fn refresh_prompt_for_delivery(&self, prompt: &mut Prompt) -> bool {
         self.deliverability_request()
-            .read(self.director_stores.as_ref(), std::slice::from_ref(prompt))
+            .read(self.director_stores.as_ref(), std::slice::from_mut(prompt))
             .first()
             .copied()
             .unwrap_or(true)
@@ -2258,12 +2421,32 @@ impl FactoryApp {
     }
 
     pub(crate) fn remove_worker_from_event_detector(&mut self, worker_name: &str) {
+        let worker = worker_name.to_string();
+        let known_ids = self
+            .factory_session
+            .as_deref()
+            .map(|session| self.snapshot_agent_ids(session, std::slice::from_ref(&worker)))
+            .unwrap_or_default();
+        self.remove_worker_from_event_detector_with_known_ids(worker_name, &known_ids);
+    }
+
+    /// Remove a worker after its registry row may already have been deleted.
+    /// `known_ids` must be captured from the session-scoped registry before
+    /// shutdown; a later name-only snapshot cannot distinguish same-name
+    /// workers in another factory session.
+    pub(crate) fn remove_worker_from_event_detector_with_known_ids(
+        &mut self,
+        worker_name: &str,
+        known_ids: &[String],
+    ) {
         self.event_detector.remove_worker(worker_name);
         let Some(session_name) = self.factory_session.clone() else {
             return;
         };
         let path = metadata_path(&session_name);
         let worker = worker_name.to_string();
+        let cas_dir = self.cas_dir().to_path_buf();
+        let known_ids = known_ids.to_vec();
         let clear_hold = move || {
             if let Err(error) = persist_session_metadata_worker_hold_at(&path, &worker, false) {
                 tracing::warn!(
@@ -2273,6 +2456,7 @@ impl FactoryApp {
                     "failed to clear removed worker from durable hold set"
                 );
             }
+            resume_held_reminders(&cas_dir, &session_name, std::slice::from_ref(&worker), &known_ids);
         };
         // cas-5e72: a worker exit is handled inside the daemon's PTY
         // exchange; the session-metadata write runs on the store worker, in
@@ -2283,6 +2467,37 @@ impl FactoryApp {
         } else {
             clear_hold();
         }
+    }
+
+    /// cas-a9a7: director summaries are already filtered by
+    /// `CAS_FACTORY_SESSION`, but `agent_id_to_name` has no session field.
+    /// Only trust cached IDs when that load scope still matches this app's
+    /// session, and read the scoped agent rows rather than matching the map by
+    /// name across sessions.
+    fn snapshot_agent_ids(&self, session_name: &str, workers: &[String]) -> Vec<String> {
+        if self.factory_session.as_deref() != Some(session_name)
+            || std::env::var("CAS_FACTORY_SESSION").ok().as_deref() != Some(session_name)
+        {
+            return Vec::new();
+        }
+        self.unfiltered_director_data
+            .agents
+            .iter()
+            .filter(|agent| workers.contains(&agent.name))
+            .map(|agent| agent.id.clone())
+            .collect()
+    }
+
+    /// cas-c5ab/cas-5f4b: a session shutdown ends every hold, so re-arm all
+    /// its workers' held reminders before their agents are unregistered.
+    pub(crate) fn rearm_held_reminders_at_shutdown(&self, session_name: &str) {
+        let workers = self.worker_names.clone();
+        resume_held_reminders(
+            self.cas_dir(),
+            session_name,
+            &workers,
+            &self.snapshot_agent_ids(session_name, &workers),
+        );
     }
 
     /// Get the focused pane kind
@@ -3000,7 +3215,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
 
     // Claude already receives the complete role contract above.
     if supervisor_cli != cas_mux::SupervisorCli::Claude {
-        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority.");
+        prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority.");
     }
 
     // cas-2085 / GH #290: Claude 2.1.231 can skip SessionStart entirely for
@@ -3432,6 +3647,43 @@ pub(crate) fn persist_session_metadata_delivery_mode_at(
     update_session_metadata_at(path, |metadata| {
         metadata.delivery_mode = delivery_mode;
     })
+}
+
+/// cas-c5ab: re-arm the suspended reminders of workers leaving a factory
+/// session (removed, or the session shutting down). Their hold ends with
+/// them, so nothing else would ever resume or cancel those reminders.
+/// cas-5f4b: `known_ids` come from the director snapshot taken before the
+/// worker left, so a worker record deleted before this runs still has its
+/// reminders re-armed; the store lookup only adds ids the snapshot missed.
+pub(crate) fn resume_held_reminders(
+    cas_dir: &std::path::Path,
+    session_name: &str,
+    workers: &[String],
+    known_ids: &[String],
+) {
+    let reminders = match crate::store::open_reminder_store(cas_dir) {
+        Ok(reminders) => reminders,
+        Err(error) => {
+            tracing::warn!(factory_session = %session_name, %error, "failed to open reminders to re-arm held reminders");
+            return;
+        }
+    };
+    let mut ids: Vec<String> = known_ids.to_vec();
+    match crate::store::open_agent_store(cas_dir).map_err(|error| error.to_string())
+        .and_then(|store| store.list(None).map_err(|error| error.to_string()))
+    {
+        Ok(agents) => ids.extend(agents.into_iter().filter(|agent| {
+            workers.contains(&agent.name) && agent.factory_session.as_deref() == Some(session_name)
+        }).map(|agent| agent.id)),
+        Err(error) => tracing::warn!(factory_session = %session_name, %error, "failed to list agents to re-arm held reminders"),
+    }
+    ids.sort();
+    ids.dedup();
+    for id in ids {
+        if let Err(error) = reminders.resume_suspended_for_target(&id) {
+            tracing::warn!(agent_id = %id, factory_session = %session_name, %error, "failed to re-arm a leaving worker's held reminders");
+        }
+    }
 }
 
 /// Read the worker hold set for one factory session.
@@ -3956,7 +4208,7 @@ mod tests {
             "authoritative assignment acceptance",
             "no prose ACK is required",
             "inbox on the next turn",
-            "Only authenticated typed",
+            "Directed messages wake",
             "blocker=true",
             "merge_request=true",
         ] {
@@ -4779,6 +5031,7 @@ mod tests {
                 last_supervisor_mcp_call_at: None,
                 supervisor_stall: Default::default(),
                 project_dir: None,
+                cas_root: None,
                 team_name: None,
             }
         }
@@ -4859,9 +5112,20 @@ mod tests {
         );
         std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
         super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+        // cas-c5ab: the held worker's reminder is suspended; removal re-arms it.
+        // cas-5f4b: its agent record is already gone; the director snapshot
+        // still names it.
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        let time = cas_store::ReminderTriggerType::Time;
+        reminders.create("worker-id", None, "red run done", time, Some(after), None, None, 3600, Some(session)).unwrap();
+        assert_eq!(reminders.suspend_pending_for_target("worker-id").unwrap(), 1);
 
-        let mut app = super::FactoryApp::for_test();
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
         app.worker_names = vec![worker.to_string()];
+        app.unfiltered_director_data.agent_id_to_name.insert("worker-id".into(), worker.into());
         app.event_detector.add_worker(worker.to_string());
         app.set_factory_session(session.to_string());
         assert!(
@@ -4878,7 +5142,10 @@ mod tests {
 
         super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
         app.apply_session_metadata_worker_holds();
-        app.remove_worker_from_event_detector(worker);
+        app.remove_worker_from_event_detector_with_known_ids(
+            worker,
+            &["worker-id".to_string()],
+        );
         assert!(!app.event_detector.is_worker_held(worker));
         let metadata: crate::ui::factory::protocol::SessionMetadata =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -4886,6 +5153,224 @@ mod tests {
             metadata.held_workers.is_empty(),
             "worker removal must clear durable state so a reused name cannot inherit it"
         );
+        assert_eq!(reminders.list_pending_for_target("worker-id").unwrap().len(), 1);
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
+    }
+
+    /// A normal worker shutdown deletes the agent row before its final
+    /// director refresh and reminder cleanup. The pre-shutdown ID must survive
+    /// that order so its held reminder is re-armed.
+    #[test]
+    fn normal_worker_shutdown_rearms_held_reminder_after_agent_deletion() {
+        use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
+        use crate::types::{Agent, AgentRole};
+
+        let home = tempfile::tempdir().unwrap();
+        let session = "worker-shutdown-hold";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", session),
+        ]);
+        let worker = "lively-crow";
+        let path = crate::ui::factory::session::metadata_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let metadata = crate::ui::factory::session::create_metadata(
+            session,
+            1,
+            "supervisor",
+            &[worker.to_string()],
+            None,
+            None,
+            None,
+        );
+        std::fs::write(&path, serde_json::to_string_pretty(&metadata).unwrap()).unwrap();
+        super::persist_session_metadata_worker_hold_at(&path, worker, true).unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let mut agent = Agent::new("worker-id".into(), worker.into());
+        agent.role = AgentRole::Worker;
+        agent.factory_session = Some(session.into());
+        agents.register(&agent).unwrap();
+
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        reminders
+            .create(
+                "worker-id",
+                None,
+                "red run done",
+                ReminderTriggerType::Time,
+                Some(after),
+                None,
+                None,
+                3600,
+                Some(session),
+            )
+            .unwrap();
+        assert_eq!(
+            reminders.suspend_pending_for_target("worker-id").unwrap(),
+            1
+        );
+
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
+        app.worker_names = vec![worker.to_string()];
+        app.event_detector.add_worker(worker.to_string());
+        app.set_factory_session(session.to_string());
+        assert!(
+            app.event_detector.is_worker_held(worker),
+            "set_factory_session must rehydrate a hold before the first refresh tick"
+        );
+
+        app.refresh_data().unwrap();
+        assert!(
+            app.unfiltered_director_data
+                .agent_id_to_name
+                .contains_key("worker-id")
+        );
+        let captured_ids = vec![agent.id.clone()];
+        agents.graceful_shutdown(&agent.id).unwrap();
+        agents.unregister(&agent.id).unwrap();
+        assert!(
+            agents.get(&agent.id).is_err(),
+            "SessionEnd removes the agent row"
+        );
+
+        // Match shutdown_worker_inner: the row is gone before its refresh and
+        // the cleanup that clears the hold and re-arms reminders.
+        app.last_db_fingerprint = None;
+        app.refresh_data().unwrap();
+        assert!(
+            !app.unfiltered_director_data
+                .agent_id_to_name
+                .contains_key("worker-id")
+        );
+        app.remove_worker_from_event_detector_with_known_ids(worker, &captured_ids);
+        assert!(!app.event_detector.is_worker_held(worker));
+        let metadata: crate::ui::factory::protocol::SessionMetadata =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(
+            metadata.held_workers.is_empty(),
+            "worker removal must clear durable state so a reused name cannot inherit it"
+        );
+        assert_eq!(
+            reminders
+                .list_pending_for_target("worker-id")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
+
+        // Keep the captured ID live in the test so it documents the value the
+        // production shutdown path must pass after the snapshot loses the row.
+        assert_eq!(captured_ids, ["worker-id"]);
+    }
+
+    /// Same-name cache entries from another factory session must not release
+    /// that session's held reminders.
+    #[test]
+    fn worker_removal_does_not_rearm_same_named_foreign_session_reminder() {
+        use crate::store::{AgentStore, ReminderStore, ReminderTriggerType};
+        use crate::types::{Agent, AgentRole};
+
+        let home = tempfile::tempdir().unwrap();
+        let session = "current-reminder-session";
+        let _guard = TestEnvGuard::with_vars(&[
+            ("HOME", home.path().to_str().unwrap()),
+            ("CAS_FACTORY_SESSION", "other-reminder-session"),
+        ]);
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let worker = "lively-crow";
+        for (id, factory_session) in [
+            ("current-worker-id", session),
+            ("foreign-worker-id", "other-reminder-session"),
+        ] {
+            let mut agent = Agent::new(id.into(), worker.into());
+            agent.role = AgentRole::Worker;
+            agent.factory_session = Some(factory_session.into());
+            agents.register(&agent).unwrap();
+        }
+
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        for id in ["current-worker-id", "foreign-worker-id"] {
+            reminders
+                .create(
+                    id,
+                    None,
+                    "red run done",
+                    ReminderTriggerType::Time,
+                    Some(after),
+                    None,
+                    None,
+                    3600,
+                    Some(session),
+                )
+                .unwrap();
+            assert_eq!(reminders.suspend_pending_for_target(id).unwrap(), 1);
+        }
+
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
+        app.worker_names = vec![worker.to_string()];
+        app.set_factory_session(session.to_string());
+        // Load a stale director snapshot scoped to a different session. The
+        // same-name foreign row must not be treated as this app's worker.
+        app.refresh_data().unwrap();
+        assert!(app.unfiltered_director_data.agent_id_to_name.contains_key("foreign-worker-id"));
+        assert!(!app.unfiltered_director_data.agent_id_to_name.contains_key("current-worker-id"));
+
+        app.remove_worker_from_event_detector(worker);
+
+        assert_eq!(
+            reminders
+                .list_pending_for_target("current-worker-id")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            reminders
+                .list_pending_for_target("foreign-worker-id")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 1);
+    }
+
+    /// cas-5f4b: a session shutdown re-arms every held worker's reminders.
+    #[test]
+    fn session_shutdown_rearms_held_workers_reminders_cas_5f4b() {
+        use crate::store::AgentStore;
+        use crate::types::{Agent, AgentRole};
+
+        let project = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(project.path()).unwrap();
+        let agents = crate::store::open_agent_store(&cas_dir).unwrap();
+        let reminders = crate::store::open_reminder_store(&cas_dir).unwrap();
+        let after = chrono::Utc::now() + chrono::Duration::hours(1);
+        let time = cas_store::ReminderTriggerType::Time;
+        for (id, name) in [
+            ("crow-id", "lively-crow"),
+            ("wren-id", "quiet-wren"),
+        ] {
+            let mut agent = Agent::new(id.into(), name.into());
+            agent.role = AgentRole::Worker;
+            agent.factory_session = Some("shutdown-5f4b".into());
+            agents.register(&agent).unwrap();
+            reminders.create(id, None, "red run done", time, Some(after), None, None, 3600, Some("shutdown-5f4b")).unwrap();
+            reminders.suspend_pending_for_target(id).unwrap();
+        }
+
+        let mut app = super::FactoryApp::for_test_at(cas_dir);
+        app.worker_names = vec!["lively-crow".into(), "quiet-wren".into()];
+        app.rearm_held_reminders_at_shutdown("shutdown-5f4b");
+
+        assert_eq!(reminders.list_suspended(None).unwrap().len(), 0);
+        assert_eq!(reminders.list_pending_for_target("wren-id").unwrap().len(), 1);
     }
 
     /// A hold update touches session metadata, not cas.db. The ordinary
@@ -5278,6 +5763,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }];
         source
             .agent_id_to_name
@@ -6848,7 +7334,7 @@ mod spawn_isolation_tests {
         std::fs::create_dir(&repo).unwrap();
         init_repo(&repo);
         without_spawn_disk_floor(&repo);
-        let worktree_path = repo.join(".cas").join("worktrees").join("clever-panther-60");
+        let worktree_path = repo.join(".cas").join("worktrees").join("clever panther's 60");
         std::fs::create_dir_all(worktree_path.parent().unwrap()).unwrap();
         let git = |dir: &std::path::Path, args: &[&str]| {
             let output = Command::new("git").args(args).current_dir(dir).output().unwrap();
@@ -6932,6 +7418,9 @@ mod spawn_isolation_tests {
         assert!(error.contains("uncommitted tracked changes"), "{error}");
         assert!(error.contains("factory/clever-panther-60-cas-9db0b"), "{error}");
         assert!(error.contains("checkout -- ."), "{error}");
+        // pin: a real kept-worktree path with spaces and apostrophe must be one argument.
+        let quoted_path = format!("'{}'", worktree_path.to_string_lossy().replace('\'', r"'\''"));
+        assert!(error.contains(&format!("git -C {quoted_path} checkout -- .")), "{error}");
         assert_eq!(
             std::fs::read_to_string(worktree_path.join("lane.txt")).unwrap(),
             "unsaved\n",
@@ -7640,17 +8129,19 @@ mod spawn_isolation_tests {
 
         let tmp = TempDir::new().unwrap();
         let snapshot = tmp.path().join("snapshot");
-        let fingerprint = "debug/.fingerprint/cas-types-abc";
         let records = [
-            "lib-cas_types",
-            "lib-cas_types.json",
-            "dep-lib-cas_types",
-            "invoked.timestamp",
+            "debug/.fingerprint/cas-types-abc/lib-cas_types",
+            "debug/.fingerprint/cas-types-abc/lib-cas_types.json",
+            "debug/.fingerprint/cas-types-abc/dep-lib-cas_types",
+            "debug/.fingerprint/cas-types-abc/invoked.timestamp",
+            "debug/build/cas-abc/out/archive_fixture_sources.rs",
+            "debug/build/cas-abc/output",
+            "release/build/tool-abc/out/generated.rs",
         ];
-        std::fs::create_dir_all(snapshot.join(fingerprint)).unwrap();
         std::fs::create_dir_all(snapshot.join("debug/deps")).unwrap();
         for record in records {
-            let path = snapshot.join(fingerprint).join(record);
+            let path = snapshot.join(record);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, b"old freshness").unwrap();
             std::fs::File::open(path)
                 .unwrap()
@@ -7668,11 +8159,11 @@ mod spawn_isolation_tests {
             hardlink_seed_tree(&snapshot, worker, worker, &mut TargetSeedStats::default()).unwrap();
             for record in records {
                 assert_eq!(
-                    std::fs::metadata(worker.join(fingerprint).join(record))
+                    std::fs::metadata(worker.join(record))
                         .unwrap()
                         .modified()
                         .unwrap(),
-                    std::fs::metadata(snapshot.join(fingerprint).join(record))
+                    std::fs::metadata(snapshot.join(record))
                         .unwrap()
                         .modified()
                         .unwrap(),
@@ -7681,19 +8172,24 @@ mod spawn_isolation_tests {
             }
         }
 
-        // Cargo rewrites these freshness records in place when one lane rebuilds.
-        // Its sibling still has the old rmeta and must retain the old freshness.
+        // Cargo and build scripts use in-place writes, like cas-cli/build.rs.
+        // A sibling's generated sources and freshness must remain untouched.
         for record in records {
-            std::fs::write(worker_a.join(fingerprint).join(record), b"new freshness").unwrap();
+            std::fs::write(worker_a.join(record), b"new freshness").unwrap();
             for untouched in [&snapshot, &worker_b] {
                 assert_eq!(
-                    std::fs::read(untouched.join(fingerprint).join(record)).unwrap(),
+                    std::fs::read(untouched.join(record)).unwrap(),
                     b"old freshness",
                     "another lane refreshed {record} while its rmeta stayed old"
                 );
+                assert_eq!(
+                    std::fs::metadata(untouched.join(record)).unwrap().modified().unwrap(),
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(100),
+                    "another lane changed {record}'s mtime"
+                );
             }
             assert_eq!(
-                std::fs::metadata(worker_a.join(fingerprint).join(record))
+                std::fs::metadata(worker_a.join(record))
                     .unwrap()
                     .nlink(),
                 1
@@ -7725,7 +8221,15 @@ mod spawn_isolation_tests {
         let source_artifact = snapshot.join("debug").join("deps").join("libwarm.rlib");
         std::fs::create_dir_all(source_lock.parent().unwrap()).unwrap();
         std::fs::create_dir_all(source_artifact.parent().unwrap()).unwrap();
-        std::fs::write(&source_lock, b"Cargo lock").unwrap();
+        let lock_names = [
+            ".cargo-lock",
+            ".cargo-build-lock",
+            ".cargo-artifact-lock",
+            "future.lock",
+        ];
+        for name in lock_names {
+            std::fs::write(snapshot.join("debug").join(name), b"Cargo lock").unwrap();
+        }
         std::fs::write(&source_artifact, b"warm artifact").unwrap();
 
         let worker_a = tmp.path().join("worker-a-target");
@@ -7733,11 +8237,13 @@ mod spawn_isolation_tests {
         for worker_target in [&worker_a, &worker_b] {
             let mut stats = TargetSeedStats::default();
             hardlink_seed_tree(&snapshot, worker_target, worker_target, &mut stats).unwrap();
+            for name in lock_names {
+                assert!(
+                    !worker_target.join("debug").join(name).exists(),
+                    "a seeded target must not inherit the snapshot lock {name}"
+                );
+            }
             assert_eq!(stats.files, 1, "only the reusable artifact is seeded");
-            assert!(
-                !worker_target.join("debug/.cargo-lock").exists(),
-                "a seeded target must not inherit the snapshot Cargo lock"
-            );
         }
 
         let worker_a_lock = OpenOptions::new()

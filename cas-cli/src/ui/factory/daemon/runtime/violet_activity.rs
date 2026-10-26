@@ -1711,7 +1711,7 @@ pub(crate) fn violet_activity_envelope(
     kind: &str,
     items: &[WakeItem],
 ) -> String {
-    violet_activity_envelope_with_age(channel_id, channel_name, kind, items, |item| {
+    violet_activity_envelope_with_age(channel_id, channel_name, kind, items, "violet", |item| {
         item.age_secs.to_string()
     })
 }
@@ -1730,7 +1730,7 @@ pub(crate) fn managed_violet_activity_envelope(
         .map(|seconds| seconds.to_string())
         .unwrap_or_else(|| "unknown".into());
     violet_activity_envelope_with_age(
-        channel_id, channel_name, kind, std::slice::from_ref(item), |_| age.clone(),
+        channel_id, channel_name, kind, std::slice::from_ref(item), "mention", |_| age.clone(),
     )
 }
 
@@ -1739,6 +1739,7 @@ fn violet_activity_envelope_with_age(
     channel_name: &str,
     kind: &str,
     items: &[WakeItem],
+    mention_addressed: &str,
     age_text: impl Fn(&WakeItem) -> String,
 ) -> String {
     use crate::prompt_revalidation::xml_attribute_value as attr;
@@ -1773,7 +1774,7 @@ fn violet_activity_envelope_with_age(
     let addressed = if all_handoffs {
         "human"
     } else if kind == "mention" {
-        "violet"
+        mention_addressed
     } else {
         "thread"
     };
@@ -2147,12 +2148,27 @@ impl VioletWakeRuntime {
     pub(crate) fn start(cas_dir: &Path, factory_session: &str, supervisor_name: &str) -> Option<Self> {
         let config = crate::config::Config::load(cas_dir).unwrap_or_default();
         let slack = config.slack.clone().unwrap_or_default();
+        // cas-ef94: every start leaves this process's consumer receipt.
+        let receipt = |consumer: Option<&str>, project: Option<&str>, skipped: Option<&str>| {
+            if let Err(error) = super::violet_consumer::record(
+                cas_dir,
+                factory_session,
+                slack.wake_enabled(),
+                consumer,
+                project,
+                skipped,
+            ) {
+                tracing::warn!(%error, "could not record the Violet consumer receipt");
+            }
+        };
         if !slack.wake_enabled() {
             tracing::info!("Violet push-wake disabled (slack.wake_enabled=false)");
+            receipt(None, None, Some("slack.wake_enabled=false"));
             return None;
         }
         let Some(project_id) = crate::cloud::resolve_canonical_id(cas_dir) else {
             tracing::info!("Violet push-wake skipped: project has no canonical id");
+            receipt(None, None, Some("project has no canonical id"));
             return None;
         };
         let consumer_id: String = format!(
@@ -2162,6 +2178,7 @@ impl VioletWakeRuntime {
         .chars()
         .take(200)
         .collect();
+        receipt(Some(&consumer_id), Some(&project_id), None);
         let state = VioletWake::new(
             project_id.clone(),
             crate::cloud::project_aliases_from_config_toml(cas_dir),

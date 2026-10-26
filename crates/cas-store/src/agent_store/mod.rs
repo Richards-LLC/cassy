@@ -41,13 +41,36 @@ pub struct LeaseHistoryEntry {
     pub reason: Option<String>,
 }
 
+macro_rules! agent_session_end_table {
+    () => { r#"CREATE TABLE IF NOT EXISTS agent_session_ends (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    machine_id TEXT,
+    role TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    claimed_by TEXT,
+    claimed_epoch TEXT,
+    queued_at TEXT,
+    UNIQUE(agent_id, registered_at)
+);
+"# };
+}
+macro_rules! agent_session_end_index {
+    () => { "CREATE INDEX IF NOT EXISTS idx_agent_session_ends_host ON agent_session_ends(machine_id, ended_at)" };
+}
+/// Canonical additive session-end schema, shared with the migration registry.
+pub const AGENT_SESSION_END_SCHEMA: &[&str] = &[agent_session_end_table!(), agent_session_end_index!()];
+
 /// Schema for agents and task leases tables.
 ///
 /// Re-exported via `cas_store::AGENT_SCHEMA` so the migration runner in
 /// `cas-cli` can bootstrap the base table before applying ALTER migrations
 /// against subsystems whose tables were historically created lazily.
 /// See cas-bdb9 / EPIC cas-9fdb.
-pub const AGENT_SCHEMA: &str = r#"
+pub const AGENT_SCHEMA: &str = concat!(r#"
 -- Agents table: tracks registered Claude Code instances
 -- Agent ID is now PPID-based (cc-{ppid}-{machine_hash}) for stability
 CREATE TABLE IF NOT EXISTS agents (
@@ -162,7 +185,7 @@ CREATE TABLE IF NOT EXISTS worktree_leases (
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_agent ON worktree_leases(agent_id);
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_status ON worktree_leases(status);
 CREATE INDEX IF NOT EXISTS idx_worktree_leases_expires ON worktree_leases(expires_at);
-"#;
+"#, agent_session_end_table!(), agent_session_end_index!(), ";");
 
 /// Trait for agent storage operations
 pub trait AgentStore: Send + Sync {
@@ -250,7 +273,7 @@ pub trait AgentStore: Send + Sync {
         Ok(true)
     }
 
-    /// Renew a task lease
+    /// Renew a task lease only while the live holder owns its running task.
     fn renew_lease(&self, task_id: &str, agent_id: &str, duration_secs: i64) -> Result<()>;
 
     /// Get lease for a task
@@ -258,6 +281,11 @@ pub trait AgentStore: Send + Sync {
 
     /// List all leases for an agent
     fn list_agent_leases(&self, agent_id: &str) -> Result<Vec<TaskLease>>;
+
+    /// Active execution leases whose running task is still assigned to this
+    /// live agent (canonical id or registered display name). Missing tasks
+    /// are ineligible; independent worktree/focus claims are not task leases.
+    fn list_renewable_task_leases(&self, agent_id: &str) -> Result<Vec<TaskLease>>;
 
     /// List all active leases
     fn list_active_leases(&self) -> Result<Vec<TaskLease>>;
@@ -598,6 +626,7 @@ impl SqliteAgentStore {
 
 mod ops_agent;
 pub(crate) use ops_agent::register_agent_with_conn;
+pub mod continuity;
 mod ops_coordination;
 mod ops_task_leases;
 mod ops_worktree;

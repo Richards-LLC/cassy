@@ -126,3 +126,34 @@ pub(crate) fn same_patch_set(
         _ => false,
     }
 }
+
+/// Find the rewritten boundary before corrections added after a rebase.
+/// Equality covers the complete old delivery; callers still validate every
+/// commit after that boundary as an attributable continuation of this task.
+pub(super) fn equivalent_prefix(
+    repo: &Path,
+    recorded: &str,
+    tip: &str,
+    target: &str,
+    task_id: &str,
+) -> Option<String> {
+    if [recorded, tip, target]
+        .iter()
+        .any(|reference| !super::is_safe_git_refname(reference))
+        || super::git_commit_is_ancestor(repo, recorded, tip)
+    {
+        return None;
+    }
+    let deadline = Deadline::after(Duration::from_secs(5));
+    let original = patches(repo, recorded, target, task_id, deadline)?;
+    let range = format!("{target}..{tip}");
+    let candidates = String::from_utf8(git(
+        repo,
+        &["rev-list", "--first-parent", &range, "--"],
+        deadline,
+    )?).ok()?;
+    candidates.lines().skip(1).take_while(|_| !deadline.remaining().is_zero()).find_map(|candidate| {
+        (patches(repo, candidate, target, task_id, deadline).as_ref() == Some(&original))
+            .then(|| candidate.to_string())
+    })
+}

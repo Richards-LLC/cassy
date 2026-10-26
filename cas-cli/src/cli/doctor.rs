@@ -29,6 +29,7 @@ mod idle_sync;
 mod slack_transport;
 mod communication;
 mod git_hooks;
+mod journeys;
 
 #[derive(Args, Debug, Clone)]
 pub struct DoctorArgs {
@@ -276,9 +277,11 @@ impl CheckGroup {
             | "sync target"
             | "models"
             | "git hooks path"
-            | "sessionstart budget" => Self::Config,
-            "issue repositories" | "shipped issues" => Self::Config,
-            "integrations" | "violet" | "violet wake" | "violet claims" | "github origin" => {
+            | "sessionstart budget"
+            | "managed commits" => Self::Config,
+            "issue repositories" | "shipped issues" | "journey registry" => Self::Config,
+            "integrations" | "violet" | "violet wake" | "violet claims"
+            | "violet consumers" | "violet channels" | "github origin" => {
                 Self::Integrations
             }
             name if name.starts_with("integration") => Self::Integrations,
@@ -308,6 +311,7 @@ impl Check {
         const REMEDIATION_MARKERS: &[&str] = &[
             "; Run `",
             ". Run `",
+            ". Run:\n",
             ". Review ",
             ". Do not treat ",
             "; repair ",
@@ -1356,6 +1360,47 @@ fn hub_audit_check_for(root: &Path, now: chrono::DateTime<chrono::Utc>) -> Check
     Check::new("hub audit log", status, report.message)
 }
 
+fn violet_channel_check(cas_root: &Path) -> Option<Check> {
+    violet_channel_check_at(
+        cas_root,
+        &crate::cli::violet_cmd::channels::ChannelsArgs {
+            url: cas_types::violet_compatibility::violet_hub_url().into(),
+            registration_id: None,
+        },
+    )
+}
+
+fn violet_channel_check_at(
+    cas_root: &Path,
+    args: &crate::cli::violet_cmd::channels::ChannelsArgs,
+) -> Option<Check> {
+    let config = crate::config::Config::load(cas_root).ok()?;
+    if config.slack.unwrap_or_default().channels.is_empty() {
+        return None;
+    }
+    Some(
+        match crate::cli::violet_cmd::channels::inspect_configured(cas_root, args) {
+            Ok(report) => Check::new(
+                "violet channels",
+                if report.ok {
+                    CheckStatus::Ok
+                } else {
+                    CheckStatus::Warning
+                },
+                report.configured_summary(),
+            ),
+            Err(error) => Check::new(
+                "violet channels",
+                CheckStatus::Warning,
+                format!(
+                    "configured channels unchecked: {}. Run `cas violet channels`",
+                    error.message
+                ),
+            ),
+        },
+    )
+}
+
 /// cas-a897: the push-wake watch book, when push-wake ever ran in this project.
 fn violet_wake_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Option<Check> {
     use crate::ui::factory::daemon::runtime::violet_activity::{WatchHealth, watch_status};
@@ -1377,6 +1422,28 @@ fn violet_claim_check(cas_root: &Path, now: chrono::DateTime<chrono::Utc>) -> Op
     Some(Check::new(
         "violet claims",
         if healthy { CheckStatus::Ok } else { CheckStatus::Warning },
+        message,
+    ))
+}
+
+/// cas-ef94 (GH #1267): each running factory daemon's own consumer receipt.
+/// An old daemon writes none and is reported unknown, never inferred from the
+/// CLI on PATH. Local evidence only: no Cloud consumer exemption.
+fn violet_consumer_check(cas_root: &Path) -> Option<Check> {
+    use crate::ui::factory::daemon::runtime::violet_consumer::{ConsumerState, project_statuses};
+    let statuses = project_statuses(cas_root);
+    if statuses.is_empty() {
+        return None;
+    }
+    let unknown = statuses.iter().any(|status| status.state == ConsumerState::Unknown);
+    let message = statuses
+        .iter()
+        .map(|status| format!("{}: {}", status.factory_session, status.rows().join(" · ")))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(Check::new(
+        "violet consumers",
+        if unknown { CheckStatus::Warning } else { CheckStatus::Ok },
         message,
     ))
 }
@@ -2502,6 +2569,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     recorder.mark("GitHub origin", &checks);
     checks.extend(git_hooks::checks(project_root));
     recorder.mark("Git hooks path", &checks); // doctor-snapshot: no default row (core.hooksPath unset)
+    // doctor-snapshot: no default row (no unpublished reconcile commits)
+    if let Some(check) = managed_commits_check(project_root) { checks.push(check); }
     checks.push(managed_file_drift_check(project_root));
     recorder.mark("managed file drift", &checks);
     checks.push(prompt_hook_check(&cas_root));
@@ -2733,6 +2802,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
                 ),
             });
             checks.push(issue_repositories_check(&config, &cas_root));
+            if let Some(check) = journeys::check(project_root, &config.qa()) {
+                checks.push(check);
+            }
         }
         Err(error) => {
             checks.push(Check {
@@ -3003,6 +3075,8 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
     // cas-a897: Violet push-wake watches and the Cloud relay claim loop.
     checks.extend(violet_wake_check(&cas_root, chrono::Utc::now()));
     checks.extend(violet_claim_check(&cas_root, chrono::Utc::now()));
+    checks.extend(violet_consumer_check(&cas_root));
+    checks.extend(violet_channel_check(&cas_root));
     recorder.mark("violet hub", &checks);
 
     // Check 13c: stale user-level skills (cas-332f). `cas update` only prunes
@@ -4303,14 +4377,20 @@ fn github_origin_check(project: &Path) -> Option<Check> {
     let binary = crate::github_repo::gh_binary();
     Some(
         match crate::github_repo::resolve_slug(&origin, project, &binary, timeout) {
-            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => Check::new(
-                "GitHub origin",
-                CheckStatus::Warning,
-                format!(
-                    "origin repository moved: {} -> {}; CI uses the canonical repository. Run `git remote set-url origin https://github.com/{}.git`",
-                    repo.origin, repo.canonical, repo.canonical
-                ),
-            ),
+            Ok(repo) if !repo.origin.eq_ignore_ascii_case(&repo.canonical) => {
+                Check::new("GitHub origin", CheckStatus::Warning, {
+                    let url = format!("https://github.com/{}.git", repo.canonical);
+                    let remedy = crate::worktree::GitOperations::git_remedies([&[
+                        "remote", "set-url", "origin", &url,
+                    ]])
+                    .map(|[command]| command)
+                    .unwrap_or_else(|refusal| refusal);
+                    format!(
+                        "origin repository moved: {} -> {}; CI uses the canonical repository. Run:\n{remedy}",
+                        repo.origin, repo.canonical
+                    )
+                })
+            }
             Ok(repo) => Check::new(
                 "GitHub origin",
                 CheckStatus::Ok,
@@ -4603,20 +4683,27 @@ fn canonical_alias_checks(cas_root: &Path) -> Vec<Check> {
 
 fn cloud_team_only_check(cas_root: &Path) -> Check {
     match crate::cloud::CloudConfig::load_from_cas_dir(cas_root) {
-        Ok(config) if config.team_only => match config.validate_team_only() {
-            Ok(()) => {
-                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
-                Check::new(
+        Ok(config) if config.team_only => {
+            let (held, held_label) = team_only_doctor_held_rows(cas_root, &config);
+            match config.validate_team_only() {
+                Ok(()) => Check::new(
                     "cloud team-only",
-                    if held > 0 { CheckStatus::Warning } else { CheckStatus::Ok },
-                    format!("on; project rows sync only to the configured team; {held} personal rows held (team_only)"),
-                )
+                    if held > 0 {
+                        CheckStatus::Warning
+                    } else {
+                        CheckStatus::Ok
+                    },
+                    format!(
+                        "on; project rows sync only to the configured team; {held} {held_label} held (team_only)"
+                    ),
+                ),
+                Err(message) => Check::new(
+                    "cloud team-only",
+                    CheckStatus::Error,
+                    format!("{message}; {held} {held_label} held (team_only)"),
+                ),
             }
-            Err(message) => {
-                let held = crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0);
-                Check::new("cloud team-only", CheckStatus::Error, format!("{message}; {held} personal rows held (team_only)"))
-            }
-        },
+        }
         Ok(config) => {
             // cas-25c1: the cloud already said this project is team-owned.
             // A checkout that never got `cloud.team_only` keeps queueing
@@ -4640,6 +4727,23 @@ fn cloud_team_only_check(cas_root: &Path) -> Check {
             CheckStatus::Warning,
             format!("could not read cloud config: {error}"),
         ),
+    }
+}
+
+fn team_only_doctor_held_rows(
+    cas_root: &Path,
+    config: &crate::cloud::CloudConfig,
+) -> (usize, &'static str) {
+    if config.active_team_id().is_some() {
+        (
+            crate::cli::cloud::team_only_held_personal_rows(cas_root).unwrap_or(0),
+            "migratable personal row(s)",
+        )
+    } else {
+        let count = crate::cloud::SyncQueue::open_read_only(cas_root)
+            .and_then(|queue| queue.personal_row_count())
+            .unwrap_or(0);
+        (count, "personal row(s)")
     }
 }
 
@@ -5833,17 +5937,20 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         }
     };
 
-    if let Ok(config) = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
-        && config.active_team_id().is_some()
-        && let Ok(queue) = crate::cloud::SyncQueue::open_read_only(cas_root)
-        && let Ok(held) = queue.personal_row_count()
-        && held > 0
-    {
-        return Check {
-            name: "cloud sync queue".into(), status: CheckStatus::Warning,
-            message: format!("{held} personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}", if config.team_only {"on"} else {"off"}, crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)),
-        };
-    }
+    let held_notice = crate::cloud::CloudConfig::load_from_cas_dir(cas_root)
+        .ok()
+        .filter(|config| config.active_team_id().is_some())
+        .and_then(|config| {
+            crate::cli::cloud::team_only_held_personal_rows(cas_root)
+                .filter(|count| *count > 0)
+                .map(|count| {
+                    format!(
+                        "{count} migratable personal row(s) held: team-linked sync drains only the team queue; cloud.team_only is {}. {}",
+                        if config.team_only { "on" } else { "off" },
+                        crate::cloud::SyncQueue::personal_backlog_remedy(config.team_only)
+                    )
+                })
+        });
 
     let pending = match crate::cli::cloud::pending_content_pushes(&conn) {
         Ok(pending) => pending,
@@ -5851,7 +5958,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
             return Check {
                 name: "cloud sync queue".to_string(),
                 status: CheckStatus::Warning,
-                message: format!("cannot count queued content changes: {error}"),
+                message: append_held_notice(
+                    format!("cannot count queued content changes: {error}"),
+                    held_notice.as_deref(),
+                ),
             };
         }
     };
@@ -5867,7 +5977,9 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         .join(", ");
     let registration_conflicts = cloud_queue_registration_conflicts(&conn);
     let rejections = cloud_queue_rejections(&conn);
-    let remediation = if rejections.is_empty()
+    let remediation = if held_notice.is_some() && rejections.is_empty() {
+        "Resolve the held personal rows above by reviewing `cas cloud queue migrate-to-team`; `cas cloud purge-foreign --dry-run` reports preserved queue rows separately."
+    } else if rejections.is_empty()
         || rejections
             .iter()
             .any(|(reason, _)| crate::cloud::push_rejection_is_retryable(reason))
@@ -5899,6 +6011,7 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
                 describe_queue_rejections(&rejections)
             ));
         }
+        message = append_held_notice(message, held_notice.as_deref());
         return Check {
             name: "cloud sync queue".to_string(),
             status: CheckStatus::Warning,
@@ -5906,10 +6019,10 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
         };
     }
 
-    if pending.is_empty() && rejections.is_empty() {
+    let mut check = if pending.is_empty() && rejections.is_empty() {
         Check {
             name: "cloud sync queue".to_string(),
-            status: CheckStatus::Ok,
+            status: if held_notice.is_some() { CheckStatus::Warning } else { CheckStatus::Ok },
             message: format!("0 queued content change(s) await push; {remediation}"),
         }
     } else if pending.is_empty() {
@@ -5940,7 +6053,17 @@ fn cloud_queue_check(cas_root: &Path) -> Check {
                 }
             ),
         }
+    };
+    check.message = append_held_notice(check.message, held_notice.as_deref());
+    check
+}
+
+fn append_held_notice(mut message: String, held_notice: Option<&str>) -> String {
+    if let Some(notice) = held_notice {
+        message.push(' ');
+        message.push_str(notice);
     }
+    message
 }
 
 /// Pending rows annotated before a sync could attempt them because the cloud
@@ -6288,20 +6411,82 @@ mod tests {
     /// so nothing pulled. Doctor names the stale pull and its cause, and a
     /// team-scoped pull counts as fresh (the cas-7e38 watermark trap).
     #[test]
-    fn cas_db92_doctor_explains_held_personal_rows_without_retrying_the_wrong_endpoint() {
+    fn cas_db92_doctor_explains_single_held_personal_row_without_retry_advice() {
         let temp = TempDir::new().unwrap();
         let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
         let mut cloud = crate::cloud::CloudConfig::default();
         cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
         cloud.save_to_cas_dir(&root).unwrap();
-        let queue = crate::cloud::SyncQueue::open(&root).unwrap(); queue.init().unwrap();
-        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut task = crate::types::Task::new("held".into(), "held".into());
+        task.origin_project = Some("p".into());
+        tasks.add(&task).unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some(&serde_json::to_string(&task).unwrap())).unwrap();
+
         let check = cloud_queue_check(&root);
         assert!(matches!(check.status, CheckStatus::Warning));
-        assert!(check.message.contains("1 personal row(s) held"));
+        assert!(check.message.contains("1 migratable personal row(s) held"));
         assert!(check.message.contains("cas config set cloud.team_only true"));
         assert!(check.message.contains("cas cloud queue migrate-to-team"));
-        assert!(!check.message.contains("cas cloud queue --retry"));
+        assert!(!check.message.contains("cas cloud queue --retry"), "{}", check.message);
+
+        queue.migrate_personal_to_team("550e8400-e29b-41d4-a716-446655440000", "p", true).unwrap();
+        let after_migration = cloud_queue_check(&root);
+        assert!(!after_migration.message.contains("personal row(s) held"), "{}", after_migration.message);
+    }
+
+    #[test]
+    fn cas_db92_doctor_keeps_conflict_and_rejection_details_with_a_held_row() {
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let mut cloud = crate::cloud::CloudConfig::default();
+        cloud.set_team("550e8400-e29b-41d4-a716-446655440000", "fixture");
+        cloud.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let enqueue_task = |id: &str, private: bool| {
+            let mut task = crate::types::Task::new(id.into(), id.into());
+            task.origin_project = Some("p".into());
+            if private {
+                task.share = Some(crate::types::ShareScope::Private);
+            }
+            tasks.add(&task).unwrap();
+            queue.enqueue(crate::cloud::EntityType::Task, id, crate::cloud::SyncOperation::Upsert, Some(&serde_json::to_string(&task).unwrap())).unwrap();
+        };
+        enqueue_task("held", false);
+        enqueue_task("registration-conflict", true);
+        enqueue_task("rejected", true);
+        let conflict = queue.list_all(10).unwrap().into_iter().find(|row| row.entity_id == "registration-conflict").unwrap();
+        queue.record_row_outcome(conflict.id, "parked", Some("project_registration_conflict")).unwrap();
+        let rejected = queue.list_all(10).unwrap().into_iter().find(|row| row.entity_id == "rejected").unwrap();
+        queue.record_row_outcome(rejected.id, "rejected", Some("team_owned_project")).unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "delete", crate::cloud::SyncOperation::Delete, None).unwrap();
+        let check = cloud_queue_check(&root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(check.message.contains("1 migratable personal row(s) held"));
+        assert!(check.message.contains("project_registration_conflict"), "{}", check.message);
+        assert!(check.message.contains("team_owned_project"), "{}", check.message);
+    }
+
+    #[test]
+    fn cas_db92_team_only_check_counts_personal_rows_without_a_linked_team() {
+        let temp = TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut config = crate::cloud::CloudConfig::default();
+        config.team_only = true;
+        config.save_to_cas_dir(&root).unwrap();
+        let queue = crate::cloud::SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        queue.enqueue(crate::cloud::EntityType::Task, "held", crate::cloud::SyncOperation::Upsert, Some("{}")).unwrap();
+
+        let check = cloud_team_only_check(&root);
+        assert!(matches!(check.status, CheckStatus::Error));
+        assert!(check.message.contains("1 personal row(s) held (team_only)"), "{}", check.message);
     }
 
     #[test]
@@ -6864,7 +7049,7 @@ mod tests {
         assert_eq!(json[0]["status"], "warning");
         assert_eq!(
             json[0]["remediation"],
-            "Run `git remote set-url origin https://github.com/Richards-LLC/cassy.git`"
+            "Run:\ngit remote set-url origin 'https://github.com/Richards-LLC/cassy.git'"
         );
         crate::test_paths::warm_stub(
             &gh,
@@ -9034,40 +9219,57 @@ mod tests {
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn doctor_proxy_reachability_check_reports_real_missing_credential_detail() {
-        crate::test_support::TestEnvGuard::run_with_temp_home(|_| {
-            let temp = TempDir::new().unwrap();
-            let cas_root = temp.path().join(".cas");
-            fs::create_dir_all(&cas_root).unwrap();
-            let missing = format!("CAS_DOCTOR_PROXY_MISSING_{}", std::process::id());
-            let mut config = cmcp_core::config::Config::default();
-            config.add_server(
-                "neon".to_string(),
-                cmcp_core::config::ServerConfig::Http {
-                    url: "https://neon.example.invalid/mcp".to_string(),
-                    auth: Some(format!("${{{missing}}}")),
-                    headers: std::collections::HashMap::new(),
-                    oauth: false,
-                },
-            );
-            config.save_to(&cas_root.join("proxy.toml")).unwrap();
+        // A runner may inherit an XDG directory with unrelated machine upstreams.
+        let inherited = TempDir::new().unwrap();
+        let user_proxy = inherited.path().join("code-mode-mcp/config.toml");
+        fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+        fs::write(
+            &user_proxy,
+            "[servers.viktor]\ntransport = 'http'\n\
+             url = 'https://viktor.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
+        ).unwrap();
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
+            "XDG_CONFIG_HOME",
+            inherited.path(),
+        );
+        // The shared guard redirects XDG and scrubs provider credentials;
+        // keep the poisoned ambient config above to prove that boundary.
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let cas_root = temp.path().join(".cas");
+        fs::create_dir_all(&cas_root).unwrap();
+        let missing = format!("CAS_DOCTOR_PROXY_MISSING_{}", std::process::id());
+        let mut config = cmcp_core::config::Config::default();
+        config.add_server(
+            "neon".to_string(),
+            cmcp_core::config::ServerConfig::Http {
+                url: "https://neon.example.invalid/mcp".to_string(),
+                auth: Some(format!("${{{missing}}}")),
+                headers: std::collections::HashMap::new(),
+                oauth: false,
+            },
+        );
+        config.save_to(&cas_root.join("proxy.toml")).unwrap();
 
-            let check = proxy_upstream_reachability_check(&cas_root);
-            assert!(matches!(check.status, CheckStatus::Warning));
-            assert!(
-                check
-                    .message
-                    .contains("checked 1 configured upstream(s) once")
-            );
-            assert!(
-                check.message.contains(&format!(
-                    "neon (missing required environment variable {missing}, named by `auth` in \
-                     the [servers.neon] block of {}",
-                    cas_root.join("proxy.toml").display()
-                )),
-                "cas-7a98: a project-supplied credential names its file: {}",
-                check.message
-            );
-        });
+        let check = proxy_upstream_reachability_check(&cas_root);
+        assert!(matches!(check.status, CheckStatus::Warning));
+        assert!(
+            check
+                .message
+                .contains("checked 1 configured upstream(s) once"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains(&format!(
+                "neon (missing required environment variable {missing}, named by `auth` in \
+                 the [servers.neon] block of {}",
+                cas_root.join("proxy.toml").display()
+            )),
+            "cas-7a98: a project-supplied credential names its file: {}",
+            check.message
+        );
     }
 
     #[test]
@@ -9121,6 +9323,99 @@ mod tests {
             assert_eq!(std::fs::read(&legacy).unwrap(), legacy_bytes.as_bytes());
         }
     }
+
+#[test]
+fn violet_channel_check_is_bounded_and_read_only_cas_cf25() {
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let ids: Vec<_> = (0..18).map(|n| format!("C{n:02}CONFIG")).collect();
+    std::fs::write(
+        dir.path().join("config.toml"),
+        format!(
+            "[project]\ncanonical_id = 'qa.invalid/channels'\n[slack]\nchannels = {}\n",
+            serde_json::to_string(&ids).unwrap()
+        ),
+    )
+    .unwrap();
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
+    crate::cloud::CloudConfig {
+        endpoint: endpoint.clone(),
+        token: Some("ordinary-fixture-user".into()),
+        team_id: Some("qa-team".into()),
+        ..Default::default()
+    }
+    .save_to_cas_dir(dir.path())
+    .unwrap();
+    let remote = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        for index in 0..17 {
+            let request = server
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap()
+                .expect("configured-channel GET");
+            assert_eq!(request.method(), &tiny_http::Method::Get);
+            paths.push(request.url().to_owned());
+            let body = if index == 0 {
+                json!({"channels": [{"channel_id":"C00CONFIG", "project_id":"qa.invalid/channels"}]})
+            } else if index == 1 {
+                json!({"schema":"cassy.binding-reconciliation/v1", "code":"completed",
+                        "binding":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "provider":"slack",
+                            "team_id":"qa-team", "workspace_id":"T0QA", "channel_id":"C00CONFIG",
+                            "project_id":"qa.invalid/channels", "mode":"managed", "verified":false,
+                            "fence_generation":0, "activated_at":null, "legacy_fenced_at":null},
+                        "strict_activation":"not_requested"})
+            } else {
+                json!({"schema":"cassy.binding-reconciliation/v1", "code":"completed", "binding":null, "strict_activation":null})
+            };
+            request
+                .respond(
+                    tiny_http::Response::from_string(body.to_string()).with_header(
+                        tiny_http::Header::from_bytes("Cache-Control", "no-store").unwrap(),
+                    ),
+                )
+                .unwrap();
+        }
+        assert!(server.try_recv().unwrap().is_none());
+        paths
+    });
+    let check = violet_channel_check_at(
+        dir.path(),
+        &crate::cli::violet_cmd::channels::ChannelsArgs {
+            url: endpoint,
+            registration_id: None,
+        },
+    )
+    .unwrap();
+    let paths = remote.join().unwrap();
+    assert!(matches!(check.status, CheckStatus::Warning));
+    assert!(
+        check.message.contains("cloud_unverified"),
+        "{}",
+        check.message
+    );
+    assert!(
+        check.message.contains("cloud_unmapped"),
+        "{}",
+        check.message
+    );
+    assert!(check.message.contains("unchecked"), "{}", check.message);
+    assert_eq!(
+        paths.len(),
+        17,
+        "one discovery GET plus at most 16 authority GETs"
+    );
+    assert!(
+        paths
+            .iter()
+            .all(|path| !path.contains("activation") && !path.contains("registration"))
+    );
+    let evidence: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("violet-channel-check.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(evidence["channels"].as_array().unwrap().len(), 16);
+}
 
     #[test]
     fn violet_wake_check_reads_the_watch_book_cas_a897() {
@@ -12623,5 +12918,86 @@ fn managed_file_drift_check(root: &Path) -> Check {
             CheckStatus::Warning,
             format!("managed file conflict: {error}; run `cas update`"),
         ),
+    }
+}
+
+fn managed_commits_check(root: &Path) -> Option<Check> {
+    let git = crate::worktree::GitOperations::new(root.to_path_buf());
+    let branch = git.detect_default_branch();
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root).args([
+        "for-each-ref", "--format=%(upstream)", &format!("refs/heads/{branch}"),
+    ]);
+    let output = crate::worktree::GitOperations::run_command_bounded(command, Duration::from_secs(2)).ok()?;
+    if !output.status.success() { return None; }
+    let upstream = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if upstream.is_empty() { return None; }
+    let mut command = std::process::Command::new("git");
+    command.current_dir(root).args(["show-ref", "--verify", "--quiet", &upstream]);
+    // A deleted configured upstream cannot establish unpublished local work.
+    // Other inspection failures retain the diagnostic below.
+    if crate::worktree::GitOperations::run_command_bounded(command, Duration::from_secs(2))
+        .is_ok_and(|output| output.status.code() == Some(1)) { return None; }
+    let commits = match git.reconcile_commits_ahead(&format!("refs/heads/{branch}"), &upstream) {
+        Ok(commits) => commits,
+        Err(_) => return Some(Check::new("managed commits", CheckStatus::Warning, "Could not inspect default-branch publication; review its Git upstream")),
+    };
+    if commits.count == 0 { return None; }
+    let branch = crate::worktree::GitOperations::visible_git_label(&branch);
+    let upstream = crate::worktree::GitOperations::visible_git_label(
+        upstream.strip_prefix("refs/remotes/").or_else(|| upstream.strip_prefix("refs/heads/")).unwrap_or(&upstream)
+    );
+    Some(Check::new("managed commits", CheckStatus::Warning, format!(
+        "{} local-only reconcile commit(s): {branch} ahead of {upstream}. Review and push to origin, then open a PR.", commits.count,
+    )))
+}
+
+#[cfg(test)]
+mod managed_commits_tests {
+    use super::*;
+
+    #[test]
+    fn doctor_finds_local_reconcile_commits_on_default_upstream_cas_3b812() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = env.home().join("repo");
+        fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q", "--initial-branch=main"]);
+        git(&["config", "user.name", "Fixture"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "baseline"]);
+        git(&["remote", "add", "origin", "./no-network-needed"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        git(&["branch", "--set-upstream-to=origin/main", "main"]);
+        assert!(managed_commits_check(&repo).is_none());
+        // A same-subject human commit is not a Cassy-authored repair.
+        git(&["-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "chore(cassy): reconcile managed project files"]);
+        assert!(managed_commits_check(&repo).is_none());
+        git(&["-c", "commit.gpgsign=false", "-c", "user.name=Cassy", "-c", "user.email=cassy@localhost", "commit", "--allow-empty", "-qm", "chore(cassy): reconcile managed project files"]);
+        let main = git(&["rev-parse", "main"]);
+        git(&["checkout", "-qb", "factory/probe", "origin/main"]);
+        // Diagnose local main even when the worker checkout itself is aligned.
+        let check = managed_commits_check(&repo).expect("unpublished reconcile commit needs a finding");
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        let json = serialize_checks(&[check], &[]);
+        assert_eq!(json[0]["status"], "warning");
+        assert_eq!(json[0]["group"], "config");
+        let message = json[0]["message"].as_str().unwrap();
+        assert!(message.contains("1") && message.contains("main") && message.contains("origin/main") && message.contains("reconcile"), "{message}");
+        let remedy = json[0]["remediation"].as_str().expect("action belongs in remediation");
+        assert!(remedy.contains("origin") && remedy.contains("PR"), "{remedy}");
+        assert_eq!(git(&["rev-parse", "main"]), main, "doctor must not move local history");
+        git(&["update-ref", "refs/remotes/origin/main", &main]);
+        assert!(managed_commits_check(&repo).is_none(), "published repairs are no longer pending");
+        git(&["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert!(managed_commits_check(&repo).is_none(), "deleted configured upstream is not proof of an unpushed repair");
+        git(&["config", "--unset", "branch.main.remote"]);
+        git(&["config", "--unset", "branch.main.merge"]);
+        assert!(managed_commits_check(&repo).is_none(), "no upstream is not proof of an unpushed repair");
     }
 }

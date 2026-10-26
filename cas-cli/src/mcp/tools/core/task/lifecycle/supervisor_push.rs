@@ -431,14 +431,98 @@ pub(crate) fn queue_cassy_merge_close_notice(
     merge_commit: &str,
 ) -> Result<Option<i64>, String> {
     queue_assignee_notice(cas_root, task, |worker_name| {
+        let admission = task.deliverables.effective_merge_ci_admission();
+        let ci = if admission == cas_types::MergeCiAdmission::Green {
+            "green CI".to_string()
+        } else {
+            format!("CI {}", admission.label())
+        };
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with green CI and closed it with your parked close reason. No re-close is needed.",
-                task.id
+                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                task.id,
+                if task.deliverables.parked_close_reason.is_some() {
+                    "with your parked close reason"
+                } else {
+                    "on its approved verdict"
+                }
             ),
             format!("Merged and closed by Cassy: {}", task.id),
         )
+    })
+}
+
+/// cas-e9d6: tell the worker once that a supervisor merge parked its lane
+/// tip and released its lease, so it neither resumes nor re-closes.
+pub(crate) fn queue_merged_lane_parked_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    tip: &str,
+    merge_commit: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
+            format!(
+                "Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                task.id
+            ),
+            format!("Merged and parked by Cassy: {}", task.id),
+        )
+    })
+}
+
+/// cas-46ea: tell the assigned worker, once per verdict, that a rejected
+/// verdict returned its merged delivery, with the findings to fix.
+pub(crate) fn queue_rejected_merge_reopen_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    verification_id: &str,
+    findings: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-merge-rejected:{verification_id}:worker:{worker_name}"),
+            format!(
+                "Task {} is Open again: the verifier rejected the merged delivery ({verification_id}). Findings: {findings}\nStart task {} again, land corrective commits on top of the merge, then close as usual.",
+                task.id, task.id
+            ),
+            format!("Verifier rejected merged delivery: {}", task.id),
+        )
+    })
+}
+
+/// cas-46ea: one supervisor receipt when Cassy's verdict close overrode a
+/// worker hold that was not waiting on the verification.
+pub(crate) fn queue_cassy_close_over_hold_receipt(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    hold_reason: &str,
+) -> Result<i64, String> {
+    let queue = crate::store::open_prompt_queue_store(cas_root)
+        .map_err(|error| format!("supervisor receipt queue open failed: {error}"))?;
+    let factory_session = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty());
+    let result = queue
+        .enqueue_idempotent(
+            "cassy",
+            "supervisor",
+            &format!(
+                "Cassy closed merged task {} on its approved verdict over a worker hold: {hold_reason}",
+                task.id
+            ),
+            factory_session.as_deref(),
+            Some(&format!("Closed over worker hold: {}", task.id)),
+            Some(cas_store::NotificationPriority::Normal),
+            &format!("cassy-close-over-hold:{}", task.id),
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .map_err(|error| format!("supervisor receipt enqueue failed: {error}"))?;
+    Ok(match result {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
     })
 }
 
@@ -867,12 +951,38 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
     occurrence_id: &str,
     branch_tip: Option<&str>,
 ) -> Result<LifecyclePushResult, String> {
+    emit_task_lifecycle_transition_in_project(
+        supervisor_queue, prompt_queue, agent_store, task_id, task_title,
+        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_task_lifecycle_transition_in_project(
+    supervisor_queue: &dyn SupervisorQueueStore,
+    prompt_queue: Option<&dyn PromptQueueStore>,
+    agent_store: &dyn AgentStore,
+    task_id: &str,
+    task_title: &str,
+    old_status: TaskStatus,
+    new_status: TaskStatus,
+    actor: &str,
+    reason: Option<&str>,
+    kind: LifecycleTransition,
+    occurrence_id: &str,
+    branch_tip: Option<&str>,
+    cas_dir: Option<&Path>,
+) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some((supervisor, recipient)) =
         lifecycle_notice_owner(agent_store, factory_session.as_deref())
     else {
         return Ok(LifecyclePushResult::NoSupervisor);
     };
+
+    let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
+    });
 
     let key = transition_key(
         task_id,
@@ -898,6 +1008,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
         "recipient_factory_session": recipient.session,
         "occurrence_id": occurrence_id,
         "branch_tip": branch_tip,
+        "verification_wait": verification_wait,
         "transition_key": key,
         "timestamp": now.to_rfc3339(),
     })
@@ -978,6 +1089,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
         branch_tip,
         &recipient.name,
         recipient.session.as_deref(),
+        verification_wait,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1068,6 +1180,7 @@ pub fn emit_qa_dispatch_handoff(
     implementer: &str,
     reasons: &str,
     location: crate::prompt_revalidation::QaDeliveryLocation<'_>,
+    reviewer: Option<&str>,
 ) -> Result<(), String> {
     let body = crate::prompt_revalidation::qa_dispatch_envelope(
         pass_id,
@@ -1079,6 +1192,7 @@ pub fn emit_qa_dispatch_handoff(
         implementer,
         reasons,
         location,
+        reviewer,
     );
     let factory_session = std::env::var("CAS_FACTORY_SESSION").ok();
     let source = format!("{QA_DISPATCH_SOURCE_PREFIX}{pass_id}");
@@ -1121,9 +1235,10 @@ fn deliver_prompt_for_notification(
     branch_tip: Option<&str>,
     recipient_target: &str,
     recipient_session: Option<&str>,
+    verification_wait: bool,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
-    let body = build_prompt_body(
+    let mut body = build_prompt_body(
         kind,
         task_id,
         task_title,
@@ -1137,7 +1252,12 @@ fn deliver_prompt_for_notification(
         branch_tip,
     );
     let summary = format!("{}: {} ({})", kind.as_event_type(), task_id, occurrence_id);
-    let source = lifecycle_prompt_source(kind, notification_id);
+    let source = if verification_wait {
+        body = format!("{}\n{body}", crate::supervisor_message_wakes::QUIET);
+        format!("{LIFECYCLE_SOURCE_PREFIX}{notification_id}")
+    } else {
+        lifecycle_prompt_source(kind, notification_id)
+    };
     let dedupe = lifecycle_prompt_dedupe_key(notification_id);
 
     prompt_queue
@@ -1361,6 +1481,11 @@ fn deliver_lifecycle_outbox_row_with_agents(
                 None => factory_session,
             },
         },
+        payload.get("verification_wait").and_then(|value| value.as_bool()).unwrap_or(false)
+            && kind == LifecycleTransition::Blocked
+            && recipient.as_ref().is_none_or(|current| {
+                payload.get("supervisor_id").and_then(|value| value.as_str()) == Some(current.id.as_str())
+            }),
     )
     .map_err(|error| error.to_string())?;
 
@@ -1493,7 +1618,7 @@ impl CasCore {
         let pq = pq_store
             .as_ref()
             .map(|a| a.as_ref() as &dyn PromptQueueStore);
-        match emit_task_lifecycle_transition_with_branch_tip(
+        match emit_task_lifecycle_transition_in_project(
             sq.as_ref(),
             pq,
             agent_store.as_ref(),
@@ -1506,6 +1631,7 @@ impl CasCore {
             kind,
             occurrence_id,
             branch_tip,
+            Some(&self.cas_root),
         ) {
             Err(e) if e.contains("prompt_queue unavailable") => {
                 if let Some(open_err) = open_err {

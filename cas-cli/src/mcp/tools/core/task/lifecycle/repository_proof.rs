@@ -172,6 +172,21 @@ fn resolve_target_branch_ref(
         .filter(|head| !head.is_empty())
         .map(|head| (target_ref, head))
     };
+    // Released epic close binds to a full commit ID so subsequent pushes do
+    // not widen the reviewed tree. Resolve the same immutable ID at capture
+    // and evaluation; arbitrary revision expressions remain unsupported.
+    let immutable_commit = matches!(target_branch.len(), 40 | 64)
+        && target_branch.bytes().all(|byte| byte.is_ascii_hexdigit());
+    // Epic close selects a qualified remote ref explicitly so an unrelated
+    // or divergent local branch cannot replace the published epic boundary.
+    if immutable_commit
+        || target_branch.starts_with("refs/heads/")
+        || target_branch.starts_with("refs/remotes/origin/")
+    {
+        return resolve(target_branch.to_string()).ok_or_else(|| {
+            format!("repository proof target ref `{target_branch}` does not resolve")
+        });
+    }
     let local = resolve(format!("refs/heads/{target_branch}"));
     let origin = resolve(format!("refs/remotes/origin/{target_branch}"));
     match (local, origin) {
@@ -337,6 +352,38 @@ fn commit_is_reachable_from(worktree_root: &Path, commit: &str, head: &str) -> b
             &["merge-base", "--is-ancestor", commit, head],
         )
         .is_ok()
+}
+
+/// Recover a parked review only from its immutable delivery, never incidental
+/// supervisor HEAD. A moved worker branch is usable only through the declared
+/// integration branch once that branch actually contains the delivery.
+pub(crate) fn capture_parked_delivery_proof(
+    repository_root: &Path,
+    task: &cas_types::Task,
+    target_branch: Option<&str>,
+) -> Result<RepositoryProofBoundary, String> {
+    let anchor = task
+        .deliverables
+        .factory_branch_anchor
+        .as_deref()
+        .filter(|anchor| !anchor.is_empty() && !anchor.starts_with('-'))
+        .ok_or("parked verification requires an immutable delivery anchor")?;
+    let anchor = rev_parse(repository_root, anchor)?;
+    if let Some(branch) = task.deliverables.parked_branch.as_deref()
+        && let Ok(proof) =
+            capture_repository_proof_at_target(repository_root, branch, vec![anchor.clone()])
+        && proof.head_commit == anchor
+    {
+        return Ok(proof);
+    }
+    if let Some(branch) = target_branch {
+        let proof =
+            capture_repository_proof_at_target(repository_root, branch, vec![anchor.clone()])?;
+        if commit_is_reachable_from(repository_root, &anchor, &proof.head_commit) {
+            return Ok(proof);
+        }
+    }
+    Err("parked delivery tip no longer matches its recorded anchor or declared target; name a fresh dispatch after reviewing the current delivery".into())
 }
 
 /// Ref namespaces that hold a parked delivery after its implementer moves on:

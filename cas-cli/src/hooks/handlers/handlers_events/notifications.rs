@@ -204,24 +204,58 @@ pub fn handle_notification(
             .spawn();
     }
 
+    // This records the hook event, not external delivery.
+    eprintln!("cas: Notification event: {message}");
+
     // Optional webhook support
     if let Some(ref webhook_url) = notification_config.webhook_url {
-        // Send async notification via webhook (fire and forget)
-        let url = webhook_url.clone();
-        let msg = message.clone();
-        std::thread::spawn(move || {
-            let _ = send_webhook_notification(&url, &msg);
-        });
+        // Diagnose old/hand-edited values before sending. Do not put the
+        // destination or body in logs.
+        match crate::config::validate_notification_webhook_url(webhook_url) {
+            Ok(Some(url)) => {
+                let msg = message.clone();
+                let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+                let sender = std::thread::spawn(move || {
+                    let _ = done_tx.send(send_webhook_notification(url.as_str(), &msg));
+                });
+                // Curl has a ten-second transfer limit. Keep this short-lived
+                // CLI alive through normal delivery, but never wait forever
+                // for a stuck sender or process launch.
+                match done_rx.recv_timeout(std::time::Duration::from_secs(11)) {
+                    Ok(result) => {
+                        if sender.join().is_err() || result.is_err() {
+                            eprintln!("cas: Warning: notification webhook failed.");
+                        } else {
+                            eprintln!("cas: Notification webhook delivered");
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => eprintln!(
+                        "cas: Warning: notification webhook timed out; delivery unconfirmed."
+                    ),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        let _ = sender.join();
+                        eprintln!("cas: Warning: notification webhook sender failed.");
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(_) => eprintln!(
+                "cas: Warning: notification webhook refused; check notifications.webhook_url."
+            ),
+        }
     }
-
-    // Log the notification event
-    eprintln!("cas: Notification sent: {message}");
 
     Ok(HookOutput::empty())
 }
 
-/// Send a webhook notification (blocking, for use in spawned thread)
+/// Send a webhook notification (blocking, for use in the bounded sender thread)
 pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemError> {
+    // Config files can predate URL validation or be edited outside the CLI;
+    // enforce the destination policy at the last point before sending data.
+    let Some(url) = crate::config::validate_notification_webhook_url(url)? else {
+        return Ok(());
+    };
+
     // Simple HTTP POST with JSON payload
     let payload = serde_json::json!({
         "text": message,
@@ -231,6 +265,12 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
     // Use curl for simplicity (available on most systems)
     let output = std::process::Command::new("curl")
         .args([
+            "-q", // Must be first: ignore curl's default config files.
+            "--globoff",
+            "--proto",
+            "=https,http",
+            "--max-time",
+            "10",
             "-s",
             "-X",
             "POST",
@@ -238,12 +278,17 @@ pub fn send_webhook_notification(url: &str, message: &str) -> Result<(), MemErro
             "Content-Type: application/json",
             "-d",
             &payload.to_string(),
-            url,
+            "--",
+            url.as_str(),
         ])
         .output();
 
     match output {
-        Ok(_) => Ok(()),
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => Err(MemError::Other(format!(
+            "Webhook failed: curl exited {}",
+            output.status
+        ))),
         Err(e) => Err(MemError::Other(format!("Webhook failed: {e}"))),
     }
 }
@@ -628,6 +673,143 @@ mod pre_compact_flush_tests {
     use crate::types::{Agent, AgentRole, Task, TaskStatus};
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn notification_webhook_sender_rejects_non_https() {
+        if std::env::var_os("CAS_2E34_REFUSAL_CAPTURE").is_some() {
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let root = env.home().join(".cas");
+            std::fs::write(root.join("config.toml"),
+                "[notifications]\nenabled = true\non_idle_prompt = true\nwebhook_url = ' https://hooks.example.test/private-destination '\n"
+            ).unwrap();
+            handle_notification(&HookInput {
+                hook_event_name: "idle_prompt".into(),
+                ..Default::default()
+            }, Some(&root)).unwrap();
+            return;
+        }
+        let error = send_webhook_notification(
+            "file:///dev/null",
+            "notification text must not leave over HTTP",
+        )
+        .expect_err("non-HTTPS destinations must be rejected before sending")
+        .to_string();
+        assert!(error.contains("HTTPS"), "{error}");
+
+        let name = concat!(module_path!(), "::notification_webhook_sender_rejects_non_https");
+        let name = name.strip_prefix("cas::").unwrap_or(name);
+        let fakebin = tempfile::tempdir().unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            for name in ["notify-send", "osascript"] {
+                let program = fakebin.path().join(name);
+                std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+                std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("CAS_2E34_REFUSAL_CAPTURE", "1")
+            .env("PATH", fakebin.path())
+            .output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        crate::test_child::assert_passed(&stdout, name);
+        let warning = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(warning.lines().filter(|line| line.contains("Warning:")).count(), 1, "{warning:?}");
+        assert!(warning.contains("Warning: notification webhook refused"), "{warning}");
+        assert!(warning.contains("notifications.webhook_url"), "{warning}");
+        assert!(!warning.contains("private-destination"), "destination leaked: {warning}");
+    }
+
+    #[test]
+    fn notification_webhook_sender_rejects_parser_differential_and_normalizes_curl_url() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let curl = temp.path().join("curl");
+        let captured_args = temp.path().join("curl-args");
+        std::fs::write(
+            &curl,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$CURL_ARGS_FILE\"\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        let path = format!("{}:{old_path}", temp.path().display());
+        let captured_args_path = captured_args.to_str().unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PATH", path.as_str()),
+            ("CURL_ARGS_FILE", captured_args_path),
+        ]);
+
+        send_webhook_notification("", "empty webhook must be a no-op").unwrap();
+        assert!(!captured_args.exists(), "empty webhook must not invoke curl");
+
+        for url in [
+            "http://127.0.0.1\\@evil.example/",
+            "http://localhost\\@evil.example",
+            "http://127.0.0.1:80\\@evil.example/",
+        ] {
+            let error = send_webhook_notification(url, "secret notification")
+                .expect_err("parser-differential destinations must be refused")
+                .to_string();
+            assert!(
+                error.to_ascii_lowercase().contains("https")
+                    || error.to_ascii_lowercase().contains("url"),
+                "{error}"
+            );
+            assert!(!captured_args.exists(), "curl must not receive {url}");
+        }
+
+        send_webhook_notification("HTTPS://Hooks.Example.Test/webhook", "safe notification")
+            .unwrap();
+        let args = std::fs::read_to_string(captured_args).unwrap();
+        let args: Vec<_> = args.lines().collect();
+        assert_eq!(args.first(), Some(&"-q"), "curl must ignore default config before any other argument");
+        assert!(args.contains(&"--globoff"));
+        // pin: the background sender has a ten-second total transfer budget.
+        assert!(args.windows(2).any(|pair| pair == ["--max-time", "10"]));
+        assert!(args.windows(2).any(|pair| pair == ["--proto", "=https,http"]));
+        assert_eq!(args.get(args.len() - 2), Some(&"--"));
+        assert_eq!(args.last(), Some(&"https://hooks.example.test/webhook"));
+    }
+
+    #[test]
+    fn notification_webhook_sender_ignores_hostile_home_curlrc() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.remove("CURL_HOME");
+        env.set("NO_PROXY", "*");
+        let server = std::sync::Arc::new(tiny_http::Server::http("127.0.0.1:0").unwrap());
+        let endpoint = format!("http://{}", server.server_addr());
+        std::fs::write(env.home().join(".curlrc"), format!(
+            "url = \"{endpoint}/stolen\"\nheader = \"X-Curlrc: injected\"\n"
+        )).unwrap();
+        let receiver = {
+            let server = server.clone();
+            std::thread::spawn(move || {
+                let mut received = Vec::new();
+                while let Ok(mut request) = server.recv() {
+                    let mut body = String::new();
+                    request.as_reader().read_to_string(&mut body).unwrap();
+                    let injected = request.headers().iter().any(|h| h.field.equiv("X-Curlrc"));
+                    received.push((request.url().to_string(), injected, body));
+                    request.respond(tiny_http::Response::empty(200)).unwrap();
+                }
+                received
+            })
+        };
+        let sent = send_webhook_notification(&format!("{endpoint}/intended"), "private notification");
+        // Curl has completed every transfer before this deterministic server shutdown.
+        server.unblock();
+        let received = receiver.join().unwrap();
+        sent.unwrap();
+        assert_eq!(received.len(), 1, "curlrc added a destination: {received:?}");
+        assert_eq!(received[0].0, "/intended");
+        assert!(!received[0].1, "curlrc injected a header");
+        let body: serde_json::Value = serde_json::from_str(&received[0].2).unwrap();
+        assert_eq!(body["text"], "private notification");
+    }
 
     // -------------------------------------------------------------------------
     // Test helpers

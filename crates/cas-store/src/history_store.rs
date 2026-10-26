@@ -1045,6 +1045,10 @@ pub trait HistoryStore: Send + Sync {
     /// Epochs ordered by `started_at` ascending, optionally from a lower bound.
     fn list_epochs(&self, since: Option<&str>, limit: usize) -> Result<Vec<HistoryEpoch>>;
 
+    /// Recently observed daemon epochs, newest observation first. A daemon
+    /// may have started long before `since` while its heartbeat is still fresh.
+    fn list_recent_daemon_epochs(&self, since: &str, limit: usize) -> Result<Vec<HistoryEpoch>>;
+
     /// Backfill `daemon_start` epochs from `daemon_instances`.
     ///
     /// Those rows carry `started_at` and `last_heartbeat` but no binary
@@ -2979,6 +2983,41 @@ impl HistoryStore for SqliteHistoryStore {
         Ok(rows)
     }
 
+    fn list_recent_daemon_epochs(&self, since: &str, limit: usize) -> Result<Vec<HistoryEpoch>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, epoch_kind, binary_path,
+                    CASE WHEN exe_deleted != 0 THEN NULL ELSE binary_mtime END,
+                    version, started_at,
+                    ended_at, pid, exe_deleted, recorded_at
+               FROM history_epochs
+              WHERE epoch_kind = ?1
+                AND datetime(COALESCE(ended_at, started_at)) >= datetime(?2)
+              ORDER BY datetime(COALESCE(ended_at, started_at)) DESC, id DESC
+              LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![EPOCH_KIND_DAEMON_START, since, limit.max(1) as i64],
+                |row| {
+                    Ok(HistoryEpoch {
+                        id: row.get(0)?,
+                        epoch_kind: row.get(1)?,
+                        binary_path: row.get(2)?,
+                        binary_mtime: row.get(3)?,
+                        version: row.get(4)?,
+                        started_at: row.get(5)?,
+                        ended_at: row.get(6)?,
+                        pid: row.get(7)?,
+                        exe_deleted: row.get::<_, i64>(8)? != 0,
+                        recorded_at: row.get(9)?,
+                    })
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     fn backfill_epochs_from_daemons(&self) -> Result<EpochBackfill> {
         let mut conn = self.lock();
         let has_source: bool = conn.query_row(
@@ -4184,6 +4223,12 @@ mod tests {
         assert_eq!(all[0].started_at, "2026-08-07T21:02:26Z", "ordered by start");
         assert_eq!(all[0].version.as_deref(), Some("2.49.0"));
         assert_eq!(all[0].binary_mtime.as_deref(), Some("2026-08-07T20:55:00Z"));
+        store.touch_epoch_end(42, "2026-08-07T21:50:00Z").unwrap();
+        let recent = store
+            .list_recent_daemon_epochs("2026-08-07T21:30:00Z", 1)
+            .unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].pid, Some(42), "newest heartbeat wins the cap");
     }
 
     #[test]

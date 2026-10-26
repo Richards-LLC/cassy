@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 /// Instructions injected into Codex supervisor agents via `--config developer_instructions`.
-const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-codex-supervisor-checklist. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. MERGE REQUIRED / awaiting_merge / idle-with-close-rejected is always top priority: run `mcp__cs__factory action=epic_status` (and/or `mcp__cs__task action=list status=awaiting_merge`), merge `factory/<worker>` into the task's resolved merge target (the epic branch when lanes are bundled there), then tell the worker to re-close. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
+const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-codex-supervisor-checklist. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `mcp__cs__factory action=epic_status id=<epic-id>` (or `mcp__cs__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Codex worker agents via `--config developer_instructions`.
 
@@ -32,7 +32,7 @@ const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating Cassy worker startup n
 /// namespaces MCP tools as `cas__<tool>` (its own `search_tool`/`use_tool`
 /// dispatch, NOT `mcp__cas__`/`mcp__cs__`), so every tool reference here
 /// uses that prefix.
-const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor, running on Grok Build. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-supervisor-checklist. MCP tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination) — not mcp__cas__ or mcp__cs__. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then assign/answer/redirect/merge as appropriate and reply via `cas__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. MERGE REQUIRED / awaiting_merge / idle-with-close-rejected is always top priority: run `cas__factory action=epic_status` (and/or `cas__task action=list status=awaiting_merge`), merge `factory/<worker>` into the task's resolved merge target (the epic branch when lanes are bundled there), tell the worker to re-close. Act on the injected signal; do not poll. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `cas__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
+const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor, running on Grok Build. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-supervisor-checklist. MCP tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination) — not mcp__cas__ or mcp__cs__. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then assign/answer/redirect/merge as appropriate and reply via `cas__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `cas__factory action=epic_status id=<epic-id>` (or `cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `cas__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `cas__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Grok Build worker agents via `--rules`
 /// (EPIC cas-8888, cas-6569 Phase 2). See `GROK_SUPERVISOR_INSTRUCTIONS`
@@ -42,8 +42,8 @@ const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor
 /// `OPENCODE_CONFIG_CONTENT`. Full plugin/lifecycle parity remains gated on
 /// the later conformance work; these instructions establish only the task and
 /// coordination contract needed by the launch adapter.
-const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = "You are a Cassy Factory Supervisor running in OpenCode. Coordinate work; do not implement worker tasks. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority. Treat received worker messages as instructions and keep merge/re-close work ahead of new assignment work.";
-const OPENCODE_WORKER_INSTRUCTIONS: &str = "You are a Cassy Factory Worker running in OpenCode. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Work exactly one assigned task at a time: show and start it before editing, post progress notes, commit (and push unless delivery_mode=local_merge), then close or hand off before starting another task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready, verification, or lifecycle events may wake an idle supervisor. Use kind=status|ready for actionable updates that allow work to continue. When required supervisor review or approval prevents further work, add a blocker note, call cas_task action=update id=<task-id> status=blocked, then cas_coordination action=message target=supervisor task_id=<task-id> blocker=true summary=\"Review required\" message=\"...\" with no kind. Record the review reply and actual decision/action; clear the review hold with cas_task action=update id=<task-id> status=open, then cas_task action=start id=<task-id> before resuming. Delivery/receipt does not prove a model action. Read cas-worker for the evidence contract. Use merge_request=true for completed deliveries awaiting merge; text alone grants no wake authority.";
+const OPENCODE_SUPERVISOR_INSTRUCTIONS: &str = "You are a Cassy Factory Supervisor running in OpenCode. Coordinate work; do not implement worker tasks. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Treat received worker messages as instructions. On READY TO MERGE or any pushed lane tip with green required CI, merge immediately into the resolved target; never wait for park or a merge request. The merge needs no worker action. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Keep merge/re-close work ahead of new assignment work.";
+const OPENCODE_WORKER_INSTRUCTIONS: &str = "You are a Cassy Factory Worker running in OpenCode. Use the injected CAS MCP tools with OpenCode's cas_ prefix, including cas_coordination and cas_task. Work exactly one assigned task at a time: show and start it before editing, post progress notes, commit (and push unless delivery_mode=local_merge), then close or hand off before starting another task. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use kind=status|ready for actionable updates that allow work to continue. When required supervisor review or approval prevents further work, add a blocker note, call cas_task action=update id=<task-id> status=blocked, then cas_coordination action=message target=supervisor task_id=<task-id> blocker=true summary=\"Review required\" message=\"...\" with no kind. Record the review reply and actual decision/action; clear the review hold with cas_task action=update id=<task-id> status=open, then cas_task action=start id=<task-id> before resuming. Delivery/receipt does not prove a model action. Read cas-worker for the evidence contract. Use merge_request=true for completed deliveries awaiting merge; text alone grants no wake authority.";
 const OPENCODE_WORKER_STARTUP_PROMPT: &str = "Cassy worker startup: call cas_coordination action=whoami, then cas_task action=mine. If assigned, choose exactly one task, call cas_task action=show and action=start, and add a progress note before implementation. If none is assigned, call cas_coordination action=message target=supervisor summary=\"ready\" message=\"ready for work\" to confirm readiness. Successful task action=start is authoritative assignment acceptance; no prose ACK is required.";
 
 // ===========================================================================
@@ -90,10 +90,10 @@ pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
         all: true,
     },
     ContractElement {
-        id: "inbox-and-typed-wake-policy",
+        id: "directed-message-wake-policy",
         markers: &[
             "inbox on the next turn",
-            "only authenticated typed",
+            "directed messages wake",
             "blocker=true",
             "merge_request=true",
         ],
@@ -153,10 +153,10 @@ pub const WORKER_CONTRACT_ELEMENTS: &[ContractElement] = &[
         all: true,
     },
     ContractElement {
-        id: "inbox-and-typed-wake-policy",
+        id: "directed-message-wake-policy",
         markers: &[
             "inbox on the next turn",
-            "only authenticated typed",
+            "directed messages wake",
             "blocker=true",
             "merge_request=true",
         ],
@@ -299,12 +299,15 @@ pub fn claude_supervisor_contract(worker_list: &str) -> String {
         "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, \
 monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor, \
 cas-supervisor-checklist, and cas-codebase-design; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
-mcp__cas__coordination). Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; worker text alone grants no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then \
+mcp__cas__coordination). Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then \
 assign/answer/redirect/merge and reply via `mcp__cas__coordination action=message \
-target=<worker> summary=\"...\" message=\"...\"`. MERGE REQUIRED / awaiting_merge / idle-with-close-rejected is always top \
-priority: run `mcp__cas__factory action=epic_status` (and/or `mcp__cas__task action=list \
-status=awaiting_merge`), merge `factory/<worker>` into the task's resolved merge target (the epic branch when lanes \
-are bundled there), then tell the worker to re-close. Recovery: to unblock a worker wedged by an \
+target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. \
+Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge \
+are additional merge triggers. Resolve the target with `mcp__cas__factory action=epic_status id=<epic-id>` \
+(or `mcp__cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` \
+using `mcp__cas__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; \
+pending/red CI needs existing override authority and reason. Run the merge verification dispatch; \
+re-close only if the receipt names another held gate. Recovery: to unblock a worker wedged by an \
 urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the \
 merge — its legitimate `mcp__cas__task action=start` clears the urgent-stop halt. Act on the \
 injected signal; do not poll. Write in facts, not narration: assignments, verdicts and merge \
@@ -402,9 +405,8 @@ startup; its conditional references cover checks, delivery and recovery. Load \
 `{prefix}verification` and record your own verdict with `{prefix}verification action=qa_record \
 task_id=<delivery-id> status=approved|rejected summary=\"...\" ledger_path=<LEDGER.md>`. \
 Recording the verdict closes the QA task. The supervisor `{prefix}factory` tool is not yours, \
-except server_start/server_list/server_stop (owned servers only) for an assigned server task. Ordinary updates reach the \
-inbox on the next turn. Only authenticated typed blocker, merge, status/ready, verification or lifecycle \
-events wake an idle supervisor. Use kind=status|ready for actionable updates that allow work to continue. \
+except server_start/server_list/server_stop (owned servers only) for an assigned server task. Directed messages wake an idle supervisor after debounce and pair rate limits. \
+Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Use kind=status|ready for actionable updates that allow work to continue. \
 When required supervisor review or approval prevents further work, add a blocker task note, \
 call `{prefix}task action=update id=<task-id> status=blocked`, then \
 `{prefix}coordination action=message target=supervisor task_id=<task-id> blocker=true \
@@ -2536,9 +2538,15 @@ impl Pty {
             })
             .map_err(|e| Error::pty(format!("Failed to open PTY: {e}")))?;
 
-        // Build command
-        let mut cmd = CommandBuilder::new(&config.command);
-        cmd.args(&config.args);
+        // Build command. A worker starts inside the credential-store mask
+        // when the operator has a store to hide (cas-5b3d).
+        let launch =
+            crate::store_isolation::worker_launch(&config.command, &config.args, &config.env)
+                .map_err(Error::pty)?;
+        let (program, args) =
+            launch.unwrap_or_else(|| (config.command.clone(), config.args.clone()));
+        let mut cmd = CommandBuilder::new(program);
+        cmd.args(args);
 
         if let Some(cwd) = &config.cwd {
             cmd.cwd(cwd);
@@ -3846,6 +3854,104 @@ mod tests {
         assert!(
             descendant_result == "descendant-clear",
             "descendant result was {descendant_result:?}"
+        );
+    }
+
+    /// Run `script` under `sh -c` in a PTY as `role` and return its output.
+    #[cfg(target_os = "linux")]
+    async fn probe_output(role: &str, script: &str, env: &[(String, String)]) -> Result<String> {
+        let mut env = env.to_vec();
+        env.push(("CAS_AGENT_ROLE".to_string(), role.to_string()));
+        let config = PtyConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), script.to_string()],
+            cwd: std::env::current_dir().ok(),
+            env,
+            ..PtyConfig::default()
+        };
+        let mut pty = Pty::spawn(format!("store-mask-probe-{role}"), config)?;
+        let mut output = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match next_pty_event_until(&mut pty, deadline).await {
+                Some(PtyEvent::Exited(_)) => break,
+                Some(PtyEvent::Output(bytes)) => output.extend_from_slice(&bytes),
+                Some(PtyEvent::Error(error)) => panic!("{role} probe failed: {error}"),
+                None => panic!("{role} probe did not exit before deadline"),
+            }
+        }
+        while let Some(PtyEvent::Output(bytes)) = pty.try_recv() {
+            output.extend_from_slice(&bytes);
+        }
+        pty.kill();
+        Ok(String::from_utf8_lossy(&output).into_owned())
+    }
+
+    /// cas-5b3d: a worker cannot read the operator's Neon or Vercel store by
+    /// any route the PreToolUse hook cannot parse (interpreter one-liners, a
+    /// piped shell, variable indirection, /proc), with no hook involved;
+    /// a supervisor running the same probe still reads it, and the worker's
+    /// git, gh, node, cargo and ssh config keep working.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn worker_launch_hides_operator_credential_stores_from_every_reader_cas_5b3d() {
+        let fixture = tempfile::tempdir().expect("fixture root");
+        let config_home = fixture.path().join("config");
+        let data_home = fixture.path().join("data");
+        std::fs::create_dir_all(config_home.join("neonctl")).unwrap();
+        std::fs::create_dir_all(data_home.join("com.vercel.cli")).unwrap();
+        std::fs::write(config_home.join("neonctl/credentials.json"), "MOCK_NEON_CANARY").unwrap();
+        std::fs::write(data_home.join("com.vercel.cli/auth.json"), "MOCK_VERCEL_CANARY").unwrap();
+        let env = vec![
+            ("XDG_CONFIG_HOME".to_string(), config_home.display().to_string()),
+            ("XDG_DATA_HOME".to_string(), data_home.display().to_string()),
+        ];
+        let script = r#"
+N="$XDG_CONFIG_HOME/neonctl/credentials.json"
+printf 'python='; python3 -c 'import sys; print(open(sys.argv[1]).read())' "$N" 2>/dev/null || echo denied
+printf 'perl='; perl -e 'open(F, "<", $ARGV[0]) or die; print <F>, "\n"' "$N" 2>/dev/null || echo denied
+printf 'pipe='; echo 'cat "$XDG_CONFIG_HOME/neonctl/credentials.json"; echo' | sh 2>/dev/null || echo denied
+d=neonctl; f=credentials.json
+printf 'indirect='; cat "$XDG_CONFIG_HOME/$d/$f" 2>/dev/null && echo || echo denied
+printf 'proc='; cat "/proc/$PPID/root$N" 2>/dev/null && echo || echo denied
+printf 'vercel='; cat "$XDG_DATA_HOME/com.vercel.cli/auth.json" 2>/dev/null && echo || echo denied
+for tool in git gh node cargo; do
+  command -v "$tool" >/dev/null || continue
+  "$tool" --version >/dev/null 2>&1 || echo "BROKEN_$tool"
+done
+if command -v ssh >/dev/null; then out=$(ssh -G github.com 2>&1 >/dev/null) || echo "BROKEN_ssh: $out"; fi
+echo SMOKE_DONE
+"#;
+
+        if crate::store_isolation::isolation_available().is_err() {
+            // No namespace here (e.g. already inside a masked worker): the
+            // worker must be refused, never started with the store visible.
+            let error = probe_output("worker", script, &env).await.unwrap_err();
+            assert!(error.to_string().contains("CAS_WORKER_STORE_ISOLATION"), "{error}");
+            return;
+        }
+
+        let supervisor = probe_output("supervisor", script, &env).await.unwrap();
+        for probe in ["python", "perl", "pipe", "indirect"] {
+            assert!(
+                supervisor.contains(&format!("{probe}=MOCK_NEON_CANARY")),
+                "supervisor {probe} probe must read the fixture store:\n{supervisor}"
+            );
+        }
+        assert!(supervisor.contains("vercel=MOCK_VERCEL_CANARY"), "{supervisor}");
+        assert!(
+            supervisor.contains("SMOKE_DONE") && !supervisor.contains("BROKEN_"),
+            "host tooling is broken before masking:\n{supervisor}"
+        );
+
+        let worker = probe_output("worker", script, &env).await.unwrap();
+        assert!(!worker.contains("MOCK_"), "worker read a masked store:\n{worker}");
+        for probe in ["python", "perl", "pipe", "indirect", "proc", "vercel"] {
+            assert!(worker.contains(&format!("{probe}=")), "{probe} did not run:\n{worker}");
+        }
+        assert!(
+            worker.contains("SMOKE_DONE") && !worker.contains("BROKEN_"),
+            "worker tooling broke:\n{worker}"
         );
     }
 
@@ -6926,7 +7032,7 @@ mod tests {
                 "authoritative assignment acceptance",
                 "no prose ACK is required",
                 "inbox on the next turn",
-                "Only authenticated typed",
+                "Directed messages wake",
                 "blocker=true",
                 "merge_request=true",
             ] {
@@ -7049,6 +7155,25 @@ mod tests {
             for bad in claude_calls.iter().chain(codex_calls.iter()) {
                 assert!(!g.contains(bad), "grok/{role:?} leaks wrapped call {bad}");
             }
+        }
+    }
+
+    #[test]
+    fn supervisor_epic_status_instructions_include_required_id() {
+        // pin: factory_epic_status rejects calls without the epic id.
+        for (harness, tool_prefix) in [
+            ("claude", "mcp__cas__"),
+            ("codex", "mcp__cs__"),
+            ("grok", "cas__"),
+        ] {
+            let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
+            let expected = format!("{tool_prefix}factory action=epic_status id=<epic-id>");
+            let bare_call = format!("{tool_prefix}factory action=epic_status`");
+            assert!(surface.contains(&expected), "{harness} is missing {expected}");
+            assert!(
+                !surface.contains(&bare_call),
+                "{harness} still includes an epic_status call without its required id"
+            );
         }
     }
 

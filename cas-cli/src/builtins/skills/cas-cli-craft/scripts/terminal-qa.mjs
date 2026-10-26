@@ -14,6 +14,7 @@
 //   node scripts/terminal-qa.mjs [--label <name>] [--out <dir>] [--widths 80,120]
 //        [--palettes dark,light,solarized-dark,solarized-light]
 //        [--allowlist <file.json>] [--strict] [--escape-flag --full]
+//        [--progress-noun <word>] (repeat for each project-specific complete noun)
 //        [--json-flag --json] [--timeout-ms 120000] -- <command> [args...]
 //
 // Runs: every width × palette in a pty (COLORFGBG hints the palette to
@@ -28,8 +29,8 @@
 //                                      line fills the width, ends mid-token, and the
 //                                      wider capture shows the token whole (warn
 //                                      when no wider capture can confirm it)
-//   truncation-without-escape   fail   a token ends in … or ... and the output
-//                                      never names the escape flag (--full)
+//   truncation-without-escape   fail   a truncated value has no escape flag;
+//                                      declared complete progress nouns before ... or … pass
 //   numeric-misalignment        fail   numbers in one table column with
 //                                      different right edges
 //   unicode-without-fallback    fail   bytes ≥ 0x80 emitted under LC_ALL=C
@@ -283,16 +284,18 @@ const CONTROL_FINALS = new Set(["A", "B", "C", "D", "G", "H", "J", "K", "f", "S"
  * Parse a raw capture into visual lines.
  *
  * Each line: { cells: [{ch, w, style}], redraws, controls: [seq] }. A carriage
- * return not followed by a newline overwrites the line from column 0 (the
- * progress-redraw idiom); a backspace removes the last cell; a tab pads to the
- * next multiple of 8. OSC/DCS strings are dropped. Non-SGR CSI sequences are
- * recorded on the line (for the piped check) and dropped from the text.
+ * return resets the cursor to column 0 without clearing existing cells; later
+ * text overwrites them in place. A backspace removes the last cell; a tab pads
+ * to the next multiple of 8. OSC/DCS strings are dropped. Non-SGR CSI
+ * sequences are recorded on the line (for the piped check) and dropped from
+ * the text.
  */
 export function parseAnsi(raw) {
   const text = Buffer.isBuffer(raw) ? raw.toString("utf8") : String(raw);
   const lines = [];
   let line = { cells: [], redraws: 0, controls: [], sgr: [] };
   let style = defaultStyle();
+  let cursorColumn = 0;
   const chars = Array.from(text);
   const n = chars.length;
   let i = 0;
@@ -301,6 +304,66 @@ export function parseAnsi(raw) {
   const pushLine = () => {
     lines.push(line);
     line = { cells: [], redraws: 0, controls: [], sgr: [] };
+    cursorColumn = 0;
+  };
+  const writeCell = (cell) => {
+    let column = 0;
+    let index = 0;
+    while (index < line.cells.length && column + line.cells[index].w <= cursorColumn) {
+      column += line.cells[index].w;
+      index += 1;
+    }
+    if (index === line.cells.length) {
+      let width = col();
+      while (width < cursorColumn) {
+        line.cells.push({ ch: " ", w: 1, style });
+        width += 1;
+      }
+      line.cells.push(cell);
+      cursorColumn += cell.w;
+      return;
+    }
+
+    const existing = line.cells[index];
+    const offset = cursorColumn - column;
+    let overwrittenWidth = existing.w - offset;
+    let end = index + 1;
+    while (overwrittenWidth < cell.w && end < line.cells.length) {
+      overwrittenWidth += line.cells[end].w;
+      end += 1;
+    }
+    const paddingStyle = existing.style;
+    const prefix = Array.from({ length: offset }, () => ({ ch: " ", w: 1, style: paddingStyle }));
+    const suffix = Array.from({ length: Math.max(0, overwrittenWidth - cell.w) }, () => ({ ch: " ", w: 1, style }));
+    line.cells.splice(index, end - index, ...prefix, cell, ...suffix);
+    cursorColumn += cell.w;
+  };
+  const eraseLine = (mode) => {
+    if (mode === 2) {
+      line.cells = [];
+      return;
+    }
+    const kept = [];
+    let column = 0;
+    for (const cell of line.cells) {
+      if (cell.w === 0) {
+        if (mode === 0 ? column <= cursorColumn : column > cursorColumn) kept.push(cell);
+        continue;
+      }
+      const end = column + cell.w;
+      if (mode === 0) {
+        if (end <= cursorColumn) kept.push(cell);
+        else if (column < cursorColumn) {
+          for (let k = 0; k < cell.w; k += 1) kept.push({ ch: " ", w: 1, style });
+        }
+      } else if (column > cursorColumn) {
+        kept.push(cell);
+      } else {
+        for (let k = 0; k < cell.w; k += 1) kept.push({ ch: " ", w: 1, style });
+      }
+      column = end;
+    }
+    line.cells = kept;
   };
 
   while (i < n) {
@@ -322,6 +385,10 @@ export function parseAnsi(raw) {
           style = applySgr(list, style);
         } else {
           line.controls.push(seq);
+          if (final === "K") {
+            const mode = params === "" ? 0 : Number(params);
+            if (mode === 0 || mode === 1 || mode === 2) eraseLine(mode);
+          }
         }
         i = j + 1;
         continue;
@@ -346,30 +413,37 @@ export function parseAnsi(raw) {
     }
     if (ch === "\n") { pushLine(); i += 1; continue; }
     if (ch === "\r") {
-      if (chars[i + 1] === "\n" || i + 1 === n) { i += 1; continue; }
-      if (line.cells.length > 0) {
+      let next = i + 1;
+      while (chars[next] === "\r") next += 1;
+      if (chars[next] !== "\n" && i + 1 !== n && line.cells.length > 0) {
         line.redraws += 1;
-        line.cells = [];
       }
+      cursorColumn = 0;
       i += 1;
       continue;
     }
-    if (ch === "\b") { line.cells.pop(); i += 1; continue; }
+    if (ch === "\b") { cursorColumn = Math.max(0, cursorColumn - 1); i += 1; continue; }
     if (ch === "\t") {
-      const c = col();
+      const c = cursorColumn;
       const pad = 8 - (c % 8);
-      for (let k = 0; k < pad; k += 1) line.cells.push({ ch: " ", w: 1, style });
+      for (let k = 0; k < pad; k += 1) writeCell({ ch: " ", w: 1, style });
       i += 1;
       continue;
     }
     if (ch === "\u0007") { i += 1; continue; }
     const w = charWidth(ch);
     if (w === 0 && line.cells.length > 0 && ch.codePointAt(0) >= 0x300) {
-      line.cells[line.cells.length - 1].ch += ch; // combining mark
+      let column = 0;
+      let previous = -1;
+      for (let j = 0; j < line.cells.length; j += 1) {
+        if (line.cells[j].w > 0 && column + line.cells[j].w <= cursorColumn) previous = j;
+        column += line.cells[j].w;
+      }
+      line.cells[previous < 0 ? line.cells.length - 1 : previous].ch += ch; // combining mark
       i += 1;
       continue;
     }
-    line.cells.push({ ch, w, style });
+    writeCell({ ch, w, style });
     i += 1;
   }
   if (line.cells.length > 0 || line.controls.length > 0 || line.sgr.length > 0 || lines.length === 0) {
@@ -538,12 +612,28 @@ function checkWordSplit(lines, columns, run, referenceText) {
   return out;
 }
 
-function checkTruncation(lines, run, escapeFlag) {
+const DEFAULT_PROGRESS_NOUNS = ["Cassy", "dependencies", "packages", "files", "configuration"];
+
+function validateProgressNouns(nouns) {
+  if (!Array.isArray(nouns) || nouns.some((noun) => typeof noun !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(noun))) {
+    throw new UsageError("progress nouns must be complete words starting with a letter, without spaces or ellipses");
+  }
+}
+
+function isLiteralProgressEllipsis(text, progressNouns) {
+  // A declaration vouches for a whole final word, never a prefix or a counter.
+  // Require one progress sentence with literal interior spaces, not column gaps.
+  const match = /^ *[A-Z][a-z]+ing(?: [A-Za-z][A-Za-z0-9_-]*)* ([A-Za-z][A-Za-z0-9_-]*)(?:\.\.\.|…) *$/.exec(text);
+  return match !== null && (DEFAULT_PROGRESS_NOUNS.includes(match[1]) || progressNouns.includes(match[1]));
+}
+
+function checkTruncation(lines, run, escapeFlag, progressNouns) {
   const out = [];
   const full = lines.map(lineText).join("\n");
   if (full.includes(escapeFlag)) return out;
   lines.forEach((line, idx) => {
     const text = lineText(line);
+    if (isLiteralProgressEllipsis(text, progressNouns)) return;
     for (const tok of tokens(text)) {
       if (/(…|\.\.\.)$/.test(tok)) {
         out.push(
@@ -688,8 +778,10 @@ function checkJsonContract(raw, run, jsonFlag) {
  * @param {string} [opts.escapeFlag]         truncation escape flag (default --full)
  * @param {string} [opts.jsonFlag]           flag used for the json run (default --json)
  * @param {string} [opts.referenceText]      plain text of a wider capture, to confirm word splits
+ * @param {string[]} [opts.progressNouns]    additional complete final words for progress copy
  */
-export function analyzeCapture({ raw, columns = 80, palette = "dark", run = "pty", escapeFlag = "--full", jsonFlag = "--json", referenceText = null }) {
+export function analyzeCapture({ raw, columns = 80, palette = "dark", run = "pty", escapeFlag = "--full", jsonFlag = "--json", referenceText = null, progressNouns = [] }) {
+  validateProgressNouns(progressNouns);
   const pal = typeof palette === "string" ? PALETTES[palette] : palette;
   const runName = typeof run === "string" ? run : run.name;
   const kind = typeof run === "string" ? "pty" : run.kind ?? "pty";
@@ -702,7 +794,7 @@ export function analyzeCapture({ raw, columns = 80, palette = "dark", run = "pty
     ...checkContrast(lines, pal, runName),
     ...checkOverflow(lines, columns, runName),
     ...checkWordSplit(lines, columns, runName, referenceText),
-    ...checkTruncation(lines, runName, escapeFlag),
+    ...checkTruncation(lines, runName, escapeFlag, progressNouns),
     ...checkNumericAlignment(lines, runName),
   ];
 }
@@ -819,6 +911,13 @@ function baseEnv() {
   return env;
 }
 
+export function stripBsdScriptEof(raw) {
+  // BSD script can echo stdin EOF as a leading ^D and two backspaces. Remove
+  // that transport prefix before it masks empty output or overwrites text.
+  const eofEcho = Buffer.from("^D\b\b");
+  return raw.subarray(0, eofEcho.length).equals(eofEcho) ? raw.subarray(eofEcho.length) : raw;
+}
+
 function runInPty(command, args, { columns, env, timeoutMs }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-qa-pty-"));
   const statusFile = path.join(dir, "command-status");
@@ -839,7 +938,8 @@ function runInPty(command, args, { columns, env, timeoutMs }) {
       const detail = res.error?.message || res.stderr?.toString().trim() || res.stdout?.toString().trim() || `script exited ${res.status} without completing the command`;
       throw new UsageError(`pty unavailable: ${detail}`);
     }
-    return { raw: res.stdout ?? Buffer.alloc(0), exit_code: Number(status) };
+    const raw = res.stdout ?? Buffer.alloc(0);
+    return { raw: bsd ? stripBsdScriptEof(raw) : raw, exit_code: Number(status) };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -905,6 +1005,7 @@ export class UsageError extends Error {}
  * @param {string} [options.allowlist]      path to allowlist JSON
  * @param {boolean} [options.strict]
  * @param {string} [options.escapeFlag]
+ * @param {string[]} [options.progressNouns] additional complete final words for progress copy
  * @param {string} [options.jsonFlag]
  * @param {number} [options.timeoutMs]
  * @param {boolean} [options.quiet]         suppress stdout printing
@@ -916,11 +1017,13 @@ export async function runTerminalQa(options) {
     palettes = Object.keys(PALETTES),
     strict = false,
     escapeFlag = "--full",
+    progressNouns = [],
     jsonFlag = null,
     timeoutMs = 120000,
     quiet = true,
   } = options;
   if (!command || command.length === 0) throw new UsageError("no command given after --");
+  validateProgressNouns(progressNouns);
   for (const p of palettes) if (!PALETTES[p]) throw new UsageError(`unknown palette "${p}" (known: ${Object.keys(PALETTES).join(", ")})`);
   for (const w of widths) if (!Number.isInteger(w) || w < 20) throw new UsageError(`invalid width "${w}"`);
   const [cmd, ...args] = command;
@@ -1009,7 +1112,7 @@ export async function runTerminalQa(options) {
       if (ref) referenceText = stripAnsi(ref.raw);
     }
     findingsAll.push(
-      ...analyzeCapture({ raw, columns: run.width ?? 80, palette: run.palette ?? "dark", run: { name: run.name, kind: run.kind }, escapeFlag, jsonFlag: jsonFlag ?? "--json", referenceText }),
+      ...analyzeCapture({ raw, columns: run.width ?? 80, palette: run.palette ?? "dark", run: { name: run.name, kind: run.kind }, escapeFlag, jsonFlag: jsonFlag ?? "--json", referenceText, progressNouns }),
     );
     if (run.kind === "json" && stderr.length > 0) {
       findingsAll.push(...analyzeCapture({ raw: stderr, columns: 80, palette: "dark", run: { name: "json.stderr", kind: "piped" }, escapeFlag }));
@@ -1049,6 +1152,7 @@ export async function runTerminalQa(options) {
     palettes,
     strict,
     escape_flag: escapeFlag,
+    progress_nouns: progressNouns,
     json_flag: jsonFlag,
     runs: runs.map((r) => ({ ...r })),
     findings,
@@ -1082,6 +1186,7 @@ export async function runTerminalQa(options) {
 const USAGE = `usage: terminal-qa.mjs [--label <name>] [--out <dir>] [--widths 80,120]
         [--palettes dark,light,solarized-dark,solarized-light] [--allowlist <file.json>]
         [--strict] [--escape-flag --full] [--json-flag --json] [--timeout-ms 120000]
+        [--progress-noun <word>] (repeatable)
         -- <command> [args...]`;
 
 export function parseArgs(argv) {
@@ -1102,6 +1207,7 @@ export function parseArgs(argv) {
     else if (a === "--widths") opts.widths = next().split(",").map((w) => Number(w.trim()));
     else if (a === "--palettes") opts.palettes = next().split(",").map((p) => p.trim()).filter(Boolean);
     else if (a === "--allowlist") opts.allowlist = next();
+    else if (a === "--progress-noun") (opts.progressNouns ??= []).push(next());
     else if (a === "--strict") opts.strict = true;
     else if (a === "--escape-flag") opts.escapeFlag = next();
     else if (a === "--json-flag") opts.jsonFlag = next();

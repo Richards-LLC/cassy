@@ -19,13 +19,19 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
-            "hub.tailscale_serve" => Some(
-                self.hub
-                    .as_ref()
-                    .and_then(|hub| hub.tailscale_serve)
-                    .unwrap_or(true)
-                    .to_string(),
+            "slack.channels" => Some(serde_json::to_string(
+                &self.slack.as_ref().cloned().unwrap_or_default().channels
+            ).expect("serializable channel IDs")),
+            "slack.stakeholder_contacts" => Some(serde_json::to_string(
+                &self.slack.as_ref().cloned().unwrap_or_default().stakeholder_contacts
+            ).expect("serializable stakeholder policies")),
+            "hub.transport_mode" => Some(
+                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().as_str().into(),
             ),
+            "hub.tailscale_serve" => Some(
+                self.hub.as_ref().cloned().unwrap_or_default().transport_mode().publishes().to_string(),
+            ),
+            "viktor.enabled" => Some(self.viktor_enabled().to_string()),
             "slack.transport" => Some(
                 match self.slack.as_ref().map(|s| s.transport).unwrap_or_default() {
                     SlackTransport::Violet => "violet",
@@ -83,6 +89,20 @@ impl Config {
             "hooks.ai_model" => Some(hooks.ai_model.clone()),
             "hooks.ai_fallback" => Some(hooks.ai_fallback.to_string()),
             "hooks.minimal_start" => Some(hooks.minimal_start.to_string()),
+            "hooks.stop.duplicate_detection_enabled" => {
+                Some(hooks.stop.duplicate_detection_enabled.to_string())
+            }
+            "hooks.stop.duplicate_detection_threshold" => {
+                Some(hooks.stop.duplicate_detection_threshold.to_string())
+            }
+            "hooks.stop.learning_review_enabled" => {
+                Some(hooks.stop.learning_review_enabled.to_string())
+            }
+            "hooks.stop.learning_review_threshold" => {
+                Some(hooks.stop.learning_review_threshold.to_string())
+            }
+            "hooks.stop.rule_review_enabled" => Some(hooks.stop.rule_review_enabled.to_string()),
+            "hooks.stop.rule_review_threshold" => Some(hooks.stop.rule_review_threshold.to_string()),
             // Hooks.plan_mode section
             "hooks.plan_mode.enabled" => Some(hooks.plan_mode.enabled.to_string()),
             "hooks.plan_mode.token_budget" => Some(hooks.plan_mode.token_budget.to_string()),
@@ -108,6 +128,8 @@ impl Config {
                     .unwrap_or_else(|| FACTORY_ARTIFACTS_ROOT_DEFAULT.to_string()),
             ),
             "factory.scratch_root" => Some(factory.scratch_root.clone().unwrap_or_default()),
+            "factory.supervisor_message_debounce_secs" => Some(factory.supervisor_message_debounce_secs.to_string()),
+            "factory.supervisor_message_wakes_per_hour" => Some(factory.supervisor_message_wakes_per_hour.to_string()),
             "factory.message_max_chars" => Some(factory.message_max_chars.to_string()),
             "factory.write_roots" => Some(factory.write_roots.join(",")),
             "factory.supervisor_only_mcp" => Some(factory.worker_policy.supervisor_only_mcp.join(",")),
@@ -166,6 +188,10 @@ impl Config {
             "factory.ai_enrichment.api_key_env" => Some(factory.ai_enrichment.api_key_env.clone()),
             "factory.ai_enrichment.model" => Some(factory.ai_enrichment.model.clone()),
             "factory.ai_enrichment.effort" => Some(factory.ai_enrichment.effort.clone()),
+            "upkeep.codemap" => Some(self.upkeep().codemap().to_string()),
+            "upkeep.product_overview" => Some(self.upkeep().product_overview().to_string()),
+            "qa.registry.enforce" => Some(qa.registry.enforce.to_string()),
+            "qa.registry.path" => Some(qa.registry.path.clone()),
             "qa.mode" => Some(qa.mode.to_string()),
             "qa.independent_pass" => Some(qa.independent_pass.to_string()),
             "qa.evidence_gate" => Some(qa.evidence_gate.to_string()),
@@ -179,6 +205,12 @@ impl Config {
             "qa.preflight_gh_token" => Some(qa.preflight_gh_token.to_string()),
             "qa.deployed_origins" => Some(qa.deployed_origins.join(",")),
             "qa.preflight_env_files" => Some(qa.preflight_env_files.join(",")),
+            "qa.post_release.command" => Some(qa.post_release.clone().unwrap_or_default().command),
+            "qa.post_release.window_mins" => Some(qa.post_release.clone().unwrap_or_default().window_mins.to_string()),
+            "qa.post_release.interval_mins" => Some(qa.post_release.clone().unwrap_or_default().interval_mins.to_string()),
+            "qa.post_release.timeout_secs" => Some(qa.post_release.clone().unwrap_or_default().timeout_secs.to_string()),
+            "qa.post_release.release_branches" => Some(qa.post_release.clone().unwrap_or_default().release_branches.join(",")),
+            "qa.post_release.env" => Some(qa.post_release.clone().unwrap_or_default().env.join(",")),
             "qa.preflight_hook" => Some(qa.preflight_hook.clone().unwrap_or_default()),
             "qa.preflight_hook_timeout_secs" => Some(qa.preflight_hook_timeout_secs.to_string()),
             // Dev section
@@ -257,6 +289,12 @@ impl Config {
                 Some(notifications.display_duration_secs.to_string())
             }
             "notifications.max_visible" => Some(notifications.max_visible.to_string()),
+            "notifications.on_permission_prompt" => {
+                Some(notifications.on_permission_prompt.to_string())
+            }
+            "notifications.on_idle_prompt" => Some(notifications.on_idle_prompt.to_string()),
+            "notifications.on_auth_success" => Some(notifications.on_auth_success.to_string()),
+            "notifications.webhook_url" => Some(notifications.webhook_url.unwrap_or_default()),
             // Notifications.tasks section
             "notifications.tasks.on_created" => Some(notifications.tasks.on_created.to_string()),
             "notifications.tasks.on_started" => Some(notifications.tasks.on_started.to_string()),

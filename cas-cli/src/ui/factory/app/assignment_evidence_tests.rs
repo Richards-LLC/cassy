@@ -88,6 +88,9 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
             theirs: vec!["cas-split".into()], state: cas_store::SplitState::Accepted,
             reason: None, message_id: None, expires_at: now - chrono::Duration::hours(1),
             created_at: now - chrono::Duration::hours(2), decided_at: Some(now),
+            decided_by: None,
+            cleanup_pending: false,
+            expiry_notice_pending: false,
         }).unwrap();
         let mut app = FactoryApp::for_test();
         app.cas_dir = cas.clone();

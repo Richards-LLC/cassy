@@ -443,6 +443,25 @@ impl CasCore {
             dispatch_id
         } else if let Some(dispatch_id) = req.dispatch_id.clone() {
             dispatch_id
+        } else if supervisor_direct {
+            // The active-task unique index guarantees one live boundary. Infer
+            // only for this authenticated supervisor; child handoffs above stay
+            // sealed, and expired/terminal cycles require explicit recovery.
+            let live = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .filter(|dispatch| matches!(dispatch.state,
+                    cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
+                    && dispatch.deadline_at > chrono::Utc::now());
+            match live {
+                Some(dispatch) => dispatch.id,
+                // A restart can leave an immutable parked delivery without an
+                // active review cycle; recover the boundary without a close attempt.
+                None if task.status == TaskStatus::AwaitingMerge => {
+                    self.recover_parked_verification_dispatch(&task, &caller)?.id
+                }
+                None => return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id.")),
+            }
         } else {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -937,6 +956,8 @@ impl CasCore {
             })?;
         }
 
+        crate::factory_review_scratch::reclaim_task_targets(&self.cas_root, &req.task_id).await;
+
         // Emit VerificationAdded event for task lifecycle tracking
         if let Ok(event_store) = cas_store::SqliteEventStore::open(&self.cas_root) {
             use cas_store::EventStore;
@@ -979,17 +1000,31 @@ impl CasCore {
         // Queue only after the verdict transaction commits, so a woken worker
         // can always observe the approval. A transactional delivery still
         // needs its merge transition before close and is excluded here.
+        // cas-46ea: a merged delivery is closed or returned by its verdict;
+        // the merge fact plus this dispatch-bound verdict are the authority.
+        let cassy_merged = task.deliverables.green_merge_commit.is_some()
+            && task.deliverables.effective_merge_ci_admission()
+                != cas_types::MergeCiAdmission::Override;
         let close_retry = if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
-            && task.pending_verification
+            && (task.pending_verification || cassy_merged)
             && proof_dispatch.delivery_transaction_id.is_none()
         {
             // cas-eda0: a delivery Cassy merged green is closed by Cassy now;
             // the worker retry remains the fallback when a gate still holds.
             use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
-            let cassy_close = self.close_green_merged_delivery(&req.task_id).await;
+            let cassy_close = self
+                .close_green_merged_delivery_after_verdict(&req.task_id, Some(&verification.id))
+                .await;
             let worker_retry = match &cassy_close {
                 CassyMergeClose::Closed { .. } | CassyMergeClose::AlreadyClosed => String::new(),
+                // cas-e9d6: Cassy's close of a merged delivery runs the
+                // worker close's gates on the same evidence, so a worker
+                // retry cannot pass where it held. The gate is the
+                // supervisor's to resolve; never relay it to the worker.
+                CassyMergeClose::Held(_) if cassy_merged => {
+                    "\nNo worker close retry was queued: the gate above is the supervisor's to resolve before this merged delivery can close.".to_string()
+                }
                 CassyMergeClose::NotEligible | CassyMergeClose::Held(_) => match task_store.get(&req.task_id) {
                     Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
                         &self.cas_root,
@@ -1004,6 +1039,12 @@ impl CasCore {
                 },
             };
             format!("{}{worker_retry}", cassy_close.receipt(&req.task_id))
+        } else if verification.status == VerificationStatus::Rejected
+            && verification.verification_type == VerificationType::Task
+            && cassy_merged
+            && proof_dispatch.delivery_transaction_id.is_none()
+        {
+            self.return_rejected_merged_delivery(&req.task_id, &verification)
         } else {
             String::new()
         };
@@ -1207,6 +1248,69 @@ impl CasCore {
         }
     }
 
+    fn recover_parked_verification_dispatch(
+        &self,
+        task: &Task,
+        caller: &cas_types::Agent,
+    ) -> Result<cas_types::VerificationDispatch, McpError> {
+        let refuse = |message: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!("Parked verification recovery refused: {message}")),
+            data: None,
+        };
+        if crate::mcp::tools::core::task::lifecycle::stale_close_guard::agent_task_work_halted(
+            &caller.metadata,
+        ) {
+            return Err(refuse("the supervisor's task work is halted".into()));
+        }
+        let context = task
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| {
+                crate::mcp::tools::core::task::repo_context::resolve_repo_context(
+                    &self.cas_root,
+                    target,
+                )
+            })
+            .transpose()
+            .map_err(&refuse)?;
+        let root = context
+            .as_ref()
+            .map(|context| context.repo_root.as_path())
+            .or_else(|| self.cas_root.parent())
+            .ok_or_else(|| refuse("repository root unavailable".into()))?;
+        let proof = crate::mcp::tools::core::task::lifecycle::repository_proof::capture_parked_delivery_proof(
+            root, task, context.as_ref().map(|context| context.target_branch.as_str()),
+        ).map_err(&refuse)?;
+        let boundary = match cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
+            .map_err(|error| refuse(error.to_string()))?
+        {
+            Some((receipt, transaction)) => {
+                if proof.anchor_commits != vec![receipt.commit_sha.clone()] {
+                    return Err(refuse(
+                        "delivery receipt no longer matches the parked anchor".into(),
+                    ));
+                }
+                cas_types::VerificationProofBoundary::delivery(receipt.id, transaction.id)
+            }
+            None => cas_types::VerificationProofBoundary::task_at(proof),
+        };
+        let now = chrono::Utc::now();
+        cas_store::timeout_verification_dispatch(&self.cas_root, &task.id, now)
+            .map_err(|error| refuse(error.to_string()))?;
+        cas_store::create_verification_dispatch_bound(
+            &self.cas_root,
+            &task.id,
+            &caller.id,
+            &caller.id,
+            &boundary,
+            now + chrono::Duration::minutes(10),
+            true,
+        )
+        .map_err(|error| refuse(error.to_string()))
+    }
+
     // ========================================================================
     // Worktree Operations
     // ========================================================================
@@ -1239,4 +1343,123 @@ fn supervisor_verification_retry_matches(
         && existing.duration_ms == candidate.duration_ms
         && serde_json::to_value(&existing.issues).ok()
             == serde_json::to_value(&candidate.issues).ok()
+}
+
+#[cfg(test)]
+mod lifecycle_friction_tests {
+    use super::*;
+    use crate::mcp::CasCore;
+    use crate::test_support::TestEnvGuard;
+    use cas_types::{Agent, AgentRole, Task, TaskStatus, VerificationProofBoundary};
+
+    fn fixture(
+        env: &mut TestEnvGuard,
+    ) -> (
+        tempfile::TempDir,
+        CasCore,
+        Task,
+        cas_types::VerificationDispatch,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        let agents = core.open_agent_store().unwrap();
+        agents
+            .register(&Agent::new_with_role(
+                "review-supervisor".into(),
+                "supervisor".into(),
+                AgentRole::Supervisor,
+            ))
+            .unwrap();
+        core.set_agent_id_for_testing("review-supervisor".into());
+        let mut task = Task::new("cas-5dc0-fixture".into(), "Review lifecycle fixture".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("implementer".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        task.deliverables.parked_branch = Some("factory/implementer".into());
+        core.open_task_store().unwrap().add(&task).unwrap();
+        let dispatch = cas_store::create_verification_dispatch_bound(
+            &root,
+            &task.id,
+            "implementer",
+            "review-supervisor",
+            &VerificationProofBoundary::task(),
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+            false,
+        )
+        .unwrap();
+        (dir, core, task, dispatch)
+    }
+
+    #[tokio::test]
+    async fn cas_5dc0_first_add_binds_the_unique_active_dispatch_without_retry() {
+        let mut env = TestEnvGuard::temp_home();
+        let (_dir, core, task, dispatch) = fixture(&mut env);
+        let result = core
+            .cas_verification_add(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id":task.id,"status":"approved","summary":"Independent review completed"
+                }))
+                .unwrap(),
+            ))
+            .await
+            .expect("first add must bind the one active dispatch");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let recorded = cas_store::get_verification_for_dispatch(&core.cas_root, &dispatch.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recorded.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+        // A terminal or missing dispatch is never silently inferred as new authority.
+        assert!(
+            core.cas_verification_add(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "task_id":task.id,"status":"approved","summary":"Unbound duplicate"
+                }))
+                .unwrap()
+            ))
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn cas_5dc0_request_changes_recovers_a_blocked_parked_verifier_failure() {
+        let mut env = TestEnvGuard::temp_home();
+        let (_dir, core, task, dispatch) = fixture(&mut env);
+        core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+            "task_id":task.id,"dispatch_id":dispatch.id,"status":"rejected","summary":"Correction required"
+        })).unwrap())).await.unwrap();
+        let tasks = core.open_task_store().unwrap();
+        let mut blocked = tasks.get(&task.id).unwrap();
+        blocked.status = TaskStatus::Blocked;
+        tasks.update(&blocked).unwrap();
+        let result = core
+            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+                id: task.id.clone(),
+                reason: "Fix the rejected delivery while keeping its ownership".into(),
+            }))
+            .await
+            .expect("blocked parked deliveries need the same audited correction exit");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let reopened = tasks.get(&task.id).unwrap();
+        assert_eq!(reopened.status, TaskStatus::Open);
+        assert_eq!(reopened.assignee, task.assignee);
+        assert!(reopened.deliverables.factory_branch_anchor.is_none());
+        assert!(
+            reopened
+                .deliverables
+                .historical_factory_branch_anchors
+                .contains(&"a".repeat(40))
+        );
+        assert!(!reopened.pending_verification);
+        assert_eq!(
+            cas_store::get_verification_dispatch(&core.cas_root, &dispatch.id)
+                .unwrap()
+                .state,
+            cas_types::VerificationDispatchState::Invalidated
+        );
+    }
 }

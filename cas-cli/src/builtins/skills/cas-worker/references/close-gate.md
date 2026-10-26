@@ -35,7 +35,9 @@ Close requires the delivered work on the named target. On MERGE REQUIRED:
 3. For `delivery_mode=local_merge`, retain the local commit and request supervisor
    merge with its branch and SHA. Push only with explicit supervisor authorization.
    Otherwise push the delivered branch, then send `merge_request=true` with the
-   target and SHA; re-close after confirmed merge. While it is pending, follow
+   target and SHA. The merge closes the task: Cassy dispatches verification at
+   the merge, a PASS closes it and tells you once, a FAIL reopens it to you with
+   findings. Do not re-close or block on that verification. While it is pending, follow
    [recovery.md](recovery.md#while-the-merge-is-pending): no polling loop.
 4. For a protected target, follow its PR flow. Ask for an epic merge rather than
    `gh pr create --base epic/...`; the supervisor owns the merge venue.
@@ -44,6 +46,21 @@ If another assigned task follows a handed-off delivery, start its per-task branc
 from the epic tip (`factory/<name>-<task-id>`), preserving the parked branch.
 No simultaneous task ownership. For rejection details, read [recovery.md](recovery.md).
 Never set `status=closed` or invent a verification record to bypass close.
+
+## Upkeep refusals at park
+
+Before the merge request, close checks that the delivery kept the journey
+registry, `.claude/CODEMAP.md` and `docs/PRODUCT_OVERVIEW.md` true for the
+paths it changed (G1–G3, G5, G6). Old debt never refuses; it prints as a
+warning. On a refusal, fix it in this branch and commit (own the new file,
+add the bug's case, edit the named CODEMAP or overview rows), then retry
+close. When the change truly needs no upkeep, record the gate's escape token
+from cas-qa-craft's
+[escape vocabulary](../../cas-qa-craft/references/journeys.md#escape-vocabulary)
+as a decision note with a specific reason, then retry. Cassy writes the
+`UPKEEP ESCAPE` and `UPKEEP OBSERVE` notes itself; never write them by hand,
+and treat an `UPKEEP OBSERVE` note as the refusal a later `enforce` stage will
+make. The reviewer and QA see each escape, so a vague reason costs a round.
 
 ## Delivery receipts
 
@@ -59,7 +76,7 @@ Never set `status=closed` or invent a verification record to bypass close.
 
 ## Conditional evidence
 
-- Demo, configured user-facing path or catalog journey: use `cas-qa-craft`
+- Demo, configured user-facing path or a journey the impact names: use `cas-qa-craft`
   before parking; cite its commit-bound bundle or real-build ledger. A
   binary-driven ledger runs the supervisor's exact-tip candidate, never a
   compile of your own (cas-qa-craft's evidence-ledger names the sources). Terminal
@@ -71,6 +88,23 @@ Never set `status=closed` or invent a verification record to bypass close.
 - Spike: record the decision and evidence; `search_manifest` can record commands
   and hit counts for conclusions based on searches.
 - Epic: every child's delivered work must reach the parent before epic close.
+
+### Cross-machine proof logs
+
+Publish and attach a peer proof in one call:
+
+```text
+artifact action=publish task_id=<task-id> path=<log> note_type=platform_proof notes="<platform, command, revision, passing result>"
+```
+
+Use `note_type=loaded_proof` for a loaded receipt. The note is attached only
+when Cloud commits the log; it carries the artifact id, Cloud id and digest.
+On the owning machine, run `artifact action=fetch task_id=<task-id> id=<art-id>`
+(or `cas artifact fetch --task <task-id> <art-id>`) and read the returned path.
+Fetch checks size and SHA-256 before saving. Cite the artifact id in review;
+a machine-local path warning means the evidence still needs publishing.
+An existing committed id in `task action=notes notes="<receipt> <art-id>"`
+also carries its portable reference. Keep the receipt fields in the note.
 
 ### Loaded proof for non-Rust targets
 

@@ -2,28 +2,72 @@
 
 A journey is one end-to-end user flow, from a real entry point to the user's
 goal, across feature boundaries. Walk journeys, not only the changed piece.
-Projects that keep a catalog describe the contract in
-`docs/qa/journey-evaluation.md`. Cassy's own is in cas-src.
 
-## Keep the catalog current
+Contents: [registry](#the-registry), [impact](#pick-the-journeys-a-change-touches),
+[journey rows](#journey-rows), [escape vocabulary](#escape-vocabulary),
+[evidence](#run-them-and-keep-the-evidence), [scoring](#score-the-experience).
 
-- Every epic that changes a user-facing surface adds or updates the journeys
-  it touches in `docs/qa/journeys.md`, in the same epic. Each journey records
-  its steps, its expected experience and its edge paths, plus the spec that
-  walks it. If the project has no catalog yet, create one with its critical
-  journeys first.
-- Edit a journey's **Steps** together with its `test.step` titles.
-  `scripts/journeys-for-diff.py --check` fails when the two drift.
+## The registry
+
+The project's journeys live in `docs/qa/journeys.yaml` (`qa.registry.path`):
+ids, status (`live`, `dark`, `dead`), entry, steps, owner globs, invariants
+and traffic share. `cas qa journeys --check` validates it against tracked
+files, `--status` reports curation debt, and `--seed` bootstraps a missing one.
+A project without YAML may keep the legacy `docs/qa/journeys.md` catalog; edit
+a journey's **Steps** together with its `test.step` titles, because
+`scripts/journeys-for-diff.py --check` fails when the two drift.
+
+Each delivery keeps the registry true for what it changed, and task park
+refuses one that does not: a new surface file needs an owner, a bug fix needs
+its case, a rename must not orphan a glob ([escapes](#escape-vocabulary)).
 
 ## Pick the journeys a change touches
 
-- Where the project ships the helper, run
-  `scripts/journeys-for-diff.py <base> [<head>]`. It prints JSON rows with
-  `id`, `title`, `suite` and `reason`. Otherwise, match the diff against each
-  journey's **Touches** globs by hand.
-- Add any journey that the `demo_statement` names.
-- Put each journey in the matrix as a row that starts at its **Entry** and
-  ends at its **Goal**. Use the ledger labels and verdicts unchanged.
+Read the journey table in the QA task description: park computed it from the
+delivered diff. Without one, run `cas qa impact --task <id>` (or
+`cas qa impact <base>..<head>`; `--json` is the contract). Rows come live
+first, then by traffic share, each with its invariants and an
+`evidence_required` line naming the walk and the read-back. With no registry,
+impact groups files by CODEMAP area: walk each area's user-facing entry. Copy
+every impact warning (no registry, stale CODEMAP, missing overview) into the
+ledger header. Add any journey that the `demo_statement` names. Each journey
+row starts at its entry and ends at its goal.
+
+## Journey rows
+
+Write one ledger row per live journey the impact lists, with the journey id as
+the row's `id` cell and one verdict: `PASS`, `FAIL`, `NOT A ROUTE`, or
+`NOT EXERCISED: <reason>`. `verification action=qa_record status=approved`
+refuses a ledger missing a row once a registry exists (G8). Prove a dark
+journey stays unreachable; a dead one is `NOT A ROUTE`. Example:
+
+```text
+| B2-home-signup | / → Get started → workspace | one claimed workspace | INV-ONE-WORKSPACE read back: 1 row, claimed_at set | PASS | real-build | qa/J03.png | - |
+```
+
+## Escape vocabulary
+
+Upkeep gates refuse at park, before the merge request. Fix the named problem
+in the same branch, or record the escape as
+`task action=notes id=<task> note_type=decision notes="<token> <reason>"` and
+retry close. The token starts the note and the reason must be non-empty.
+
+| Gate | Refusal heading | Escape token |
+| --- | --- | --- |
+| G1 | `JOURNEY REGISTRY BROKEN BY THIS DELIVERY` | `registry unchanged:` |
+| G2 | `UNOWNED USER-FACING FILE` | `no journey impact:` (or own the file: owner glob, owner group or `ignore`) |
+| G3 | `BUG FIX WITHOUT A CASE` | `no case:` (or add a `bug_families` entry whose `tasks` names the task) |
+| G5 | `CODEMAP DRIFT` | `codemap unchanged:` |
+| G6 | `PRODUCT_OVERVIEW DRIFT` | `overview unchanged:` |
+| G8 | `QA RECORD REJECTED` | a `NOT EXERCISED: <reason>` row |
+| G9 | `RELEASE NOTES BLOCKED`, `POST-RELEASE CHECK` | operator only: `POST-RELEASE OVERRIDE: <their words>` on the epic |
+
+Cassy records the outcome as notes that start `UPKEEP ESCAPE G1|G2|G3|G5|G6:
+<token> <reason>`, or `UPKEEP OBSERVE <gate>:` for a would-be refusal when the
+gate's stage is `observe` (`qa.registry.enforce`, `upkeep.codemap`,
+`upkeep.product_overview`). Those notes are accounting; quoting a token there
+waives nothing. The QA task lists the delivery's escapes: an independent
+reviewer challenges a reason that does not hold.
 
 ## Run them and keep the evidence
 

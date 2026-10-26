@@ -212,6 +212,50 @@ async fn cas_4b26f_matching_batch_squash_auto_closes() {
 }
 
 #[tokio::test]
+async fn cas_d8b4_batch_squash_survives_target_evolution() {
+    let mut env = TestEnvGuard::temp_home();
+    for (receipt_kind, change) in [("anchor", "evolved"), ("squash", "evolved"), ("anchor", "reverted"), ("anchor", "labelled")] {
+        let (temp, _, supervisor, head) = fixture(&mut env);
+        let repo = temp.path();
+        git(repo, &["checkout", "-q", "batch/X"]);
+        // Binary evolution cannot use the ordinary line-ownership fallback.
+        let batch_tip = commit(repo, "asset.bin", "batch\0version");
+        git(repo, &["checkout", "-q", "factory/test-agent"]);
+        squash(repo, None);
+        let receipt = git(repo, &["rev-parse", "main"]);
+        git(repo, &["checkout", "-q", "main"]);
+        if change == "reverted" {
+            git(repo, &["revert", "--no-edit", &receipt]);
+        } else if change == "labelled" {
+            std::fs::write(repo.join("src/one.rs"), "pub fn replacement() {}\n").unwrap();
+            git(repo, &["add", "src/one.rs"]);
+            git(repo, &["commit", "-q", "-m", "Revert published batch path"]);
+        } else {
+            commit(repo, "asset.bin", "later\0version");
+        }
+        git(repo, &["checkout", "-q", "factory/test-agent"]);
+        // Historical tasks can be staged after the squash and subsequent edits.
+        stage(supervisor.clone(), &batch_tip).await.unwrap();
+        let receipt = if receipt_kind == "anchor" { &head } else { &receipt };
+        let request = serde_json::from_value(serde_json::json!({
+            "action":"close", "id":TASK, "commit_receipt":receipt,
+            "supervisor_override":true, "reason":"Reconcile historical merged delivery"
+        })).unwrap();
+        let text = extract_text(CasService::new(supervisor.clone(), None)
+            .task(Parameters(request)).await.unwrap());
+        let tasks = open_task_store(&repo.join(".cas")).unwrap();
+        let task = tasks.get(TASK).unwrap();
+        if change != "evolved" {
+            assert_eq!(task.status, TaskStatus::AwaitingMerge, "a reverted squash is not delivered: {text}");
+            assert!(text.contains("MERGE REQUIRED"), "{text}");
+            continue;
+        }
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert_eq!(task.deliverables.factory_branch_anchor.as_deref(), Some(head.as_str()));
+    }
+}
+
+#[tokio::test]
 async fn cas_4b26f_dropped_batch_path_is_rejected() {
     let mut env = TestEnvGuard::temp_home();
     for dropped in ["src/two.rs", "src/sibling.rs", "extra"] {
@@ -256,4 +300,132 @@ async fn cas_4b26f_non_supervisor_cannot_stage_batch() {
         .get(TASK)
         .unwrap();
     assert!(!task.notes.contains("integration batch"));
+}
+
+#[tokio::test]
+async fn cas_dbab_reclose_squash_after_rejected_verification() {
+    let mut env = TestEnvGuard::temp_home();
+    // The delivery precedes the retry's lease, without wall-clock sleeps.
+    env.set(
+        "GIT_COMMITTER_DATE",
+        (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339(),
+    );
+    let (temp, worker, supervisor, head) = fixture(&mut env);
+    let repo = temp.path();
+    let cas_dir = repo.join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.created_at = chrono::Utc::now() - chrono::Duration::minutes(10);
+    // Creation time is immutable on update; seed the historical task at add.
+    tasks.delete(TASK).unwrap();
+    tasks.add(&task).unwrap();
+    tasks
+        .add_dependency(&cas::types::Dependency::new(
+            TASK.into(),
+            "cas-be01".into(),
+            cas::types::DependencyType::ParentChild,
+        ))
+        .unwrap();
+    git(repo, &["checkout", "-q", "main"]);
+    git(repo, &["merge", "--squash", "factory/test-agent"]);
+    git(repo, &["commit", "-q", "-m", "Squash delivery (#3814)"]);
+    let receipt = git(repo, &["rev-parse", "HEAD"]);
+    git(repo, &["checkout", "-q", "factory/test-agent"]);
+    env.remove("GIT_COMMITTER_DATE");
+    std::fs::write(cas_dir.join("config.toml"),
+        "[verification]\nenabled=true\n[code_review]\nowner=\"worker\"\n[qa]\nindependent_pass=false\n").unwrap();
+    let first = close(worker.clone(), Some(&receipt)).await;
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
+        .unwrap()
+        .unwrap();
+    let service = CasService::new(supervisor.clone(), None);
+    let rejected = service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":TASK, "status":"rejected", "summary":"Ledger evidence incomplete; code unchanged",
+        "dispatch_id":dispatch.id
+    })).unwrap())).await.unwrap();
+    assert_eq!(
+        cas::store::open_verification_store(&cas_dir)
+            .unwrap()
+            .get_latest_for_task(TASK)
+            .unwrap()
+            .unwrap()
+            .status,
+        cas::types::VerificationStatus::Rejected,
+        "{}",
+        extract_text(rejected)
+    );
+    for status in ["blocked", "open"] {
+        service
+            .task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":"update", "id":TASK, "status":status
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+    }
+    cas::store::open_agent_store(&cas_dir)
+        .unwrap()
+        .try_claim(
+            TASK,
+            &format!("test-session-{}", std::process::id()),
+            1800,
+            None,
+        )
+        .unwrap();
+    let retried = close(worker.clone(), Some(&receipt)).await;
+    assert!(retried.contains("VERIFICATION REQUIRED"), "{retried}");
+    let next = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
+        .unwrap()
+        .unwrap();
+    assert_ne!(dispatch.id, next.id);
+    service.verification(Parameters(serde_json::from_value(serde_json::json!({
+        "action":"add", "task_id":TASK, "status":"approved", "summary":"Corrected ledger; unchanged delivery verified",
+        "dispatch_id":next.id
+    })).unwrap())).await.unwrap();
+    let closed = close(worker, Some(&receipt)).await;
+    assert_eq!(
+        tasks.get(TASK).unwrap().status,
+        TaskStatus::Closed,
+        "{closed}"
+    );
+    assert_eq!(git(repo, &["rev-parse", "factory/test-agent"]), head);
+    assert_eq!(
+        tasks
+            .get(TASK)
+            .unwrap()
+            .deliverables
+            .factory_branch_anchor
+            .as_deref(),
+        Some(head.as_str())
+    );
+}
+
+#[tokio::test]
+async fn cas_dbab_merged_into_prefers_origin_over_stale_local_batch() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, _, supervisor, _) = fixture(&mut env);
+    git(temp.path(), &["checkout", "-q", "batch/X"]);
+    let tip = commit(temp.path(), "sibling.txt", "other delivery\n");
+    git(
+        temp.path(),
+        &["update-ref", "refs/remotes/origin/batch/X", &tip],
+    );
+    git(temp.path(), &["reset", "--hard", "HEAD^"]);
+    git(temp.path(), &["checkout", "-q", "factory/test-agent"]);
+    let result = stage(supervisor, &tip).await.unwrap();
+    let task = open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .get(TASK)
+        .unwrap();
+    assert_eq!(
+        task.deliverables
+            .integration_batch
+            .as_ref()
+            .map(|batch| batch.tip.as_str()),
+        Some(tip.as_str()),
+        "{result}"
+    );
 }

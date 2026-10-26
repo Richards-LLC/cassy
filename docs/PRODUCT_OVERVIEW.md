@@ -6,37 +6,42 @@
 
 Cassy is a local-first multi-agent coding factory and persistent context system for developers working in Git repositories.
 The `cas` binary runs a supervisor with isolated workers; `cas serve` gives coding agents durable project context through MCP.
-Task coordination, memories, rules, skills, and repository knowledge live in one local system; Cloud sync is optional.
+Tasks, memories, rules, skills and repository knowledge live in one local store; Cloud sync, the machine hub and the Commander browser app are optional.
+Every delivery is checked before it merges: tests, the journeys a change touches, documentation upkeep and, after release, a live post-release check.
 
 ## Personas
 
-- **Repository maintainer** - starts a factory session, chooses work, reviews delivery evidence, and merges accepted branches.
-- **Supervisor agent** - plans epics, assigns one task at a time to workers, coordinates review and integration.
-- **Worker agent** - executes an assigned task in its own worktree, records progress, and parks a committed result for review.
+- **Operator** - the repository maintainer: starts factory sessions, picks the work, reviews delivery evidence, approves releases and can answer from Commander.
+- **Supervisor agent** - plans epics, assigns one task at a time to workers, reviews and merges deliveries, and coordinates with supervisors on other projects or machines.
+- **Worker agent** - executes one assigned task in its own worktree, runs the targeted tests, and parks a committed result for review.
+- **QA reviewer** - walks the journeys a delivery touches on the real build and records an approve or reject verdict in a QA ledger.
 
 ## Core Concepts
 
-- **Factory session** - a live supervisor and worker fleet coordinated through the terminal UI.
-- **Supervisor** - the session role that plans work, assigns tasks, reviews deliveries, and manages integration.
-- **Worker** - an agent assigned a bounded task and isolated checkout.
-- **Epic** - a larger outcome represented by related tasks and dependencies.
-- **Task** - a prioritized work item with lifecycle status, notes, ownership, and close requirements.
-- **Lease** - the time-bounded assignment that gives one worker responsibility for a task.
-- **Worktree** - a separate Git checkout and branch used to isolate a worker's changes.
-- **Close gate** - evidence and merge-state checks that determine whether a delivery can close.
-- **Memory entry** - a durable fact, preference, context, or observation retrieved in later sessions.
-- **Rule** - a versioned instruction that can become proven and sync into agent harnesses.
-- **Skill** - a procedural playbook loaded by an agent for a particular kind of work.
-- **Knowledge page** - a distilled, source-linked page about the current repository.
-- **Code index** - searchable files and symbols that connect code to project context.
+- **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI.
+- **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
+- **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.
+- **Worktree** - a separate Git checkout and branch that isolates a worker's changes.
+- **Close gate** - the evidence, test-receipt and merge checks that decide whether a parked delivery may close.
+- **Journey registry** - a project's `docs/qa/journeys.yaml` (drafted by `cas qa journeys --seed`): each user journey's owner files, specs, surfaces and live, dark or dead status. Cassy's Commander registry preserves import and CSS selector coverage, with enforcement declared in the tracked registry.
+- **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns.
+- **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
+- **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
+- **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.
+- **Worker isolation** - on Linux, workers cannot read operator credential stores such as Neon and Vercel, and see only the connectors an operator grants a dedicated worker account.
+- **Memory, Rule, Skill** - durable facts, versioned instructions that sync into agent harnesses, and procedural playbooks agents load for a kind of work.
+- **Knowledge page** - a distilled, source-linked page about the current repository; the code index connects symbols to that context.
 
 ## Primary Journeys
 
-1. A maintainer launches `cas`, reviews the active epic, and chooses which repository work to staff.
-2. A supervisor creates tasks and dependencies, then assigns each ready task to a worker.
-3. A worker starts its lease, commits changes in its worktree, and parks the branch with evidence for review.
-4. An agent calls `cas serve` tools to find tasks, memories, rules, skills, and knowledge while working.
-5. A maintainer builds or searches repository knowledge and carries the resulting context into later sessions.
+1. The operator launches `cas`, reviews the active epic and staffs workers for its ready tasks.
+2. A worker starts its lease, commits in its worktree, runs targeted tests and parks the branch; the close gate and upkeep gates check it.
+3. A QA reviewer runs `cas qa impact` on a delivery, walks the touched journeys and records the verdict in the QA ledger.
+4. A supervisor messages a supervisor on another project or machine, sees RECEIVED or PENDING, or splits an epic with that peer.
+5. After a release merges, `cas serve` runs the post-release check, `cas release report` builds the branded release report, and Violet posts the release notes to Slack.
+6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change.
+7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.
+8. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 
 ## Authoritative Sources
 
@@ -44,5 +49,16 @@ Task coordination, memories, rules, skills, and repository knowledge live in one
 - Coordination and context-system boundaries: `cas-cli/docs/ARCHITECTURE.md`.
 - Task lifecycle and close states: `crates/cas-types/src/task.rs`.
 - Agent roles and session responsibilities: `crates/cas-types/src/agent.rs`.
-- Memory, rule, and skill records: `crates/cas-types/src/entry.rs`, `crates/cas-types/src/rule.rs`, `crates/cas-types/src/skill.rs`.
+- Memory, rule and skill records: `crates/cas-types/src/entry.rs`, `crates/cas-types/src/rule.rs`, `crates/cas-types/src/skill.rs`.
+- Adaptive QA: `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_post_release.rs`, `docs/qa/impact.md`, `docs/qa/docs-upkeep.md`.
 - CLI and MCP surfaces: `cas-cli/src/cli/` and `cas-cli/src/mcp/tools/`.
+- Commander browser app: `hub-web/`.
+- Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`.
+- Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
+- Release history: `CHANGELOG.md`.
+
+<!-- cas:project-overview
+# Product paths the G6 park gate and overview freshness watch. Keep when regenerating.
+domain_paths = ["crates/cas-types/src/task.rs", "crates/cas-types/src/agent.rs"]
+watch_dirs = ["cas-cli/src/cli", "cas-cli/src/mcp/tools", "cas-cli/src/builtins/skills", "crates/cas-types/src", "hub-web/src"]
+-->

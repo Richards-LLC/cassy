@@ -184,13 +184,13 @@ Before (build `eda3dfd1`): `terminal-qa: FAIL cas-update-check · 12 runs · 33 
 
 After: `terminal-qa: PASS cas-update-check · 12 runs · 0 fail · 0 warn · 0 allowed · docs/design/cli/captures/after/cas-update-check/report.md`
 
-Post-swap failure review: `terminal-qa: PASS cas-update · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cas-a461/terminal-qa/report.json`; the plain-mode
+Post-swap failure review: `terminal-qa: PASS cas-update · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-a461/terminal-qa/report.json`; the plain-mode
 failure test keeps the first line actionable by naming the failed project and the one rerun command.
 
 Service-refresh receipt review: `cas-cli` scoped update tests pass 41/41, including the
 old-to-new version transition and `via: service` contract; the real-build terminal capture
 for the adjacent doctor/service warning is recorded under
-`/home/pippenz/.cas/artifacts/cas-47f9/terminal-qa/`.
+`<artifacts>/cas-47f9/terminal-qa/`.
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -213,9 +213,9 @@ the transcript's defects as rendered: `→ [1/2] Updating Cassy binaryChecking t
 cut names (`Petrastella/gabber-…`), raw errors in details blocks, and a final
 `✗ one or more projects were not fully refreshed`.
 
-After: `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-0aa5/terminal-qa-history/after/cas-update-partial-refresh/report.json`
+After: `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-0aa5/terminal-qa-history/after/cas-update-partial-refresh/report.json`
 
-After: `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-0aa5/terminal-qa-history/after/cas-update-success/report.json`
+After: `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-0aa5/terminal-qa-history/after/cas-update-success/report.json`
 
 `--json` for the partial fixture prints the same two documents before and after, byte for byte
 once parsed, and exits 1 both times.
@@ -238,15 +238,15 @@ update renderer files are identical to the merged `dc1665877`.
 
 The committed `after` captures for these three fixtures are these runs:
 
-- `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-partial-refresh/report.json`
-- `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-success/report.json`
-- `terminal-qa: PASS cas-update-mixed-failure · 11 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-6b56/terminal-qa/cas-update-mixed-failure/report.json`
+- `terminal-qa: PASS cas-update-partial-refresh · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-6b56/terminal-qa/cas-update-partial-refresh/report.json`
+- `terminal-qa: PASS cas-update-success · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-6b56/terminal-qa/cas-update-success/report.json`
+- `terminal-qa: PASS cas-update-mixed-failure · 11 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-6b56/terminal-qa/cas-update-mixed-failure/report.json`
 
 The native interactive captures are the approved cells of independent QA round 2 of cas-70a8.
 They come from the same `4cedda1` binary, run by the supervisor with factory identity preserved,
 and cover accept with a deliberate extraction failure, a slow download, HTTP 500, decline, `-y`,
 pipe, C locale, `NO_COLOR` and colour. Their ledger:
-`/home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-70a8/independent-qa/round-2/LEDGER.md`.
+`<artifacts>/cas-70a8/independent-qa/round-2/LEDGER.md`.
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
@@ -257,3 +257,37 @@ pipe, C locale, `NO_COLOR` and colour. Their ledger:
 | Machine contract | 4 | `--json` and counts are unchanged; a full update still prints two documents (pre-existing) |
 
 Scored by happy-tiger-95 on 2026-10-17; floor holds.
+
+
+## Dry-run upkeep preview (cas-be63)
+
+| Field | Sentence |
+| --- | --- |
+| First two lines | Existing update and project verdicts retain their dry-run status; no adoption is claimed as applied. |
+| Scannable | Each dry-run project detail block names its planned upkeep stages under migration. |
+| Readable | Wrapped upkeep notes explain the observe window and the command to pin an explicit stage. |
+| Machine output | The existing single receipt includes projects[].phase_documents.docs_upkeep[].changes with the planned notes; config bytes stay unchanged. |
+| Omitted | No extra success transcript, progress line or receipt document is added. |
+
+Schema migrations remain skipped in the native dry run. Upkeep planning runs
+with the real dry-run flag after successful or planned schema work; schema
+failures still prevent upkeep writes. Human notes fit within the existing
+80-column project detail block; JSON retains the complete notes as data.
+
+## Local runtime preflight (cas-0700)
+
+Binding reconciliation filters the machine-wide session registry by project
+before checking process identity or GUI endpoints. Dead or stale sessions with
+refused or absent endpoints are skipped during ordinary read-only repair;
+the same rule covers unattributed socket paths left by macOS shutdown. Each
+connect has a 250 ms bound. Held or unknown endpoints still block, naming the
+session and a safely quoted `cas kill -- <name>` remedy when attributable. The
+existing binding report carries that cause in human and JSON output.
+
+`cas update` captures one runtime inventory for all projects and channels.
+Outside dry run, it reaps only owned, unchanged dead metadata whose GUI probe
+is refused or missing. Held or unknown records retain project attribution.
+Linux socket removal retains its kernel-holder checks; macOS leaves socket
+paths alone pending cas-f2c7. Session writers invalidate a reused inventory;
+the update then asks for a rerun rather than trusting an older observation.
+Each channel still receives its own authenticated drain acknowledgement.

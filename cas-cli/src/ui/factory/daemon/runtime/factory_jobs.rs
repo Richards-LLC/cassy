@@ -11,6 +11,7 @@
 //! | `WorkerHealthProbe` | blocking | 100 ms | stall confirmation (worker resolution, `/proc` scan, transcript reads), and the idle-worker liveness observed with each delivery read (cas-3b16) |
 //! | `ReminderScan` | write (StoreWorker) | 100 ms | reminder expiry, due reads and firing |
 //! | `CiStatus` | external | 10 s | the git half of the supervisor-stall evidence: delivery tips, lane CI via `gh`, merged state |
+//! | `MergeAlertInbox` | external | 10 s | final merge containment check and native Teams inbox write, together |
 //!
 //! Revalidation is always a fresh read on the read lane's own connection,
 //! never the cached snapshot (app/mod.rs, `prompt_is_still_deliverable`).
@@ -27,6 +28,7 @@ pub(crate) const REVALIDATE_FRESH: &str = "RevalidateFresh";
 pub(crate) const WORKER_HEALTH_PROBE: &str = "WorkerHealthProbe";
 pub(crate) const REMINDER_SCAN: &str = "ReminderScan";
 pub(crate) const CI_STATUS: &str = "CiStatus";
+pub(crate) const MERGE_ALERT_INBOX: &str = "MergeAlertInbox";
 
 /// Spec §4.4 budgets.
 pub(crate) const DIRECTOR_SNAPSHOT_BUDGET: Duration = Duration::from_millis(250);
@@ -173,6 +175,7 @@ pub(crate) enum FactoryJobOutput {
     Deliverability(DeliverabilityBatch),
     WorkerHealth(WorkerHealthReport),
     ReminderScan,
+    MergeAlertInbox(Option<super::delivery::CompletedMergeAlert>),
     CiStatus(StallExternalEvidence),
 }
 
@@ -181,5 +184,6 @@ pub(crate) fn is_factory_kind(kind: &str) -> bool {
     matches!(
         kind,
         DIRECTOR_SNAPSHOT | REVALIDATE_FRESH | WORKER_HEALTH_PROBE | REMINDER_SCAN | CI_STATUS
+            | MERGE_ALERT_INBOX
     )
 }

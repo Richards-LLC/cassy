@@ -17,8 +17,16 @@ Contents: 1 One file · 2 JavaScript · 3 Semantic HTML · 4 Theme and design la
 - **Images**: inline SVG, or a small data URI when a raster is unavoidable. Prefer drawing the chart in
   SVG over embedding a screenshot — a screenshot is not copyable, not accessible, and not printable at
   arbitrary size.
+- **Before/after pairs** are the place a screenshot earns its bytes. In a Was → Now section, a
+  change with a complete pair in its delivery's `qa/pairs/pairs.json`
+  ([layout](../../cas-qa-craft/references/evidence-bundle.md#beforeafter-pairs)) embeds both JPG
+  copies as data URIs in one `<figure>`: visible Before and After labels, Before first, alt text
+  saying what each shows, and a caption naming each side's commit or origin and capture time. A
+  change with one side or none gets no image.
 - **Size**: keep it under ~500 KB. If you are past that, you are embedding raw data that belongs in a
-  linked data file next to the markdown.
+  linked data file next to the markdown. Pairs count toward it: embed one pair per change, and if
+  the pairs still overflow, keep the changes a reader most needs to see and list the omitted shot
+  ids in the provenance section.
 
 ## 2. JavaScript is progressive enhancement only
 

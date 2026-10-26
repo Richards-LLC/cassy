@@ -413,14 +413,18 @@ impl ArtifactUploadClient {
         size_bytes: u64,
         body: impl Read,
     ) -> Result<(), UploadFailure> {
-        let mime = validate_upload_mime(mime)?;
         check_upload_url(&begun.upload_url)?;
         let mut request = ureq::put(&begun.upload_url)
-            .set("Content-Type", &mime)
             // ureq streams chunked unless the length is declared; object
             // stores reject a chunked pre-signed PUT.
             .set("Content-Length", &size_bytes.to_string())
             .timeout(self.upload_timeout);
+        // ureq replaces headers case-sensitively. Do not first add an
+        // inferred Content-Type alongside Cloud's differently-cased signed
+        // header; the object store must receive exactly the signed value.
+        if !begun.required_headers.keys().any(|name| name.eq_ignore_ascii_case("content-type")) {
+            request = request.set("Content-Type", &validate_upload_mime(mime)?);
+        }
         for (name, value) in &begun.required_headers {
             request = request.set(name, value);
         }

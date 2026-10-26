@@ -18,19 +18,23 @@ fn cas_cmd(root: &std::path::Path) -> Command {
     // Clear CAS_ROOT to prevent env pollution from parent shell
     // Tests should use current_dir() for isolation, not inherit env vars
     cmd.env_remove("CAS_ROOT");
+    cmd.env_remove("COLUMNS");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
 
 #[test]
 fn test_help() {
+    let mut env = crate::test_env_guard::TestEnvGuard::new();
+    env.set("COLUMNS", "60");
     let temp = TempDir::new().unwrap();
     cas_cmd(temp.path())
         .arg("--help")
         .assert()
         .success()
+        // cas-a0f8 made global help ASCII so it reads under LC_ALL=C.
         .stdout(predicate::str::contains(
-            "Cassy — a multi-agent coding factory with persistent memory and task coordination",
+            "Cassy - a multi-agent coding factory with persistent memory and task coordination",
         ));
 }
 
@@ -45,27 +49,751 @@ fn test_version() {
 }
 
 #[test]
-fn test_init_yes_flag() {
+fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
     let temp = TempDir::new().unwrap();
-    assert!(!temp.path().join(".git").exists());
+    let root = temp.path();
+    assert!(std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(root.join("README.md"), "candidate fixture\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    assert!(std::process::Command::new("git")
+        .args(["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"])
+        .current_dir(root)
+        .status()
+        .unwrap()
+        .success());
+    cas_cmd(root).current_dir(root).args(["init", "--yes"]).assert().success();
+    let artifact_base = root.join("task-artifacts");
+    std::fs::write(
+        root.join(".cas/config.toml"),
+        format!("[factory]\nartifacts_root = {:?}\n", artifact_base.display().to_string()),
+    ).unwrap();
+    let output = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "candidate", "build", "--task", "cas-0227", "--plan", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let candidate = std::path::PathBuf::from(plan["candidate_dir"].as_str().unwrap());
+    assert!(candidate.starts_with(&artifact_base), "{plan}");
+    assert!(candidate.ends_with("cas-0227/candidate"), "{plan}");
+    assert_eq!(plan["binary"], candidate.join("cas").display().to_string());
+    assert_eq!(plan["version_file"], candidate.join("VERSION.txt").display().to_string());
+    assert_eq!(plan["checksums_file"], candidate.join("SHA256SUMS").display().to_string());
+    assert_eq!(plan["receipt_file"], candidate.join("RECEIPT.json").display().to_string());
+    assert_eq!(plan["revision"].as_str().unwrap().len(), 40);
+    assert!(!candidate.exists(), "planning must not build or create evidence");
 
-    cas_cmd(temp.path())
-        .current_dir(&temp)
+    // cas-d0e6: the receipt names the short form, and a worker resolves the
+    // binary by task id alone instead of typing the hashed artifacts path.
+    let text_plan = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "candidate", "build", "--task", "cas-0227", "--plan"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&text_plan.stdout).contains("cas qa candidate path --task cas-0227"),
+        "{}",
+        String::from_utf8_lossy(&text_plan.stdout)
+    );
+    let path = |role: &str| {
+        cas_cmd(root)
+            .current_dir(root)
+            .env("CAS_AGENT_ROLE", role)
+            .args(["qa", "candidate", "path", "--task", "cas-0227"])
+            .output()
+            .unwrap()
+    };
+    let binary = candidate.join("cas").display().to_string();
+    let missing = path("worker");
+    assert!(!missing.status.success(), "no candidate has been built yet");
+    assert!(String::from_utf8_lossy(&missing.stderr).contains(&binary), "{missing:?}");
+    std::fs::create_dir_all(&candidate).unwrap();
+    std::fs::write(candidate.join("cas"), "built candidate\n").unwrap();
+    let found = path("worker");
+    assert!(found.status.success(), "{}", String::from_utf8_lossy(&found.stderr));
+    assert_eq!(String::from_utf8(found.stdout).unwrap().trim(), binary);
+
+    // No compiler runs: exercise the real wrapper with a builder boundary
+    // that publishes the same manifest as the Python builder, plus Git chatter.
+    let build = |json: bool| {
+        let mut command = cas_cmd(root);
+        command.current_dir(root)
+            .env("CAS_AGENT_ROLE", "supervisor")
+            .args(["qa", "candidate", "build", "--task", "cas-0227"]);
+        if json {
+            command.arg("--json");
+        }
+        command.output().unwrap()
+    };
+    let missing_builder = build(true);
+    assert!(!missing_builder.status.success());
+    let script = root.join("scripts/qa-candidate-build.py");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, r#"
+import argparse, json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument('--repo')
+parser.add_argument('--rev')
+parser.add_argument('--candidate-dir')
+args = parser.parse_args()
+destination = Path(args.candidate_dir)
+destination.mkdir(parents=True, exist_ok=True)
+receipt = dict(revision=args.rev, version='cas 9.99.7', sha256='fixture-hash')
+(destination / 'RECEIPT.json').write_text(json.dumps(receipt))
+print('HEAD is now at fixture')
+print(json.dumps(dict(receipt, candidate_dir=str(destination))))
+"#).unwrap();
+    let built = build(true);
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let receipt: serde_json::Value = serde_json::from_slice(&built.stdout).unwrap();
+    assert_eq!(receipt["revision"], plan["revision"]);
+    assert_eq!(receipt["candidate_dir"], plan["candidate_dir"]);
+    assert_eq!(receipt["receipt_file"], plan["receipt_file"]);
+    assert!(!String::from_utf8_lossy(&built.stderr).contains("[ERROR]"));
+    let human = build(false);
+    assert!(human.status.success(), "{}", String::from_utf8_lossy(&human.stderr));
+    assert!(String::from_utf8_lossy(&human.stdout).contains(&format!(
+        "Receipt: {}", candidate.join("RECEIPT.json").display()
+    )), "{human:?}");
+
+    let missing_error = String::from_utf8_lossy(&missing_builder.stderr);
+    assert!(missing_error.contains("QA candidate builder missing"), "{missing_error}");
+    assert!(missing_error.contains("source checkout") && missing_error.contains("rerun"), "{missing_error}");
+}
+
+#[test]
+fn qa_journeys_check_reports_debt_kinds_and_growth_cas_cb2b() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    cas_cmd(root)
+        .current_dir(root)
         .args(["init", "--yes"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("Cassy initialized"))
-        .stdout(predicate::str::contains("cas hub service install"));
+        .success();
+    let registry = root.join("docs/qa/journeys.yaml");
+    std::fs::create_dir_all(registry.parent().unwrap()).unwrap();
+    std::fs::write(root.join("page.ts"), "export {};\n").unwrap();
+    let seeded = "version: 1\nupdated: '2026-10-21'\ninvariants:\n  ACCOUNT: {statement: Account exists, check: Read account}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Join}\n    owners: ['page.ts']\n";
+    std::fs::write(&registry, seeded).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["add", "page.ts", "docs/qa/journeys.yaml"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let human = |expected: &str| {
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["qa", "journeys", "--check"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with(expected), "{output}");
+        assert!(
+            output.lines().all(|line| line.chars().count() <= 80),
+            "{output}"
+        );
+        output
+    };
+    let json = || {
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["qa", "journeys", "--check", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let first = human("DEBT: 0 problem(s), 1 debt item(s)\nDebt by kind:\n  seeded: 1\n");
+    assert!(first.contains("first recorded check"), "{first}");
+    assert!(
+        !first.contains("DEBT signup"),
+        "individual rows belong under --verbose: {first}"
+    );
 
-    assert!(temp.path().join(".cas").exists());
-    assert!(temp.path().join(".cas/cas.db").exists());
-    // Config is now saved as TOML (preferred format)
-    assert!(temp.path().join(".cas/config.toml").exists());
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .arg("status")
+    std::fs::write(
+        &registry,
+        format!("{seeded}    traffic: {{share_pct: null}}\n"),
+    )
+    .unwrap();
+    let increased = json();
+    assert_eq!(increased["problems"], serde_json::json!([]));
+    assert_eq!(increased["debt"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        increased["debt_summary"]["by_kind"],
+        serde_json::json!({"seeded": 1, "unmeasured_traffic": 1})
+    );
+    assert_eq!(increased["debt_summary"]["previous_total"], 1);
+    assert_eq!(increased["debt_summary"]["delta"], 1);
+    assert_eq!(increased["debt_summary"]["grew"], true);
+    assert_eq!(increased["debt_summary"]["history_status"], "recorded");
+
+    // Remove and re-add traffic debt so the human renderer also observes growth.
+    std::fs::write(&registry, seeded).unwrap();
+    let decreased = json();
+    assert_eq!(decreased["debt_summary"]["delta"], -1);
+    assert_eq!(decreased["debt_summary"]["grew"], false);
+    std::fs::write(
+        &registry,
+        format!("{seeded}    traffic: {{share_pct: null}}\n"),
+    )
+    .unwrap();
+    let grew = human(
+        "DEBT: 0 problem(s), 2 debt item(s)\nDebt by kind:\n  seeded: 1\n  unmeasured_traffic: 1\n",
+    );
+    assert!(
+        grew.contains("Debt grew: +1 since previous check (1 -> 2)"),
+        "{grew}"
+    );
+    let unchanged = json();
+    assert_eq!(unchanged["debt_summary"]["previous_total"], 2);
+    assert_eq!(unchanged["debt_summary"]["delta"], 0);
+    assert_eq!(unchanged["debt_summary"]["grew"], false);
+
+    // A corrupt receipt must restart history, not poison every future check.
+    let connection = rusqlite::Connection::open(root.join(".cas/cas.db")).unwrap();
+    let key: String = connection.query_row(
+        "SELECT key FROM metadata WHERE key LIKE 'qa_journeys_check:%'", [], |row| row.get(0),
+    ).unwrap();
+    connection.execute("UPDATE metadata SET value = '{' WHERE key = ?1", [&key]).unwrap();
+    let recovered = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "journeys", "--check", "--verbose"])
+        .assert().success().get_output().stdout.clone();
+    let recovered = String::from_utf8(recovered).unwrap();
+    assert!(recovered.contains("first recorded check")
+        && recovered.contains("History reset:")
+        && !recovered.contains("Details: cas qa journeys --check --verbose"), "{recovered}");
+    assert!(recovered.lines().all(|line| line.chars().count() <= 80), "{recovered}");
+    let after_recovery = json();
+    assert_eq!(after_recovery["debt_summary"]["history_status"], "recorded");
+    assert_eq!(after_recovery["debt_summary"]["previous_total"], 2);
+    assert_eq!(after_recovery["debt_summary"]["delta"], 0);
+
+    let alternate = root.join("docs/qa/alternate.yaml");
+    std::fs::write(&alternate, seeded).unwrap();
+    cas_cmd(root)
+        .current_dir(root)
+        .args([
+            "config",
+            "set",
+            "qa.registry.path",
+            "docs/qa/alternate.yaml",
+        ])
         .assert()
         .success();
+    let other_registry = json();
+    assert!(
+        other_registry["debt_summary"]["previous_total"].is_null(),
+        "{other_registry}"
+    );
+    assert!(
+        other_registry["debt_summary"]["delta"].is_null(),
+        "{other_registry}"
+    );
+
+    // One consumer is debt; repeated mentions in that journey still count once.
+    // Shared and unused groups in the same registry must not produce warnings.
+    let groups = "owner_groups:\n  audit-v2: {description: Audit prompts, globs: ['page.ts']}\n  shared: {description: Shared logic, globs: ['page.ts']}\n  unused: {description: Future logic, globs: ['page.ts']}\n";
+    let grouped = seeded
+        .replace("invariants:\n", &format!("{groups}invariants:\n"))
+        .replace("    owners: ['page.ts']\n", "    owners: ['page.ts']\n    owner_groups: [audit-v2, audit-v2, shared]\n")
+        + "  - id: second\n    status: live\n    seeded: true\n    entry: {url: /second, trigger: Open}\n    owners: ['page.ts']\n    owner_groups: [shared]\n";
+    std::fs::write(&alternate, grouped).unwrap();
+    let single = json();
+    assert_eq!(single["problems"], serde_json::json!([]));
+    assert_eq!(single["single_reference_owner_groups"], serde_json::json!({"audit-v2": "signup"}));
+    let debts: Vec<_> = single["debt"].as_array().unwrap().iter()
+        .filter(|row| row["code"] == "single_reference_owner_group").collect();
+    assert_eq!(debts.len(), 1, "{single}");
+    assert_eq!(debts[0]["subject"], "owner_groups.audit-v2");
+    assert!(debts[0]["message"].as_str().unwrap().contains("signup"), "{single}");
+    let human = human("DEBT: 0 problem(s), 3 debt item(s)\n");
+    let warnings: Vec<_> = human.lines().filter(|line| line.starts_with("WARN owner group ")).collect();
+    assert_eq!(warnings, ["WARN owner group audit-v2: only journey signup"], "{human}");
+}
+
+#[test]
+fn upkeep_status_and_enforce_transition_warn_on_integration_drift_cas_a77e() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "upkeep fixture")
+            .env("GIT_COMMITTER_NAME", "upkeep fixture")
+            .env("GIT_AUTHOR_EMAIL", "fixture@example.test")
+            .env("GIT_COMMITTER_EMAIL", "fixture@example.test")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let write = |path: &str, body: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    let commit = || {
+        git(&["add", ".claude/CODEMAP.md", "docs", "pages"]);
+        git(&["-c", "commit.gpgsign=false", "commit", "-qm", "fixture"]);
+        git(&["rev-parse", "HEAD"])
+    };
+    git(&["init", "-q", "-b", "main"]);
+    cas_cmd(root)
+        .current_dir(root)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+    write(
+        ".cas/config.toml",
+        "[factory]\nepic_base_branch = 'main'\n[upkeep]\ncodemap = 'observe'\nproduct_overview = 'observe'\n[qa.registry]\nenforce = 'observe'\n",
+    );
+    let overview =
+        "# Product\n<!-- cas:project-overview\nwatch_dirs = ['pages']\n-->\n";
+    let registry = "version: 1\nupdated: '2026-10-21'\nsurfaces: ['pages/**']\ninvariants:\n  FLOW: {statement: Arrived, check: Read state}\njourneys:\n  - id: home\n    status: live\n    entry: {url: /, trigger: Open}\n    steps: [Arrive]\n    owners: ['pages/base.ts']\n    invariants: [FLOW]\n    traffic: {share_pct: 100, basis: all visits}\n";
+    write(".claude/CODEMAP.md", "# Map\n- pages/: entry routes\n");
+    write("docs/PRODUCT_OVERVIEW.md", overview);
+    write("docs/qa/journeys.yaml", registry);
+    write("pages/base.ts", "export {};\n");
+    let baseline = commit();
+    write("pages/new.ts", "export {};\n");
+    // Integration has seeded debt and a broken reference; the checkout is curated.
+    write(
+        "docs/qa/journeys.yaml",
+        &registry.replace("    status: live", "    status: live\n    seeded: true")
+            .replace("invariants: [FLOW]", "invariants: [MISSING]"),
+    );
+    let integrated = commit();
+    git(&["update-ref", "refs/remotes/origin/main", &integrated]);
+    git(&["reset", "--hard", &baseline]);
+    let status = || {
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["qa", "journeys", "--status", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let report = status();
+    let measured = format!("origin/main@{integrated}");
+    assert_eq!(report["upkeep"]["measured_ref"], measured, "{report}");
+    assert_eq!(report["source"], "working_tree", "{report}");
+    assert_eq!(report["differs_from_measured_ref"], true, "{report}");
+    assert_eq!(report["seeded"], 0, "{report}");
+    assert_eq!(report["debt_count"], 0, "{report}");
+    assert_eq!(report["problems"], serde_json::json!([]), "{report}");
+    assert_eq!(report["upkeep"]["registry"]["drift_count"], 2, "{report}");
+    assert_eq!(report["upkeep"]["registry"]["debt_count"], 1, "{report}");
+    let checked = cas_cmd(root).current_dir(root)
+        .args(["qa", "journeys", "--check", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let checked: serde_json::Value = serde_json::from_slice(&checked).unwrap();
+    assert_eq!(report["problems"], checked["problems"]);
+    assert_eq!(report["debt_count"], checked["debt_summary"]["total"]);
+    for artifact in ["codemap", "product_overview"] {
+        assert_eq!(
+            report["upkeep"][artifact]["drift_count"], 1,
+            "{artifact}: {report}"
+        );
+    }
+    let long_branch = format!("epic/{}release-suffix", "measured-integration-reference-".repeat(4));
+    for branch in ["main", long_branch.as_str()] {
+        git(&["update-ref", &format!("refs/remotes/origin/{branch}"), &integrated]);
+        let config_path = root.join(".cas/config.toml");
+        let config = std::fs::read_to_string(&config_path).unwrap();
+        std::fs::write(&config_path, config.replace("epic_base_branch = 'main'", &format!("epic_base_branch = '{branch}'"))).unwrap();
+        let human = cas_cmd(root)
+            .current_dir(root)
+            .env("COLUMNS", "80")
+            .args(["qa", "journeys", "--status"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let human = String::from_utf8(human).unwrap();
+        assert!(human.starts_with("PASS: 0 problem(s), 0 debt item(s) (working tree)\n"), "{human}");
+        assert!(human.contains("Working tree:\n  Journeys: 1  Added: 0\n  Seeded: 0  Unowned surfaces: 0"), "{human}");
+        assert!(human.contains("Working tree differs from measured ref."), "{human}");
+        let (_, integration) = human.split_once("Integration upkeep:\n").unwrap();
+        assert!(integration.contains("journey registry: 2 validation/ownership issue(s)"), "{human}");
+        assert!(integration.contains("1 validation problem(s), 1 unowned surface file(s)"), "{human}");
+        assert!(integration.contains("Curation debt: 1"), "{human}");
+        let line = human.lines().find(|line| line.starts_with("Measured ref: ")).unwrap();
+        assert!(line.chars().count() <= 80, "{human}");
+        if branch == "main" {
+            assert_eq!(line, format!("Measured ref: {measured}"));
+        } else {
+            assert!(line.ends_with(&format!("@{}", &integrated[..7])), "measured SHA lost: {human}");
+            assert!(line.contains("origin/epic/") && line.contains("release-suffix@"), "branch ends lost: {human}");
+            assert!(human.contains("Full ref: cas qa journeys --status --json"), "{human}");
+        }
+        std::fs::write(config_path, config).unwrap();
+    }
+    for (index, key) in [
+        "upkeep.codemap",
+        "upkeep.product_overview",
+        "qa.registry.enforce",
+    ]
+    .iter()
+    .enumerate()
+    {
+        if index == 0 {
+            cas_cmd(root)
+                .current_dir(root)
+                .args(["config", "set", key, "enforce"])
+                .assert()
+                .success()
+                .stdout(predicate::str::contains("WARNING: CODEMAP drift: 1"))
+                .stdout(predicate::str::contains("Review: cas qa journeys --status\n"));
+        } else {
+            let output = cas_cmd(root)
+                .current_dir(root)
+                .args(["config", "set", key, "enforce", "--json"])
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone();
+            let saved: serde_json::Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(saved["warnings"][0]["drift_count"], if *key == "qa.registry.enforce" { 2 } else { 1 }, "{saved}");
+            assert_eq!(saved["warnings"][0]["measured_ref"], measured, "{saved}");
+        }
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["config", "set", key, "enforce", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let repeated: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            repeated["warnings"],
+            serde_json::json!([]),
+            "repeated write: {repeated}"
+        );
+    }
+    git(&["reset", "--hard", &integrated]);
+    write(
+        ".claude/CODEMAP.md",
+        "# Map\n- pages/: base and new routes\n",
+    );
+    write(
+        "docs/PRODUCT_OVERVIEW.md",
+        &format!("{overview}\nNew route documented.\n"),
+    );
+    write(
+        "docs/qa/journeys.yaml",
+        &registry.replace("'pages/base.ts'", "'pages/**'"),
+    );
+    let curated = commit();
+    git(&["update-ref", "refs/remotes/origin/main", &curated]);
+    // An ahead worker must not substitute its unintegrated drift for this report.
+    write("pages/worker-only.ts", "export {};\n");
+    commit();
+    let clean = status();
+    assert_eq!(
+        clean["upkeep"]["measured_ref"],
+        format!("origin/main@{curated}")
+    );
+    for (key, artifact) in [
+        ("upkeep.codemap", "codemap"),
+        ("upkeep.product_overview", "product_overview"),
+        ("qa.registry.enforce", "registry"),
+    ] {
+        assert_eq!(clean["upkeep"][artifact]["drift_count"], 0, "{clean}");
+        cas_cmd(root)
+            .current_dir(root)
+            .args(["config", "set", key, "observe"])
+            .assert()
+            .success();
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["config", "set", key, "enforce", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let saved: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            saved["warnings"],
+            serde_json::json!([]),
+            "zero drift: {saved}"
+        );
+    }
+}
+
+/// The lib-test probe child does not exercise main.rs's early executable route.
+/// Both real-binary phases must preserve locks owned by this parent process.
+#[cfg(unix)]
+#[test]
+fn ownership_probe_binary_route_preserves_parent_locks_cas_b7f9() {
+    let temp = TempDir::new().unwrap();
+    let db = temp.path().join("cas.db");
+    let writer = rusqlite::Connection::open(&db).unwrap();
+    writer.execute_batch(
+        "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+         CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT);
+         INSERT INTO tasks VALUES ('cas-aaaa', 'checkpointed');
+         PRAGMA wal_checkpoint(TRUNCATE);
+         INSERT INTO tasks VALUES ('cas-bbbb', 'wal');
+         BEGIN IMMEDIATE; UPDATE tasks SET title='pending';",
+    ).unwrap();
+    let held_locks = || {
+        let output = std::process::Command::new("python3").args(["-I", "-S", "-c", r#"
+import fcntl, json, sys
+held = []
+for path, offset in [(sys.argv[1], 1073741826), (sys.argv[1] + '-shm', 120)]:
+    with open(path, 'r+b') as file:
+        try:
+            fcntl.lockf(file, fcntl.LOCK_EX | fcntl.LOCK_NB, 1, offset)
+        except BlockingIOError:
+            held.append(True)
+        else:
+            held.append(False)
+print(json.dumps(held))
+"#]).arg(&db).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        serde_json::from_slice::<Vec<bool>>(&output.stdout).unwrap()
+    };
+    let lengths = || (std::fs::metadata(&db).unwrap().len(),
+        std::fs::metadata(temp.path().join("cas.db-wal")).unwrap().len());
+    let before = lengths();
+    assert_eq!(held_locks(), vec![true, true], "real SQLite shared and WAL writer locks");
+    for (phase, variant, id) in [("before", "Before", "cas-bbbb"), ("after", "After", "cas-aaaa")] {
+        let response = temp.path().join(format!("{phase}.json"));
+        // pin: this internal flag is the executable protocol used by isolated_probe.
+        cas_cmd(temp.path()).current_dir(temp.path())
+            .arg("--internal-task-ownership-probe").arg(phase).arg(&db).arg(&response)
+            .timeout(std::time::Duration::from_secs(10))
+            .assert().success().stdout("").stderr("");
+        let result: serde_json::Value = serde_json::from_slice(&std::fs::read(response).unwrap()).unwrap();
+        assert!(result["Ok"][variant]["ids"].as_array().unwrap().iter().any(|value| value == id),
+            "{phase} must execute its snapshot phase: {result}");
+        assert_eq!(held_locks(), vec![true, true], "{phase} must not release parent locks");
+        assert_eq!(lengths(), before, "the inspected database and WAL must not grow");
+    }
+    writer.execute_batch("ROLLBACK").unwrap();
+}
+
+#[test]
+fn test_init_yes_flag() {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        struct RestorePermissions(std::path::PathBuf, std::fs::Permissions);
+        impl Drop for RestorePermissions {
+            fn drop(&mut self) {
+                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
+            }
+        }
+        let project = TempDir::new().unwrap();
+        // Establish the child's isolated home before making the project
+        // unwritable; failure must come from real project initialization.
+        let mut command = cas_cmd(project.path());
+        command
+            .current_dir(project.path())
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .args(["init", "--yes", "--no-integrations"]);
+        let restore = RestorePermissions(
+            project.path().into(),
+            std::fs::metadata(project.path()).unwrap().permissions(),
+        );
+        std::fs::set_permissions(project.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let output = command.output().unwrap();
+        drop(restore);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(
+            stderr.matches("Permission denied").count(),
+            1,
+            "a CasError that already displays its source must not repeat it: {stderr}"
+        );
+        assert!(
+            !String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("Permission denied")
+        );
+        assert!(!project.path().join(".cas/cas.db").exists());
+    }
+    let mut redraws = Vec::new();
+    // Both human entry paths share execute_step; exercise completion and an
+    // actual filesystem failure through their piped CLI, not a renderer copy.
+    for (interactive, failure, width, existing_store) in [
+        (false, "none", 80, false),
+        (true, "none", 80, false),
+        (false, "gitignore", 80, false),
+        (true, "gitignore", 80, false),
+        (false, "codex", 80, false),
+        (true, "codex", 120, false),
+        (false, "codex", 120, true),
+        (true, "codex", 80, true),
+    ] {
+        let temp = TempDir::new().unwrap();
+        assert!(!temp.path().join(".git").exists());
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        let fail_gitignore = failure == "gitignore";
+        let long_cause = "deliberately invalid configuration with enough separate words to require natural wrapping while retaining every part of this complete diagnostic and its original parser explanation";
+        if failure == "codex" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            if existing_store {
+                cas_cmd(temp.path())
+                    .current_dir(&temp)
+                    .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
+                    .args(["init", "--json", "--no-integrations"])
+                    .assert()
+                    .success();
+            }
+            std::fs::write(temp.path().join(".codex/config.toml"), long_cause).unwrap();
+        }
+        let saved_config =
+            existing_store.then(|| std::fs::read(temp.path().join(".cas/config.toml")).unwrap());
+        if fail_gitignore {
+            std::fs::create_dir(temp.path().join(".gitignore")).unwrap();
+        }
+        let mut cmd = cas_cmd(temp.path());
+        cmd.current_dir(&temp)
+            .args(["init", "--no-integrations"])
+            .env("LC_ALL", "C")
+            .env("NO_COLOR", "1")
+            .env("COLUMNS", width.to_string())
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"));
+        if existing_store {
+            cmd.arg("--force");
+        }
+        if interactive {
+            cmd.write_stdin("y\n");
+        } else {
+            cmd.arg("--yes");
+        }
+        let output = cmd.output().unwrap();
+        assert_eq!(
+            output.status.success(),
+            failure == "none",
+            "interactive={interactive}, fail_gitignore={fail_gitignore}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        let config_phase = if existing_store {
+            "Keeping existing configuration"
+        } else {
+            "Saving configuration"
+        };
+        assert!(text.contains(config_phase), "{text}");
+        assert!(text.contains("Updating .gitignore"), "{text}");
+        if text
+            .bytes()
+            .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\n' | b'\t'))
+            || text.matches(config_phase).count() != 1
+            || text.matches("Updating .gitignore").count() != 1
+        {
+            redraws.push(format!(
+                "interactive={interactive}, fail_gitignore={fail_gitignore}: {text:?}"
+            ));
+        }
+        assert!(temp.path().join(".cas/cas.db").exists());
+        assert!(temp.path().join(".cas/config.toml").exists());
+        if failure == "codex" {
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            let diagnostic = "TOML parse error";
+            assert!(
+                !text.contains(diagnostic),
+                "phase stdout must carry context without repeating the cause: {text}"
+            );
+            assert_eq!(stderr.matches(diagnostic).count(), 1, "{stderr}");
+            let normalized = stderr.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                normalized.contains(long_cause),
+                "full parser input must survive wrapping: {stderr}"
+            );
+            assert!(
+                stderr.contains("expected"),
+                "retain the actionable parser explanation: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .all(|line| ratatui::text::Line::raw(line).width() <= width),
+                "{width} columns, existing={existing_store}: {stderr}"
+            );
+            let continuation = stderr
+                .lines()
+                .skip(if existing_store { 1 } else { 3 })
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+            assert!(
+                !continuation.is_empty() && continuation.iter().all(|line| line.starts_with("  ")),
+                "wrapped diagnostic continuations retain their hanging indent: {stderr}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(temp.path().join(".codex/config.toml")).unwrap(),
+                long_cause
+            );
+            if let Some(config) = saved_config {
+                assert_eq!(
+                    std::fs::read(temp.path().join(".cas/config.toml")).unwrap(),
+                    config
+                );
+            } else {
+                assert!(
+                    stderr.contains("cas init --force"),
+                    "retain recovery remedy: {stderr}"
+                );
+            }
+        }
+        if failure == "none" {
+            assert!(text.contains("Cassy initialized"), "{text}");
+            assert!(text.contains("cas hub service install"), "{text}");
+            cas_cmd(temp.path())
+                .current_dir(&temp)
+                .arg("status")
+                .assert()
+                .success();
+        }
+    }
+    assert!(
+        redraws.is_empty(),
+        "piped phase output must append each completed phase once without spinner or redraw bytes: {redraws:#?}"
+    );
 }
 
 #[test]
@@ -108,14 +836,158 @@ fn cas_de46_startup_preserves_retired_embedding_artifacts() {
 
 #[test]
 fn test_init_json() {
-    let temp = TempDir::new().unwrap();
+    for state in ["missing", "existing", "directory", "malformed", "malformed-grok", "array-root", "array-servers", "null-root", "null-servers"] {
+        let temp = TempDir::new().unwrap();
+        if state == "malformed-grok" {
+            std::fs::create_dir(temp.path().join(".codex")).unwrap();
+            std::fs::create_dir(temp.path().join(".grok")).unwrap();
+        } else {
+            std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        }
+        let mcp_path = temp.path().join(".mcp.json");
+        let other_server = serde_json::json!({"command": "other-mcp", "args": ["start"]});
+        let invalid_content: Option<&[u8]> = match state {
+            "malformed" | "malformed-grok" => Some(b"{\"mcpServers\": {\"other\":"),
+            "array-root" => Some(b"[]"),
+            "array-servers" => Some(b"{\"mcpServers\":[\"x\"]}"),
+            "null-root" => Some(b"null"),
+            "null-servers" => Some(b"{\"mcpServers\":null}"),
+            _ => None,
+        };
+        match state {
+            "existing" => std::fs::write(
+                &mcp_path,
+                serde_json::json!({"mcpServers": {"other": other_server}}).to_string(),
+            )
+            .unwrap(),
+            "directory" => std::fs::create_dir(&mcp_path).unwrap(),
+            _ if invalid_content.is_some() => std::fs::write(&mcp_path, invalid_content.unwrap()).unwrap(),
+            _ => {}
+        }
 
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--json"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("initialized"));
+        let output = cas_cmd(temp.path())
+            .current_dir(&temp)
+            .env("CODEX_HOME", temp.path().join(".test-home/.codex"))
+            .args(["init", "--no-integrations", "--json"])
+            .output()
+            .unwrap();
+        if state == "directory" || invalid_content.is_some() {
+            assert!(
+                output.status.code() == Some(1),
+                "MCP provisioning failure must exit 1 without panicking ({state}): {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "failed init must not report initialized"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains(".mcp.json"));
+            if state == "directory" {
+                assert!(mcp_path.is_dir(), "failed init must preserve the obstructing directory");
+            } else {
+                assert_eq!(std::fs::read(&mcp_path).unwrap(), invalid_content.unwrap());
+                let error = String::from_utf8_lossy(&output.stderr);
+                assert!(error.contains("JSON"), "malformed config needs an explicit parse error: {error}");
+            }
+            continue;
+        }
+
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "initialized");
+        assert_eq!(report["agents"]["claude"], true);
+        assert_eq!(report["hooks_configured"], true);
+        let mcp: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&mcp_path).expect("successful Claude init must create .mcp.json"),
+        )
+        .unwrap();
+        // pin: Claude's MCP launch contract must match the durable server entry.
+        assert_eq!(
+            mcp["mcpServers"]["cas"],
+            serde_json::json!({"command": "cas", "args": ["serve"]})
+        );
+        if state == "existing" {
+            assert_eq!(mcp["mcpServers"]["other"], other_server);
+        }
+    }
+}
+
+#[test]
+fn test_init_failure_reports_force_retry() {
+    let mut missing_hints = Vec::new();
+    for harness in ["claude", "codex"] {
+        let clean = TempDir::new().unwrap();
+        std::fs::create_dir(clean.path().join(format!(".{harness}"))).unwrap();
+        cas_cmd(clean.path()).current_dir(&clean)
+            .env("CODEX_HOME", clean.path().join(".test-home/.codex"))
+            .args(["init", "--json", "--no-integrations"])
+            .assert().success();
+        let clean_config: toml::Value = toml::from_str(
+            &std::fs::read_to_string(clean.path().join(".cas/config.toml")).unwrap(),
+        ).unwrap();
+        for (mode, retry_mode) in [
+            ("json", "json"), ("json", "yes"), ("yes", "yes"), ("interactive", "yes"),
+        ] {
+            let temp = TempDir::new().unwrap();
+            let config_dir = temp.path().join(format!(".{harness}"));
+            std::fs::create_dir(&config_dir).unwrap();
+            let blocked = if harness == "claude" {
+                temp.path().join(".mcp.json")
+            } else {
+                config_dir.join("config.toml")
+            };
+            std::fs::create_dir(&blocked).unwrap();
+            let user_codex = temp.path().join(".test-home/.codex");
+            let mut command = cas_cmd(temp.path());
+            command.current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", "--no-integrations"]);
+            match mode {
+                "json" => { command.arg("--json"); }
+                "yes" => { command.arg("--yes"); }
+                _ => { command.write_stdin("y\n"); }
+            }
+            let output = command.output().unwrap();
+            let error = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{harness}/{mode} must fail provisioning");
+            assert!(temp.path().join(".cas/cas.db").is_file());
+            assert!(blocked.is_dir(), "the user's obstruction must remain intact");
+            if !error.lines().any(|line| line == "Fix the reported error, then re-run: cas init --force")
+                || error.lines().any(|line| line.chars().count() > 80)
+            {
+                missing_hints.push(format!("{harness}/{mode}: {error}"));
+            }
+            std::fs::remove_dir(&blocked).unwrap();
+            // Removing the obstruction alone does not finish an existing
+            // store. Prove that the suggested force retry actually repairs it.
+            cas_cmd(temp.path()).current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", "--json", "--no-integrations"])
+                .assert().success().stdout(predicate::str::contains("already_initialized"));
+            assert!(!blocked.exists());
+            cas_cmd(temp.path()).current_dir(&temp)
+                .env("CODEX_HOME", &user_codex)
+                .args(["init", if retry_mode == "json" { "--json" } else { "--yes" }, "--no-integrations", "--force"])
+                .assert().success();
+            let recovered_config: toml::Value = toml::from_str(
+                &std::fs::read_to_string(temp.path().join(".cas/config.toml")).unwrap(),
+            ).unwrap();
+            assert_eq!(recovered_config, clean_config,
+                "{harness}/{mode} -> {retry_mode}: force recovery must keep the full clean-init config");
+            if harness == "claude" {
+                let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&blocked).unwrap()).unwrap();
+                assert_eq!(value["mcpServers"]["cas"]["command"], "cas");
+            } else {
+                let value: toml::Value = toml::from_str(&std::fs::read_to_string(&blocked).unwrap()).unwrap();
+                assert_eq!(value["mcp_servers"]["cs"]["command"].as_str(), Some("cas"));
+            }
+        }
+    }
+    assert!(missing_hints.is_empty(), "failed init must explain force recovery: {missing_hints:#?}");
 }
 
 #[test]
@@ -136,6 +1008,18 @@ fn test_init_already_initialized() {
         .assert()
         .success()
         .stdout(predicate::str::contains("already initialized"));
+
+    let config_path = temp.path().join(".cas/config.toml");
+    let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n";
+    std::fs::write(&config_path, custom_config).unwrap();
+    let output = cas_cmd(temp.path()).current_dir(&temp)
+        .args(["init", "--no-integrations"]).write_stdin("").output().unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(error.contains("stdin closed before a selection"), "{error}");
+    assert!(!error.contains("Initialization is incomplete") && !error.contains("cas init --force"),
+        "a valid pre-existing store must not receive partial-init recovery advice: {error}");
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config);
 }
 
 /// Regression test for cas-bf06: a reinit of `cas init` (interactive, no
@@ -217,22 +1101,31 @@ fn test_init_reinit_with_closed_stdin_does_not_hang() {
 
 #[test]
 fn test_init_force_reinit() {
-    let temp = TempDir::new().unwrap();
+    for mode in ["json", "yes", "interactive"] {
+        let temp = TempDir::new().unwrap();
+        std::fs::create_dir(temp.path().join(".claude")).unwrap();
+        cas_cmd(temp.path()).current_dir(&temp)
+            .args(["init", "--yes", "--no-integrations"]).assert().success();
+        let config_path = temp.path().join(".cas/config.toml");
+        let custom_config = "# operator config\n[issues]\nrepo = \"acme/widgets\"\n[hooks]\ntoken_budget = 1234\n";
+        std::fs::write(&config_path, custom_config).unwrap();
+        let mcp_path = temp.path().join(".mcp.json");
+        std::fs::remove_file(&mcp_path).unwrap();
 
-    // First init
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes"])
-        .assert()
-        .success();
-
-    // Force reinit should succeed
-    cas_cmd(temp.path())
-        .current_dir(&temp)
-        .args(["init", "--yes", "--force"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Cassy initialized"));
+        let mut command = cas_cmd(temp.path());
+        command.current_dir(&temp).args(["init", "--force", "--no-integrations"]);
+        match mode {
+            "json" => { command.arg("--json"); }
+            "yes" => { command.arg("--yes"); }
+            _ => { command.write_stdin("y\n"); }
+        }
+        command.assert().success().stdout(predicate::str::contains(
+            if mode == "json" { "initialized" } else { "Cassy initialized" }));
+        assert_eq!(std::fs::read_to_string(config_path).unwrap(), custom_config,
+            "{mode} force retry must preserve the operator's config bytes");
+        let mcp: serde_json::Value = serde_json::from_slice(&std::fs::read(mcp_path).unwrap()).unwrap();
+        assert_eq!(mcp["mcpServers"]["cas"]["command"], "cas", "{mode} must repair provisioning");
+    }
 }
 
 /// EPIC cas-8888 (cas-6f46, Phase 5): a pre-existing `.grok/` dir (the
@@ -399,6 +1292,76 @@ fn test_not_initialized_error() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("no Cassy store here; run `cas init`"));
+
+    // cas-d6ab: styling follows the destination stream, independently of stdout.
+    #[cfg(unix)]
+    let config_project = TempDir::new().unwrap();
+    #[cfg(unix)]
+    cas::store::init_cas_dir(config_project.path()).unwrap();
+    #[cfg(unix)]
+    for (stdout_tty, stderr_tty, no_color, config_error) in [
+        (true, false, false, false),
+        (false, true, false, false),
+        (true, true, true, false),
+        // cas-62e0: the command's own stderr formatter must follow the pipe,
+        // just like the top-level error formatter covered by the other rows.
+        (true, false, false, true),
+    ] {
+        use std::fs::File;
+        use std::io::{IsTerminal, Read};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::process::{Command as ProcessCommand, Stdio};
+
+        let (mut master_fd, mut slave_fd) = (-1, -1);
+        // SAFETY: openpty initializes two fresh owned descriptors on success.
+        assert_eq!(unsafe { libc::openpty(
+            &mut master_fd, &mut slave_fd, std::ptr::null_mut(),
+            std::ptr::null_mut(), std::ptr::null_mut(),
+        ) }, 0, "{}", std::io::Error::last_os_error());
+        let (mut master, slave) = unsafe {
+            (File::from_raw_fd(master_fd), File::from_raw_fd(slave_fd))
+        };
+        assert!(slave.is_terminal(), "fixture must provide a real TTY");
+        let mut command = ProcessCommand::new(cas::test_paths::cas_binary());
+        command.env_clear()
+            .env("HOME", temp.path().join(".test-home"))
+            .env("XDG_CONFIG_HOME", temp.path().join(".test-xdg-config"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("LC_ALL", "C")
+            .env("CAS_SKIP_FACTORY_TOOLING", "1")
+            .current_dir(if config_error { config_project.path() } else { temp.path() })
+            .args(if config_error { vec!["config", "export", "--format", "unsupported"] } else { vec!["status"] })
+            .stdin(Stdio::null())
+            .stdout(if stdout_tty { Stdio::from(slave.try_clone().unwrap()) } else { Stdio::piped() })
+            .stderr(if stderr_tty { Stdio::from(slave.try_clone().unwrap()) } else { Stdio::piped() });
+        if no_color { command.env("NO_COLOR", "1"); }
+        let output = command.output().unwrap();
+        drop(command);
+        let mut tty_output = Vec::new();
+        if stderr_tty {
+            // Keep the parent slave open until the diagnostic is drained: BSD
+            // may discard unread PTY output on the last slave's close.
+            while !tty_output.ends_with(b"\n") {
+                let mut descriptor = libc::pollfd {
+                    fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0,
+                };
+                assert_eq!(unsafe { libc::poll(&mut descriptor, 1, 5_000) }, 1,
+                    "missing bounded PTY diagnostic: {tty_output:?}");
+                let mut bytes = [0; 4096];
+                let count = master.read(&mut bytes).unwrap();
+                assert!(count > 0, "PTY closed before diagnostic newline");
+                tty_output.extend_from_slice(&bytes[..count]);
+            }
+        }
+        drop(slave);
+        let error = if stderr_tty { &tty_output } else { &output.stderr };
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let diagnostic = if config_error { "Unknown format" } else { "no Cassy store here" };
+        assert!(String::from_utf8_lossy(error).contains(diagnostic),
+            "missing diagnostic: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, stderr={error:?}");
+        assert_eq!(error.contains(&0x1b), stderr_tty && !no_color,
+            "stderr styling must follow its own TTY and NO_COLOR: stdout_tty={stdout_tty}, stderr_tty={stderr_tty}, no_color={no_color}, stderr={error:?}");
+    }
 }
 
 #[test]
@@ -671,6 +1634,152 @@ fn test_config_get_set() {
         .assert()
         .success()
         .stdout(predicate::str::contains("false"));
+
+    // Hub policy is consumed by the host daemon, even from an initialized
+    // project with a conflicting value (cas-e3ed).
+    let host = temp.path().join(".test-home/.cas");
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::write(
+        host.join("config.toml"),
+        "[hub]\ntransport_mode = \"required\"\ntailscale_serve = false\n",
+    )
+    .unwrap();
+    let root = temp.path().join(".cas");
+    let mut project = cas::config::Config::load(&root).unwrap();
+    project.set("hub.transport_mode", "loopback").unwrap();
+    project.save(&root).unwrap();
+    let project_before = std::fs::read(root.join("config.toml")).unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "get", "hub.transport_mode"])
+        .assert()
+        .success()
+        .stdout("required\n");
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "get", "hub.tailscale_serve"])
+        .assert()
+        .success()
+        .stdout("true\n");
+    let list = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--json", "config", "list", "--section", "hub"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: serde_json::Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list["hub"]["hub.transport_mode"]["value"], "required");
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "hub.transport_mode", "loopback"])
+        .assert()
+        .success();
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .get("hub.transport_mode")
+            .as_deref(),
+        Some("loopback")
+    );
+    assert_eq!(
+        std::fs::read(root.join("config.toml")).unwrap(),
+        project_before,
+        "host policy must not rewrite project config"
+    );
+    let outside = TempDir::new().unwrap();
+    let git = std::process::Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(outside.path())
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()
+        .unwrap();
+    assert!(
+        git.status.success(),
+        "{}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "get", "hub.transport_mode"])
+        .assert()
+        .success()
+        .stdout("loopback\n");
+    let legacy_set = cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "set", "hub.tailscale_serve", "true"])
+        .output()
+        .unwrap();
+    assert!(legacy_set.status.success(), "{}", String::from_utf8_lossy(&legacy_set.stderr));
+    let legacy_output = String::from_utf8_lossy(&legacy_set.stdout);
+    for expected in [
+        "Legacy hub.tailscale_serve = true saved; ignored by hub.transport_mode.",
+        "Effective value: hub.tailscale_serve = false (transport_mode = loopback).",
+        "Use: cas config set hub.transport_mode auto",
+    ] {
+        assert!(legacy_output.contains(expected), "missing {expected}: {legacy_output}");
+    }
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .hub
+            .unwrap()
+            .tailscale_serve,
+        Some(true)
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "list", "--section", "hub", "--json"])
+        .assert()
+        .success();
+    let other = temp.path().join("other/.cas");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("config.toml"), "").unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .env("CAS_ROOT", &other)
+        .args(["config", "set", "hub.transport_mode", "required"])
+        .assert()
+        .success();
+    let invalid_mode = cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "set", "hub.transport_mode", "tailnet"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid_mode.status.code(), Some(4));
+    let invalid_error = String::from_utf8_lossy(&invalid_mode.stderr);
+    assert!(
+        invalid_error.contains("hub.transport_mode must be one of: auto, required, loopback"),
+        "key-specific validation should name the accepted modes: {invalid_error}"
+    );
+    assert!(
+        !invalid_error.contains("Suggestion:"),
+        "do not add the generic parse suggestion: {invalid_error}"
+    );
+    assert_eq!(
+        cas::config::Config::load(&host)
+            .unwrap()
+            .get("hub.transport_mode")
+            .as_deref(),
+        Some("required")
+    );
+    assert_eq!(
+        std::fs::read(root.join("config.toml")).unwrap(),
+        project_before
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("config.toml")).unwrap(),
+        ""
+    );
+    cas_cmd(temp.path())
+        .current_dir(&outside)
+        .args(["config", "get", "sync.enabled"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no Cassy store here"));
 }
 
 #[test]
@@ -715,6 +1824,64 @@ fn test_config_set_validation() {
         .args(["config", "set", "hooks.token_budget", "notanumber"])
         .assert()
         .failure();
+
+    // Refusals under --json still produce one machine-readable error document.
+    let invalid = cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["--json", "config", "set", "coordination.mode", "invalid"])
+        .output()
+        .expect("cas config set must run");
+    assert!(!invalid.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&invalid.stdout)
+        .expect("--json config refusal must emit one JSON document");
+    assert_eq!(error["status"], "error", "{error}");
+    assert!(
+        error["message"].as_str().unwrap_or_default().contains("Value must be one of: local, cloud"),
+        "{error}"
+    );
+}
+
+#[test]
+fn config_set_preserves_comments_order_and_only_removes_the_documented_marker() {
+    let temp = TempDir::new().unwrap();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["init", "--yes"])
+        .assert()
+        .success();
+
+    let config_path = temp.path().join(".cas/config.toml");
+    let original = "# hand-maintained configuration\n\
+[upkeep]\n\
+# codemap policy\n\
+codemap = \"off\" # retain this inline comment\n\
+product_overview = \"observe\"\n\
+\n\
+[upkeep.observe_since]\n\
+codemap = \"old-codemap-marker\"\n\
+product_overview = \"keep-this-marker\"\n\
+\n\
+[sync]\n\
+# unrelated sync policy\n\
+min_helpful = 3 # retain this too\n\
+target = \"custom-rules\"\n\
+\n\
+[hub]\n\
+tailscale_serve = false\n\
+transport_mode = \"required\"\n";
+    std::fs::write(&config_path, original).unwrap();
+
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "upkeep.codemap", "enforce"])
+        .assert()
+        .success();
+
+    let expected = original
+        .replace("codemap = \"off\"", "codemap = \"enforce\"")
+        .replace("codemap = \"old-codemap-marker\"\n", "");
+    // pin: config set must retain every unrelated byte, comment and table order.
+    assert_eq!(std::fs::read_to_string(config_path).unwrap(), expected);
 }
 
 #[test]

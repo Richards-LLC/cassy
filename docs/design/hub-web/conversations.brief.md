@@ -32,7 +32,7 @@ No synthesized replies, new message transport, worker-first overview, decorative
 
 - Exact pane text and operator messages/replies in scoped component/integration tests.
 - Real default Hub build in Playwright: project badges; full-width phone thread; addressed Send; sent/acknowledged/replied distinction; the Raw output drawer (formerly the Terminal view alternate, retired in cas-0546); keyboard/draft preservation.
-- 390×844, 844×390 and 1280×800, light/dark, plus reduced motion. Review each screenshot and record the verdict/change in `/home/pippenz/.cas/artifacts/cas-11b01/element-review.md`.
+- 390×844, 844×390 and 1280×800, light/dark, plus reduced motion. Review each screenshot and record the verdict/change in `<artifacts>/cas-11b01/element-review.md`.
 - Run Hub npm test, typecheck and an isolated-output build; supervisor owns committed dist regeneration per DESIGN.md unless explicitly instructed otherwise. Measure bundle delta; retain no new runtime dependency.
 - UI critique and final evidence remain pending until the real default view is wired and inspected.
 
@@ -56,7 +56,7 @@ message action; a rendered-thread guard prevents sending after stale selection.
 QA: 457 unit tests; typecheck and isolated build; six production-bundle viewport/
 scheme journeys with controlled protocol fixtures; strict visual QA covers
 15 fixtures × 2 schemes × 3 viewports. The per-element decisions and screenshot
-reviews live in `/home/pippenz/.cas/artifacts/cas-11b01/element-review.md`; full
+reviews live in `<artifacts>/cas-11b01/element-review.md`; full
 labelled evidence is in `LEDGER.md` beside it. Native paired-device delivery is
 supervisor-owned integration verification (notification 28848), not claimed by
 these browser fixtures. No new runtime dependency; bundle ~72.5KB JS / 12.5KB CSS

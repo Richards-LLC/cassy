@@ -1,0 +1,20 @@
+
+  Cassy
+  Cassy init (using defaults)
+
+
+  [OK] Saving configuration                    .cas/config.toml
+  [OK] Updating .gitignore                     .gitignore (created)
+  [OK] Configuring editor hooks                .claude/settings.json
+  [OK] Configuring MCP server                  .mcp.json
+  [OK] Updating agent instructions             CLAUDE.md
+  [OK] Generating Cassy guidance skill         .claude/skills/cas/SKILL.md
+  [OK] Syncing built-in files                  174 files
+  [ERROR] Configuring Codex MCP server
+[ERROR] Initialization is incomplete.
+Fix the reported error, then re-run: cas init --force
+Failed to parse .codex/config.toml: TOML parse error at line 1, column
+  14 | 1 | deliberately invalid configuration with enough separate words
+  to require natural wrapping while retaining every part of this
+  complete diagnostic and its original parser explanation | ^ key with
+  no value, expected `=`

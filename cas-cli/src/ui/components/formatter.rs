@@ -49,8 +49,8 @@ impl Verdict {
 ///
 /// `LC_ALL` overrides `LC_CTYPE`, which overrides `LANG`; a locale that names
 /// no UTF-8 encoding (`C`, `POSIX`, `en_US.ISO-8859-1`) gets ASCII. With no
-/// locale variable set at all the terminal is assumed to be UTF-8, which is
-/// what every modern emulator defaults to.
+/// nonempty locale variable, POSIX defaults to C: do not infer UTF-8 from
+/// terminal styling support.
 pub fn locale_is_utf8() -> bool {
     for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
         if let Ok(value) = std::env::var(key) {
@@ -62,7 +62,7 @@ pub fn locale_is_utf8() -> bool {
             return lower.contains("utf-8") || lower.contains("utf8");
         }
     }
-    true
+    false
 }
 
 /// Text punctuation for a locale that cannot show it: `×` → `x`, `…` → `...`,
@@ -108,10 +108,14 @@ pub enum OutputMode {
 impl OutputMode {
     /// Detect the appropriate output mode for stdout.
     pub fn detect() -> Self {
+        Self::for_terminal(io::stdout().is_terminal())
+    }
+
+    fn for_terminal(is_terminal: bool) -> Self {
         if std::env::var("NO_COLOR").is_ok() {
             return OutputMode::Plain;
         }
-        if io::stdout().is_terminal() {
+        if is_terminal {
             OutputMode::Styled
         } else {
             OutputMode::Plain
@@ -151,6 +155,16 @@ impl<'w> Formatter<'w> {
             theme,
             width,
         }
+    }
+
+    /// Create a Formatter for stderr, detecting styling from stderr itself.
+    pub fn stderr(writer: &'w mut dyn Write, theme: ActiveTheme) -> Self {
+        Self::new(
+            writer,
+            OutputMode::for_terminal(io::stderr().is_terminal()),
+            theme,
+            terminal_width(),
+        )
     }
 
     /// Create a styled Formatter (force styled mode).
@@ -670,6 +684,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn locale_precedence_is_shared_by_peer_output_cas_64f7() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        for (all, ctype, lang, utf8) in [
+            (None, None, None, false),
+            (None, None, Some("en_US.UTF-8"), true),
+            (None, None, Some("C"), false),
+            (None, Some("C.UTF8"), None, true),
+            (None, Some("POSIX"), None, false),
+            (Some(""), None, Some("en_US.UTF-8"), true),
+            (Some(" "), Some("C.UTF-8"), Some("C"), true),
+            (None, Some("C"), Some("en_US.UTF-8"), false),
+            (Some("C"), Some("C.UTF-8"), Some("en_US.UTF-8"), false),
+            (Some("C.UTF-8"), Some("C"), Some("C"), true),
+        ] {
+            for (key, value) in [("LC_ALL", all), ("LC_CTYPE", ctype), ("LANG", lang)] {
+                match value {
+                    Some(value) => env.set(key, value),
+                    None => env.remove(key),
+                }
+            }
+            assert_eq!(locale_is_utf8(), utf8, "{all:?}/{ctype:?}/{lang:?}");
+            assert_eq!(
+                crate::cloud::peers_detail::ascii_terminal(),
+                !utf8,
+                "peer locale differs: {all:?}/{ctype:?}/{lang:?}"
+            );
+        }
+    }
+
+    #[test]
     fn test_output_mode_detect_respects_no_color() {
         let mode = OutputMode::detect();
         // In test (non-TTY), should be Plain
@@ -705,52 +749,72 @@ mod tests {
     #[test]
     fn test_styled_status_marks_use_ascii_fallback_under_c_locale() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
-        env.remove("NO_COLOR");
-        let theme = ActiveTheme::default_light();
-        let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
-            panic!("text_error must use a concrete theme color");
-        };
-        let mut error_buf = Vec::new();
-        {
-            let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
-            fmt.error("configuration failed").unwrap();
-        }
-        assert_eq!(
-            String::from_utf8(error_buf).unwrap(),
-            format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
-        );
+        // Capture the original cache before priming either fixture policy.
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
+        // Without the guard, this cached shell policy survives env.remove below.
+        env.set("NO_COLOR", "1");
+        let _ = crossterm::style::Colored::ansi_color_disabled_memoized();
+        for no_color in [None, Some("1")] {
+            match no_color {
+                Some(value) => env.set("NO_COLOR", value),
+                None => env.remove("NO_COLOR"),
+            }
+            let theme = ActiveTheme::default_light();
+            let RatatuiColor::Rgb(r, g, b) = theme.palette.text_error else {
+                panic!("text_error must use a concrete theme color");
+            };
+            let mut error_buf = Vec::new();
+            {
+                let mut fmt = Formatter::styled(&mut error_buf, theme.clone());
+                fmt.error("configuration failed").unwrap();
+            }
+            assert_eq!(
+                String::from_utf8(error_buf).unwrap(),
+                format!("\x1b[38;2;{r};{g};{b}m[ERROR]\x1b[0m configuration failed\n")
+            );
 
-        let mut success_buf = Vec::new();
-        {
-            let mut fmt = Formatter::styled(&mut success_buf, theme);
-            fmt.success("sync complete").unwrap();
+            let mut success_buf = Vec::new();
+            {
+                let mut fmt = Formatter::styled(&mut success_buf, theme);
+                fmt.success("sync complete").unwrap();
+            }
+            assert_eq!(
+                String::from_utf8(success_buf).unwrap(),
+                "\x1b[1m[OK]\x1b[0m sync complete\n"
+            );
         }
-        assert_eq!(
-            String::from_utf8(success_buf).unwrap(),
-            "\x1b[1m[OK]\x1b[0m sync complete\n"
-        );
     }
 
     #[test]
     fn test_sync_output_uses_default_text_and_palette_safe_success_mark() {
         let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C.UTF-8")]);
-        env.remove("NO_COLOR");
-        let mut buf = Vec::new();
-        {
-            let mut fmt = Formatter::new(
-                &mut buf,
-                OutputMode::Styled,
-                ActiveTheme::default_dark(),
-                80,
-            );
-            fmt.subheading("Syncing .claude files").unwrap();
-            fmt.success("Updated .mcp.json").unwrap();
-        }
+        // Capture the original cache before priming either fixture policy.
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
+        // Without the guard, this cached shell policy survives env.remove below.
+        env.set("NO_COLOR", "1");
+        let _ = crossterm::style::Colored::ansi_color_disabled_memoized();
+        for no_color in [None, Some("1")] {
+            match no_color {
+                Some(value) => env.set("NO_COLOR", value),
+                None => env.remove("NO_COLOR"),
+            }
+            let mut buf = Vec::new();
+            {
+                let mut fmt = Formatter::new(
+                    &mut buf,
+                    OutputMode::Styled,
+                    ActiveTheme::default_dark(),
+                    80,
+                );
+                fmt.subheading("Syncing .claude files").unwrap();
+                fmt.success("Updated .mcp.json").unwrap();
+            }
 
-        assert_eq!(
-            String::from_utf8(buf).unwrap(),
-            "\x1b[1mSyncing .claude files\x1b[0m\n\x1b[38;2;40;145;75m✓\x1b[0m Updated .mcp.json\n"
-        );
+            assert_eq!(
+                String::from_utf8(buf).unwrap(),
+                "\x1b[1mSyncing .claude files\x1b[0m\n\x1b[38;2;40;145;75m✓\x1b[0m Updated .mcp.json\n"
+            );
+        }
 
         let luminance = |(r, g, b): (u8, u8, u8)| {
             let channel = |c: u8| {

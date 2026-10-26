@@ -1,5 +1,47 @@
 use crate::config::*;
 
+/// Only allow secure webhook destinations, except HTTP services bound to
+/// localhost/loopback for development.
+pub(crate) fn validate_notification_webhook_url(
+    value: &str,
+) -> Result<Option<url::Url>, MemError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value
+        .chars()
+        .any(|character| {
+            character == '\\' || character.is_whitespace() || character.is_control()
+        })
+    {
+        return Err(MemError::Parse(
+            "notifications.webhook_url must not contain backslashes or whitespace".into(),
+        ));
+    }
+
+    let url = url::Url::parse(value).map_err(|_| {
+        MemError::Parse(
+            "notifications.webhook_url must be a valid HTTPS URL or an HTTP localhost URL"
+                .into(),
+        )
+    })?;
+    let is_https = url.scheme() == "https" && url.host().is_some();
+    let is_loopback_http = url.scheme() == "http"
+        && match url.host() {
+            Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            None => false,
+        };
+    if !is_https && !is_loopback_http {
+        return Err(MemError::Parse(
+            "notifications.webhook_url must use HTTPS; HTTP is allowed only for localhost"
+                .into(),
+        ));
+    }
+    Ok(Some(url))
+}
+
 impl Config {
     /// GH #1182: replace `[factory] write_roots`. Only the operator CLI path
     /// (`cas config set factory.write_roots`) calls this, after resolving
@@ -14,8 +56,8 @@ impl Config {
         // not a single literal value (llm.harness/model/reasoning_effort —
         // see cas-05e3/cas-fbac): resolution depends on role, so there's no
         // one concrete string to show as `default:` in the registry.
-        // `cas config reset <key>` / the TUI 'd' key / the interactive
-        // editor all call `set(key, meta.default)`, which for these fields
+        // The TUI 'd' key and the interactive editor call
+        // `set(key, meta.default)`, which for these fields
         // means `set(key, "(default)")` — meaning "clear the field back to
         // unset", NOT "set it to the literal value `(default)`". The
         // documented way to clear one of these fields directly
@@ -39,24 +81,73 @@ impl Config {
                 ""
             } else {
                 meta.validate(value).map_err(MemError::Parse)?;
-                value
+                if meta.value_type == ConfigType::Bool {
+                    match value.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "1" => "true",
+                        "false" | "no" | "0" => "false",
+                        _ => {
+                            return Err(MemError::Parse(format!(
+                                "Invalid boolean value for {key}: {value}"
+                            )));
+                        }
+                    }
+                } else {
+                    value
+                }
             }
         } else {
             value
         };
 
         match key {
+            "slack.channels" => {
+                let mut slack = self.slack.clone().unwrap_or_default();
+                slack.channels = serde_json::from_str(value)
+                    .map_err(|_| MemError::Parse("slack.channels requires a JSON list of C... or G... channel IDs".into()))?;
+                slack.validate_channels().map_err(MemError::Parse)?;
+                slack.channels.sort();
+                slack.channels.dedup();
+                self.slack = Some(slack);
+            }
+            "slack.stakeholder_contacts" => {
+                let policies: Vec<StakeholderContactPolicy> = serde_json::from_str(value)
+                    .map_err(|error| MemError::Parse(format!("Invalid stakeholder_contacts JSON: {error}")))?;
+                let mut seen = std::collections::BTreeSet::new();
+                for policy in &policies {
+                    policy.validate().map_err(MemError::Parse)?;
+                    if !seen.insert((&policy.workspace_id, &policy.user_id)) {
+                        return Err(MemError::Parse("Duplicate stakeholder workspace/user policy".into()));
+                    }
+                }
+                self.slack.get_or_insert_with(Default::default).stakeholder_contacts = policies;
+            }
             "factory.commander_mirror_enabled" => {
                 self.factory.get_or_insert_with(Default::default).commander_mirror_enabled =
                     value.parse().map_err(|_| MemError::Parse(
                         "Invalid boolean for factory.commander_mirror_enabled".into()
                     ))?;
             }
+            "hub.transport_mode" => {
+                let mode = match value {
+                    "auto" => HubTransportMode::Auto,
+                    "required" => HubTransportMode::Required,
+                    "loopback" => HubTransportMode::Loopback,
+                    _ => return Err(MemError::Parse("hub.transport_mode must be auto, required or loopback".into())),
+                };
+                self.hub.get_or_insert_with(Default::default).transport_mode = Some(mode);
+            }
             "hub.tailscale_serve" => {
                 self.hub
                     .get_or_insert_with(Default::default)
                     .tailscale_serve = Some(value.parse().map_err(|_| {
                     MemError::Parse("Invalid boolean for hub.tailscale_serve".into())
+                })?);
+            }
+            "viktor.enabled" => {
+                self.viktor
+                    .get_or_insert_with(ViktorConfig::default)
+                    .enabled = Some(value.parse().map_err(|_| {
+                    MemError::Parse("Invalid boolean for viktor.enabled".into())
                 })?);
             }
             "slack.transport" => {
@@ -292,6 +383,14 @@ impl Config {
                         "Invalid integer value for factory.supervisor_queue_retention_days: {value}"
                     ))
                 })?;
+            }
+            "factory.supervisor_message_debounce_secs" => {
+                let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_debounce_secs: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_debounce_secs = number;
+            }
+            "factory.supervisor_message_wakes_per_hour" => {
+                let number: u64 = value.parse().map_err(|_| MemError::Parse(format!("Invalid integer value for factory.supervisor_message_wakes_per_hour: {value}")))?;
+                self.factory.get_or_insert_with(FactoryConfig::default).supervisor_message_wakes_per_hour = number;
             }
             "factory.message_max_chars" => {
                 let factory = self.factory.get_or_insert_with(FactoryConfig::default);
@@ -535,6 +634,36 @@ impl Config {
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
             }
+            "hooks.stop.duplicate_detection_enabled"
+            | "hooks.stop.learning_review_enabled"
+            | "hooks.stop.rule_review_enabled" => {
+                let enabled = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for {key}: {value}"))
+                })?;
+                let stop = &mut self.hooks.get_or_insert_with(HookConfig::default).stop;
+                match key {
+                    "hooks.stop.duplicate_detection_enabled" => {
+                        stop.duplicate_detection_enabled = enabled;
+                    }
+                    "hooks.stop.learning_review_enabled" => stop.learning_review_enabled = enabled,
+                    _ => stop.rule_review_enabled = enabled,
+                }
+            }
+            "hooks.stop.duplicate_detection_threshold"
+            | "hooks.stop.learning_review_threshold"
+            | "hooks.stop.rule_review_threshold" => {
+                let threshold: usize = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid integer value for {key}: {value}"))
+                })?;
+                let stop = &mut self.hooks.get_or_insert_with(HookConfig::default).stop;
+                match key {
+                    "hooks.stop.duplicate_detection_threshold" => {
+                        stop.duplicate_detection_threshold = threshold;
+                    }
+                    "hooks.stop.learning_review_threshold" => stop.learning_review_threshold = threshold,
+                    _ => stop.rule_review_threshold = threshold,
+                }
+            }
             // Hooks.plan_mode section
             "hooks.plan_mode.enabled" => {
                 let hooks = self.hooks.get_or_insert_with(HookConfig::default);
@@ -640,6 +769,30 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "qa.post_release.command" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.command = value.trim().to_string();
+            }
+            "qa.post_release.window_mins" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.window_mins = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.interval_mins" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.interval_mins = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.timeout_secs" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.timeout_secs = value.parse().map_err(|_| MemError::Parse("Expected a positive integer".into()))?;
+            }
+            "qa.post_release.release_branches" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.release_branches = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.post_release.env" => {
+                let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
+                post.env = value.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).collect();
+            }
             "qa.preflight_hook" => {
                 let qa = self.qa.get_or_insert_with(QaConfig::default);
                 qa.preflight_hook = if value.trim().is_empty() {
@@ -667,6 +820,30 @@ impl Config {
                     .trim()
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid boolean value: {value}")))?;
+            }
+            "upkeep.codemap" | "upkeep.product_overview" => {
+                let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
+                let upkeep = self.upkeep.get_or_insert_with(UpkeepConfig::default);
+                let gate = key.strip_prefix("upkeep.").unwrap();
+                if gate == "codemap" { upkeep.codemap = Some(stage); }
+                else { upkeep.product_overview = Some(stage); }
+                upkeep.observe_since.remove(gate);
+            }
+            "qa.registry.enforce" => {
+                let stage = value.trim().parse().map_err(|error: &str| MemError::Parse(error.into()))?;
+                self.qa.get_or_insert_with(QaConfig::default).registry.enforce = stage;
+                if let Some(upkeep) = self.upkeep.as_mut() {
+                    upkeep.observe_since.remove("registry");
+                }
+            }
+            "qa.registry.path" => {
+                let path = std::path::Path::new(value.trim());
+                if path.as_os_str().is_empty() || path.is_absolute()
+                    || path.components().any(|part| matches!(part, std::path::Component::ParentDir))
+                {
+                    return Err(MemError::Parse("qa.registry.path must be a non-empty project-relative path without ..".into()));
+                }
+                self.qa.get_or_insert_with(QaConfig::default).registry.path = value.trim().to_owned();
             }
             "qa.mode" => {
                 let mode = match value.trim() {
@@ -1015,6 +1192,30 @@ impl Config {
                 notifications.max_visible = value
                     .parse()
                     .map_err(|_| MemError::Parse(format!("Invalid integer value: {value}")))?;
+            }
+            "notifications.on_permission_prompt"
+            | "notifications.on_idle_prompt"
+            | "notifications.on_auth_success" => {
+                let enabled = value.parse().map_err(|_| {
+                    MemError::Parse(format!("Invalid boolean value for {key}: {value}"))
+                })?;
+                let notifications = self
+                    .notifications
+                    .get_or_insert_with(NotificationConfig::default);
+                match key {
+                    "notifications.on_permission_prompt" => {
+                        notifications.on_permission_prompt = enabled;
+                    }
+                    "notifications.on_idle_prompt" => notifications.on_idle_prompt = enabled,
+                    _ => notifications.on_auth_success = enabled,
+                }
+            }
+            "notifications.webhook_url" => {
+                let url = validate_notification_webhook_url(value)?;
+                let notifications = self
+                    .notifications
+                    .get_or_insert_with(NotificationConfig::default);
+                notifications.webhook_url = url.map(|url| url.to_string());
             }
             // Notifications.tasks section
             "notifications.tasks.on_created" => {

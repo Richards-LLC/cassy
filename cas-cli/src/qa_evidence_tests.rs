@@ -168,7 +168,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes,
-            deployed_origins: &[],
+            deployed_origins: &[], rebind_scope: None,
         })
     }
 }
@@ -217,6 +217,79 @@ fn valid_bundle_passes() {
     assert_eq!(receipt.passed_expects, 1);
 }
 
+#[test]
+fn after_cells_must_preserve_before_carousels_cas_51f1() {
+    let fx = Fixture::new();
+    let before = ["G1", "G2", "G3", "G4", "G5"];
+    for (after, missing) in [
+        (vec!["G1", "G2", "G5"], vec!["G3", "G4"]),
+        (vec![], before.to_vec()),
+        (vec!["G1", "G2", "G3", "G4", "G5", "G6"], vec![]),
+    ] {
+        // A journey may cite the shared pairs directory outside its bundle.
+        let relative = if missing.is_empty() {
+            "../pairs/pairs.json"
+        } else {
+            "pairs/pairs.json"
+        };
+        fx.write_bundle(|manifest| manifest["files"]["pairs"] = relative.into());
+        let dir = if missing.is_empty() {
+            fx.task_dir.join("pairs")
+        } else {
+            fx.bundle_dir().join("pairs")
+        };
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut pairs = Vec::new();
+        let mut unpaired = Vec::new();
+        for id in ["G1", "G2", "G3", "G4", "G5", "G6"] {
+            let mut cell = serde_json::json!({"id": id});
+            if before.contains(&id) {
+                let name = format!("{id}.before.png");
+                std::fs::write(dir.join(&name), "baseline capture").unwrap();
+                set_mtime_secs_ago(&dir.join(&name), 240);
+                cell["before"] = serde_json::json!({"png": name});
+            }
+            if after.contains(&id) {
+                let name = format!("{id}.after.png");
+                std::fs::write(dir.join(&name), "delivered capture").unwrap();
+                cell["after"] = serde_json::json!({"png": name});
+            }
+            if before.contains(&id) && after.contains(&id) {
+                pairs.push(cell);
+            } else if before.contains(&id) || after.contains(&id) {
+                unpaired.push(cell);
+            }
+        }
+        std::fs::write(
+            dir.join("pairs.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schema": 1, "task_id": TASK, "head_sha": fx.head,
+                "pairs": pairs, "unpaired": unpaired,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let ctx = EvidenceContext {
+            task_id: TASK,
+            task_artifacts_dir: &fx.task_dir,
+            repo: &fx.repo,
+            delivered_head: &fx.head,
+            notes: &fx.notes(),
+            deployed_origins: &[], rebind_scope: None,
+        };
+        let result = run_close_gate(&ctx, EvidenceTier::Bundle, &["path:app.ts".into()], &[]);
+        if missing.is_empty() {
+            assert!(result.is_ok(), "AFTER supersets must pass: {result:?}");
+        } else {
+            let refusal = result.expect_err("dropped carousel cells must refuse close");
+            assert!(
+                refusal.contains(&format!("missing BEFORE cell(s): {}", missing.join(", "))),
+                "{refusal}"
+            );
+        }
+    }
+}
+
 fn scoped_factory_fixture() -> (Fixture, PathBuf, PathBuf) {
     let mut fx = Fixture::new();
     let cas_root = fx.repo.join(".cas");
@@ -249,7 +322,7 @@ fn scoped_close(fx: &Fixture, cas_root: &Path, notes: &str) -> Result<Vec<String
     let mut task = crate::types::Task::new(TASK.into(), "QA path agreement".into());
     task.notes = notes.into();
     crate::mcp::tools::core::task::lifecycle::qa_evidence_gate::qa_evidence_close_gate_for_paths(
-        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()])
+        cas_root, &task, &fx.repo, "", Some(&fx.head), Some(&["web/app.css".into()]), None
     )
 }
 
@@ -708,7 +781,7 @@ fn ledger_tier_requires_a_fresh_pass_row() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     assert!(
         validate_ledger(&ctx)
@@ -876,7 +949,7 @@ fn close_gate_rejects_unexplained_markers_before_evidence() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: &notes,
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let markers = added_skip_markers(HEALER_DIFF);
     let error = run_close_gate(&ctx, EvidenceTier::None, &[], &markers).unwrap_err();
@@ -932,7 +1005,7 @@ fn close_gate_message_names_reasons_problem_and_next_command() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let error = run_close_gate(
         &ctx,
@@ -970,7 +1043,7 @@ fn delivery_range_before_and_after_merge() {
     git_ok(&fx.repo, &["branch", "-M", "main"]);
     git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/w"]);
     let tip = commit(&fx.repo, "ui.tsx", 30);
-    let (from, to) = delivery_range(&fx.repo, &tip, "main").unwrap();
+    let (from, to) = delivery_range(&fx.repo, &tip, "main", None).unwrap();
     assert_eq!((from.as_str(), to.as_str()), (base.as_str(), tip.as_str()));
     assert_eq!(
         range_paths(&fx.repo, &from, &to).unwrap(),
@@ -993,11 +1066,73 @@ fn delivery_range_before_and_after_merge() {
             "factory/w",
         ],
     );
-    let (from, to) = delivery_range(&fx.repo, &tip, "main").unwrap();
+    let (from, to) = delivery_range(&fx.repo, &tip, "main", None).unwrap();
     assert!(from.ends_with("^1"), "{from}");
     assert_eq!(
         range_paths(&fx.repo, &from, &to).unwrap(),
         vec!["ui.tsx".to_string()]
+    );
+    assert_eq!(
+        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main", None).unwrap(),
+        vec!["ui.tsx".to_string()]
+    );
+    let integration = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    let integration_range = delivery_range(&fx.repo, &integration, "main", None).unwrap();
+
+    // cas-a173: a squash is itself on the target's first-parent chain.
+    // A later docs merge must not replace its app.css delivery with an empty
+    // content range (independent QA) or the docs delta (evidence bundles).
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/squash"]);
+    commit(&fx.repo, "app.css", 15);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    git_ok(&fx.repo, &["merge", "-q", "--squash", "factory/squash"]);
+    git_ok(&fx.repo, &["commit", "-qm", "squash UI delivery"]);
+    let squash = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "docs"]);
+    commit(&fx.repo, "notes.md", 10);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    git_ok(&fx.repo, &["merge", "-q", "--no-ff", "docs", "-m", "merge docs"]);
+    let (from, to) = delivery_range(&fx.repo, &squash, "main", None).unwrap();
+    assert_eq!(
+        (
+            crate::qa_pass::integrated_paths(&fx.repo, &squash, "main", None),
+            range_paths(&fx.repo, &from, &to),
+        ),
+        (Some(vec!["app.css".to_string()]), Some(vec!["app.css".to_string()])),
+        "both QA gates must measure the squash delivery itself"
+    );
+    // cas-420af: a fast-forward can integrate an entire delivery, rather
+    // than one squash. Its recorded base must retain all three commits even
+    // after unrelated target work follows it.
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "factory/ff"]);
+    commit(&fx.repo, "first.html", 9);
+    commit(&fx.repo, "second.css", 8);
+    commit(&fx.repo, "third.md", 7);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    let ff_base = commit(&fx.repo, "before-rebase.rs", 6);
+    git_ok(&fx.repo, &["checkout", "-q", "factory/ff"]);
+    git_ok(&fx.repo, &["rebase", "main"]);
+    let ff_head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    git_ok(&fx.repo, &["checkout", "-q", "main"]);
+    git_ok(&fx.repo, &["merge", "-q", "--ff-only", "factory/ff"]);
+    commit(&fx.repo, "later.rs", 6);
+    let (from, to) = delivery_range(&fx.repo, &ff_head, "main", Some(&ff_base)).unwrap();
+    assert_eq!(
+        (
+            crate::qa_pass::integrated_paths(&fx.repo, &ff_head, "main", Some(&ff_base)),
+            range_paths(&fx.repo, &from, &to),
+        ),
+        (
+            Some(vec!["first.html".into(), "second.css".into(), "third.md".into()]),
+            Some(vec!["first.html".into(), "second.css".into(), "third.md".into()]),
+        ),
+        "both QA gates must retain the whole FF delivery from recorded base {ff_base}"
+    );
+    assert_eq!(delivery_range(&fx.repo, &integration, "main", Some(&base)), Some(integration_range));
+    assert_eq!(
+        crate::qa_pass::integrated_paths(&fx.repo, &tip, "main", None).unwrap(),
+        vec!["ui.tsx".to_string()],
+        "the ordinary merged delivery keeps its content range"
     );
 }
 
@@ -1067,7 +1202,7 @@ fn ledger_pass_row_must_be_real_build() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let ledger = fx.task_dir.join("LEDGER.md");
     std::fs::write(
@@ -1088,7 +1223,7 @@ fn terminal_qa_receipt_must_pass_and_be_fresh() {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes: "",
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     };
     let refusal = validate_terminal_qa(&ctx).unwrap_err();
     assert!(refusal.problem.starts_with("missing"), "{refusal:?}");
@@ -1647,7 +1782,7 @@ impl Fixture {
             repo: &self.repo,
             delivered_head: &self.head,
             notes: &notes,
-            deployed_origins: origins,
+            deployed_origins: origins, rebind_scope: None,
         })
     }
 }
@@ -2267,6 +2402,59 @@ fn scoped_visual_qa_translation_preserves_new_findings_cas_5488() {
     assert!(fx.validate(&fx.notes()).unwrap_err().problem.contains("introduced 1"));
 }
 
+/// GH #1321: a contrast finding in the `section` sibling at `index` under main.
+fn gh_1321_finding(origin: &str, section: &str, index: usize, text: &str, y: f64) -> serde_json::Value {
+    serde_json::json!({
+        "type": "contrast",
+        "selector": format!("main > section.{section}:nth-of-type({index}) > p.total"),
+        "textSample": text, "textBounds": {"x":24,"y":y,"width":120,"height":18},
+        "ratio": 3.2, "threshold": 4.5, "foreground": [130,130,130], "background": [255,255,255],
+        "url": format!("{origin}/commander/?conversation=1"), "scheme": "light",
+        "viewport": {"name":"desktop","width":1280,"height":800}
+    })
+}
+
+/// The delivery inserts `section.observations` above two existing sections,
+/// shifting their `nth-of-type` index and their position on the page.
+fn gh_1321_shifted_reports(fx: &Fixture, tip_extra: Option<serde_json::Value>) {
+    let named = |origin, index, y| {
+        let mut finding = gh_1321_finding(origin, "calculations", index, "Net 42", y);
+        finding["role"] = serde_json::json!("button");
+        finding["accessibleName"] = serde_json::json!("Recalculate");
+        finding
+    };
+    let base = serde_json::json!([
+        gh_1321_finding(BASE, "snapshots", 1, "Total 12", 100.0),
+        named(BASE, 2, 300.0)
+    ]);
+    let mut tip = vec![
+        gh_1321_finding(TIP, "snapshots", 2, "Total 12", 460.0),
+        named(TIP, 3, 660.0),
+    ];
+    tip.extend(tip_extra);
+    cas_f290_reports(fx, serde_json::json!(tip), base);
+}
+
+#[test]
+fn scoped_visual_qa_pairs_findings_below_an_inserted_section_gh_1321() {
+    let fx = scoped_fixture();
+    gh_1321_shifted_reports(&fx, None);
+    fx.validate(&fx.notes())
+        .expect("findings re-indexed by an inserted sibling section are pre-existing");
+}
+
+#[test]
+fn scoped_visual_qa_reports_a_finding_inside_an_inserted_section_gh_1321() {
+    let fx = scoped_fixture();
+    gh_1321_shifted_reports(
+        &fx,
+        Some(gh_1321_finding(TIP, "observations", 1, "Total 12", 120.0)),
+    );
+    let refusal = fx.validate(&fx.notes()).unwrap_err();
+    assert!(refusal.problem.contains("introduced 1"), "{refusal:?}");
+    assert!(refusal.problem.contains("section.observations"), "{refusal:?}");
+}
+
 fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
     EvidenceContext {
         task_id: TASK,
@@ -2274,7 +2462,7 @@ fn journey_context<'a>(fx: &'a Fixture, notes: &'a str) -> EvidenceContext<'a> {
         repo: &fx.repo,
         delivered_head: &fx.head,
         notes,
-        deployed_origins: &[],
+        deployed_origins: &[], rebind_scope: None,
     }
 }
 

@@ -1,0 +1,88 @@
+# Illustrative routes and checks: adapt them to the application's actual contracts.
+version: 1
+updated: "2026-10-21"
+selection: globs
+surfaces: ["apps/backend/src/tools/audit-v2/*.prompt.ts"]
+owner_groups:
+  audit_v2:
+    description: Shared audit prompts consumed by every post shape
+    globs: ["apps/backend/src/tools/audit-v2/*.prompt.ts"]
+invariants:
+  SPOKEN:
+    statement: Spoken video output contains its required spoken script
+    check: Read the spoken_video fixture's output script
+  TEXT:
+    statement: Text-led video output contains its required on-screen text
+    check: Read the text_led_video fixture's output text
+  CAROUSEL:
+    statement: Carousel slides-with-text ratio meets the prior prompt's baseline
+    check: Compare slides containing text / total slides against the prior prompt on the same carousel fixture
+  IMAGE:
+    statement: Single-image output contains one image composition
+    check: Read the single_image fixture's output composition
+  MONTAGE:
+    statement: Montage output contains its required shot sequence
+    check: Read the montage fixture's output shots
+  SCREEN:
+    statement: Screen tutorial output contains its required tutorial steps
+    check: Read the screen_tutorial fixture's output steps
+  HYBRID:
+    statement: Hybrid output contains the fixture's required content elements
+    check: Read the general_hybrid fixture's required output fields
+journeys:
+  - id: spoken_video
+    status: live
+    entry: {url: /audit/spoken_video, trigger: Generate spoken video}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/spoken_video.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [SPOKEN]
+    traffic: {share_pct: null}
+  - id: text_led_video
+    status: live
+    entry: {url: /audit/text_led_video, trigger: Generate text-led video}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/text_led_video.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [TEXT]
+    traffic: {share_pct: null}
+  - id: carousel_sequence
+    status: live
+    entry: {url: /audit/carousel_sequence, trigger: Generate carousel}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/carousel_sequence.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [CAROUSEL]
+    traffic: {share_pct: null}
+  - id: single_image
+    status: live
+    entry: {url: /audit/single_image, trigger: Generate single image}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/single_image.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [IMAGE]
+    traffic: {share_pct: null}
+  - id: montage
+    status: live
+    entry: {url: /audit/montage, trigger: Generate montage}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/montage.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [MONTAGE]
+    traffic: {share_pct: null}
+  - id: screen_tutorial
+    status: live
+    entry: {url: /audit/screen_tutorial, trigger: Generate screen tutorial}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/screen_tutorial.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [SCREEN]
+    traffic: {share_pct: null}
+  - id: general_hybrid
+    status: live
+    entry: {url: /audit/general_hybrid, trigger: Generate hybrid}
+    steps: [Generate, Read back output]
+    owners: {backend: ["apps/backend/src/post-shapes/general_hybrid.ts"]}
+    owner_groups: [audit_v2]
+    invariants: [HYBRID]
+    traffic: {share_pct: null}

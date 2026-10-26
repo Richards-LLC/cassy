@@ -22,6 +22,8 @@ pub enum ArtifactCommands {
     Publish(PublishArgs),
     /// Show one artifact record
     Show(ShowArgs),
+    /// Fetch a task's proof log from Cloud and verify its SHA-256
+    Fetch(FetchArgs),
     /// List the artifacts published for a task
     List(ListArgs),
     /// Plan (and with --yes, apply) reclaiming closed tasks' artifact
@@ -78,6 +80,15 @@ pub struct ShowArgs {
 }
 
 #[derive(Debug, Clone, Args)]
+pub struct FetchArgs {
+    /// Task carrying the published artifact reference
+    #[arg(long)]
+    pub task: String,
+    /// Published artifact id from the proof note
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Args)]
 pub struct ListArgs {
     /// Task whose artifacts to list
     #[arg(long)]
@@ -92,6 +103,23 @@ pub fn execute(
     match command {
         ArtifactCommands::Publish(args) => execute_publish(args, cas_root, cli.json),
         ArtifactCommands::Show(args) => execute_show(args, cas_root, cli.json),
+        ArtifactCommands::Fetch(args) => {
+            let (artifact, path) =
+                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id)?;
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "artifact_id": artifact.id, "path": path, "sha256": artifact.sha256,
+                        "size_bytes": artifact.size_bytes,
+                    }))?
+                );
+            } else {
+                println!("[OK] verified {} - {}", artifact.name, artifact.id);
+                println!("{}", path.display());
+            }
+            Ok(())
+        }
         ArtifactCommands::List(args) => execute_list(args, cas_root, cli.json),
         ArtifactCommands::Prune(args) => execute_prune(
             args,
@@ -156,19 +184,24 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
 
 fn print_publish(outcome: &PublishOutcome) {
     let artifact = &outcome.artifact;
+    let verdict = if outcome.disposition.is_committed() {
+        "[OK] published"
+    } else {
+        "[WARN] local-only"
+    };
     println!(
-        "[OK] published {} - {} - {}",
+        "{verdict} {} - {} - {}",
         artifact.name,
         human_size(artifact.size_bytes),
         artifact.id
     );
     println!("     {}", outcome.disposition.summary());
-    println!("     sha256 {}", short_digest(&artifact.sha256));
+    println!("     sha256 {}", artifact.sha256);
     match &outcome.disposition {
         PublishDisposition::UploadFailed { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.
-            for line in reason.lines() {
+            for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
             println!("  -> cas artifact show {}", artifact.id);
@@ -397,14 +430,6 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Enough digest to compare by eye, in one terminal column.
-fn short_digest(sha256: &str) -> String {
-    if sha256.len() <= 16 {
-        return sha256.to_string();
-    }
-    format!("{}…{}", &sha256[..8], &sha256[sha256.len() - 4..])
-}
-
 fn truncate(value: &str, width: usize) -> String {
     if value.chars().count() <= width {
         return value.to_string();
@@ -557,15 +582,6 @@ mod tests {
         assert_eq!(human_size(812_345), "813 KB");
         assert_eq!(human_size(3_400_000), "3.4 MB");
         assert_eq!(human_size(42_800_000_000), "42.8 GB");
-    }
-
-    #[test]
-    fn a_digest_is_shortened_but_still_comparable() {
-        let digest = "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9";
-        let short = short_digest(digest);
-        assert_eq!(short, "b94d27b9…cde9");
-        assert!(digest.starts_with("b94d27b9") && digest.ends_with("cde9"));
-        assert_eq!(short_digest("abc"), "abc", "a short value is left alone");
     }
 
     #[test]

@@ -57,6 +57,33 @@ fn main() -> ExitCode {
             }
         };
     }
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new("--internal-task-ownership-probe"))
+    {
+        let mut args = std::env::args_os().skip(2);
+        let (Some(phase), Some(db), Some(output), None) =
+            (args.next(), args.next(), args.next(), args.next())
+        else {
+            eprintln!("ownership probe requires phase, database and response paths");
+            return ExitCode::FAILURE;
+        };
+        return match phase
+            .to_str()
+            .ok_or("invalid ownership probe phase".to_owned())
+            .and_then(|phase| {
+                cas::task_ownership::run_internal_ownership_probe(
+                    phase,
+                    std::path::Path::new(&db),
+                    std::path::Path::new(&output),
+                )
+            }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("ownership probe failed: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Native Codex Cargo admission must not wait for Sentry, logging,
     // telemetry or development-tracer databases before selecting its route.
     if cli::is_native_codex_pre_tool(&std::env::args().collect::<Vec<_>>()) {
@@ -122,6 +149,15 @@ fn main() -> ExitCode {
     let args = redact_viktor_key_args(std::env::args().skip(1).collect());
     sentry::add_command_breadcrumb(&args.join(" "));
 
+    // Config and hub refusals are returned through the shared error path. Keep
+    // those failures machine-readable on stdout when their caller requested
+    // JSON; stderr keeps the human diagnostic either way.
+    let json_refusal = cli.json
+        && matches!(
+            cli.command.as_ref(),
+            Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
+        );
+    let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = cli::run(cli);
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
@@ -131,24 +167,45 @@ fn main() -> ExitCode {
     match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            use cas::ui::components::Formatter;
-            use cas::ui::theme::ActiveTheme;
+            // A command that already printed its JSON report keeps stdout to
+            // that one document; its failure still reaches stderr below.
+            let (e, already_reported) = match e.downcast::<cli::JsonReportedFailure>() {
+                Ok(reported) => (reported.0, true),
+                Err(e) => (e, false),
+            };
+            if json_refusal && !already_reported {
+                let message = cli::json_error_message(&e);
+                println!("{}", serde_json::json!({"status": "error", "message": message}));
+            }
+            {
+                use cas::ui::components::Formatter;
+                use cas::ui::theme::ActiveTheme;
 
-            let mut err_out = std::io::stderr();
-            let theme = ActiveTheme::default();
-            let mut fmt = Formatter::stdout(&mut err_out, theme);
+                let mut err_out = std::io::stderr();
+                let theme = ActiveTheme::default();
+                let mut fmt = Formatter::stderr(&mut err_out, theme);
 
-            if let Some(err) = e.downcast_ref::<error::CasError>() {
-                let _ = fmt.error(&err.to_string());
+                let message = if init_command {
+                    cli::human_init_error_message(&e)
+                } else if let Some(err) = e.downcast_ref::<error::CasError>() {
+                    err.to_string()
+                } else {
+                    cli::human_error_message(&e)
+                };
+                let _ = fmt.error(&message);
 
-                // Show suggestion if available
-                if let Some(suggestion) = err.suggestion() {
-                    let _ = fmt.newline();
-                    let _ = fmt.warning("Suggestion:");
-                    let _ = fmt.indent_block(suggestion);
+                if let Some(err) = e.downcast_ref::<error::CasError>() {
+                    // Show suggestion if available
+                    if let Some(suggestion) = err.suggestion() {
+                        let _ = fmt.newline();
+                        let _ = fmt.warning("Suggestion:");
+                        let _ = fmt.indent_block(suggestion);
+                    }
                 }
+            }
 
-                // Return specific exit codes for different error types
+            // Preserve specific exit codes for different error types.
+            if let Some(err) = e.downcast_ref::<error::CasError>() {
                 match err {
                     error::CasError::NotFound(_)
                     | error::CasError::EntryNotFound(_)
@@ -163,8 +220,13 @@ fn main() -> ExitCode {
                     _ => ExitCode::FAILURE,
                 }
             } else {
-                let _ = fmt.error(&format!("{e:#}"));
-                ExitCode::FAILURE
+                if e.downcast_ref::<cas::qa_impact::ReadError>().is_some() {
+                    ExitCode::from(3)
+                } else if e.downcast_ref::<cas::qa_impact::UsageError>().is_some() {
+                    ExitCode::from(2)
+                } else {
+                    ExitCode::FAILURE
+                }
             }
         }
     }

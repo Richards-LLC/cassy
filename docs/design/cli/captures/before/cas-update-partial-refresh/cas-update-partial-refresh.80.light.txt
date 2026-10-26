@@ -47,9 +47,9 @@ cas update: Check `tailscale status`, then run `cas hub restart`.
   pippenz/Penguinz      ✓     ✓      ✓       ✓       ✓      migration           
   pippenz/ai-toolkit    ✓     ✓      ✓       –       –      not cloud-linked    
   pippenz/soundwave-c…  ✓     ✓      ✓       –       –      not cloud-linked    
-  [OK] user-level store: migrated /home/pippenz/.cas; built-ins current
+  [OK] user-level store: migrated <home>/.cas; built-ins current
   not refreshed (skipped_unregistered): 1 — use `cas known-repos forget <path>` for stale registry rows; intentional projects can be registered explicitly
-    ! /home/pippenz/scratch/old-clone — not a Git project root
+    ! <home>/scratch/old-clone — not a Git project root
 [WARN] Push incomplete; queued rows remain (2 projects)
  ✗ 4.3s
 ✗ one or more projects were not fully refreshed; see the per-project phase summary above

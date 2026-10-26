@@ -10,10 +10,11 @@ use std::process::Command;
 use cas_store::{
     AgentStore, EventStore, PromptQueueStore, QueuedPrompt, Reminder, ReminderStore,
     SqliteAgentStore, SqliteEventStore, SqlitePromptQueueStore, SqliteReminderStore,
-    SqliteTaskStore, SqliteWorktreeStore, WorktreeStore,
+    SqliteTaskStore, SqliteWorktreeStore, TaskStore, WorktreeStore,
 };
 use cas_types::{
-    Agent, AgentRole, AgentStatus, Event, EventType, Priority, Task, TaskStatus, TaskType, WorktreeStatus,
+    Agent, AgentRole, AgentStatus, DependencyType, Event, EventType, Priority, Task, TaskStatus,
+    TaskType, WorktreeStatus,
 };
 
 use crate::changes::{FileChangeInfo, GitFileStatus, SourceChangesInfo};
@@ -241,6 +242,10 @@ pub struct AgentSummary {
     /// longer before producing a checkpoint-class activity event than a
     /// low-effort worker's (cas-09d0).
     pub effort: Option<cas_mux::Effort>,
+    /// The agent issued the latest failed QA verdict for a delivery still
+    /// awaiting another review round. Suppress idle assignment nudges during
+    /// this reviewer handoff gap.
+    pub qa_reviewer_between_rounds: bool,
 }
 
 /// A group of tasks under an epic
@@ -400,6 +405,7 @@ impl DirectorData {
         if let Some(project_id) = project_id {
             tasks.retain(|task| task_in_project(task, project_id));
         }
+        let blocks_dependencies = task_store.list_dependencies(Some(DependencyType::Blocks))?;
 
         // Build assignee to task map for looking up current tasks
         let mut assignee_tasks: HashMap<String, String> = HashMap::new();
@@ -414,10 +420,22 @@ impl DirectorData {
             tasks.iter().map(|task| (task.id.clone(), task)).collect();
 
         // Build map: child_id -> parent_epic_id
-        let child_to_epic: HashMap<String, String> = parent_child_deps
+        let mut child_to_epic: HashMap<String, String> = parent_child_deps
             .iter()
             .map(|dep| (dep.from_id.clone(), dep.to_id.clone()))
             .collect();
+        // A direct Epic -> Gate Blocks edge is also an active completion
+        // obligation for that epic. Keep it in the same active-task snapshot
+        // so both completion events and actionable-state prompts wait for it.
+        for dependency in &blocks_dependencies {
+            let epic = task_by_id.get(&dependency.from_id);
+            let gate = task_by_id.get(&dependency.to_id);
+            if epic.is_some_and(|task| task.task_type == TaskType::Epic)
+                && gate.is_some_and(|task| task.task_type == TaskType::Gate)
+            {
+                child_to_epic.insert(dependency.to_id.clone(), dependency.from_id.clone());
+            }
+        }
 
         // Helper to convert Task to TaskSummary with epic relationship
         let to_summary = |t: &Task| -> TaskSummary {
@@ -615,6 +633,24 @@ impl DirectorData {
                     .unwrap_or_default()
             };
 
+        // Rejection reopens a delivery to Open while its implementer fixes it.
+        // Only non-terminal deliveries below the QA limit leave reviewers
+        // between rounds. Read the task IDs in one bounded store query;
+        // store errors fail open.
+        let active_qa_task_ids = tasks
+            .iter()
+            .filter(|task| !task.is_terminal())
+            .map(|task| task.id.clone())
+            .collect::<Vec<_>>();
+        let qa_max_rounds = qa_reviewer_round_limit(cas_dir);
+        let qa_reviewer_ids =
+            cas_store::latest_failed_qa_reviewers(cas_dir, &active_qa_task_ids)
+                .unwrap_or_default()
+                .into_values()
+                .filter(|(_, round)| *round < qa_max_rounds)
+                .map(|(reviewer, _)| reviewer)
+                .collect::<HashSet<_>>();
+
         let mut agent_id_to_name = HashMap::new();
         let agents: Vec<AgentSummary> = agents_list
             .into_iter()
@@ -644,6 +680,8 @@ impl DirectorData {
                 let pending_supervisor_messages =
                     pending_supervisor_counts.get(&a.name).copied().unwrap_or(0);
                 let latest_supervisor_message_at = latest_supervisor_messages.get(&a.name).copied();
+                let qa_reviewer_between_rounds =
+                    qa_reviewer_ids.contains(&a.id) || qa_reviewer_ids.contains(&a.name);
                 let effort = a
                     .metadata
                     .get("worker_effort")
@@ -710,6 +748,7 @@ impl DirectorData {
                     latest_supervisor_message_at,
                     active_lease,
                     effort,
+                    qa_reviewer_between_rounds,
                 }
             })
             .collect();
@@ -945,12 +984,27 @@ pub fn task_in_project(task: &Task, project_id: &str) -> bool {
         .is_none_or(|origin| origin == project_id)
 }
 
+// QA dispatch migrates legacy project settings to TOML before opening a round.
+// Keep this aggregation read-only and use the dispatch default when settings
+// are unavailable, without depending on the CLI's Config type.
+fn qa_reviewer_round_limit(cas_dir: &Path) -> u32 {
+    std::fs::read_to_string(cas_dir.join("config.toml"))
+        .ok()
+        .and_then(|text| toml::from_str::<toml::Value>(&text).ok())
+        .and_then(|config| config.get("qa")?.get("max_rounds")?.as_integer())
+        .and_then(|rounds| u32::try_from(rounds).ok())
+        .unwrap_or(3)
+        .max(1)
+}
+
 fn load_reminders(store: &SqliteReminderStore) -> Vec<Reminder> {
     let init_result = store.init();
     if init_result.is_err() {
         return Vec::new();
     }
     let mut all = store.list_all_pending().unwrap_or_default();
+    // cas-c5ab: a held worker's suspended reminders stay visible as held.
+    all.extend(store.list_suspended(None).unwrap_or_default());
     all.extend(store.list_recently_fired(60).unwrap_or_default());
     all
 }
@@ -1202,6 +1256,22 @@ mod tests {
     use cas_store::{PendingReason, TaskStore};
     use cas_types::{Agent, EventEntityType, WorkTarget};
     use chrono::{Duration, Utc};
+
+    /// cas-c5ab: a held worker's suspended reminder is listed for the
+    /// director, so its "held" label can appear.
+    #[test]
+    fn director_reminders_include_held_workers_suspended_reminders() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = SqliteReminderStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        let time = cas_store::ReminderTriggerType::Time;
+        let at = chrono::Utc::now() + chrono::Duration::hours(1);
+        store.create("worker-1", None, "red run done", time, Some(at), None, None, 3600, None).unwrap();
+        store.suspend_pending_for_target("worker-1").unwrap();
+
+        let statuses: Vec<_> = load_reminders(&store).into_iter().map(|reminder| reminder.status).collect();
+        assert_eq!(statuses, vec![cas_store::ReminderStatus::Suspended]);
+    }
 
     #[test]
     fn task_note_activity_counts_as_recent_worker_activity() {

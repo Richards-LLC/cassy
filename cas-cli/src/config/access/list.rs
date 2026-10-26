@@ -18,6 +18,9 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         vec![
+            ("slack.channels".into(), self.get("slack.channels").unwrap()),
+            ("slack.stakeholder_contacts".into(), self.get("slack.stakeholder_contacts").unwrap()),
+            ("hub.transport_mode".into(), self.get("hub.transport_mode").unwrap()),
             (
                 "hub.tailscale_serve".to_string(),
                 self.get("hub.tailscale_serve").unwrap(),
@@ -186,6 +189,14 @@ impl Config {
                 factory.scratch_root.clone().unwrap_or_default(),
             ),
             (
+                "factory.supervisor_message_debounce_secs".to_string(),
+                factory.supervisor_message_debounce_secs.to_string(),
+            ),
+            (
+                "factory.supervisor_message_wakes_per_hour".to_string(),
+                factory.supervisor_message_wakes_per_hour.to_string(),
+            ),
+            (
                 "factory.message_max_chars".to_string(),
                 factory.message_max_chars.to_string(),
             ),
@@ -329,6 +340,16 @@ impl Config {
                 "qa.independent_pass".to_string(),
                 qa.independent_pass.to_string(),
             ),
+            ("upkeep.codemap".into(), self.upkeep().codemap().to_string()),
+            ("upkeep.product_overview".into(), self.upkeep().product_overview().to_string()),
+            ("qa.registry.enforce".into(), qa.registry.enforce.to_string()),
+            ("qa.registry.path".to_string(), qa.registry.path.clone()),
+            ("qa.post_release.command".into(), self.get("qa.post_release.command").unwrap()),
+            ("qa.post_release.window_mins".into(), self.get("qa.post_release.window_mins").unwrap()),
+            ("qa.post_release.interval_mins".into(), self.get("qa.post_release.interval_mins").unwrap()),
+            ("qa.post_release.timeout_secs".into(), self.get("qa.post_release.timeout_secs").unwrap()),
+            ("qa.post_release.release_branches".into(), self.get("qa.post_release.release_branches").unwrap()),
+            ("qa.post_release.env".into(), self.get("qa.post_release.env").unwrap()),
             ("qa.mode".to_string(), qa.mode.to_string()),
             ("qa.evidence_gate".to_string(), qa.evidence_gate.to_string()),
             ("qa.api_paths".to_string(), qa.api_paths.join(",")),

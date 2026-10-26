@@ -22,6 +22,7 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
     registry
         .section_descriptions
         .insert("qa", "User-facing QA gates for task planning");
+    registry.section_descriptions.insert("upkeep", "Delivery-scoped documentation upkeep gates");
     registry.section_descriptions.insert(
         "issues",
         "GitHub repository routing for Cassy-system bug reports",
@@ -97,4 +98,7 @@ pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
         "skills",
         "Optional stack-specific builtin skills for this project",
     );
+    registry
+        .section_descriptions
+        .insert("viktor", "Machine-wide managed Viktor upstream");
 }

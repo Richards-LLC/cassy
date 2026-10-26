@@ -61,37 +61,43 @@ struct TurnEvent {
     kind: String,
 }
 
-/// Reads a fixed-size snapshot; ignores a partial first/last record, invalid
-/// UTF-8 records and malformed JSON. A concurrent append is seen next poll.
+/// Visits each JSON record in the bounded tail ([`read_jsonl_tail`]). The line
+/// the window cut and an unterminated last line (still being written) are
+/// skipped; malformed JSON is ignored. Invalid UTF-8 is decoded lossily, so a
+/// record containing it is visited with U+FFFD in place of the bad bytes. A
+/// concurrent append is seen on the next poll.
 pub(crate) fn tail_records(path: &Path, mut visit: impl FnMut(&Value)) {
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Some((_, tail)) = read_jsonl_tail(path, TAIL_BYTES) else {
         return;
     };
-    let Ok(meta) = file.metadata() else { return };
-    let start = meta.len().saturating_sub(TAIL_BYTES);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return;
-    }
-    let mut bytes = Vec::new();
-    if file
-        .take(meta.len() - start)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        return;
-    }
-    let mut lines = bytes.split_inclusive(|byte| *byte == b'\n');
-    if start > 0 {
-        lines.next();
-    }
-    for line in lines {
-        if line.last() != Some(&b'\n') {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_slice(line) {
+    // A last line without its newline is still being written.
+    for line in tail.split_inclusive('\n').filter(|line| line.ends_with('\n')) {
+        if let Ok(value) = serde_json::from_str(line) {
             visit(&value);
         }
     }
+}
+
+/// The last `window` bytes of an append-only JSONL transcript, as text, with
+/// the byte offset they start at (cas-b76b). Never more than the window, even
+/// while the file grows. A window that starts inside a line drops that cut
+/// line, and the seek point may split a UTF-8 character, so the bytes are
+/// decoded lossily rather than refused: a strict read failed on long
+/// transcripts and hid a logged-out or out-of-credit harness (cas-ceeb).
+pub(crate) fn read_jsonl_tail(path: &Path, window: u64) -> Option<(u64, String)> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let start = file.metadata().ok()?.len().saturating_sub(window);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(window).read_to_end(&mut bytes).ok()?;
+    if start > 0 {
+        let cut = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |newline| newline + 1);
+        bytes.drain(..cut);
+    }
+    Some((start, String::from_utf8_lossy(&bytes).into_owned()))
 }
 
 fn event(value: &Value, cli: SupervisorCli) -> Option<TurnEvent> {

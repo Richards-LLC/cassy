@@ -33,7 +33,7 @@ user-facing change they never ran.
 | What is required | The cas-c3b8 bundle, contract v1 (`~/.cas/artifacts/cas-c3b8/bundle-contract.md`). This is a `bundle.json` manifest plus its files, under `<artifacts_root>/<project-key>/<task-id>/`, cited by a `platform_proof` note `qa-bundle: <abs>/bundle.json`. |
 | Who must produce it | The implementer, for a delivery that is **web user-facing** (see Eligibility). |
 | Where it is enforced | **Before the merge gate** in `cas_task_close_with_completion`, after repo and branch resolution (`~4745`). It runs on every close attempt until the task closes, so the first close cannot park and the re-close cannot finish without a valid bundle for the delivered head. |
-| Staleness | Every listed file's mtime and `created_at` must be later than the delivered head's committer time. `head_sha` must equal the delivered head, or be a descendant of it. |
+| Staleness | Every listed file's mtime and `created_at` must be later than the delivered head's committer time, or the execution revision's time for a verified documentation-only rebind. `head_sha` must equal the delivered head, be a descendant of it, or precede it through that rebind. The existing product/QA-input classifier must prove the rebind. When the configured journey registry changes, `qa_impact::analyze` must select the same journey IDs, statuses and invariants (IDs, statements and checks) for the delivery's attributed files at both revisions. Coverage-neutral bug metadata or unrelated journey edits may reuse proof; changed coverage refuses and names the affected journeys/invariants. Close preserves the manifest and records both full SHAs and changed paths in task notes. Product, legacy catalog or QA-tool input changes still refuse reuse; unreadable post-check diffs report a read failure. |
 | Trace proof | Parsed natively from `trace.zip`'s `test.trace`. It needs ≥1 passing `Expect "` step and no failed `Expect "` step. `trace-actions.txt` must list at least one `Expect "` line. No `npx` runs in the close path. |
 | Skip markers | Any delivery that **adds** `test.fixme`, `test.skip` or `.only` markers to a JS/TS test file is rejected, whether or not it is user-facing. A marker is allowed when its line or the line above carries `cas-allow-skip: <reason>`. This is the healer finding from cas-d7b7. |
 | Bypass | `supervisor_override=true` with a non-empty reason from a live supervisor (the existing mechanism). It is logged as a `✅ DECISION` note that names the gate. |
@@ -185,6 +185,20 @@ that produces it:
    `cells` and `polish_screenshots` each have ≥1 entry, and
    `polish_screenshots` has exactly the four
    `{light,dark}-{desktop,phone}` renders.
+   Declared `files.pairs` is also validated. Its schema-1 `pairs.json` must
+   match the bundle's task/head and use stable cell ids in `pairs[]` and
+   `unpaired[]`. Each present side names a contained, nonempty PNG. Across
+   both arrays, AFTER ids must contain every BEFORE id; extra AFTER cells
+   pass, and an empty AFTER refuses when BEFORE exists. One refusal names
+   all missing ids in sorted order. Blank/padded or duplicate per-side ids
+   refuse. Baseline captures may predate the delivery; current captures and
+   the pairs manifest retain freshness checks. Existing after-only bundles
+   without `files.pairs` keep their contract. Filenames alone do not declare
+   a BEFORE/AFTER identity.
+
+   Batch deferral, batch receipts and passed independent QA do not waive
+   declared pair coverage. Only an exact-tip recorded `qa_waive` or a live
+   supervisor's recorded `supervisor_override` bypasses that comparison.
 3. **Staleness.** `created_at` and every file's mtime are later than the
    delivered head's committer time. `head_sha` is 40 hex characters,
    resolves in the repo, and is the delivered head or a descendant of it.

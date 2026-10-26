@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Render the release-report Markdown contract using only the Python stdlib."""
 import argparse
+import base64
 import html
 import json
 import os
 from pathlib import Path
 import re
+import sys
 from urllib.parse import quote, urlsplit
 
 REFERENCE_DIR = Path(__file__).resolve().parent.parent / 'references'
+# Eight equal dots fit between the area label (x < 150) and a two-digit count
+# (right-aligned at 337): the last dot's edge is 160 + 7*20 + 7 = 307.
+DOTS_PER_ROW = 8
 SECTION_NAMES = ('Change map', 'Release at a glance', 'What you can do now',
                  'Under the hood', 'Fixes ledger', 'Install', 'Evidence and scope')
 
@@ -132,7 +137,60 @@ def simple(source):
     return '\n'.join(result)
 
 
-def groups(source):
+CAPTURE_BYTES = 400_000  # per image, the same cap as an inlined font face
+CAPTURE_PAIRS = 6        # per report: one representative pair per change
+IMAGE_TYPES = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'), (b'RIFF', 'image/webp'))
+
+
+def warn(message):
+    print('release report: warning: ' + message, file=sys.stderr)
+
+
+class Captures:
+    """Before | After screenshot pairs for Was -> Now cards, inlined as data URIs.
+
+    A pair renders only when both real captures exist, are PNG, JPEG or WebP and
+    fit the budget; otherwise the change renders without captures and a warning
+    names why. Paths are absolute or relative to the project root.
+    """
+
+    def __init__(self, project_root):
+        self.root, self.pairs = Path(project_root), 0
+
+    def image(self, path):
+        file = Path(path) if Path(path).is_absolute() else self.root / path
+        if not file.is_file():
+            raise ValueError('capture not found: ' + path)
+        data = file.read_bytes()
+        if len(data) > CAPTURE_BYTES:
+            raise ValueError(f'capture over {CAPTURE_BYTES // 1000} kB: ' + path)
+        kind = next((name for magic, name in IMAGE_TYPES if data.startswith(magic)), None)
+        if not kind or kind == 'image/webp' and data[8:12] != b'WEBP':
+            raise ValueError('capture is not a PNG, JPEG or WebP image: ' + path)
+        return 'data:' + kind + ';base64,' + base64.b64encode(data).decode()
+
+    def pair(self, title, before, after):
+        if not before and not after:
+            return ''
+        if not (before and after):
+            warn('change "' + title + '" needs both Before: and After: captures; showing none')
+            return ''
+        if self.pairs >= CAPTURE_PAIRS:
+            warn(f'more than {CAPTURE_PAIRS} capture pairs; showing none for "' + title + '"')
+            return ''
+        try:
+            sides = [(label, self.image(path)) for label, path in (('Before', before), ('After', after))]
+        except ValueError as error:
+            warn(str(error) + '; showing no captures for "' + title + '"')
+            return ''
+        self.pairs += 1
+        return '<figure class="captures">' + ''.join(
+            f'<div class="capture capture-{label.lower()}"><img src="{uri}" alt="{label}: {escape(title)}" decoding="async">'
+            f'<figcaption><span class="state">{label}</span></figcaption></div>' for label, uri in sides) + '</figure>'
+
+
+def groups(source, captures=None):
+    captures = captures or Captures('.')
     parts = re.split(r'^### (.+)\n', source, flags=re.M)
     result = [simple(parts[0])] if parts[0].strip() else []
     for k in range(1, len(parts), 2):
@@ -141,11 +199,11 @@ def groups(source):
         if items[0].strip():
             result.append(simple(items[0]))
         for j in range(1, len(items), 2):
-            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(\n\nSource:.*)?\s*', items[j + 1], re.S)
+            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(?:\n\nBefore: (\S+))?(?:\n\nAfter: (\S+))?(\n\nSource:.*)?\s*', items[j + 1], re.S)
             if not match:
                 raise ValueError('change needs Was/Now paragraphs: ' + items[j])
-            was, now, trailing = match.groups()
-            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div></article>')
+            was, now, before, after, trailing = match.groups()
+            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div>' + captures.pair(items[j].strip(), before, after) + '</article>')
             if trailing:
                 result.append(simple(trailing))
         result.append('</div></section>')
@@ -160,7 +218,7 @@ def merge_tokens(base, override):
             base[key] = value
 
 
-def token_css(project_root, token_path):
+def token_json(project_root, token_path):
     tokens = json.loads((REFERENCE_DIR / 'default-tokens.json').read_text())
     candidates = [project_root / 'design-tokens.json', project_root / 'docs/design/design-tokens.json']
     selected = token_path or next((p for p in candidates if p.is_file()), None)
@@ -182,7 +240,79 @@ def token_css(project_root, token_path):
         if not isinstance(family, list) or not family or any(not re.fullmatch(r'[A-Za-z0-9 _-]+', f) for f in family):
             raise ValueError('font family tokens must be nonempty arrays of local font names')
         fonts.append('--font-' + key + ':' + ','.join('"' + f + '"' if ' ' in f else f for f in family))
-    return colors('light'), colors('dark'), ';'.join(fonts)
+    light, dark, fonts = colors('light'), colors('dark'), ';'.join(fonts)
+    return (':root{' + light + ';' + fonts + ';color-scheme:light dark}\n'
+            '@media(prefers-color-scheme:dark){:root{' + dark + '}}\n'
+            '@media print{:root{' + light + ';color-scheme:light}}')
+
+
+DARK_SCHEME = re.compile(r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)')
+FONT_FILE = re.compile(r'url\("(\./[\w./-]+\.woff2)"\)')
+
+
+def design_md(project_root):
+    """Tokens a project's DESIGN.md names: its CSS `source` files and `maps` roles.
+
+    Returns None unless DESIGN.md lists at least one existing .css source and
+    a maps block of `role: "--variable"` entries. The CSS is inlined as-is
+    (relative .woff2 faces become data URIs), so it may hold only custom
+    properties, @media/selector blocks and @font-face rules: no network URL
+    and no markup. Each role becomes `--role: var(--variable)`.
+    """
+    path = project_root / 'DESIGN.md'
+    if not path.is_file():
+        return None
+    text = path.read_text(encoding='utf-8')
+    if not text.startswith('---\n') or '\n---\n' not in text[4:]:
+        return None
+    head = text[4:text.index('\n---\n', 4)]
+    source = re.search(r'^source:\s*\[(.*)\]\s*$', head, re.M)
+    maps = re.search(r'^maps:\n((?:[ \t]+.*\n?)+)', head, re.M)
+    if not source or not maps:
+        return None
+    sheets = [project_root / item.strip() for item in source.group(1).split(',') if item.strip().endswith('.css')]
+    sheets = [sheet for sheet in sheets if sheet.is_file()]
+    if not sheets:
+        return None
+    roles = re.findall(r'^\s+([a-z][a-z0-9-]*):\s*"?(--[a-z][\w-]*)"?\s*$', maps.group(1), re.M)
+    if not roles:
+        return None
+    css = []
+    for sheet in sheets:
+        content = sheet.read_text(encoding='utf-8')
+        def font(match):
+            face = (sheet.parent / match.group(1)).resolve()
+            if not face.is_file() or face.stat().st_size > 400_000:
+                raise ValueError('DESIGN.md font source missing or too large: ' + match.group(1))
+            return 'url("data:font/woff2;base64,' + base64.b64encode(face.read_bytes()).decode() + '")'
+        content = FONT_FILE.sub(font, content)
+        if '</' in content or '@import' in content or re.search(r'url\(\s*(?!["\']?data:)', content):
+            raise ValueError('DESIGN.md CSS sources may hold only tokens and local font faces: ' + sheet.name)
+        # Print is always the light set: a dark-scheme block applies on screen only.
+        css.append(DARK_SCHEME.sub('@media screen and (prefers-color-scheme: dark)', content))
+    # A role named like its variable is already defined; aliasing it would be a cycle.
+    aliases = ';'.join('--' + role + ':var(' + name + ')' for role, name in roles if '--' + role != name)
+    mark = re.search(r'^brand-mark:\s*(\S+\.svg)\s*$', head, re.M)
+    mark_uri = ''
+    if mark and (project_root / mark.group(1)).is_file():
+        mark_uri = 'data:image/svg+xml;base64,' + base64.b64encode((project_root / mark.group(1)).read_bytes()).decode()
+    return '\n'.join(css) + '\n:root{' + aliases + '}', mark_uri
+
+
+def token_css(project_root, token_path):
+    """Return (CSS, brand-mark data URI): explicit --tokens JSON first, then
+    the project's DESIGN.md sources, then design-tokens.json, then defaults."""
+    if not token_path:
+        try:
+            found = design_md(project_root)
+        except ValueError as error:
+            # A downstream project's DESIGN.md source the report cannot carry
+            # offline must not stop its release report: say so and fall back.
+            warn(str(error) + '; using design-tokens.json or the bundled defaults')
+            found = None
+        if found:
+            return found
+    return token_json(project_root, token_path), ''
 
 
 def render(source, *, project_root=Path('.'), tokens=None, source_href='source.md',
@@ -262,10 +392,10 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{escape(name)}</text>')
         for j, item in enumerate(ids):
             mark = f'data-change="{j+1}"><title>{escape(item)}</title>' if by_change else f'data-issue="{item}"><title>Issue #{item}</title>'
-            svg.append(f'<circle cx="{160+(j%7)*22}" cy="{y+(j//7)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
+            svg.append(f'<circle cx="{160+(j%DOTS_PER_ROW)*20}" cy="{y+(j//DOTS_PER_ROW)*20}" r="7" class="{"decisive" if decisive else "dot"}" {mark}</circle>')
         svg.append(f'<text x="337" y="{y+5}" text-anchor="end" class="svg-count">{count}</text></g>')
         description.append(name + ' ' + str(count))
-        y += 34 + max(0, (count-1)//7)*20
+        y += 34 + max(0, (count-1)//DOTS_PER_ROW)*20
     if not shown:
         svg.append(f'<text x="0" y="{y+5}" class="svg-label">{"No changes listed" if by_change else "No GitHub issues closed"}</text>')
         y += 34
@@ -273,7 +403,7 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
     if by_change:
         legend = ('One dot, one shipped change. ' +
                   (f'{issues_closed} GitHub issue{"" if issues_closed == 1 else "s"} closed with this release, listed in the fixes ledger.'
-                   if issues_closed else 'No GitHub issues were closed with this release.'))
+                   if issues_closed else "No GitHub issues are counted in this report's fixes ledger."))
     else:
         legend = 'One dot, one closed GitHub issue.'
     leading, glance_table, method = split_table(sections['Release at a glance'])
@@ -283,14 +413,16 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
             raise ValueError('glance table needs measure, value and definition')
         label, value, definition = row
         stats.append('<div class="stat"><span class="stat-value">' + inline(value) + '</span><span class="stat-label">' + inline(label) + '</span><p>' + inline(definition) + '</p></div>')
-    light, dark, fonts = token_css(Path(project_root), Path(tokens) if tokens else None)
+    captures = Captures(project_root)
+    token_style, mark = token_css(Path(project_root), Path(tokens) if tokens else None)
     rendered_verdict = inline(verdict)
     if emphasis:
         if emphasis not in verdict:
             raise ValueError('emphasis must be an exact substring of the verdict')
         rendered_verdict = rendered_verdict.replace(escape(emphasis), '<em>' + escape(emphasis) + '</em>', 1)
     values = dict(TITLE=inline(title), DATE=inline(date), VERDICT=rendered_verdict,
-                  LIGHT_TOKENS=light, DARK_TOKENS=dark, PRINT_TOKENS=light, FONT_TOKENS=fonts,
+                  TOKENS=token_style,
+                  MARK=('<img class="mark" src="' + mark + '" alt="" width="32" height="32">') if mark else '',
                   MAP_HEIGHT=y, MAP_TOTAL=total, MAP_CLAIM=inline(claim),
                   MAP_DESCRIPTION=escape(', '.join(description) + '. Each filled circle represents one ' + unit + '. Total ' + str(total) + '.'),
                   MAP_ROWS='\n'.join(svg), MAP_LEGEND=escape(legend), MAP_UNIT=escape('CHANGES' if by_change else 'ISSUES CLOSED'),
@@ -298,7 +430,7 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
                   MAP_LINK=escape('See every change' if by_change else 'Read the map data'),
                   STATS='\n'.join(stats), METHOD=simple(leading + '\n\n' + method),
                   MAP_DATA=simple(guide) + simple(map_table) + simple(after),
-                  USERS=groups(sections['What you can do now']), DEV=groups(sections['Under the hood']),
+                  USERS=groups(sections['What you can do now'], captures), DEV=groups(sections['Under the hood'], captures),
                   LEDGER=simple(sections['Fixes ledger']), INSTALL=simple(sections['Install']),
                   PROVENANCE=simple(sections['Evidence and scope']),
                   STITCH=''.join(f'<circle cx="{8+j*23}" cy="8" r="5" fill="currentColor"/>' for j in range(6)),
@@ -314,12 +446,13 @@ def main():
     parser.add_argument('--project-root', default=Path('.'), type=Path)
     parser.add_argument('--tokens', type=Path)
     parser.add_argument('--pdf-href')
+    parser.add_argument('--source-href')
     parser.add_argument('--emphasis', default='')
     parser.add_argument('--footer', default='Release report')
     args = parser.parse_args()
     try:
         output = render(args.source.read_text(encoding='utf-8'), project_root=args.project_root,
-                        tokens=args.tokens, source_href=quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
+                        tokens=args.tokens, source_href=args.source_href or quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
                         pdf_href=args.pdf_href or quote(args.output.with_suffix('.pdf').name),
                         emphasis=args.emphasis, footer=args.footer)
         args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -209,6 +209,37 @@ An error that lists `uploads_begun` means Slack allocated those uploads: check
 the channel before posting again. `cas doctor` shows readiness on its Violet
 row: hub reachable and bearer accepted, or `invalid_token` for a bad bearer.
 
+### Channel binding inventory
+
+Run `cas violet channels --json` to compare this project's configured channels,
+Violet mappings and Cloud binding verification. Declare desired IDs with
+`cas config set slack.channels '["C0123456789", "G0123456789"]'`.
+The command uses ordinary Cloud read authentication and performs no mapping,
+registration, claim or activation mutation. Violet rows are discovery; repair
+verifies mapping authority server-side through the existing `cas update` path.
+
+Read `ok`, `complete`, `channels[]` and `errors[]` from the single JSON report.
+Each channel retains both project IDs, Cloud workspace/verification/activation,
+configuration status, flags and a remedy. Treat `project_mismatch` as an ownership
+question: inspect both links before explicitly remapping. A verified Cloud row
+can still conflict with Violet. A failed authority read is unknown, not unmapped.
+
+Cloud-only enumeration requires an existing supervisor registration for the same
+account/project. Pass `--registration-id <id>` outside its session; the command
+never creates an agent. Missing/refused registration or the server's unpageable
+100-binding limit marks discovery incomplete while checking known channels.
+Findings/incompleteness exit 1. Follow row remedies, then rerun `cas update`.
+Pre-binding history retains Cloud's archival-only policy without later-slot backfill.
+
+| Local code | Action |
+| --- | --- |
+| `project_required` | Run in a Cassy project. |
+| `project_unlinked` | Check the canonical project/team link with `cas cloud team show`. |
+| `not_logged_in` | Run `cas login`, then retry the report. |
+| `invalid_cloud_config` | Restore a supported HTTPS Cloud origin and ordinary credential; use `cas login`. |
+| `invalid_config` | Check `.cas/config.toml` with `cas doctor`; channels require C.../G... IDs. |
+| `bindings_attention` | The report has findings; inspect its flags/errors and use each row's remedy. |
+
 ## Posting a published artifact by ID
 
 To share a file that `artifact action=publish` already committed to Cloud,

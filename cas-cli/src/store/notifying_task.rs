@@ -170,6 +170,24 @@ impl TaskStore for NotifyingTaskStore {
         Ok(persisted_at)
     }
 
+    fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        let task = self.inner.get(task_id)?;
+        let persisted_at = self.inner.append_trusted_note(task_id, formatted_note)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
+        self.notify_updated(&task, Some(task.status));
+        Ok(persisted_at)
+    }
+
+    fn append_trusted_note_with_mutation_receipt(
+        &self, task_id: &str, formatted_note: &str, receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        let task = self.inner.get(task_id)?;
+        let persisted_at = self.inner.append_trusted_note_with_mutation_receipt(task_id, formatted_note, receipt_id)?;
+        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
+        self.notify_updated(&task, Some(task.status));
+        Ok(persisted_at)
+    }
+
     fn append_note_with_mutation_receipt(
         &self,
         task_id: &str,
@@ -187,8 +205,13 @@ impl TaskStore for NotifyingTaskStore {
         Ok(persisted_at)
     }
 
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
-        let recorded = self.inner.record_green_merge(task_id, merge_commit)?;
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
+        let recorded = self.inner.record_merge_admission(task_id, merge_commit, admission)?;
         if recorded {
             crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
         }
@@ -209,6 +232,15 @@ impl TaskStore for NotifyingTaskStore {
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         self.inner.list(status)
+    }
+
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        self.inner
+            .ids_by_assignees_and_statuses(assignees, statuses)
     }
 
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {

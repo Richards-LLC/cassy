@@ -23,6 +23,8 @@ impl SqliteAgentStore {
     pub(crate) fn coord_graceful_shutdown(&self, agent_id: &str) -> Result<Vec<String>> {
         let tx = crate::shared_db::begin_immediate_pooled(&self.conn)?;
 
+        super::continuity::capture(&tx, agent_id, None)?;
+
         // Get all active task leases for this agent
         let mut stmt = tx.prepare_cached(
             "SELECT task_id, epoch FROM task_leases WHERE agent_id = ? AND status = 'active'",
@@ -61,6 +63,8 @@ impl SqliteAgentStore {
                 Some("graceful_shutdown"),
             )?;
         }
+
+        crate::qa_pass_store::release_qa_claims_for_agent_with_conn(&tx, agent_id)?;
 
         // Mark agent as shutdown
         tx.execute(

@@ -2,7 +2,9 @@
 
 Wrong field names and invalid actions waste dispatch cycles. This section covers exact valid actions and field names.
 
-**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `available`, `mine`.
+**Valid `task` actions** (do not invent others): `create`, `proposal_inbox`, `proposal_accept`, `proposal_reject`, `proposal_reconcile`, `show`, `update`, `start`, `close`, `cancel`, `reopen`, `request_changes`, `delete`, `list`, `ready`, `blocked`, `notes`, `dep_add`, `dep_remove`, `dep_list`, `claim`, `release`, `reset`, `transfer`, `rebind_branch`, `available`, `mine`.
+
+Approve an existing replacement delivery branch with `task action=rebind_branch id=<task> branch=<factory-branch> reason="<approval>"` after the assigned worker checks it out cleanly. Use `request_changes` first for a parked delivery. Cassy records the old tip, preserves assignment and target, and keeps normal close gates.
 
 ## Task risk declarations
 
@@ -23,6 +25,20 @@ base has a queue, otherwise one assembly build + test of the epic tip and its
 `ASSEMBLY_PROOF: head=<epic tip sha> result=PASS command=<cmd> log=<path>`
 note on the epic. Child closes reference that proof. A non-Rust
 `risk=platform` task still carries its worker `platform_proof` receipt.
+
+For a Cassy source CLI QA walk requiring an exact-tip binary, run
+`cas qa candidate build --task <task-id> --rev <sha>` as supervisor. The command
+uses release/assembly Zig and scratch resolution and the warm native Cargo
+target; it writes `cas`, `VERSION.txt`, `SHA256SUMS` and `RECEIPT.json` under
+the task's canonical artifact `candidate/` directory. Give the version and
+binary SHA-256 to the QA reviewer, who resolves the binary with
+`cas qa candidate path --task <task-id>` instead of a typed hashed path. The command builds evidence only and
+does not run or replace the epic's release checks.
+
+For a proof produced on another machine, use the worker's
+[cross-machine proof log flow](../../cas-worker/references/close-gate.md#cross-machine-proof-logs):
+attach a published artifact, then fetch and read the hash-verified copy on the
+owning machine before relying on the receipt.
 
 Two of those are supervisor-specific and easy to confuse:
 
@@ -234,9 +250,12 @@ Other supervisors of this GitHub repo, on this machine or another one logged in 
 - **Supervisors of your other projects.** `coordination action=peers scope=all` (or `cas peers --all`) lists every supervisor of your own Cassy Cloud account, in any project and on any machine; another user's supervisors never appear. Message one with `target=supervisor:<project>`, `<name>` or `<name>@<machine>`; an ambiguous project is refused with the candidates. `attachment=<artifact id | repo path[@commit]>` adds a pointer: a file is readable directly on the same machine, an artifact from anywhere. These messages are advisory and use the peer wake/authority limits above.
 - **Before taking an epic,** check the peers' focus to avoid starting overlapping work.
 - **Split a shared epic.** Run `factory action=epic_split id=<epic> target=<peer> mine=<ids> theirs=<ids>`. It claims your share in Cassy Cloud, all of it or none: if a live peer holds any child, nothing is claimed or sent. The peer receives the proposal as a peer message.
+  - Request one child in one message with `factory action=epic_split id=<epic> target=<owner> mine=<id>`; omit `theirs`. The owner accepts or rejects the request. To grant a child to a peer, use `theirs=<id>` and omit `mine`. Either share may be empty or omitted, but not both; only named tasks are claimed.
   - The peer answers with `epic_split id=<split> decision=accept`, which claims only its own share, or `decision=reject reason="..."`.
-  - An unanswered proposal expires after `ttl_secs` (default 1800), and a late accept is refused.
-  - While a split binds (accepted, or your own open proposal), `task start`, `task claim` and `spawn_workers task_id=` on the other side's children are refused. Message the peer first; `force=true` on start or spawn takes the child anyway, with a visible note.
+  - Accept, reject, cancel and expiry arrive as typed peer decisions eligible to wake the proposer. Read `factory action=epic_split id=<split> decision=status` (or just `id=<split>`) for state, `decided_at`, decider, observed Cloud claims and pending cleanup/delivery.
+  - Wait without polling with `coordination action=remind remind_event=epic_split_decided remind_filter='{"split_id":"<split>"}' remind_message="Continue after the split decision"`. This fires once for the latest persisted decided state, including a decision made before registration.
+  - An unanswered proposal expires after `ttl_secs` (default 1800). The mailbox duty records expiry, releases only each side's own frozen claims and tells both sides. A late accept cannot revive an expired split. Rejecting a request releases the requester's own share when the answer arrives; worker-owned and peer-owned claims stay.
+  - While a split binds (accepted, or your own open proposal), assigning, starting, claiming, transferring or pre-assigned spawning of the peer's children is refused. Agree on a takeover with the peer, then run `task action=update id=<child> assignee=<worker> supervisor_override=true reason="<agreement>"`. Only a live registered supervisor can authorize this; only that worker's successful start consumes the durable decision. `force=true` cannot bypass the split. Cancel or redirect the split to change the agreement instead.
   - Either side ends it with `decision=cancel`. That releases only your own claims and tells the peer; the peer's claims stay. A live registered supervisor can also cancel an accepted split after its registered owner has no live process and its heartbeat is older than the 30-second stale threshold. Include a reason; Cassy records the acting and original supervisors.
   - `epic_split` with no arguments, `coordination action=peers` and the Peers section of `worker_status` list the splits.
   - Neither side claims or spawns for the other. A superseding supervisor releases only the original owner's claims after the owner is proven gone.

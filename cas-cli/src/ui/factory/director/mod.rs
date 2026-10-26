@@ -14,6 +14,7 @@ pub mod mission_epic;
 pub mod mission_workers;
 pub mod panel;
 mod prompts;
+pub(crate) use prompts::{refresh_ci_merge_signal, fresh_merge_alert_tip_evidence, resolve_merge_target_for_task, target_is_protected_default};
 mod reminders;
 #[cfg(test)]
 mod supervisor_stall_tests;
@@ -47,7 +48,7 @@ pub use prompts::{
     worker_now_has_real_assignment, MergeAlertEvidence, MergeAlertFreshness, Prompt,
 };
 pub(crate) use prompts::{
-    external_response_hint,
+    enqueue_external_message, external_response_hint,
     apply_idle_liveness, epic_completion_is_current, idle_worker_liveness,
     prompt_is_still_deliverable,
 };

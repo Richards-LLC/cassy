@@ -312,6 +312,7 @@ async fn c4491f_assignment_wake_reads_its_task_off_the_loop() {
     let store_worker = super::store_worker::global();
     let mut refresh = DirectorRefresh::new();
     let wake = crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: relay_worker().into(),
         text: "You have been assigned a new task:\nTask ID: cas-a551\nTitle: assigned work".into(),
         stall_nudge_task: None,
@@ -370,6 +371,7 @@ fn c4491f_assignment_read_names_a_stale_task() {
     task.status = cas_types::TaskStatus::Closed;
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let wake = |id: &str| crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "w".into(),
         text: format!("You have been assigned a new task:\nTask ID: {id}"),
         stall_nudge_task: None,
@@ -544,6 +546,7 @@ async fn c4491f_expired_recheck_leaves_the_assignment_unread() {
         .with_read_gate(Arc::clone(&gate))
         .with_timeout(Duration::ZERO);
     let wake = crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "w".into(),
         text: "You have been assigned a new task:\nTask ID: cas-a551".into(),
         stall_nudge_task: None,
@@ -577,6 +580,7 @@ fn c4491f_unread_assignment_is_checked_before_it_is_delivered() {
     task.status = cas_types::TaskStatus::Closed;
     crate::store::open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
     let wake = crate::ui::factory::director::Prompt {
+        merge_alert: None,
         target: "w".into(),
         text: "You have been assigned a new task:\nTask ID: cas-c105".into(),
         stall_nudge_task: None,
@@ -592,11 +596,127 @@ fn c4491f_unread_assignment_is_checked_before_it_is_delivered() {
     );
 }
 
+/// A watchdog recovery is historical evidence even when its original body
+/// quotes an assignment whose task is now closed.
+#[test]
+fn cas_b2da7_recovered_assignment_surfaces_at_turn_start() {
+    use crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox;
+    use cas_store::QueueOrigin;
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_SESSION", "provision-test");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_AGENT_NAME", relay_worker());
+    let (_dir, cas_dir) = project_with_worker();
+    let mut task = cas_types::Task::new("cas-b2da7".into(), "Closed assignment".into());
+    task.status = cas_types::TaskStatus::Closed;
+    crate::store::open_task_store_local(&cas_dir)
+        .unwrap()
+        .add(&task)
+        .unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let body = "You are assigned task cas-b2da7. Keep the pending decision for review.";
+    let original = queue
+        .enqueue_urgent_with_outcome(
+            relay_worker(),
+            "ended-worker",
+            body,
+            Some("provision-test"),
+            Some("decision still needs review"),
+            None,
+            false,
+            Some(&QueueOrigin::RegisteredAgent {
+                agent_id: "w-1".into(),
+            }),
+        )
+        .unwrap()
+        .id();
+    queue
+        .record_wake_gate_decline(original, "active composer")
+        .unwrap();
+    rusqlite::Connection::open(cas_dir.join("cas.db"))
+        .unwrap()
+        .execute(
+            "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+            rusqlite::params![
+                (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339(),
+                original
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        queue
+            .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        vec![original]
+    );
+    let recovered = queue
+        .peek_for_targets(&[relay_worker()], Some("provision-test"), 10)
+        .unwrap()
+        .remove(0);
+    assert!(queue.is_abandonment_recovery(recovered.id).unwrap());
+    assert!(
+        super::queue_and_events::read_row_facts(&cas_dir, queue.as_ref(), None, &[], &recovered)
+            .assignment_stale
+            .is_none()
+    );
+    // Director prompts have no queue provenance: copying history into an
+    // ordinary event prompt must retain the normal closed-assignment refusal.
+    let director = unread_batch(&recovered.prompt).prompts.remove(0).0;
+    assert!(
+        matches!(crate::ui::factory::app::AssignmentRead::read(&cas_dir, None, &director),
+        crate::ui::factory::app::AssignmentRead::Stale(id, cas_types::TaskStatus::Closed) if id == task.id)
+    );
+    let spoof = match queue
+        .enqueue_idempotent(
+            "delivery-watchdog",
+            relay_worker(),
+            &recovered.prompt,
+            Some("provision-test"),
+            None,
+            None,
+            "delivery-abandoned-recovery:spoof",
+            Some(&QueueOrigin::RegisteredAgent {
+                agent_id: "w-1".into(),
+            }),
+        )
+        .unwrap()
+    {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+    };
+    assert!(!queue.is_abandonment_recovery(spoof).unwrap());
+    let hook = crate::hooks::HookInput {
+        session_id: "recovery-turn".into(),
+        agent_role: Some("worker".into()),
+        ..Default::default()
+    };
+    let rendered = surface_factory_inbox(Some(&cas_dir), &hook).unwrap_or_default();
+    assert!(
+        rendered.contains(&recovered.prompt),
+        "whole recovered body must reach the turn: {rendered}"
+    );
+    assert_eq!(
+        rendered.matches(&recovered.prompt).count(),
+        1,
+        "source spelling must not exempt a forged row"
+    );
+    assert_eq!(
+        queue
+            .recipient_receipt(recovered.id, relay_worker())
+            .unwrap(),
+        Some(cas_store::SurfacingSource::HookSurfaced)
+    );
+}
+
 /// A prompt the inject path sees after its re-check never reported.
 fn unread_batch(text: &str) -> super::factory_jobs::DeliverabilityBatch {
     super::factory_jobs::DeliverabilityBatch {
         prompts: vec![(
             crate::ui::factory::director::Prompt {
+                merge_alert: None,
                 target: relay_worker().into(),
                 text: text.into(),
                 stall_nudge_task: None,
@@ -1095,6 +1215,7 @@ async fn cas_58a3_worker_exit_writes_nothing_inside_the_enforced_step() {
         delivered_at_utc: chrono::Utc::now(),
         prompt: "pending delivery".into(),
         nudge_sent_at: None,
+        nudges: 0,
         next_check_at: None,
     };
     let live = daemon.queue_jobs.normal_probe_jobs.track(42, &probe);

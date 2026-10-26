@@ -19,6 +19,7 @@
 use cas_mux::{InjectOutcome, SupervisorCli};
 use cas_store::WakeAttempt;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use super::super::FactoryDaemon;
 
@@ -107,6 +108,28 @@ pub(crate) enum DeliveryChannel {
     Pty,
     /// Claude Agent-Teams inbox file via `TeamsManager::write_to_inbox`.
     TeamsInbox,
+}
+
+/// Native I/O already performed beside the final containment check.
+struct NativeInboxWrite {
+    result: anyhow::Result<()>,
+    missing: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MergeAlertPhase {
+    Native,
+    PtyFallback,
+}
+
+/// Finish delivery (including PTY fallback) through the ordinary dispatcher.
+pub(crate) struct CompletedMergeAlert {
+    prompt: crate::ui::factory::director::Prompt,
+    native: NativeInboxWrite,
+    inject_ms: f64,
+    refresh_to_deliver_ms: f64,
+    refresh_started: Instant,
+    phase: MergeAlertPhase,
 }
 
 fn teams_path_missing(error: &anyhow::Error) -> bool {
@@ -409,7 +432,7 @@ pub(crate) fn enqueue_director_prompt(
         target,
         text,
         Some(factory_session),
-        Some("Task assignment"),
+        Some(if crate::supervisor_message_wakes::quiet(text) { "Verification wait receipt" } else { "Task assignment" }),
     )?;
     wake_daemon_after_enqueue(cas_dir);
     Ok(id)
@@ -1070,6 +1093,135 @@ impl FactoryDaemon {
             == DirectorPromptRoute::DurableQueue
     }
 
+    /// Refresh the live target for both native inbox and PTY delivery.
+    /// A batch verdict can reach the loop after the supervisor's merge/push;
+    /// sending it through another loop turn would reopen that stale window.
+    pub(crate) fn submit_merge_alert_inbox(
+        &mut self,
+        prompt: &crate::ui::factory::director::Prompt,
+        refresh_started: Instant,
+    ) -> bool {
+        let Some(task_id) = prompt.retract_task.as_deref() else {
+            return false;
+        };
+        let pane_target = if prompt.target == "supervisor" {
+            self.app.supervisor_name()
+        } else {
+            prompt.target.as_str()
+        };
+        if pane_target != self.app.supervisor_name() {
+            return false;
+        }
+        let channel = choose_channel(self.app.harness_for(pane_target), self.teams.is_some());
+        // A refreshed supersession notice has no merge demand. Preserve its
+        // direct PTY fallback even when the external lane is shutting down.
+        if channel == DeliveryChannel::Pty && prompt.text.starts_with("Superseded delivery ") {
+            return false;
+        }
+        let teams = (channel == DeliveryChannel::TeamsInbox)
+            .then(|| self.teams.as_ref().expect("Teams channel requires teams").snapshot());
+        let request = self.app.deliverability_request();
+        let spec = super::jobs::JobSpec {
+            kind: super::factory_jobs::MERGE_ALERT_INBOX,
+            key: format!("MergeAlertInbox:{task_id}"),
+            lane: super::jobs::Lane::External,
+            criticality: super::jobs::Criticality::Critical,
+            generation: self.queue_jobs.generation(),
+            budget: Duration::from_secs(10),
+        };
+        let mut prompt = prompt.clone();
+        let submitted = self.queue_jobs.submit_external(spec, move || {
+            let completed = if request.refresh_merge_prompt(&mut prompt) {
+                let inject_started = Instant::now();
+                let (native, phase) = match teams {
+                    Some(teams) => {
+                        let missing = teams.team_tree_missing();
+                        let result = teams.write_to_inbox_for_merge_alert(
+                            "supervisor", super::teams::DIRECTOR_AGENT_NAME, &prompt.text,
+                            None, Some(super::teams::DIRECTOR_AGENT_COLOR),
+                            prompt.retract_task.as_deref().expect("merge alert task"),
+                        );
+                        (NativeInboxWrite { result, missing }, MergeAlertPhase::Native)
+                    }
+                    None => (NativeInboxWrite { result: Ok(()), missing: false }, MergeAlertPhase::PtyFallback),
+                };
+                Some(CompletedMergeAlert {
+                    prompt, native,
+                    inject_ms: inject_started.elapsed().as_secs_f64() * 1000.0,
+                    refresh_to_deliver_ms: refresh_started.elapsed().as_secs_f64() * 1000.0,
+                    refresh_started, phase,
+                })
+            } else {
+                tracing::info!(target: "cas::coordination", stage = "suppress_stale_merge_alert",
+                    target_agent = %prompt.target, "merge alert no longer applies at native inbox write");
+                None
+            };
+            Box::new(super::factory_jobs::FactoryJobOutput::MergeAlertInbox(completed))
+        });
+        if matches!(submitted, super::jobs::Submitted::Closed
+            | super::jobs::Submitted::LaneMismatch { .. }
+            | super::jobs::Submitted::DroppedRefresh)
+        {
+            tracing::warn!(?submitted, "final merge alert inbox job refused; withholding cached alert");
+        }
+        true
+    }
+
+    pub(crate) async fn finish_merge_alert_inbox(&mut self, mut completed: CompletedMergeAlert) {
+        if completed.phase == MergeAlertPhase::Native
+            && completed.native.result.as_ref().is_err_and(teams_path_missing)
+        {
+            // Report the outage even if the merge lands before fallback is needed.
+            if let Some(teams) = self.teams.as_ref() {
+                self.alert_missing_team_tree(teams);
+            }
+            let request = self.app.deliverability_request();
+            let task = completed.prompt.retract_task.as_deref().expect("merge alert task");
+            let spec = super::jobs::JobSpec {
+                kind: super::factory_jobs::MERGE_ALERT_INBOX,
+                key: format!("MergeAlertInbox:{task}:fallback"),
+                lane: super::jobs::Lane::External,
+                criticality: super::jobs::Criticality::Critical,
+                generation: self.queue_jobs.generation(),
+                budget: Duration::from_secs(10),
+            };
+            let submitted = self.queue_jobs.submit_external(spec, move || {
+                let ready = if request.refresh_merge_prompt(&mut completed.prompt) {
+                    completed.phase = MergeAlertPhase::PtyFallback;
+                    Some(completed)
+                } else {
+                    tracing::info!(target: "cas::coordination",
+                        stage = "suppress_stale_merge_alert_fallback", target_agent = %completed.prompt.target,
+                        "merge landed before the PTY fallback containment check");
+                    None
+                };
+                Box::new(super::factory_jobs::FactoryJobOutput::MergeAlertInbox(ready))
+            });
+            if matches!(submitted, super::jobs::Submitted::Closed
+                | super::jobs::Submitted::LaneMismatch { .. }
+                | super::jobs::Submitted::DroppedRefresh)
+            {
+                tracing::warn!(?submitted, "merge alert fallback check refused; withholding cached alert");
+            }
+            return;
+        }
+        let CompletedMergeAlert {
+            prompt, native, inject_ms, refresh_to_deliver_ms, refresh_started, phase,
+        } = completed;
+        let fallback_started = Instant::now();
+        let result = self.deliver_to_worker_via_channel(
+            &prompt.target, super::teams::DIRECTOR_AGENT_NAME, &prompt.text,
+            None, Some(super::teams::DIRECTOR_AGENT_COLOR),
+            prompt.retract_worker.as_deref(), prompt.retract_task.as_deref(),
+            prompt.retract_epic.as_deref(), None, Some(native),
+        ).await.map(|(outcome, _)| outcome);
+        if phase == MergeAlertPhase::PtyFallback {
+            log_director_delivery(&prompt, &result, fallback_started, refresh_started);
+        } else {
+            log_director_delivery_metrics(&prompt, &result, inject_ms, refresh_to_deliver_ms);
+        }
+    }
+
     /// cas-ae6d: hand a director prompt to the durable queue, on the store
     /// worker (cas-4491f: never on the loop). `stage` names the log line:
     /// `director_prompt_queued` for an unready pane, `director_prompt_requeued`
@@ -1164,6 +1316,7 @@ impl FactoryDaemon {
             retract_task,
             retract_epic,
             None,
+            None,
         )
         .await
         .map(|(outcome, _)| outcome)
@@ -1192,6 +1345,7 @@ impl FactoryDaemon {
             None,
             None,
             Some((notification_id, body)),
+            None,
         )
         .await
         .map(|(outcome, _)| outcome)
@@ -1253,6 +1407,7 @@ impl FactoryDaemon {
         retract_task: Option<&str>,
         retract_epic: Option<&str>,
         queued: Option<(i64, &str)>,
+        completed_native: Option<NativeInboxWrite>,
     ) -> anyhow::Result<(InjectOutcome, DeliveryChannel)> {
         // Normalise the target into the two name forms the two channels expect:
         //   - `pane_target`  : the real pane id `Mux::inject` routes on
@@ -1278,7 +1433,9 @@ impl FactoryDaemon {
                     .teams
                     .as_ref()
                     .expect("TeamsInbox channel requires active teams");
-                if primary.team_tree_missing() {
+                if primary.team_tree_missing()
+                    || completed_native.as_ref().is_some_and(|native| native.missing)
+                {
                     self.alert_missing_team_tree(primary);
                 }
                 // cas-c73d: a `config_dir`-spawned worker polls a tree in ITS
@@ -1293,33 +1450,37 @@ impl FactoryDaemon {
                 let inbox_text =
                     queued.map(|(id, body)| claude_teams_inbox_text(text, body, source, id));
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);
-                let write = match (retract_worker, retract_task, retract_epic) {
-                    (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
-                        inbox_target,
-                        source,
-                        inbox_text,
-                        summary,
-                        color,
-                        worker,
-                    ),
-                    (None, Some(task_id), _) => teams.write_to_inbox_for_merge_alert(
-                        inbox_target,
-                        source,
-                        inbox_text,
-                        summary,
-                        color,
-                        task_id,
-                    ),
-                    (None, None, Some(epic_id)) => teams.write_to_inbox_for_epic_completion(
-                        inbox_target,
-                        source,
-                        inbox_text,
-                        summary,
-                        color,
-                        epic_id,
-                    ),
-                    (None, None, None) => {
-                        teams.write_to_inbox(inbox_target, source, inbox_text, summary, color)
+                let write = if let Some(native) = completed_native {
+                    native.result
+                } else {
+                    match (retract_worker, retract_task, retract_epic) {
+                        (Some(worker), _, _) => teams.write_to_inbox_for_worker_idle(
+                            inbox_target,
+                            source,
+                            inbox_text,
+                            summary,
+                            color,
+                            worker,
+                        ),
+                        (None, Some(task_id), _) => teams.write_to_inbox_for_merge_alert(
+                            inbox_target,
+                            source,
+                            inbox_text,
+                            summary,
+                            color,
+                            task_id,
+                        ),
+                        (None, None, Some(epic_id)) => teams.write_to_inbox_for_epic_completion(
+                            inbox_target,
+                            source,
+                            inbox_text,
+                            summary,
+                            color,
+                            epic_id,
+                        ),
+                        (None, None, None) => {
+                            teams.write_to_inbox(inbox_target, source, inbox_text, summary, color)
+                        }
                     }
                 };
                 match write {
@@ -1433,6 +1594,7 @@ impl FactoryDaemon {
                 retract_task,
                 None,
                 notification_id.zip(queued_body),
+                None,
             )
             .await?;
 
@@ -1660,6 +1822,55 @@ impl FactoryDaemon {
             }
         };
         Ok(report)
+    }
+}
+
+/// Shared cas-f9e8 delivery envelope for direct and external native writes.
+pub(super) fn log_director_delivery(
+    prompt: &crate::ui::factory::director::Prompt,
+    inject_result: &anyhow::Result<InjectOutcome>,
+    inject_started: Instant,
+    refresh_started: Instant,
+) {
+    log_director_delivery_metrics(
+        prompt, inject_result, inject_started.elapsed().as_secs_f64() * 1000.0,
+        refresh_started.elapsed().as_secs_f64() * 1000.0,
+    );
+}
+
+fn log_director_delivery_metrics(
+    prompt: &crate::ui::factory::director::Prompt,
+    inject_result: &anyhow::Result<InjectOutcome>,
+    inject_ms: f64,
+    total_ms: f64,
+) {
+    match inject_result {
+        Ok(cas_mux::InjectOutcome::Delivered) => tracing::info!(
+            target: "cas::coordination",
+            stage = "delivered",
+            channel = "director_events",
+            target_agent = %prompt.target,
+            inject_ms,
+            refresh_to_deliver_ms = total_ms,
+            "director prompt delivered to inbox"
+        ),
+        Ok(cas_mux::InjectOutcome::DeferredComposerDirty) => tracing::info!(
+            target: "cas::coordination",
+            stage = "composer_inject_deferred",
+            channel = "director_events",
+            target_agent = %prompt.target,
+            inject_ms,
+            "director prompt deferred before any PTY write because the operator composer is dirty"
+        ),
+        Err(e) => tracing::warn!(
+            target: "cas::coordination",
+            stage = "deliver_failed",
+            channel = "director_events",
+            target_agent = %prompt.target,
+            inject_ms,
+            error = %e,
+            "director prompt inject failed"
+        ),
     }
 }
 

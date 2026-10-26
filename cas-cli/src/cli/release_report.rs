@@ -173,10 +173,13 @@ struct ReleaseEvidence {
     stage_trend: Vec<(String, Vec<(String, i64)>)>,
     /// (tasks, median seconds, worst task, worst seconds) from park to main.
     commit_to_main: Option<(u64, i64, String, i64)>,
+    /// cas-692a: a latency receipt was read, so its absent fields are its own.
+    latency_receipt_read: bool,
 }
 
 impl ReleaseEvidence {
     fn record_latency(&mut self, values: &HashMap<String, String>) {
+        self.latency_receipt_read = true;
         let seconds = |key: &str| {
             values
                 .get(key)
@@ -356,9 +359,11 @@ fn parse_stage_pairs(pairs: &str) -> Vec<(String, i64)> {
 fn pipeline_latency_section(evidence: &ReleaseEvidence) -> String {
     let mut output = String::from("### Pipeline latency\n\n");
     if evidence.stage_seconds.is_empty() {
-        output.push_str(
-            "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n",
-        );
+        output.push_str(if evidence.latency_receipt_read {
+            "Stage timings are unavailable: the latency receipt records no STAGE_SECS.\n\n"
+        } else {
+            "Stage timings are unavailable: no latency receipt was found for this release.\n\n"
+        });
         return output;
     }
     let budget = |stage: &str| {
@@ -575,12 +580,27 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
     };
 
     let renderer = RendererAssets::locate(&project_root)?;
+    let relative = |path: &Path| {
+        path.strip_prefix(&project_root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/")
+    };
+    let default_branch = crate::worktree::GitOperations::new(project_root.clone())
+        .detect_default_branch();
+    let links = report_link_hrefs(
+        project_config.issue_repo_registry_for_project(&project_root).project.as_deref(),
+        &default_branch,
+        &relative(&source_path),
+        &relative(&pdf_path),
+    );
     render_html(
         &renderer.script,
         &source_path,
         &html_path,
         &project_root,
         renderer.render_timeout,
+        links,
     )?;
 
     let mut pdf_written = false;
@@ -690,51 +710,13 @@ fn report_output_width(fmt: &Formatter<'_>) -> usize {
 /// path) with one spare cell. The spare cell avoids terminal-qa mistaking a
 /// continuation of a path for a word split at the right edge.
 fn wrap_report_output(text: &str, width: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let width = width.max(1);
-    let hard_width = width.saturating_sub(1).max(1);
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        let word_width = word.chars().count();
-        if word_width <= width {
-            if current.is_empty() {
-                current.push_str(word);
-            } else if current.chars().count() + 1 + word_width <= width {
-                current.push(' ');
-                current.push_str(word);
-            } else {
-                lines.push(std::mem::take(&mut current));
-                current.push_str(word);
-            }
-            continue;
-        }
-
-        if !current.is_empty() {
-            lines.push(std::mem::take(&mut current));
-        }
-        let mut remaining = word;
-        while remaining.chars().count() > hard_width {
-            let split_at = remaining
-                .char_indices()
-                .nth(hard_width)
-                .map(|(index, _)| index)
-                .unwrap_or(remaining.len());
-            lines.push(remaining[..split_at].to_string());
-            remaining = &remaining[split_at..];
-        }
-        current.push_str(remaining);
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    if lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines
+    crate::ui::word_wrap::wrap_words(
+        text,
+        width,
+        |text| text.chars().count(),
+        crate::ui::word_wrap::OverlongWordPolicy::HardWrap { spare_columns: 1 },
+    )
+    .lines
 }
 
 fn output_text_for_locale(fmt: &Formatter<'_>, text: &str) -> String {
@@ -868,7 +850,7 @@ fn acquire_sources(
         ));
     }
 
-    let github_repo = config.issue_repo_registry().project;
+    let github_repo = config.issue_repo_registry_for_project(project_root).project;
     let mut release = None;
     let mut issues = Vec::new();
     let mut assets = Vec::new();
@@ -1749,7 +1731,7 @@ fn assemble_markdown(
             },
         ));
     } else {
-        zero_notes.push("No GitHub issues were closed with this release.".to_string());
+        zero_notes.push("No GitHub issues are counted in this report's fixes ledger.".to_string());
     }
     let green_timing =
         if sources.release_evidence.publication_start_kind.as_deref() == Some("gate-green") {
@@ -1940,7 +1922,7 @@ fn assemble_markdown(
     };
     output.push('\n');
     if sources.issues.is_empty() {
-        output.push_str("No GitHub issues were closed with this release.\n\n");
+        output.push_str("No GitHub issues are counted in this report's fixes ledger.\n\n");
     }
     if !sources.issues_still_open.is_empty() {
         output.push_str(&format!(
@@ -2368,19 +2350,40 @@ fn is_release_note_section_label(line: &str) -> bool {
         || lower.starts_with("dev reply")
 }
 
+/// The report's "Markdown source" and "Print edition" link targets, given
+/// their repository-relative paths. cas-692a: Chromium prints a relative link
+/// as a file:// URL into the generating checkout, so with a known GitHub
+/// repository both name the files on its default branch: reports are committed after the
+/// release tag is created. Without one they stay
+/// sibling names; the PDF printer then drops their link targets.
+fn report_link_hrefs(
+    github_repo: Option<&str>,
+    default_branch: &str,
+    source: &str,
+    pdf: &str,
+) -> (String, String) {
+    match github_repo {
+        Some(repo) => (
+            format!("https://github.com/{repo}/blob/{default_branch}/{source}"),
+            format!("https://github.com/{repo}/blob/{default_branch}/{pdf}"),
+        ),
+        None => {
+            let name = |path: &str| path.rsplit('/').next().unwrap_or(path).to_string();
+            (name(source), name(pdf))
+        }
+    }
+}
+
 fn render_html(
     script: &Path,
     source: &Path,
     output: &Path,
     project_root: &Path,
     timeout: Duration,
+    links: (String, String),
 ) -> anyhow::Result<()> {
     let mut command = Command::new("python3");
-    let pdf_name = output
-        .with_extension("pdf")
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "report.pdf".to_string());
+    let (source_href, pdf_href) = links;
     command
         .current_dir(project_root)
         .arg(script)
@@ -2389,8 +2392,10 @@ fn render_html(
         .arg(output)
         .arg("--project-root")
         .arg(project_root)
+        .arg("--source-href")
+        .arg(source_href)
         .arg("--pdf-href")
-        .arg(pdf_name);
+        .arg(pdf_href);
     let output_result = run_command(&mut command, Deadline::after(timeout), timeout)
         .map_err(|error| anyhow::anyhow!(bounded_error("python3", error)))?;
     if !output_result.status.success() {
@@ -2519,14 +2524,27 @@ const { pathToFileURL } = require('node:url');
     await page.evaluate(async () => {
       await document.fonts.ready;
       document.querySelectorAll('details').forEach(panel => { panel.open = true; });
+      // cas-692a: a link resolving to a local file is dead in every reader's
+      // copy; keep its text and drop the target.
+      document.querySelectorAll('a[href]').forEach(link => {
+        if (link.href.startsWith('file:')) link.removeAttribute('href');
+      });
     });
+    // The running folio wears the report's own tokens: its title and page
+    // count in the mono stack and muted ink the page declares.
+    const folio = await page.evaluate(() => {
+      const style = getComputedStyle(document.documentElement);
+      const token = name => style.getPropertyValue(name).trim();
+      return { color: token('--ink-muted') || 'GrayText', font: token('--font-mono') || 'monospace' };
+    });
+    const attr = text => text.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
     for (const format of ['A4', 'Letter']) {
       await page.pdf({
         path: path.join(output, path.basename(input, '.html') + '-' + format + '.pdf'),
         format, printBackground: true, preferCSSPageSize: false,
         margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' },
         displayHeaderFooter: true, headerTemplate: '<span></span>',
-        footerTemplate: '<div style="font:8px sans-serif;width:100%;text-align:center;color:#555"><span class="pageNumber"></span> / <span class="totalPages"></span></div>'
+        footerTemplate: `<div style="width:100%;margin:0 15mm;display:flex;justify-content:space-between;gap:12px;font:7px ${attr(folio.font)};color:${attr(folio.color)}"><span class="title"></span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`
       });
     }
   } finally { await browser.close(); }
@@ -2609,12 +2627,15 @@ impl RendererAssets {
 }
 
 /// An installed renderer is used only when it reads the front matter and the
-/// v2 change map this assembler writes; older copies fall back to the builtin.
+/// v2 change map this assembler writes, and accepts both link overrides passed
+/// by render_html; older copies fall back to the builtin.
 fn renderer_supports_source(path: &Path) -> bool {
     fs::read_to_string(path)
         .map(|content| {
             content.contains("front matter needs a closing")
                 && content.contains("['area', 'changes', 'what changed']")
+                && content.contains("--source-href")
+                && content.contains("--pdf-href")
         })
         .unwrap_or(false)
 }
@@ -3148,6 +3169,22 @@ fn playwright_module_missing(detail: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// cas-692a: Chromium prints a relative link as a file:// URL into the
+    /// generating checkout, so a report names its source and print edition
+    /// by their GitHub URLs on main, where the post-release report is committed.
+    #[test]
+    fn report_links_name_the_main_github_files_not_the_checkout_cas_692a() {
+        let (source, pdf) = report_link_hrefs(
+            Some("o/r"),
+            "main",
+            "docs/release-reports/v9.99.1.md",
+            "docs/release-reports/v9.99.1.pdf",
+        );
+        // pin: the exact URL is the link a reader of the published PDF follows.
+        assert_eq!(source, "https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.md");
+        assert_eq!(pdf, "https://github.com/o/r/blob/main/docs/release-reports/v9.99.1.pdf");
+    }
+
     /// cas-7860: issues are closed by hand minutes after the release PR
     /// merges, so a report generated at merge+10s must still count the
     /// issues that close at merge+30s, and must not recount an issue a
@@ -3218,6 +3255,10 @@ mod tests {
     /// with every stage's earlier releases read from their receipts.
     #[test]
     fn pipeline_latency_section_fails_an_over_budget_stage_with_its_trend() {
+        // cas-692a: with no latency receipt there is nothing it "records".
+        let absent = pipeline_latency_section(&ReleaseEvidence::default());
+        assert!(absent.contains("no latency receipt was found"), "{absent}");
+        assert!(!absent.contains("records"), "{absent}");
         let root = tempfile::tempdir().unwrap();
         for (dir, receipt) in [
             (
@@ -3465,7 +3506,8 @@ mod tests {
         let page_one = &report[..report.find("## What you can do now").unwrap()];
         assert!(!page_one.contains("| 0 |"), "{page_one}");
         assert!(!page_one.contains("unavailable |"), "{page_one}");
-        assert!(report.contains("No GitHub issues were closed with this release."));
+        assert!(report.contains("No GitHub issues are counted in this report"));
+        assert!(!report.contains("No GitHub issues were closed with this release."));
         assert!(report.contains("Not measured for this release: green to published"));
     }
 

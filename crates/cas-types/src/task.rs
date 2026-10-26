@@ -515,9 +515,75 @@ pub struct IntegrationBatchEvidence {
     pub recorded_at: DateTime<Utc>,
 }
 
+/// One supervisor decision authorizing one registered worker to start a peer's child.
+/// Removed by the successful start, or invalidated by a new assignment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SplitTakeoverAuthorization {
+    pub split_id: String,
+    pub worker_id: String,
+    pub supervisor_id: String,
+    pub reason: String,
+}
+
+/// Server-captured graph boundary for a worker starting a task on a reused
+/// lane. The base belongs to the preceding work, never to this task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryBranchStart {
+    pub work_target: WorkTarget,
+    pub assignee: String,
+    pub branch: String,
+    pub base_sha: String,
+}
+
+/// Host where a recorded epic lane was bound to its task. Diagnostic provenance
+/// only: current publication is always observed from Git, never from this row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EpicBranchOrigin {
+    pub branch: String,
+    pub host: String,
+    /// Stable source identity; legacy records fall back to their host label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+}
+
+/// CI evidence under which a published factory merge was admitted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeCiAdmission {
+    #[default]
+    Green,
+    Advisory,
+    Override,
+}
+
+impl MergeCiAdmission {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Advisory => "advisory",
+            Self::Override => "override",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Advisory => "advisory (unconfirmed)",
+            Self::Override => "override",
+        }
+    }
+}
+
 /// Deliverables and durable lifecycle evidence for a task.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TaskDeliverables {
+    /// Sync-safe origin for an unpublished lane; no host-local checkout path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epic_branch_origin: Option<EpicBranchOrigin>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub split_takeover: Option<SplitTakeoverAuthorization>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration_batch: Option<IntegrationBatchEvidence>,
 
@@ -593,6 +659,12 @@ pub struct TaskDeliverables {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub factory_branch_anchor: Option<String>,
 
+    /// Recorded after start reconciles the lane, preserved across resumes.
+    /// Descendants establish task identity without commit-message conventions;
+    /// close still rejects explicit foreign work after this boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factory_branch_start: Option<FactoryBranchStart>,
+
     /// Commit anchors from prior delivery cycles. `request_changes` clears
     /// `factory_branch_anchor` so a new cycle cannot reuse it as an active
     /// merge proof, but the declined commits remain this task's work and must
@@ -648,11 +720,14 @@ pub struct TaskDeliverables {
     pub parked_close_reason: Option<String>,
 
     /// cas-eda0: target tip of the `worktree_merge` that landed this parked
-    /// delivery with green CI and no override. Its presence hands the close
+    /// delivery. Admission is recorded separately; old records read as green.
+    /// Its presence hands the close
     /// retry to Cassy: an approved verdict closes the task without waking
     /// the worker. Cleared with the park on reopen or conflict rework.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub green_merge_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_ci_admission: Option<MergeCiAdmission>,
 }
 
 /// The object-shaped representation used by current task payloads.
@@ -662,6 +737,10 @@ pub struct TaskDeliverables {
 /// invoking itself.
 #[derive(Debug, Deserialize)]
 struct TaskDeliverablesObject {
+    #[serde(default)]
+    epic_branch_origin: Option<EpicBranchOrigin>,
+    #[serde(default)]
+    split_takeover: Option<SplitTakeoverAuthorization>,
     #[serde(default)]
     integration_batch: Option<IntegrationBatchEvidence>,
     #[serde(default)]
@@ -691,6 +770,8 @@ struct TaskDeliverablesObject {
     #[serde(default)]
     factory_branch_anchor: Option<String>,
     #[serde(default)]
+    factory_branch_start: Option<FactoryBranchStart>,
+    #[serde(default)]
     historical_factory_branch_anchors: Vec<String>,
     #[serde(default)]
     declined_factory_branch_anchors: Option<Vec<String>>,
@@ -704,11 +785,15 @@ struct TaskDeliverablesObject {
     parked_close_reason: Option<String>,
     #[serde(default)]
     green_merge_commit: Option<String>,
+    #[serde(default)]
+    merge_ci_admission: Option<MergeCiAdmission>,
 }
 
 impl From<TaskDeliverablesObject> for TaskDeliverables {
     fn from(value: TaskDeliverablesObject) -> Self {
         Self {
+            epic_branch_origin: value.epic_branch_origin,
+            split_takeover: value.split_takeover,
             integration_batch: value.integration_batch,
             work_target: value.work_target,
             work_target_cleared: value.work_target_cleared,
@@ -723,6 +808,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             delivery_pr_merged_at: value.delivery_pr_merged_at,
             review_envelope: value.review_envelope,
             factory_branch_anchor: value.factory_branch_anchor,
+            factory_branch_start: value.factory_branch_start,
             historical_factory_branch_anchors: value.historical_factory_branch_anchors,
             declined_factory_branch_anchors: value.declined_factory_branch_anchors,
             parked_branch: value.parked_branch,
@@ -730,6 +816,7 @@ impl From<TaskDeliverablesObject> for TaskDeliverables {
             merge_conflicted: value.merge_conflicted,
             parked_close_reason: value.parked_close_reason,
             green_merge_commit: value.green_merge_commit,
+            merge_ci_admission: value.merge_ci_admission,
         }
     }
 }
@@ -755,9 +842,12 @@ impl<'de> Deserialize<'de> for TaskDeliverables {
     }
 }
 
-/// Maximum serialized size of the structured task execution state. The state
-/// is a bounded resume surface, not an append-only transcript.
+/// Maximum serialized size of hand-written task resume fields. Automatic
+/// qa_impact has a separate bounded allowance; neither is a transcript.
 pub const TASK_EXECUTION_STATE_MAX_BYTES: usize = 16 * 1024;
+// Full diff impact can exceed the hand-written resume-state budget. Keep a
+// separate finite allowance so large owned diffs retain all journey matches.
+const TASK_QA_IMPACT_MAX_BYTES: usize = 1024 * 1024;
 const TASK_EXECUTION_STATE_MAX_STRING_BYTES: usize = 2 * 1024;
 const TASK_EXECUTION_STATE_MAX_ARRAY_ITEMS: usize = 256;
 
@@ -777,6 +867,7 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "decisions",
     "next_step",
     "blocked_hold",
+    "qa_impact",
 ];
 
 /// Apply and validate one structured task execution-state merge patch.
@@ -812,14 +903,6 @@ pub fn merge_task_execution_state_patch(current: &Value, patch: &Value) -> Resul
 
     let result = Value::Object(merged);
     validate_task_execution_state(&result)?;
-    let encoded = serde_json::to_vec(&result)
-        .map_err(|error| format!("failed to encode execution state: {error}"))?;
-    if encoded.len() > TASK_EXECUTION_STATE_MAX_BYTES {
-        return Err(format!(
-            "execution state exceeds the {}-byte limit",
-            TASK_EXECUTION_STATE_MAX_BYTES
-        ));
-    }
     Ok(result)
 }
 
@@ -842,7 +925,9 @@ pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
         }
         validate_task_execution_state_field(field, value)?;
     }
-    let encoded = serde_json::to_vec(state)
+    let mut resume = object.clone();
+    resume.remove("qa_impact");
+    let encoded = serde_json::to_vec(&resume)
         .map_err(|error| format!("failed to encode execution state: {error}"))?;
     if encoded.len() > TASK_EXECUTION_STATE_MAX_BYTES {
         return Err(format!(
@@ -888,6 +973,51 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
                         "execution state receipt {index} only allows command and exit_status"
                     ));
                 }
+            }
+            Ok(())
+        }
+        "qa_impact" => {
+            let impact = value
+                .as_object()
+                .ok_or_else(|| "qa_impact must be an object".to_string())?;
+            if impact.get("version").and_then(Value::as_u64) != Some(1)
+                || !impact
+                    .get("head_sha")
+                    .and_then(Value::as_str)
+                    .is_some_and(|head| {
+                        head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                || !impact.get("registry").is_some_and(Value::is_object)
+            {
+                return Err(
+                    "qa_impact requires version=1, a full head_sha and registry metadata".into(),
+                );
+            }
+            let journeys = impact
+                .get("journeys")
+                .and_then(Value::as_array)
+                .ok_or_else(|| "qa_impact requires a journeys array".to_string())?;
+            for journey in journeys {
+                if !journey
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || !matches!(
+                        journey.get("status").and_then(Value::as_str),
+                        Some("live" | "dark" | "dead")
+                    )
+                {
+                    return Err("qa_impact journeys require an id and live/dark/dead status".into());
+                }
+            }
+            if serde_json::to_vec(value)
+                .map_err(|error| error.to_string())?
+                .len()
+                > TASK_QA_IMPACT_MAX_BYTES
+            {
+                return Err(format!(
+                    "qa_impact exceeds the {TASK_QA_IMPACT_MAX_BYTES}-byte limit"
+                ));
             }
             Ok(())
         }
@@ -1040,8 +1170,15 @@ impl TaskDeliverables {
             .unwrap_or(&self.historical_factory_branch_anchors)
     }
 
+    /// Missing admission predates the distinction and retains green semantics.
+    pub fn effective_merge_ci_admission(&self) -> MergeCiAdmission {
+        self.merge_ci_admission.unwrap_or_default()
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.work_target.is_none()
+        self.epic_branch_origin.is_none()
+            && self.split_takeover.is_none()
+            && self.work_target.is_none()
             && self.pre_close_hook.is_none()
             && self.negative_result.is_none()
             && self.evidence_only.is_none()
@@ -1053,10 +1190,13 @@ impl TaskDeliverables {
             && self.delivery_pr_merged_at.is_none()
             && self.review_envelope.is_none()
             && self.factory_branch_anchor.is_none()
+            && self.factory_branch_start.is_none()
             && self.historical_factory_branch_anchors.is_empty()
             && self.declined_factory_branch_anchors.is_none()
             && self.parked_branch.is_none()
             && !self.merge_conflicted
+            && self.green_merge_commit.is_none()
+            && self.merge_ci_admission.is_none()
     }
 }
 
@@ -1470,6 +1610,30 @@ mod tests {
         );
         assert!(validate_task_execution_state(&state).is_ok());
 
+        let impact = serde_json::json!({"version": 1, "head_sha": "a".repeat(40),
+            "registry": {"present": true}, "journeys": [{"id": "SEND", "status": "live"}],
+            "matches": "x".repeat(TASK_EXECUTION_STATE_MAX_BYTES)});
+        let with_impact =
+            merge_task_execution_state_patch(&state, &serde_json::json!({"qa_impact": impact}))
+                .unwrap();
+        assert_eq!(with_impact["qa_impact"]["journeys"][0]["id"], "SEND");
+        assert_eq!(with_impact["blocked_hold"], state["blocked_hold"]);
+        for invalid in [
+            serde_json::json!(false),
+            serde_json::json!({}),
+            serde_json::json!({"version":1, "head_sha":"a".repeat(40), "registry":{}, "journeys":[{"id":"SEND", "status":"unknown"}]}),
+            serde_json::json!({"version":1, "head_sha":"a".repeat(40), "registry":{}, "journeys":[], "oversize":"x".repeat(TASK_QA_IMPACT_MAX_BYTES)}),
+        ] {
+            assert!(
+                merge_task_execution_state_patch(&state, &serde_json::json!({"qa_impact":invalid}))
+                    .is_err()
+            );
+        }
+        let cleared_impact =
+            merge_task_execution_state_patch(&with_impact, &serde_json::json!({"qa_impact":null}))
+                .unwrap();
+        assert_eq!(cleared_impact, state);
+
         let cleared =
             merge_task_execution_state_patch(&state, &serde_json::json!({"blocked_hold": null}))
                 .expect("null patch should clear the hold");
@@ -1495,8 +1659,15 @@ mod tests {
     #[test]
     fn legacy_deliverables_json_defaults_to_no_work_target() {
         let deliverables: TaskDeliverables = serde_json::from_str("{}").unwrap();
+        assert!(deliverables.epic_branch_origin.is_none());
         assert!(deliverables.work_target.is_none());
         assert!(deliverables.pre_close_hook.is_none());
+        assert_eq!(deliverables.effective_merge_ci_admission(), MergeCiAdmission::Green);
+        for (state, expected) in [("green", MergeCiAdmission::Green), ("advisory", MergeCiAdmission::Advisory), ("override", MergeCiAdmission::Override)] {
+            let parsed: TaskDeliverables = serde_json::from_value(serde_json::json!({"green_merge_commit":"sha", "merge_ci_admission":state})).unwrap();
+            assert_eq!(parsed.effective_merge_ci_admission(), expected);
+            assert_eq!(serde_json::to_value(parsed).unwrap()["merge_ci_admission"], state);
+        }
     }
 
     #[test]
@@ -1518,6 +1689,30 @@ mod tests {
             Some("deadbeef")
         );
         assert!(serde_json::to_value(task).unwrap()["deliverables"].is_object());
+
+        // A takeover may be the only deliverable. It must survive the same
+        // persistence boundary without relying on human task notes for authority.
+        let authorization = serde_json::json!({"split_id": "split-test", "worker_id": "worker-1",
+            "supervisor_id": "supervisor-1", "reason": "peer handed back the child"});
+        let mut encoded = serde_json::to_value(Task::new("cas-takeover".into(), "takeover".into())).unwrap();
+        encoded["deliverables"] = serde_json::json!({"split_takeover": authorization});
+        let task: Task = serde_json::from_value(encoded).unwrap();
+        assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["split_takeover"], authorization);
+
+        // Origin may be the only deliverable and must survive object and
+        // legacy string transport without a machine-local checkout path.
+        for origin in [
+            serde_json::json!({"branch": "epic/peer", "host": "soundwave"}),
+            serde_json::json!({"branch": "epic/peer", "host": "soundwave", "device_id": "source-device"}),
+        ] {
+        for value in [serde_json::json!({"epic_branch_origin": origin}),
+            serde_json::json!(serde_json::json!({"epic_branch_origin": origin}).to_string())] {
+            let mut encoded = serde_json::to_value(Task::new("cas-peer".into(), "peer".into())).unwrap();
+            encoded["deliverables"] = value;
+            let task: Task = serde_json::from_value(encoded).unwrap();
+            assert_eq!(serde_json::to_value(task).unwrap()["deliverables"]["epic_branch_origin"], origin);
+        }
+        }
     }
 
     #[test]
@@ -1525,6 +1720,19 @@ mod tests {
         let mut task = Task::new(
             "cas-historical-anchor".to_string(),
             "Retain declined delivery identity".to_string(),
+        );
+        task.deliverables.factory_branch_start = Some(FactoryBranchStart {
+            work_target: WorkTarget {
+                repo_selector: "project:test".into(),
+                target_branch: "main".into(),
+            },
+            assignee: "worker".into(),
+            branch: "factory/worker".into(),
+            base_sha: "b".repeat(40),
+        });
+        assert!(
+            !task.deliverables.is_empty(),
+            "start evidence alone must persist"
         );
         task.deliverables
             .historical_factory_branch_anchors
@@ -1540,8 +1748,13 @@ mod tests {
             vec!["a".repeat(40)]
         );
 
+        assert_eq!(
+            decoded.deliverables.factory_branch_start,
+            task.deliverables.factory_branch_start
+        );
         let legacy: TaskDeliverables = serde_json::from_str("{}").unwrap();
         assert!(legacy.historical_factory_branch_anchors.is_empty());
+        assert!(legacy.factory_branch_start.is_none());
     }
 
     #[test]

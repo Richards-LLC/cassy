@@ -111,16 +111,14 @@ pub(super) fn rejection(
                 ));
             }
         };
-        let lines: Vec<_> = diff
-            .lines()
-            .filter(|line| {
-                (line.starts_with('+') || line.starts_with('-'))
-                    && !line.starts_with("+++")
-                    && !line.starts_with("---")
-                    || line.starts_with("Binary files ")
+        let lines: Vec<_> = super::task_attribution::hunk_lines(&diff)
+            .map(|(_, line)| line)
+            .filter(|line| line.starts_with('+') || line.starts_with('-'))
+            .chain(diff.lines().filter(|line| {
+                line.starts_with("Binary files ")
                     || line.starts_with("old mode ")
                     || line.starts_with("new mode ")
-            })
+            }))
             .collect();
         // Paths reported by attribution can include an unchanged snapshot from
         // an earlier commit in the receipt window. Only a real diff needs approval.
@@ -202,13 +200,13 @@ mod tests {
     }
 
     #[test]
-    fn real_git_snapshot_changes_require_file_changed_line_and_reason_even_after_merge() {
+    fn real_git_snapshot_changes_require_file_changed_line_and_reason_even_after_merge_cas_1597() {
         let dir = tempfile::tempdir().unwrap();
         let repo = dir.path();
         git(repo, &["init", "-q", "-b", "main"]);
         git(repo, &["config", "user.name", "fixture"]);
         git(repo, &["config", "user.email", "fixture@example.test"]);
-        std::fs::write(repo.join("view.snap"), "before\n").unwrap();
+        std::fs::write(repo.join("view.snap"), "-- before\n").unwrap();
         git(repo, &["add", "."]);
         git(repo, &["commit", "-qm", "base"]);
         let base = git(repo, &["rev-parse", "HEAD"]);
@@ -236,6 +234,7 @@ mod tests {
             .unwrap();
             assert!(error.contains("mcp__cs__task action=notes id=cas-fixture note_type=decision"));
             assert!(error.contains("view.snap — +after"));
+            assert!(error.contains("2 changed lines"), "removed -- content must count: {error}");
         }
         let notes = "[time] decision snapshot-approved: view.snap — +after — display now includes the new field";
         assert!(

@@ -229,6 +229,10 @@ pub(crate) struct DeliveryRequest {
     /// against (cas-3b16: read here, not on the loop).
     session: Option<String>,
     merge_events: Vec<DirectorEvent>,
+    merge_probes: super::merge_alert::ProbeCache,
+    probe_now: chrono::DateTime<chrono::Utc>,
+    blocked_tasks: Vec<String>,
+    supervisor: String,
 }
 
 /// The idle-worker liveness a delivery read is joined with: agent store,
@@ -258,6 +262,7 @@ impl IdleLivenessRequest {
 /// The delivery stage's fresh read: the unfiltered snapshot events are
 /// revalidated against, and the `Blocks` dependencies that gate dispatch.
 pub(crate) struct DeliveryInputs {
+    pub(super) verification_waits: HashMap<String, String>,
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
     /// Liveness of each idle worker, observed off the loop.
@@ -270,8 +275,8 @@ pub(crate) struct DeliveryInputs {
     /// against, read with the facts.
     pub(super) session: Option<SessionProgressRead>,
     pub(super) merge_alerts: HashMap<String, super::merge_alert::Ready>,
-    /// Worker -> (current task, exact pushed tip) with positively pending CI.
-    pub(super) worker_ci_waits: HashMap<String, (String, String)>,
+    /// Current task/tip/CI and positive build waits, read off the loop.
+    pub(super) worker_waits: HashMap<String, super::merge_alert::WorkerWait>,
 }
 
 impl DeliveryInputs {
@@ -281,6 +286,7 @@ impl DeliveryInputs {
     #[cfg(test)]
     pub(crate) fn failed_for_test() -> Self {
         Self {
+            verification_waits: HashMap::new(),
             data: Err(anyhow::anyhow!("test: the fresh read failed")),
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
@@ -288,7 +294,7 @@ impl DeliveryInputs {
             assignment: None,
             session: None,
             merge_alerts: HashMap::new(),
-            worker_ci_waits: HashMap::new(),
+            worker_waits: HashMap::new(),
         }
     }
 
@@ -361,23 +367,27 @@ impl DeliveryRequest {
             (Some(session), Some(_)) => Some(session_progress_named(session)),
             _ => None,
         };
-        let merge_alerts = data.as_ref().ok().map(|fresh| {
+        let (mut merge_alerts, mut worker_waits) = (HashMap::new(), HashMap::new());
+        if let Ok(fresh) = &data {
+            super::merge_alert::prune_ready_receipts(&self.merge_probes, &self.cas_dir, self.probe_now);
             let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
-            self.merge_events.iter().filter_map(|event| {
-                let ready = super::merge_alert::read(event, fresh, repo)?;
-                Some((ready.evidence.task_id.clone(), ready))
-            }).collect()
-        }).unwrap_or_default();
-        let worker_ci_waits = data.as_ref().ok().map(|fresh| {
-            let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
-            self.merge_events.iter().filter_map(|event| {
-                super::merge_alert::read_worker_ci_wait(event, fresh, repo)
-            }).collect()
-        }).unwrap_or_default();
+            for event in &self.merge_events {
+                let (ready, wait) = super::merge_alert::read_delivery(
+                    &self.merge_probes, event, fresh, repo, self.probe_now,
+                );
+                if let Some(ready) = ready { merge_alerts.insert(ready.evidence.task_id.clone(), ready); }
+                if let Some((worker, wait)) = wait { worker_waits.insert(worker, wait); }
+            }
+        }
         let assignment = self.stall.as_ref().and_then(|stall|
             data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
             .map(|request| request.read());
         DeliveryInputs {
+            verification_waits: self.blocked_tasks.iter().filter_map(|task| {
+                crate::mcp::tools::core::task::block_hold::owned_verification_wait(
+                    &self.cas_dir, task, &self.supervisor,
+                ).map(|dispatch| (task.clone(), dispatch))
+            }).collect(),
             data,
             blocks_deps,
             idle_liveness,
@@ -385,7 +395,7 @@ impl DeliveryRequest {
             assignment,
             session,
             merge_alerts,
-            worker_ci_waits,
+            worker_waits,
         }
     }
 }
@@ -547,11 +557,23 @@ pub(crate) struct DeliverabilityRequest {
 }
 
 impl DeliverabilityRequest {
-    /// Whether each prompt is still deliverable. Runs on any thread. Always a
+    /// Final merge-signal builder check, executed on the external release lane.
+    pub(crate) fn refresh_merge_prompt(&self, prompt: &mut Prompt) -> bool {
+        if prompt.merge_alert.is_none() {
+            return self.read(None, std::slice::from_mut(prompt)) == [true];
+        }
+        let Ok(data) = DirectorData::load_with_stores_for_project(
+            &self.cas_dir, self.worktree_root.as_deref(), false, None, self.project_id.as_deref(),
+        ) else { return false; };
+        crate::ui::factory::director::refresh_ci_merge_signal(prompt, &data, &self.cas_dir, &self.repo_root)
+    }
+
+    /// Refresh each prompt's body and return whether it is deliverable.
+    /// Runs on any thread. Always a
     /// fresh read: a failed read is uncertainty, and an uncertain prompt is
     /// delivered. Never retract a legitimate notification from cached data
     /// (app/mod.rs, `prompt_is_still_deliverable`).
-    pub(crate) fn read(&self, stores: Option<&DirectorStores>, prompts: &[Prompt]) -> Vec<bool> {
+    pub(crate) fn read(&self, stores: Option<&DirectorStores>, prompts: &mut [Prompt]) -> Vec<bool> {
         if !prompts.iter().any(prompt_needs_fresh_recheck) {
             return vec![true; prompts.len()];
         }
@@ -563,10 +585,15 @@ impl DeliverabilityRequest {
             self.project_id.as_deref(),
         );
         prompts
-            .iter()
+            .iter_mut()
             .map(|prompt| {
                 !prompt_needs_fresh_recheck(prompt)
                     || fresh.as_ref().map_or(true, |data| {
+                        if prompt.merge_alert.is_some() {
+                            return crate::ui::factory::director::refresh_ci_merge_signal(
+                                prompt, data, &self.cas_dir, &self.repo_root,
+                            );
+                        }
                         crate::ui::factory::director::prompt_is_still_deliverable(
                             prompt,
                             data,
@@ -696,6 +723,11 @@ impl FactoryApp {
             .flatten();
         let session = stall.as_ref().and(self.factory_session.clone());
         DeliveryRequest {
+            blocked_tasks: events.iter().filter_map(|event| match event {
+                DirectorEvent::TaskBlocked { task_id, .. } => Some(task_id.clone()),
+                _ => None,
+            }).collect(),
+            supervisor: self.supervisor_name.clone(),
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),
@@ -703,6 +735,8 @@ impl FactoryApp {
             stall,
             session,
             merge_events: events.iter().filter(|event| super::merge_alert::needs_ci_read(event)).cloned().collect(),
+            merge_probes: std::sync::Arc::clone(&self.merge_alert_retries.probes),
+            probe_now: self.merge_alert_retries.clock(),
         }
     }
 
@@ -817,7 +851,11 @@ impl FactoryApp {
         events.extend(timed("supervisor stall", || self.detect_supervisor_stall()));
         let retries = self.merge_alert_retry_events_at(self.merge_alert_retries.clock());
         for retry in retries {
-            if !events.iter().any(|event| super::merge_alert::task_id(event) == super::merge_alert::task_id(&retry)) {
+            if !events.iter().any(|event| match (event, &retry) {
+                (DirectorEvent::WorkerIdle { active_task: Some(a), .. },
+                 DirectorEvent::WorkerIdle { active_task: Some(b), .. }) => a.task_id == b.task_id,
+                _ => false,
+            }) {
                 events.push(retry);
             }
         }

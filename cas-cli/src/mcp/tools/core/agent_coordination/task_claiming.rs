@@ -1,3 +1,4 @@
+use crate::mcp::tools::core::task::audit;
 use crate::harness_policy::is_supervisor_from_env;
 use crate::mcp::tools::core::imports::*;
 
@@ -15,6 +16,15 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        // Only start consumes a worker-bound takeover. Refuse before claim's
+        // auto-assignment/adoption paths can mutate a peer's task.
+        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                hold.refusal(&req.task_id, &crate::mcp::tools::core::guidance::caller_prefix()),
+            ));
+        }
 
         // cas-a0d2: adopt an unattributed row into this project. Unlike
         // `start`, claim has no later write of its own, so persist the
@@ -196,17 +206,6 @@ impl CasCore {
         // cas-5f28: mirror the claim into Cassy Cloud first; a peer on another
         // machine that holds this task refuses the claim before anything here
         // changes. Epics are shared: their overlap is only reported.
-        // cas-4736: a child the peer took under a binding epic split.
-        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(hold.refusal(
-                    &req.task_id,
-                    &crate::mcp::tools::core::guidance::caller_prefix(),
-                )),
-                data: None,
-            });
-        }
         // cas-0078: a claim another agent of this database holds is left with
         // it until the local lease below decides, and every round trip runs
         // off the async runtime within one budget.
@@ -220,6 +219,8 @@ impl CasCore {
             crate::cloud::peer_claims::ClaimKind::Task
         };
         let mut cloud_claimed = false;
+        let mut peer_claim_fence = None;
+        let mut claim_snapshot = None;
         let mut cloud_local_holder: Option<String> = None;
         let peer_note = match peer_claims.clone() {
             Some(claims) => {
@@ -227,18 +228,21 @@ impl CasCore {
                 let kind = claim_kind;
                 let local = crate::cloud::peer_claims::local_agent_ids(agent_store.as_ref());
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                let answer = {
+                let (answer, fence, snapshot) = {
+                    let cas_root = self.cas_root.clone();
                     let (id, agent, name) =
                         (req.task_id.clone(), agent_id.clone(), agent_name.clone());
                     peer_budget
                         .run(move || {
-                            claims.acquire(&id, kind, &agent, &name, cloud_duration, &|holder| {
+                            claims.acquire_for_local_lease(&cas_root, &id, kind, &agent, &name, cloud_duration, &|holder| {
                                 local.contains(holder)
                             })
                         })
                         .await
-                        .unwrap_or_else(Acquire::Unavailable)
+                        .unwrap_or_else(|reason| (Acquire::Unavailable(reason), None, None))
                 };
+                peer_claim_fence = fence;
+                claim_snapshot = snapshot;
                 match answer {
                     Acquire::Claimed => {
                         cloud_claimed = true;
@@ -285,26 +289,21 @@ impl CasCore {
             None => Some(peer_note),
         };
 
-        let result = agent_store
-            .try_claim(
-                &req.task_id,
-                &agent_id,
-                req.duration_secs,
-                req.reason.as_deref(),
-            )
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to claim task: {e}")),
-                data: None,
-            })?;
+        let result = agent_store.try_claim(
+            &req.task_id,
+            &agent_id,
+            req.duration_secs,
+            req.reason.as_deref(),
+        );
 
         // cas-0078: the cloud claim follows the local lease. The winner takes
         // a claim another local agent held; a refused claimant leaves behind
-        // no claim of its own, and never touches anyone else's.
+        // no claim of its own, including when the local write fails, and
+        // never touches anyone else's.
         if let Some(claims) = peer_claims {
             let won = match &result {
-                ClaimResult::Success(_) => true,
-                ClaimResult::AlreadyClaimed { held_by, .. } => held_by == &agent_id,
+                Ok(ClaimResult::Success(_)) => true,
+                Ok(ClaimResult::AlreadyClaimed { held_by, .. }) => held_by == &agent_id,
                 _ => false,
             };
             let (id, agent, name) = (req.task_id.clone(), agent_id.clone(), agent_name.clone());
@@ -318,12 +317,27 @@ impl CasCore {
                         .await;
                 }
                 (false, _) if cloud_claimed => {
-                    let _ = peer_budget.run(move || claims.release_own(&id, &agent)).await;
+                    // cas-da31: fenced until the release really ends.
+                    let fence = peer_claim_fence.take();
+                    let _ = peer_budget
+                        .run(move || {
+                            let _fence = fence;
+                            claims.release_own_at(&id, &agent, claim_snapshot)
+                        })
+                        .await;
                 }
                 _ => {}
             }
         }
 
+        // Keep an old release excluded through local publication and any
+        // Cloud handoff or rollback decided by that local arbitration.
+        drop(peer_claim_fence);
+        let result = result.map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to claim task: {e}")),
+            data: None,
+        })?;
         match result {
             ClaimResult::Success(lease) => {
                 // Update task to in_progress if it's open
@@ -481,9 +495,11 @@ impl CasCore {
         // GH #1098: a registered live supervisor can return a worker's
         // task to the pool without waiting for its exhausted conversation.
         // Environment roles and force=true do not grant this authority.
-        let is_live_supervisor = agent_store.get(&agent_id).is_ok_and(|agent| {
+        let caller = agent_store.get(&agent_id).ok();
+        let is_live_supervisor = caller.as_ref().is_some_and(|agent| {
             agent.role == cas_types::AgentRole::Supervisor && agent.is_alive()
         });
+        let reviewer_name = caller.as_ref().map(|agent| agent.name.as_str()).unwrap_or(&agent_id);
         let release_result = if is_live_supervisor {
             agent_store
                 .release_lease_for_task(
@@ -506,8 +522,14 @@ impl CasCore {
 
         match release_result {
             Ok(()) => {
+                let qa_warning = self.release_qa_claim_on_task_release(
+                    &req.task_id, &agent_id, reviewer_name, is_live_supervisor,
+                );
                 // cas-5f28: release the Cassy Cloud claim beside the lease.
-                crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+                crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id)
+                    .await;
+                // cas-c55f: and the file leases taken for the task.
+                crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
                 let mut task = task_store.get(&req.task_id).map_err(|e| McpError {
                     code: ErrorCode::INTERNAL_ERROR,
                     message: Cow::from(format!(
@@ -546,12 +568,12 @@ impl CasCore {
                         data: None,
                     })?;
                     Ok(Self::success(format!(
-                        "Released task: {} (status reset from InProgress to Open)",
+                        "Released task: {} (status reset from InProgress to Open){qa_warning}",
                         req.task_id
                     )))
                 } else {
                     Ok(Self::success(format!(
-                        "Released task lease: {} (task status remains {})",
+                        "Released task lease: {} (task status remains {}){qa_warning}",
                         req.task_id, task.status
                     )))
                 }
@@ -580,6 +602,11 @@ impl CasCore {
                             && task.status != TaskStatus::Open
                             && task.status != TaskStatus::AwaitingMerge
                         {
+                            let qa_warning = self.release_qa_claim_on_task_release(
+                                &req.task_id, &agent_id, reviewer_name, is_live_supervisor,
+                            );
+                            crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id).await;
+                            crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
                             let prior_status = task.status;
                             let prior_assignee = task.assignee.clone();
                             task.status = TaskStatus::Open;
@@ -603,7 +630,7 @@ impl CasCore {
                                 data: None,
                             })?;
                             return Ok(Self::success(format!(
-                                "Released task: {} (auto-recovered from {:?} — lease was absent; status reset to Open)",
+                                "Released task: {} (auto-recovered from {:?} — lease was absent; status reset to Open){qa_warning}",
                                 req.task_id, prior_status
                             )));
                         }
@@ -615,6 +642,38 @@ impl CasCore {
                     message: Cow::from(format!("Failed to release task: {err_str}")),
                     data: None,
                 })
+            }
+        }
+    }
+
+    // QA ownership is independent of the task lease. An error here must not
+    // strand Cloud/file leases after the task lease has already been dropped.
+    fn release_qa_claim_on_task_release(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        reviewer_name: &str,
+        is_live_supervisor: bool,
+    ) -> String {
+        let released = if is_live_supervisor {
+            cas_store::release_qa_claim_for_task(&self.cas_root, task_id)
+        } else {
+            cas_store::release_qa_claim_for_reviewer(&self.cas_root, task_id, reviewer_name)
+                .or_else(|error| {
+                    // QA start records names; direct store callers may record IDs.
+                    // Retry only an ownership conflict, preserving database failures.
+                    if reviewer_name != agent_id && matches!(&error, cas_store::StoreError::Other(_)) {
+                        cas_store::release_qa_claim_for_reviewer(&self.cas_root, task_id, agent_id)
+                    } else {
+                        Err(error)
+                    }
+                })
+        };
+        match released {
+            Ok(_) => String::new(),
+            Err(error) => {
+                tracing::warn!(task_id, agent_id, %error, "task release could not clear QA claim; continuing cleanup");
+                format!("\nWarning: QA pass claim was not released: {error}")
             }
         }
     }
@@ -661,7 +720,6 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
-
         if task.is_terminal() {
             return Err(McpError {
                 code: ErrorCode::INVALID_PARAMS,
@@ -673,26 +731,68 @@ impl CasCore {
             });
         }
 
-        // cas-bebc (GH #1023 finding 9): a supervisor sharing this clone must
-        // not force-release another live session's worker's task. `force`
-        // bypasses the liveness guard below, never ownership.
-        if let Some(assignee) = task.assignee.as_deref()
-            && let Some((owner, caller)) = crate::factory_session_scope::foreign_owner_in_store(
-                &self.cas_root,
-                |agents, caller, now| {
-                    crate::factory_session_scope::foreign_owner_of_worker(
-                        agents, caller, assignee, now,
-                    )
-                },
-            )
+        // GH #1362: a fresh old supervisor row is not proof its daemon is
+        // alive. Cross-session recovery still requires an authenticated epic
+        // owner and positive evidence that the original daemon is dead.
+        let caller_id = self.get_registered_agent_id_read_only().ok();
+        let caller_session = caller_id
+            .as_deref()
+            .and_then(|id| agent_store.get(id).ok())
+            .and_then(|caller| caller.factory_session)
+            .or_else(crate::factory_session_scope::caller_factory_session);
+        if let (Some(session), Some(assignee)) =
+            (caller_session.as_deref(), task.assignee.as_deref())
         {
-            return Err(McpError {
-                code: ErrorCode::INVALID_PARAMS,
-                message: Cow::from(
-                    owner.refusal(&format!("task reset of {}", req.task_id), &caller),
-                ),
+            let roster = agent_store.list(None).map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(error.to_string()),
                 data: None,
-            });
+            })?;
+            let worker = roster
+                .iter()
+                .filter(|worker| {
+                    worker.role == cas_types::AgentRole::Worker
+                        && (worker.id == assignee || worker.name.eq_ignore_ascii_case(assignee))
+                })
+                .max_by_key(|worker| {
+                    (
+                        worker.factory_session.as_deref() == Some(session),
+                        worker.registered_at,
+                    )
+                });
+            if let Some(worker) = worker
+                && let Some(original) = worker
+                    .factory_session
+                    .as_deref()
+                    .filter(|original| *original != session)
+                && (worker.is_alive()
+                    || crate::mcp::tools::service::agent_liveness::agent_process_is_alive(worker))
+                && !crate::factory_session_scope::adopted_worker_supervisor(&self.cas_root, worker)
+                    .is_some_and(|owner| {
+                        Some(&owner.id) == caller_id.as_ref()
+                            && owner.factory_session.as_deref() == Some(session)
+                    })
+            {
+                let owner = crate::factory_session_scope::ForeignOwner {
+                    worker: worker.name.clone(),
+                    session: original.into(),
+                    supervisor: roster
+                        .iter()
+                        .find(|agent| {
+                            agent.role == cas_types::AgentRole::Supervisor
+                                && agent.factory_session.as_deref() == Some(original)
+                        })
+                        .map(|agent| agent.name.clone())
+                        .unwrap_or_else(|| "unknown".into()),
+                };
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from(
+                        owner.refusal(&format!("task reset of {}", req.task_id), session),
+                    ),
+                    data: None,
+                });
+            }
         }
 
         // cas-86c5: Alive-worker safety guard.
@@ -745,22 +845,24 @@ impl CasCore {
             .release_lease_for_task(&req.task_id, "Task reset")
             .unwrap_or(false);
         // cas-5f28: and its Cassy Cloud claim, so peers may start it.
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+        crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id).await;
+        // cas-c55f: and the file leases taken for it.
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
         let prior_status = task.status;
         let prior_assignee = task.assignee.clone();
         task.status = TaskStatus::Open;
         task.assignee = None;
-        let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        // cas-47a2: history only; the next holder binds its own branch.
+        crate::factory_isolation::retire_branch_binding(&mut task.deliverables);
         // cas-86c5: note whether the reset was forced (live worker override).
         let recovery_kind = if req.force.unwrap_or(false) {
             "forced reset (alive-worker guard bypassed)"
         } else {
             "dead-session recovery"
         };
-        let audit = format!(
-            "[{ts}] reset: force-transitioned {prior_status:?}→Open (prior assignee: {}, lease released: {lease_released}) — {recovery_kind}",
-            prior_assignee.as_deref().unwrap_or("<none>")
+        let audit = audit::reset_note(
+            chrono::Utc::now(), prior_status, prior_assignee.as_deref(), lease_released, recovery_kind,
         );
         task.notes = if task.notes.is_empty() {
             audit
@@ -830,14 +932,14 @@ impl CasCore {
 
         // Filter to unclaimed tasks. Legacy rows with no origin remain visible;
         // explicitly foreign rows require the opt-in flag.
-        let project_id = super::super::task::current_project_id(&self.cas_root);
+        let project_scope = super::super::task::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
             0
         } else {
             ready_tasks
                 .iter()
                 .filter(|task| {
-                    !super::super::task::task_visible_in_project(task, project_id.as_deref())
+                    !project_scope.shows(task)
                 })
                 .count()
         };
@@ -845,7 +947,7 @@ impl CasCore {
             .iter()
             .filter(|t| {
                 req.include_foreign
-                    || super::super::task::task_visible_in_project(t, project_id.as_deref())
+                    || project_scope.shows(t)
             })
             .filter(|t| !claimed_ids.contains(t.id.as_str()))
             .collect();
@@ -922,6 +1024,17 @@ impl CasCore {
         &self,
         Parameters(req): Parameters<TaskTransferRequest>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(message) = req
+            .note
+            .as_deref()
+            .and_then(crate::mcp::tools::core::task::caller_note_marker_rejection)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
         let agent_store = self.open_agent_store()?;
         let task_store = self.open_task_store()?;
 
@@ -944,6 +1057,15 @@ impl CasCore {
             data: None,
         })?;
 
+        // A transfer must not silently move a split child or its takeover
+        // grant. Redirect the split, or mint a new reasoned assignment.
+        if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.task_id) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                hold.refusal(&req.task_id, &crate::mcp::tools::core::guidance::caller_prefix()),
+            ));
+        }
+
         // Set when the task had no active lease at all (e.g. a Blocked task
         // whose lease lapsed). The assignee, or a supervisor with
         // supervisor_override, may still hand it on (cas-6cfe7, GH #987).
@@ -956,6 +1078,10 @@ impl CasCore {
             data: None,
         })?;
 
+        // A supervisor issues the transfer but is not its previous holder.
+        // Capture the source before the assignee is overwritten below.
+        let previous_holder = lease.as_ref().map(|lease| lease.agent_id.clone())
+            .or_else(|| task.assignee.clone()).unwrap_or_else(|| "<unassigned>".into());
         // prior_lease_holder is Some(<agent_id>) when we force-released a live lease.
         // Used below for the audit note.
         let prior_lease_holder: Option<String> = match &lease {
@@ -1139,6 +1265,7 @@ impl CasCore {
         }
         // Update assignee to the target agent
         task.assignee = Some(target_name);
+        task.deliverables.split_takeover = None;
         task.updated_at = chrono::Utc::now();
 
         task_store.update(&task).map_err(|e| McpError {
@@ -1167,14 +1294,16 @@ impl CasCore {
                 })?;
         }
         // cas-5f28: the receiver's start takes the cloud claim afresh.
-        crate::cloud::peer_claims::release_task_claim(&self.cas_root, &req.task_id);
+        crate::cloud::peer_claims::release_task_claim_off_runtime(&self.cas_root, &req.task_id).await;
+        // cas-978d: and the previous holder's file leases end with its work.
+        crate::cloud::file_leases::release_for_task(&self.cas_root, &req.task_id);
 
         // Try to claim for target agent (best effort - they may need to claim themselves)
         let claim_result = agent_store.try_claim(
             &req.task_id,
             &target_agent.id,
             DEFAULT_LEASE_DURATION_SECS,
-            Some(&format!("Transferred from {agent_id}")),
+            Some(&format!("Transferred from {previous_holder}")),
         );
 
         let claim_msg = match claim_result {
@@ -1204,7 +1333,7 @@ impl CasCore {
         Ok(Self::success(format!(
             "Transferred task {} from {} to {}\n{}\nNote: {}{}{}",
             req.task_id,
-            agent_id,
+            previous_holder,
             target_label,
             claim_msg,
             req.note.as_deref().unwrap_or("(none)"),
@@ -1271,7 +1400,7 @@ impl CasCore {
         }
 
         let leases = agent_store.list_agent_leases(&agent_id).unwrap_or_default();
-        let project_id = super::super::task::current_project_id(&self.cas_root);
+        let project_scope = super::super::task::ProjectScope::current(&self.cas_root);
         let mut assigned: Vec<Task> = task_store
             .list(None)
             .unwrap_or_default()
@@ -1280,7 +1409,7 @@ impl CasCore {
             // unattributed row is this project's work until some other project
             // claims it, and hiding it from `mine` left an assigned worker
             // with nothing to act on.
-            .filter(|t| super::super::task::task_visible_in_project(t, project_id.as_deref()))
+            .filter(|t| project_scope.shows(t))
             .filter(|t| {
                 if t.is_terminal() {
                     return false;

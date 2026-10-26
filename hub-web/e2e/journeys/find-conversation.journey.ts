@@ -596,11 +596,14 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await page.setViewportSize({ width: 390, height: 844 });
     for (const header of [await headerHost()]) { expect(header.machineChars, "machine on the header at 390").toBeGreaterThanOrEqual(4); expect(header.osCut, "OS word cut at 390").toBe(false); }
     const meta = page.locator(".thread .empty .proj2");
-    const fitted = await meta.evaluate((line) => {
+    const measureFit = () => meta.evaluate((line) => {
       const machine = line.querySelector<HTMLElement>(".proj2-machine")!;
       const ch = parseFloat(getComputedStyle(machine).fontSize) * 0.6;
       return { machineChars: machine.getBoundingClientRect().width / ch, os: (machine.querySelector<HTMLElement>(".host-os")?.getBoundingClientRect().width ?? 0) > 1, title: line.getAttribute("title") };
     });
+    // Viewport resizing resolves before ResizeObserver has necessarily fitted the line.
+    await expect.poll(measureFit, { message: "the phone metadata finishes fitting after resize" }).toMatchObject({ os: false });
+    const fitted = await measureFit();
     expect(fitted.machineChars, "the machine keeps 16ch at 390px").toBeGreaterThanOrEqual(15.5);
     expect(fitted.os, "the OS word goes before the name is cut").toBe(false);
     expect(fitted.title).toBe("Forge build box with an unusual hostname · Linux · quiet-heron-7");

@@ -40,7 +40,7 @@ impl CasCore {
             to_id: req.to_id.clone(),
             dep_type,
             created_at: chrono::Utc::now(),
-            created_by: Some("mcp".to_string()),
+            created_by: self.get_agent_id().ok(),
         };
 
         // Parent-linking an existing task must establish the same durable
@@ -133,10 +133,17 @@ impl CasCore {
             })?;
         }
 
-        Ok(Self::success(format!(
-            "Added dependency: {}",
-            describe_dependency(&dep)
-        )))
+        let split_cleanup = if dep_type == DependencyType::ParentChild {
+            Some(crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &from_task.id,
+            ))
+        } else {
+            None
+        };
+        let mut response = format!("Added dependency: {}", describe_dependency(&dep));
+        append_split_claim_cleanup(&mut response, split_cleanup);
+        Ok(Self::success(response))
     }
 
     /// Remove a dependency of a specific type between tasks (cas-6009).
@@ -232,10 +239,29 @@ impl CasCore {
             created_at: chrono::Utc::now(),
             created_by: None,
         };
-        Ok(Self::success(format!(
-            "Removed dependency: {}",
-            describe_dependency(&removed)
-        )))
+        let split_cleanup = if dep_type == DependencyType::ParentChild {
+            Some(crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &req.from_id,
+            ))
+        } else {
+            None
+        };
+        let mut response = format!("Removed dependency: {}", describe_dependency(&removed));
+        append_split_claim_cleanup(&mut response, split_cleanup);
+        Ok(Self::success(response))
+    }
+}
+
+fn append_split_claim_cleanup(response: &mut String, result: Option<Result<usize, String>>) {
+    match result {
+        Some(Ok(released)) if released > 0 => response.push_str(&format!(
+            "\nReleased {released} obsolete split-derived Cloud claim(s)."
+        )),
+        Some(Err(error)) => response.push_str(&format!(
+            "\nSplit Cloud claim cleanup failed: {error}. Check the Cloud claim before starting the task."
+        )),
+        Some(Ok(_)) | None => {}
     }
 }
 

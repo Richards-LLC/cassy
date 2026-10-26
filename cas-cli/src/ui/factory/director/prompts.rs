@@ -575,6 +575,9 @@ pub fn revalidate_event_for_delivery_with_context(
 /// A prompt to be injected into an agent's terminal
 #[derive(Debug, Clone)]
 pub struct Prompt {
+    /// Immutable delivery identity for CI-completed signals. Final release
+    /// must not substitute a later tip from the reused worker lane.
+    pub merge_alert: Option<MergeAlertEvidence>,
     /// Target agent name (worker name or "supervisor")
     pub target: String,
     /// Typed routing for a routine worker stall nudge; always uses the durable queue.
@@ -779,6 +782,30 @@ pub(crate) fn external_response_hint(cas_root: &std::path::Path, from: &str) -> 
     format!("{route}\n\nDO NOT USE SENDMESSAGE.")
 }
 
+/// Queue an external notifier's message (the bridge's POST /message and
+/// `cas factory message`) for `target`. Sender text cannot carry a server
+/// assignment binding: leading `<cas-assignment>` lookalikes are stripped with
+/// the same function the MCP route uses before the reply line is added.
+pub(crate) fn enqueue_external_message(
+    cas_root: &std::path::Path,
+    from: &str,
+    target: &str,
+    message: &str,
+    no_wrap: bool,
+) -> anyhow::Result<i64> {
+    let message = crate::prompt_revalidation::strip_assignment_envelopes(message);
+    let payload = if no_wrap {
+        message.to_string()
+    } else {
+        format!("{}\n\n{}", message.trim_end(), external_response_hint(cas_root, from))
+    };
+    let queue = crate::store::open_prompt_queue_store(cas_root)?;
+    Ok(match std::env::var("CAS_FACTORY_SESSION").ok() {
+        Some(session) => queue.enqueue_with_session(from, target, &payload, &session)?,
+        None => queue.enqueue(from, target, &payload)?,
+    })
+}
+
 /// Resolve the harness of the worker a director event is about (cas-dc1b).
 ///
 /// Worker-facing lines (assignment, stall nudge, reply footer) and the
@@ -835,7 +862,7 @@ fn is_merge_required_idle(task: &ActiveLeaseSummary) -> bool {
 /// count was computed — if a supervisor's own `epic_status` shows a
 /// different SHA, the branch has moved and this alert may already be
 /// out of date again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergeAlertEvidence {
     pub task_id: String,
     pub factory_branch: String,
@@ -986,6 +1013,16 @@ fn fresh_merge_alert_git_evidence(
     factory_branch: &str,
     epic_branch: &str,
 ) -> MergeAlertFreshness {
+    fresh_merge_alert_tip_evidence(repo_root, task_id, factory_branch, epic_branch, None)
+}
+
+pub(crate) fn fresh_merge_alert_tip_evidence(
+    repo_root: &Path,
+    task_id: &str,
+    factory_branch: &str,
+    epic_branch: &str,
+    delivery_tip: Option<&str>,
+) -> MergeAlertFreshness {
     let epic_branch = epic_branch.strip_prefix("origin/").unwrap_or(epic_branch);
     let has_origin = std::process::Command::new("git")
         .args(["config", "--get", "remote.origin.url"]).current_dir(repo_root)
@@ -997,7 +1034,7 @@ fn fresh_merge_alert_git_evidence(
     // Pin all three movable refs once. Every merge-base/rev-list below uses
     // these immutable IDs, so a concurrent fetch/branch update cannot combine
     // a SHA from one instant with a count from another.
-    let factory_commit = resolve_ref_commit_sha(repo_root, factory_branch)
+    let factory_commit = delivery_tip.map(str::to_owned).or_else(|| resolve_ref_commit_sha(repo_root, factory_branch))
         .or_else(|| resolve_ref_commit_sha(repo_root, &format!("origin/{factory_branch}")));
     let local = observe_merge_ref(repo_root, factory_commit.as_deref(), epic_branch);
     let origin_ref = format!("origin/{epic_branch}");
@@ -1009,13 +1046,162 @@ fn fresh_merge_alert_git_evidence(
     result
 }
 
+fn merge_alert_evidence_line(e: &MergeAlertEvidence, target: &str) -> String {
+    let disagreement = e
+        .ref_disagreement
+        .as_deref()
+        .map(|details| {
+            format!(
+                "Git ref disagreement detected: {details}. Using {} after re-reading both refs.\n",
+                e.checked_epic_ref
+            )
+        })
+        .unwrap_or_default();
+    format!(
+        "Live evidence: {} unmerged commit(s) on {} vs {} (checked {} at {}).\n{}",
+        e.unmerged_count, e.factory_branch, target, e.checked_epic_ref, e.epic_sha, disagreement
+    )
+}
+
+fn merge_alert_action_line(factory_branch: &str, target: &str, push_required: bool) -> String {
+    let factory_label = crate::worktree::GitOperations::visible_git_label(factory_branch);
+    let target_label = crate::worktree::GitOperations::visible_git_label(target);
+    if push_required {
+        return format!(
+            "2. Push required: the local {target_label} already contains {factory_label}, \
+             but origin does not. Push {target_label} to origin; do not repeat the local merge."
+        );
+    }
+    // The checkout context is a ref too, even when only named in prose.
+    let [merge, _switch] = match crate::worktree::GitOperations::git_remedies([
+        &["merge", "--no-ff", factory_branch], &["switch", target],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
+    format!(
+        "2. Merge {factory_label} into {target_label} (FF preferred; else \
+         `{merge}` on {target_label})"
+    )
+}
+
+/// Build the released signal from the original tip and live target/task state.
+/// Called only from delivery jobs: all store/Git reads stay off the control lane.
+pub(crate) fn refresh_ci_merge_signal(
+    prompt: &mut Prompt,
+    data: &DirectorData,
+    cas_dir: &Path,
+    repo_root: &Path,
+) -> bool {
+    let Some(original) = prompt.merge_alert.clone() else {
+        return prompt_is_still_deliverable(prompt, data, repo_root);
+    };
+    let task = cas_dir
+        .join("cas.db")
+        .is_file()
+        .then(|| {
+            crate::store::open_task_store_local(cas_dir)
+                .ok()
+                .and_then(|store| store.get(&original.task_id).ok())
+        })
+        .flatten();
+    if let Some(task) = &task {
+        if task
+            .deliverables
+            .declined_factory_anchors()
+            .contains(&original.factory_tip)
+            || task
+                .deliverables
+                .factory_branch_anchor
+                .as_ref()
+                .is_some_and(|anchor| task.status == TaskStatus::AwaitingMerge && anchor != &original.factory_tip)
+        {
+            prompt.text = format!(
+                "Superseded delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
+                original.factory_tip, original.task_id,
+            );
+            // Keep the original identity so subsequent release checks preserve
+            // this informational label instead of checking the mutable worker lane.
+            tracing::info!(target: "cas::coordination", status = "superseded",
+                task_id = %original.task_id, delivery_tip = %original.factory_tip,
+                "CI-completed merge signal superseded before release");
+            return true;
+        }
+        if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
+            return false;
+        }
+        if task.status != TaskStatus::AwaitingMerge {
+            // A pre-park signal must still name the current pushed lane, never
+            // an earlier green tip after the worker has committed again.
+            let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo_root, branch);
+            if resolve(&original.factory_branch).as_deref() != Some(&original.factory_tip)
+                || fetch_parent_branch_result(repo_root, &original.factory_branch) != BoundedFetch::Succeeded
+                || resolve(&format!("origin/{}", original.factory_branch)).as_deref() != Some(&original.factory_tip)
+                || crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
+                    repo_root, task, &original.factory_branch, &original.factory_tip,
+                ).is_err()
+            { return false; }
+        }
+    }
+    let (_, snapshot_target, _) = resolve_merge_target_for_task(data, &original.task_id);
+    let target = task
+        .as_ref()
+        .and_then(|task| task.deliverables.work_target.as_ref())
+        .map(|target| target.target_branch.as_str())
+        .or(snapshot_target.as_deref());
+    let Some(target) = target else {
+        return true;
+    };
+    match fresh_merge_alert_tip_evidence(
+        repo_root,
+        &original.task_id,
+        &original.factory_branch,
+        target,
+        Some(&original.factory_tip),
+    ) {
+        MergeAlertFreshness::Stale | MergeAlertFreshness::Unavailable => false,
+        MergeAlertFreshness::Fresh(current) => {
+            // Render every field derived from live Git evidence together.
+            // Preserve the CI identity, liveness and response instructions.
+            let mut text = String::with_capacity(prompt.text.len());
+            for line in prompt.text.split_inclusive('\n') {
+                if line.starts_with("Live evidence: ") {
+                    text.push_str(&merge_alert_evidence_line(&current, target));
+                } else if line.starts_with("Git ref disagreement detected: ") {
+                    // Included above only when it is still true in current evidence.
+                } else if line.starts_with("2. Push required: ") || line.starts_with("2. Merge ") {
+                    text.push_str(&merge_alert_action_line(
+                        &current.factory_branch,
+                        target,
+                        current.push_required,
+                    ));
+                    if line.ends_with('\n') {
+                        text.push('\n');
+                    }
+                } else {
+                    text.push_str(line);
+                }
+            }
+            prompt.text = text;
+            prompt.merge_alert = Some(current);
+            true
+        }
+        MergeAlertFreshness::NotApplicable => true,
+    }
+}
+
 /// Parked per-task branches survive worker reuse and must win over the worker's lane.
 fn merge_delivery_branch(repo_root: &Path, task_id: &str, worker: &str) -> String {
     let cas_dir = repo_root.join(".cas");
     let parked = cas_dir.join("cas.db").is_file().then(|| {
         crate::store::open_task_store_cached(&cas_dir).ok()?.get(task_id).ok()?.deliverables.parked_branch
     }).flatten();
-    parked.unwrap_or_else(|| format!("factory/{worker}"))
+    parked.unwrap_or_else(|| super::events::task_delivery_ref(
+        task_id, worker, None, None,
+        |branch| resolve_ref_commit_sha(repo_root, branch)
+            .or_else(|| resolve_ref_commit_sha(repo_root, &format!("origin/{branch}"))),
+        |_, _| false,
+    ).0)
 }
 
 /// Re-validate a MERGE REQUIRED / AwaitingMerge `WorkerIdle` signal against
@@ -1078,9 +1264,9 @@ pub fn check_merge_alert_freshness(
 /// Returns `Stale` (retract the row) when:
 /// - the task is no longer tracked in `data.in_progress_tasks` at all
 ///   (closed, reset, or otherwise resolved since the alert was written), or
-/// - the task is tracked but its status has moved off `AwaitingMerge`
-///   (re-closed, reopened, reassigned), or
-/// - the task is still `AwaitingMerge` but its factory branch now carries
+/// - the task was reopened for changes and is no longer an active, blocked,
+///   or parked delivery, or
+/// - the task's factory branch now carries
 ///   zero unmerged commits against the live epic tip (the merge landed).
 ///
 /// Returns `NotApplicable` (preserve the row; caller cannot verify either
@@ -1100,13 +1286,13 @@ pub fn check_merge_alert_freshness_for_task(
     data: &DirectorData,
     repo_root: &Path,
 ) -> MergeAlertFreshness {
-    let Some(task) = data.in_progress_tasks.iter().find(|t| t.id == task_id) else {
+    let Some(task) = data.in_progress_tasks.iter().chain(&data.ready_tasks).find(|t| t.id == task_id) else {
         // No longer tracked as in-progress/awaiting-merge in the current
         // snapshot at all — whatever happened (closed, reset elsewhere),
         // the alert's premise no longer holds.
         return MergeAlertFreshness::Stale;
     };
-    if task.status != TaskStatus::AwaitingMerge {
+    if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
         return MergeAlertFreshness::Stale;
     }
     if staged_integration_batch(repo_root, task_id) {
@@ -1127,7 +1313,7 @@ pub fn check_merge_alert_freshness_for_task(
 /// Resolve the delivery target for a parked task from the current director
 /// snapshot. A task WorkTarget, projected into its summary branch, wins over
 /// the parent epic; the parent remains only as the legacy fallback.
-fn resolve_merge_target_for_task(
+pub(crate) fn resolve_merge_target_for_task(
     data: &DirectorData,
     task_id: &str,
 ) -> (Option<String>, Option<String>, bool) {
@@ -1161,7 +1347,7 @@ fn resolve_merge_target_for_task(
 /// (`main` or `master`, with or without an `origin/` prefix). Factory repos
 /// protect it: it accepts only pull requests through the merge queue, so the
 /// MERGE REQUIRED relay must not tell the supervisor to merge and push it.
-fn target_is_protected_default(target: &str) -> bool {
+pub(crate) fn target_is_protected_default(target: &str) -> bool {
     matches!(
         target.trim().trim_start_matches("origin/"),
         "main" | "master"
@@ -1308,30 +1494,9 @@ fn merge_required_idle_prompt_text(
         .close_rejected_reason
         .as_deref()
         .unwrap_or("MERGE REQUIRED");
-    let evidence_line = match evidence {
-        Some(e) => {
-            let disagreement = e
-                .ref_disagreement
-                .as_deref()
-                .map(|details| {
-                    format!(
-                        "Git ref disagreement detected: {details}. Using {} after re-reading both refs.\n",
-                        e.checked_epic_ref
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                "Live evidence: {} unmerged commit(s) on {} vs {} (checked {} at {}).\n{}",
-                e.unmerged_count,
-                e.factory_branch,
-                target,
-                e.checked_epic_ref,
-                e.epic_sha,
-                disagreement
-            )
-        }
-        None => String::new(),
-    };
+    let evidence_line = evidence
+        .map(|e| merge_alert_evidence_line(e, target))
+        .unwrap_or_default();
     // cas-6db4: a protected default branch only takes pull requests through
     // the merge queue; merging into it locally and pushing is refused. The
     // worker's push hook already lets a push_branch delivery publish its
@@ -1356,17 +1521,9 @@ fn merge_required_idle_prompt_text(
             task.task_id, task.task_title, task.task_status, task.task_id
         );
     }
-    let merge_step = if evidence.is_some_and(|e| e.push_required) {
-        format!(
-            "2. Push required: the local {target} already contains {factory_branch}, \
-             but origin does not. Push {target} to origin; do not repeat the local merge."
-        )
-    } else {
-        format!(
-            "2. Merge {factory_branch} into {target} (FF preferred; else \
-             `git merge --no-ff {factory_branch}` on {target})"
-        )
-    };
+    let merge_step = merge_alert_action_line(
+        &factory_branch, target, evidence.is_some_and(|e| e.push_required),
+    );
 
     format!(
         "⚠️ MERGE REQUIRED — supervisor action needed (not a task completion).\n\
@@ -1495,11 +1652,12 @@ pub fn generate_prompt_at(
                  Successful task action=start is authoritative assignment acceptance; no prose ACK is required. A concise execution plan is optional.\n\
                  {test_policy}\n\
                  While working, post progress notes with {worker_prefix}task action=notes.\n\
-                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Ordinary updates surface through the inbox on the next turn; only authenticated typed blocker, merge, verification, or lifecycle events may wake an idle supervisor.",
+                 If blocked, set status=blocked and send {worker_prefix}coordination action=message target=supervisor blocker=true summary=\"...\" message=\"...\" with the blocker. For merge requests, use merge_request=true. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn.",
                 test_policy = crate::task_assignment::WORKER_ASSIGNMENT_TEST_POLICY,
             );
 
             Some(Prompt {
+                merge_alert: None,
                 target: worker.clone(),
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
                 retract_worker: None,
@@ -1584,6 +1742,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1610,6 +1769,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1758,6 +1918,7 @@ pub fn generate_prompt_at(
                 };
 
                 return Some(Prompt {
+                    merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker,
@@ -1828,6 +1989,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: Some(worker.clone()),
@@ -1874,6 +2036,7 @@ pub fn generate_prompt_at(
                 );
 
                 return Some(Prompt {
+                    merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -1899,6 +2062,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
+                    merge_alert: None,
                     target: worker.clone(),
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
                     retract_worker: None,
@@ -1918,10 +2082,21 @@ pub fn generate_prompt_at(
                 // means un-persisted work + full in-flight context loss, not
                 // "safe". Point at the actual triage triad instead —
                 // `is-wedged` classifies before anyone kills anything.
+                // cas-73b89: a worker with nothing pending to wake it will
+                // not resume on its own; say so, so a message is the obvious fix.
+                let pending_wake = data.agents.iter().any(|agent| {
+                    agent.name == *worker
+                        && super::events::worker_has_pending_wake(data, agent)
+                });
+                let cause = if pending_wake {
+                    "an auto-nudge did not unstick it"
+                } else {
+                    "no reminder or message is pending to wake it, so it will not resume on \
+                     its own. If it is waiting, message it to continue"
+                };
                 let text = format!(
                     "Worker {worker} has been stalled on task {task_id} for about \
-                     {elapsed_mins}m — alive heartbeat, no activity, and an auto-nudge \
-                     did not unstick it.\n\n\
+                     {elapsed_mins}m — alive heartbeat, no activity, and {cause}.\n\n\
                      Triage before acting:\n\
                      1. `cas factory is-wedged {worker}` — classifies Alive / Wedged / \
                      Starved / Dead from PID + transcript evidence.\n\
@@ -1934,6 +2109,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
+                    merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -2002,6 +2178,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
                 retract_worker: Some(agent_name.clone()),
@@ -2140,6 +2317,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
+                merge_alert: None,
                 target: supervisor_name.to_string(),
                 text,
                 retract_worker: None,
@@ -2201,6 +2379,7 @@ mod tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("sess-id-abc123".to_string(), "swift-fox".to_string())]
@@ -2298,7 +2477,7 @@ mod tests {
                 "no prose ACK is required",
                 "execution plan is optional",
                 "inbox on the next turn",
-                "only authenticated typed",
+                "Directed messages wake",
                 "blocker=true",
                 "merge_request=true",
             ] {
@@ -3769,7 +3948,7 @@ mod tests {
     #[test]
     fn test_c145_awaiting_merge_idle_is_actionable_merge_queue_prompt() {
         let event = DirectorEvent::WorkerIdle {
-            worker: "recipe-be".to_string(),
+            worker: "recipe{a,b}!e".to_string(),
             active_task: Some(ActiveLeaseSummary {
                 task_id: "cas-8eff".to_string(),
                 task_title: "Backend recipes API".to_string(),
@@ -3780,16 +3959,16 @@ mod tests {
         };
         let mut data = make_data(0);
         // make_data seeds a single agent named swift-fox; re-point it so the
-        // live-worker session-id guard accepts recipe-be.
-        data.agents[0].name = "recipe-be".to_string();
+        // live-worker session-id guard accepts recipe{a,b}!e.
+        data.agents[0].name = "recipe{a,b}!e".to_string();
         data.agent_id_to_name
-            .insert("sess-id-abc123".to_string(), "recipe-be".to_string());
+            .insert("sess-id-abc123".to_string(), "recipe{a,b}!e".to_string());
         data.in_progress_tasks = vec![TaskSummary {
             id: "cas-8eff".to_string(),
             title: "Backend recipes API".to_string(),
             status: TaskStatus::AwaitingMerge,
             priority: Priority::MEDIUM,
-            assignee: Some("recipe-be".to_string()),
+            assignee: Some("recipe{a,b}!e".to_string()),
             task_type: TaskType::Task,
             epic: Some("cas-4c77".to_string()),
             branch: None,
@@ -3829,7 +4008,7 @@ mod tests {
         assert!(prompt.text.contains("cas-8eff"), "{}", prompt.text);
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("factory/recipe-be"),
+            prompt.text.contains("factory/recipe{a,b}!e"),
             "must name source factory branch: {}",
             prompt.text
         );
@@ -3842,7 +4021,7 @@ mod tests {
         );
         assert!(
             prompt.text.contains(
-                "git merge --no-ff factory/recipe-be` on epic/general-dosha-recipes-dual-mode-generation-standal-cas-4c77"
+                "git merge --no-ff 'factory/recipe{a,b}!e'"
             ),
             "epic-target relay must retain its epic branch merge command: {}",
             prompt.text
@@ -3873,11 +4052,11 @@ mod tests {
         );
         assert!(
             // pin: rendered supervisor/worker prompt text is the contract under test.
-            prompt.text.contains("git merge --no-ff factory/recipe-be")
+            prompt.text.contains("git merge --no-ff 'factory/recipe{a,b}!e'")
                 || prompt
                     .text
                     .to_lowercase()
-                    .contains("merge factory/recipe-be"),
+                    .contains("merge factory/recipe{a,b}!e"),
             "must include merge next action: {}",
             prompt.text
         );
@@ -5273,6 +5452,7 @@ mod tests {
                 latest_supervisor_message_at: None,
                 active_lease: None,
                 effort: None,
+                qa_reviewer_between_rounds: false,
             }],
             activity: vec![],
             agent_id_to_name: [("sess-id-abc123".to_string(), "swift-fox".to_string())]
@@ -5759,6 +5939,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }];
         data.agent_id_to_name = [(
             "sess-id-codex-worker".to_string(),
@@ -6367,6 +6548,7 @@ mod tests {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         });
 
         // Foreign session sees the same epic (shared DB) but different supervisor
@@ -7009,6 +7191,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
+                merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7035,11 +7218,12 @@ mod tests {
         /// `AwaitingMerge` (re-closed after the supervisor merged) while the
         /// alert was queued behind other prompts in the injection loop.
         #[test]
-        fn merge_alert_is_dropped_when_the_task_leaves_awaiting_merge() {
+        fn merge_alert_is_dropped_when_the_task_reopens_for_changes() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
             let mut data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
+                merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7050,10 +7234,10 @@ mod tests {
                 durable_retry: false,
             };
 
-            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            data.in_progress_tasks[0].status = TaskStatus::Open;
             assert!(
                 !prompt_is_still_deliverable(&prompt, &data, repo.path()),
-                "a task no longer parked has no outstanding merge to demand"
+                "a task reopened for changes has no outstanding merge to demand"
             );
 
             data.in_progress_tasks.clear();
@@ -7397,20 +7581,19 @@ mod tests {
             );
         }
 
-        /// AC1 (task moved off AwaitingMerge): re-closed / reopened /
-        /// reassigned since the alert was written — retract.
+        /// Reopened for changes since the alert was written — retract.
         #[test]
-        fn task_sweep_stale_when_task_left_awaiting_merge() {
+        fn task_sweep_stale_when_task_reopened_for_changes() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
 
             let mut data = awaiting_merge_data("recipe-be");
-            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            data.in_progress_tasks[0].status = TaskStatus::Open;
 
             let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
-                "task no longer AwaitingMerge must be Stale: {outcome:?}"
+                "task reopened for changes must be Stale: {outcome:?}"
             );
         }
 
@@ -7517,6 +7700,7 @@ mod tests {
 fn idle_relays_and_merge_relays_use_the_status_verdict() {
     use crate::mcp::tools::service::worker_liveness::{Liveness, Observation};
     let prompt = Prompt {
+        merge_alert: None,
         target: "supervisor".into(),
         text: "Worker wolf is idle while task t is awaiting_merge".into(),
         retract_worker: Some("wolf".into()),

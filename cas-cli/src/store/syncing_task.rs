@@ -109,6 +109,9 @@ pub(crate) enum TaskSyncReconcileOutcome {
     /// A live mutation owned an entity, or the database stayed write-busy:
     /// the remaining intents stay durable for a later pass.
     Deferred,
+    /// One or more entities have ambiguous durable intents. They remain
+    /// available to the authenticated recovery command, but do not fail opens.
+    Blocked,
 }
 
 /// A task store wrapper that queues changes for cloud sync
@@ -254,6 +257,7 @@ impl SyncingTaskStore {
                 .or_default()
                 .push(intent);
         }
+        let mut blocked_count = 0;
         for (entity_id, mut intents) in by_entity {
             match self.inner.get(&entity_id) {
                 Ok(_) => {}
@@ -274,16 +278,32 @@ impl SyncingTaskStore {
                     TaskSyncFulfillResult::Deferred => {
                         return Ok(TaskSyncReconcileOutcome::Deferred);
                     }
+                    TaskSyncFulfillResult::Blocked {
+                        diagnostic,
+                        first_report,
+                    } => {
+                        blocked_count += 1;
+                        if first_report {
+                            tracing::warn!(%entity_id, %diagnostic, "task sync recovery is blocked; durable intent retained for supervisor resolution");
+                        }
+                        // Preserve this entity's whole intent chain until a
+                        // supervisor resolves the ambiguous revision evidence.
+                        break;
+                    }
                 }
             }
         }
-        Ok(TaskSyncReconcileOutcome::Clean)
+        if blocked_count == 0 {
+            Ok(TaskSyncReconcileOutcome::Clean)
+        } else {
+            Ok(TaskSyncReconcileOutcome::Blocked)
+        }
     }
 
     /// The task-store open path's reconcile: once per process and `.cas`
     /// directory, then again only when the schedule is due
-    /// ([`RECONCILE_PERIOD`] after a clean pass, [`RECONCILE_RETRY`] after a
-    /// deferred or failed one). Between passes an open does no reconcile
+    /// ([`RECONCILE_PERIOD`] after a clean or blocked pass, [`RECONCILE_RETRY`]
+    /// after a deferred or failed one). Between passes an open does no reconcile
     /// work; it re-reports the last pass's failure, if any (cas-afe1).
     pub(crate) fn reconcile_if_due(&self) -> Result<()> {
         let cas_dir = self.queue.cas_dir().to_path_buf();
@@ -434,7 +454,9 @@ impl SyncingTaskStore {
 
 fn record_reconcile(cas_dir: PathBuf, result: &Result<TaskSyncReconcileOutcome>) {
     let (delay, failure) = match result {
-        Ok(TaskSyncReconcileOutcome::Clean) => (RECONCILE_PERIOD, None),
+        Ok(TaskSyncReconcileOutcome::Clean | TaskSyncReconcileOutcome::Blocked) => {
+            (RECONCILE_PERIOD, None)
+        }
         Ok(TaskSyncReconcileOutcome::Deferred) => (RECONCILE_RETRY, None),
         Err(error) => {
             tracing::warn!(%error, "task sync reconcile failed; pending intents retained for retry");
@@ -602,12 +624,17 @@ impl TaskStore for SyncingTaskStore {
 
     /// cas-eda0: `green_merge_commit` is local merge coordination consumed by
     /// this machine's verdict path; it rides the next ordinary upsert.
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         let _sync_guard = self
             .queue
             .lock_task_sync_mutations(&[task_id])
             .map_err(queue_error_before_local_commit)?;
-        let recorded = self.inner.record_green_merge(task_id, merge_commit)?;
+        let recorded = self.inner.record_merge_admission(task_id, merge_commit, admission)?;
         if recorded {
             crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
         }
@@ -628,6 +655,35 @@ impl TaskStore for SyncingTaskStore {
             Some(&previous),
         )?;
         let persisted_at = match self.inner.append_note_with_mutation_receipt(
+            task_id,
+            formatted_note,
+            &intent.mutation_id,
+        ) {
+            Ok(persisted_at) => persisted_at,
+            Err(error) => {
+                self.cancel_staged_after_local_failure(&intent);
+                return Err(error);
+            }
+        };
+        crate::mcp::tools::service::mutation_receipt::task_committed(task_id);
+        self.fulfill_upsert(&intent)?;
+        Ok(persisted_at)
+    }
+
+    fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        let _sync_guard = self
+            .queue
+            .lock_task_sync_mutations(&[task_id])
+            .map_err(queue_error_before_local_commit)?;
+        let previous = self.inner.get(task_id)?;
+        let previous_updated_at = previous.updated_at.to_rfc3339();
+        let intent = self.stage_upsert(
+            &previous,
+            "append_trusted_note",
+            Some(&previous_updated_at),
+            Some(&previous),
+        )?;
+        let persisted_at = match self.inner.append_trusted_note_with_mutation_receipt(
             task_id,
             formatted_note,
             &intent.mutation_id,
@@ -683,6 +739,15 @@ impl TaskStore for SyncingTaskStore {
 
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         self.inner.list(status)
+    }
+
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        self.inner
+            .ids_by_assignees_and_statuses(assignees, statuses)
     }
 
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {
@@ -1541,8 +1606,14 @@ mod tests {
     }
 
     #[test]
-    fn unbound_advanced_intent_is_retained_without_queue_output() {
-        let (_temp, store) = create_test_store();
+    fn unclassified_intent_does_not_abort_unrelated_task_recovery() {
+        let temp = TempDir::new().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let inner = SqliteTaskStore::open(&cas_dir).unwrap();
+        inner.init().unwrap();
+        let queue = SyncQueue::open(&cas_dir).unwrap();
+        queue.init().unwrap();
+        let store = SyncingTaskStore::new(Arc::new(inner), Arc::new(queue));
         let mut task = Task::new("task-ambiguous-intent".to_string(), "before".to_string());
         store.inner.add(&task).unwrap();
         let previous = store.inner.get(&task.id).unwrap();
@@ -1557,15 +1628,41 @@ mod tests {
         task.title = "advanced outside the receipt protocol".to_string();
         store.inner.update(&task).unwrap();
 
-        let error = store.reconcile_pending_task_sync().unwrap_err();
+        // A separate, receipt-bound task mutation is the ordinary progress
+        // update that must still recover while this entity remains ambiguous.
+        let mut unrelated = Task::new("task-unrelated-recovery".to_string(), "before".to_string());
+        store.add(&unrelated).unwrap();
+        store.queue.clear().unwrap();
+        install_task_enqueue_failure(&cas_dir, "");
+        unrelated.title = "committed while sync was degraded".to_string();
+        assert_degraded(store.update(&unrelated).unwrap_err(), "update", &unrelated.id);
+        remove_task_enqueue_failure(&cas_dir);
 
-        assert!(error.to_string().contains("unclassified"), "{error}");
-        assert!(error.to_string().contains("evidence retained"), "{error}");
-        assert!(store.queue.pending(10, 5).unwrap().is_empty());
+        let cloud = CloudConfig {
+            token: Some("offline-fixture-token".into()),
+            endpoint: "http://127.0.0.1:9".into(),
+            ..Default::default()
+        };
+        cloud.save_to_cas_dir(&cas_dir).unwrap();
+        reconcile_schedule().remove(&cas_dir);
+        let reopened = crate::store::open_task_store(&cas_dir);
+        assert!(
+            reopened.is_ok(),
+            "an ambiguous intent must not make unrelated task-store opens fail"
+        );
+        let reopened = reopened.unwrap();
+        assert_eq!(reopened.get(&unrelated.id).unwrap().title, unrelated.title);
         assert_eq!(
             store.queue.pending_task_sync_intents().unwrap(),
-            vec![intent]
+            vec![intent],
+            "the unresolved intent remains durable for supported operator recovery"
         );
+        let records = store.queue.task_sync_recovery_records().unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].blocked_reason.contains("unclassified"));
+        let pending = store.queue.pending(10, 5).unwrap();
+        assert_eq!(pending.len(), 1, "the unrelated intent should be recovered");
+        assert_eq!(pending[0].entity_id, unrelated.id);
     }
 
     #[test]
@@ -1752,39 +1849,25 @@ mod tests {
     }
 
     #[test]
-    fn test_append_note_queues_the_canonical_task_once() {
+    fn append_note_preserves_nul_in_the_canonical_task_queue() {
         let (temp, store) = create_test_store();
         let queue = SyncQueue::open(temp.path()).unwrap();
         let task = Task::new("task-note-sync".to_string(), "Task notes".to_string());
         store.add(&task).unwrap();
         queue.clear().unwrap();
 
+        let note = "sync\u{0}ed task note";
         store
-            .append_note(&task.id, "synced task note")
+            .append_note(&task.id, note)
             .expect("append note should commit locally and stage sync");
 
         let pending = queue.pending(10, 5).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].entity_id, task.id);
         assert_eq!(pending[0].operation, SyncOperation::Upsert);
-        assert_eq!(
-            pending[0]
-                .payload
-                .as_ref()
-                .unwrap()
-                .matches("synced task note")
-                .count(),
-            1
-        );
-        assert_eq!(
-            store
-                .get(&task.id)
-                .unwrap()
-                .notes
-                .matches("synced task note")
-                .count(),
-            1
-        );
+        let queued: Task = serde_json::from_str(pending[0].payload.as_deref().unwrap()).unwrap();
+        assert_eq!(queued.notes, note);
+        assert_eq!(store.get(&task.id).unwrap().notes, note);
     }
 
     #[test]

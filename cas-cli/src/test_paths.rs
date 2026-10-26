@@ -136,9 +136,23 @@ pub fn crate_root() -> PathBuf {
 ///
 /// `CARGO_MANIFEST_DIR` records the path on the machine that built an
 /// archived test. Nextest executes the archive from a checkout at a different
-/// path, so fixture directories must be created beneath the process cwd.
+/// path, so fixture directories are created beneath the runtime package
+/// directory, where the test process starts.
+///
+/// cas-3fc8: that directory comes from the runtime `CARGO_MANIFEST_DIR`
+/// (set by cargo and nextest, remapped for archives) and is read once, never
+/// from a cwd another test has entered: a fixture created there would be
+/// deleted with that test's directory.
 pub fn runtime_fixture_parent() -> PathBuf {
-    std::env::current_dir().expect("test current directory")
+    static PARENT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    PARENT
+        .get_or_init(|| {
+            std::env::var_os("CARGO_MANIFEST_DIR")
+                .map(PathBuf::from)
+                .filter(|path| path.is_dir())
+                .unwrap_or_else(|| std::env::current_dir().expect("test current directory"))
+        })
+        .clone()
 }
 
 /// Finds the `cas` executable supplied alongside an archived test binary.
@@ -241,6 +255,22 @@ mod tests {
         std::fs::write(member.join("Cargo.toml"), "[package]\nname = \"member\"\n").unwrap();
 
         assert_eq!(find_workspace_root(&member).as_deref(), Some(temp.path()));
+    }
+
+    /// cas-3fc8: a fixture parent never follows another test's entered
+    /// directory, so a fixture cannot land inside it and be deleted with it.
+    #[test]
+    fn fixture_parent_ignores_a_directory_another_test_entered_cas_3fc8() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let entered = tempdir().unwrap();
+        let _env = env.enter_dir(entered.path());
+        let parent = super::runtime_fixture_parent();
+        assert!(
+            !parent.starts_with(entered.path().canonicalize().unwrap()) && !parent.starts_with(entered.path()),
+            "{} is inside the entered {}",
+            parent.display(),
+            entered.path().display()
+        );
     }
 
     #[test]

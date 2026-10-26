@@ -6,8 +6,6 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
-#[cfg(unix)]
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -64,75 +62,25 @@ fn private_home() -> hub_fixture::PrivateHubTempDir {
     hub_fixture::private_hub_tempdir()
 }
 
-/// Keep a loopback port reserved without listening, so tests can model a dead
-/// prior Serve target without leaving a close/rebind window for other tests.
+/// Reserve an established client's local port, which cannot accept new
+/// connections. A merely bound, non-listening socket times out on macOS;
+/// this connected socket instead rejects unrelated connections on both OSes.
+/// Keeping both ends open excludes the port from automatic ephemeral allocation
+/// without any close/rebind window. This does not exclude an explicit bind with
+/// SO_REUSEADDR, which macOS permits over an established connection.
 #[cfg(unix)]
-fn reserve_unlistened_loopback_port() -> (u16, OwnedFd) {
-    use std::mem::{size_of, zeroed};
-
-    // SAFETY: these constants select a TCP/IPv4 socket and require no pointers.
-    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    assert!(
-        fd >= 0,
-        "create reserved loopback socket: {}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: fd is freshly created and ownership is transferred exactly once.
-    let socket = unsafe { OwnedFd::from_raw_fd(fd) };
-    // SAFETY: the descriptor is open and F_SETFD takes one integer flag.
-    assert_eq!(
-        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) },
-        0,
-        "mark reserved loopback socket close-on-exec: {}",
-        std::io::Error::last_os_error()
-    );
-    // SAFETY: zero is a valid initial representation for sockaddr_in.
-    let mut address: libc::sockaddr_in = unsafe { zeroed() };
-    #[cfg(target_os = "macos")]
-    {
-        address.sin_len = size_of::<libc::sockaddr_in>() as u8;
-    }
-    address.sin_family = libc::AF_INET as libc::sa_family_t;
-    address.sin_addr.s_addr = u32::from_ne_bytes([127, 0, 0, 1]);
-    // SAFETY: address is initialized and its pointer/length match sockaddr_in.
-    let bind = unsafe {
-        libc::bind(
-            fd,
-            (&address as *const libc::sockaddr_in).cast(),
-            size_of::<libc::sockaddr_in>() as libc::socklen_t,
-        )
-    };
-    assert_eq!(
-        bind,
-        0,
-        "bind reserved loopback socket: {}",
-        std::io::Error::last_os_error()
-    );
-
-    // SAFETY: the address buffer and length are initialized for getsockname.
-    let mut bound: libc::sockaddr_in = unsafe { zeroed() };
-    let mut length = size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    let result = unsafe {
-        libc::getsockname(
-            fd,
-            (&mut bound as *mut libc::sockaddr_in).cast(),
-            &mut length,
-        )
-    };
-    assert_eq!(
-        result,
-        0,
-        "read reserved loopback port: {}",
-        std::io::Error::last_os_error()
-    );
-    let port = u16::from_be(bound.sin_port);
+fn reserve_refused_loopback_port() -> (u16, (TcpStream, TcpStream)) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (peer, _) = listener.accept().unwrap();
+    let port = client.local_addr().unwrap().port();
     let endpoint = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     assert!(
         TcpStream::connect_timeout(&endpoint, Duration::from_millis(100))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::ConnectionRefused),
         "reserved loopback target must be connection-refused"
     );
-    (port, socket)
+    (port, (client, peer))
 }
 
 #[cfg(unix)]
@@ -308,6 +256,9 @@ fn flagless_hub_lifecycle_publishes_and_host_opt_out_removes_serve() {
 #[test]
 fn signed_out_hub_start_requires_explicit_loopback() {
     let home = private_home();
+    // This refusal is the explicit required policy; auto may retain loopback.
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub]\ntransport_mode = 'required'\n").unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     install_tailscale_mock(
@@ -321,6 +272,30 @@ fn signed_out_hub_start_requires_explicit_loopback() {
         .unwrap();
     assert!(!start.status.success(), "signed-out start must fail");
     assert!(String::from_utf8_lossy(&start.stderr).contains("--loopback"));
+    let restart = cas_command(home.path(), bin.as_os_str())
+        .args(["hub", "restart", "--port", "0"])
+        .output().unwrap();
+    assert!(!restart.status.success(), "signed-out restart must fail");
+    for output in [&start, &restart] {
+        let text = String::from_utf8_lossy(&output.stderr);
+        let remedies: Vec<_> = text.lines().filter(|line|
+            line.starts_with("Retry:") || line.starts_with("Or run ")
+        ).collect();
+        assert!(!remedies.is_empty(), "missing refusal remedy: {text}");
+        assert!(remedies.iter().all(|line| line.chars().count() <= 80),
+            "required refusal remedy exceeds 80 columns: {text}");
+    }
+
+    let json_start = cas_command(home.path(), bin.as_os_str())
+        .args(["--json", "hub", "start", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(!json_start.status.success(), "signed-out JSON start must fail");
+    let error: Value = serde_json::from_slice(&json_start.stdout)
+        .expect("--json hub refusal must emit one JSON document");
+    assert_eq!(error["status"], "error", "{error}");
+    assert!(error["message"].as_str().unwrap_or_default().contains("--loopback"), "{error}");
+
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     assert!(paths.read_process_record().is_err(), "refused start must not leave a hub");
     let loopback = cas_command(home.path(), bin.as_os_str())
@@ -335,6 +310,9 @@ fn signed_out_hub_start_requires_explicit_loopback() {
 #[test]
 fn stopped_tailscale_diagnostic_names_cli_and_socket() {
     let home = private_home();
+    // Restart refuses a stopped daemon only under the required policy (cas-3f03e).
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub]\ntransport_mode = 'required'\n").unwrap();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
     let tailscale = bin.join("tailscale");
@@ -357,6 +335,7 @@ fn stopped_tailscale_diagnostic_names_cli_and_socket() {
     for explicit in [None, Some(home.path().join("override.socket")), Some(home.path().join("missing.socket"))] {
         let selected = explicit.as_ref().unwrap_or(&socket);
         for args in [vec!["hub", "status"], vec!["hub", "restart", "--port", "0"]] {
+            let is_restart = args.contains(&"restart");
             let mut command = cas_command(home.path(), bin.as_os_str());
             if let Some(explicit) = &explicit { command.env("TAILSCALE_SOCKET", explicit); }
             let output = command.args(args).output().unwrap();
@@ -367,8 +346,67 @@ fn stopped_tailscale_diagnostic_names_cli_and_socket() {
             for expected in [cause, "TAILSCALE_SOCKET", tailscale.to_str().unwrap(), selected.to_str().unwrap()] {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }
+            if is_restart {
+                for expected in [
+                    "Hub transport required: Tailscale is unavailable.",
+                    "Restart refused; existing hub (pid ",
+                    ") remains running.",
+                    "Retry: TAILSCALE_SOCKET=<signed-in-socket> cas hub restart.",
+                ] {
+                    assert!(text.contains(expected), "missing {expected}: {text}");
+                }
+            }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_auto_fallback_warning_names_retry_and_fits_80_columns() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    install_tailscale_mock(home.path(), &bin.join("tailscale"), "#!/bin/sh\nexit 1\n");
+    let mut path_entries = vec![bin.clone()];
+    path_entries.extend(std::env::split_paths(&system_path()));
+    let path = std::env::join_paths(path_entries).unwrap();
+
+    let start = cas_command(home.path(), &path)
+        .args(["hub", "start", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{}", String::from_utf8_lossy(&start.stderr));
+    let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
+    let mut cleanup = LegacyHubCleanup(vec![paths.read_process_record().unwrap().pid]);
+
+    let restart = cas_command(home.path(), &path)
+        .args(["hub", "restart", "--port", "0"])
+        .output()
+        .unwrap();
+    assert!(restart.status.success(), "{}", String::from_utf8_lossy(&restart.stderr));
+    let record = paths.read_process_record().unwrap();
+    cleanup.0.clear();
+    cleanup.0.push(record.pid);
+
+    let warning = String::from_utf8_lossy(&restart.stderr);
+    for expected in [
+        "Tailscale Serve inactive; hub is loopback-only.",
+        "Cause:",
+        "Retry: tailscale status && cas hub restart",
+    ] {
+        assert!(warning.contains(expected), "missing {expected}: {warning}");
+    }
+    assert!(
+        warning.lines().all(|line| line.chars().count() <= 80),
+        "warning exceeds 80 columns: {warning}"
+    );
+
+    let stop = cas_command(home.path(), &path)
+        .args(["hub", "stop", "--force"])
+        .output()
+        .unwrap();
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    cleanup.0.clear();
 }
 
 #[cfg(unix)]
@@ -1043,7 +1081,7 @@ esac
 "##,
     );
 
-    let (dead_port, _dead_port_reservation) = reserve_unlistened_loopback_port();
+    let (dead_port, _dead_port_reservation) = reserve_refused_loopback_port();
     let old_target = format!("http://127.0.0.1:{dead_port}");
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
@@ -1156,7 +1194,7 @@ case "$*" in
 esac
 "##,
     );
-    let (dead_port, _dead_port_reservation) = reserve_unlistened_loopback_port();
+    let (dead_port, _dead_port_reservation) = reserve_refused_loopback_port();
     let old_target = format!("http://127.0.0.1:{dead_port}");
     let paths = cas::hub::HubRuntimePaths::new(home.path().join(".cas/hub"));
     let old_record: cas::hub::HubProcessRecord = serde_json::from_value(serde_json::json!({
@@ -2300,6 +2338,96 @@ fn plain_stop_never_reports_success_while_a_hub_still_holds_the_lock() {
 fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
     use cas::hub::HubRuntimePaths;
 
+    // cas-036b: a stop can acquire the machine lock between the launcher
+    // releasing it and the new foreground hub acquiring it. Force a real
+    // failed first acquisition, then either finish cleanup or hold it through
+    // the bounded startup wait so the caller receives the specific failure.
+    for cleanup_finishes in [true, false] {
+        let home = private_home();
+        let bin = home.path().join("bin");
+        fs::create_dir(&bin).unwrap();
+        let barrier = home.path().join("startup-lock-barrier");
+        fs::create_dir(&barrier).unwrap();
+        let paths = HubRuntimePaths::new(home.path().join(".cas/hub"));
+        let mut command = cas_process_command(home.path(), bin.as_os_str());
+        let mut start = command
+            .env("CAS_TEST_HUB_LAUNCH_BARRIER", &barrier)
+            .env("CAS_TEST_HUB_STARTUP_LOCK_BARRIER", &barrier)
+            .args([
+                "--json", "hub", "--no-tailscale-serve", "start", "--port", "0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start hub at lock handoff barrier");
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        let launcher = loop {
+            let launcher = fs::read_dir(&barrier).unwrap().filter_map(Result::ok)
+                .find_map(|entry| entry.file_name().to_string_lossy()
+                    .strip_prefix("launcher-").and_then(|pid| pid.parse::<u32>().ok()));
+            if launcher.is_some() || Instant::now() >= deadline {
+                break launcher;
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        if launcher.is_none() {
+            let _ = fs::write(barrier.join("release-launchers"), b"release\n");
+            let _ = fs::write(barrier.join("release-monitors"), b"release\n");
+            let _ = fs::write(barrier.join("release-startup-lock"), b"release\n");
+            let output = start.wait_with_output().unwrap();
+            panic!("launcher did not reach lock handoff: {output:?}");
+        }
+        let launcher = launcher.unwrap();
+        let mut cleanup_lock = paths.acquire_instance_lock().unwrap();
+        cleanup_lock.set_phase("stopping").unwrap();
+        let unrelated_error = paths.root().join(".launcher-unrelated.error");
+        fs::write(&unrelated_error, b"another launch's diagnostic").unwrap();
+        fs::write(barrier.join("release-launchers"), b"release\n").unwrap();
+        let contention = barrier.join(format!("startup-lock-waiter-{launcher}"));
+        let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+        while !contention.exists() && start.try_wait().unwrap().is_none()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let cleanup_lock = Some(cleanup_lock);
+        let held_lock = if cleanup_finishes {
+            drop(cleanup_lock);
+            None
+        } else {
+            cleanup_lock
+        };
+        fs::write(barrier.join("release-startup-lock"), b"release\n").unwrap();
+        fs::write(barrier.join("release-monitors"), b"release\n").unwrap();
+        let output = start.wait_with_output().unwrap();
+        assert!(contention.exists(), "hub did not attempt the contended lock: {output:?}");
+        let errors = fs::read_dir(paths.root()).unwrap().filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".error"))
+            .map(|entry| entry.path()).collect::<Vec<_>>();
+        assert_eq!(errors, vec![unrelated_error.clone()], "launch leaked its diagnostic file");
+        assert_eq!(fs::read(&unrelated_error).unwrap(), b"another launch's diagnostic");
+        if !cleanup_finishes {
+            assert!(!output.status.success(), "hub ignored the held machine lock: {output:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("machine lock remained held"),
+                "startup timeout lost its specific diagnostic: {stderr}");
+            assert!(!paths.root().join("process.json").exists(), "timed-out hub published a record");
+            drop(held_lock);
+            continue;
+        }
+        assert!(output.status.success(), "hub abandoned a transient cleanup lock: {output:?}");
+        let started: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(started["pid"], launcher);
+        let status = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "status"]).output().unwrap();
+        let running: Value = serde_json::from_slice(&status.stdout).unwrap();
+        assert_eq!(running["running"], true, "{running}");
+        assert_eq!(running["record"]["pid"], launcher, "{running}");
+        let stop = cas_command(home.path(), bin.as_os_str())
+            .args(["--json", "hub", "stop"]).output().unwrap();
+        assert!(stop.status.success());
+    }
+
     let home = private_home();
     let bin = home.path().join("bin");
     fs::create_dir(&bin).unwrap();
@@ -2415,6 +2543,199 @@ fn concurrent_start_and_restart_leave_exactly_one_lock_owner() {
             .acquire_instance_lock()
             .is_ok()
     );
+
+    // The two `hub start`/`hub restart` races above cover competing launchers.
+    // Also pin two restarts that both began stopping the same generation:
+    // hold the old hub after it removes its record, wait until both restart
+    // processes have entered the stop waiter, then release the old lock.
+    // Worker mode gives each detached hub its shared-server cgroup, so stale
+    // cleanup must not kill the replacement that joined a later generation.
+    let race_home = private_home();
+    let barrier = race_home.path().join("concurrent-restart-barrier");
+    fs::create_dir(&barrier).unwrap();
+    let session = format!("cas-3dc8-test-{}", std::process::id());
+    let initial = cas_command(race_home.path(), bin.as_os_str())
+        .env("CAS_AGENT_ROLE", "worker")
+        .env("CAS_FACTORY_SESSION", &session)
+        .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+        .args([
+            "--json",
+            "hub",
+            "--no-tailscale-serve",
+            "start",
+            "--port",
+            "0",
+        ])
+        .output()
+        .expect("start worker hub for concurrent restart race");
+    assert!(
+        initial.status.success(),
+        "worker hub start failed: {}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let initial: Value = serde_json::from_slice(&initial.stdout).unwrap();
+
+    let spawn_restart = |name: &str| {
+        let stdout_path = race_home.path().join(format!("{name}.stdout"));
+        let stderr_path = race_home.path().join(format!("{name}.stderr"));
+        let mut command = cas_process_command(race_home.path(), bin.as_os_str());
+        command
+            .env("CAS_AGENT_ROLE", "worker")
+            .env("CAS_FACTORY_SESSION", &session)
+            .env("CAS_TEST_HUB_LOCK_RELEASE_BARRIER", &barrier)
+            .args([
+                "--json",
+                "hub",
+                "--no-tailscale-serve",
+                "restart",
+                "--port",
+                "0",
+            ])
+            .stdout(Stdio::from(fs::File::create(&stdout_path).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&stderr_path).unwrap()));
+        let child = command.spawn().expect("spawn concurrent restart");
+        (child, stdout_path, stderr_path)
+    };
+    let (mut first, first_stdout, first_stderr) = spawn_restart("restart-a");
+    let old_hub_waiting = barrier.join("record-removed-lock-held");
+    let deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    while !old_hub_waiting.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !old_hub_waiting.exists() {
+        let _ = fs::write(barrier.join("release"), b"release\n");
+        let _ = first.wait_with_output();
+        panic!("old hub did not reach the deterministic lock-release barrier");
+    }
+    let (mut second, second_stdout, second_stderr) = spawn_restart("restart-b");
+    let waiter_deadline = Instant::now() + CHILD_PROGRESS_TIMEOUT;
+    loop {
+        let waiters = fs::read_dir(&barrier)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("restart-stop-waiter-")
+            })
+            .count();
+        if waiters >= 2 || Instant::now() >= waiter_deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let waiter_count = fs::read_dir(&barrier)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("restart-stop-waiter-")
+        })
+        .count();
+    let _ = fs::write(barrier.join("release"), b"release\n");
+    let first_status = first.wait().expect("wait first concurrent restart");
+    let second_status = second.wait().expect("wait second concurrent restart");
+    let first = std::process::Output {
+        status: first_status,
+        stdout: fs::read(first_stdout).unwrap(),
+        stderr: fs::read(first_stderr).unwrap(),
+    };
+    let second = std::process::Output {
+        status: second_status,
+        stdout: fs::read(second_stdout).unwrap(),
+        stderr: fs::read(second_stderr).unwrap(),
+    };
+
+    let status = cas_command(race_home.path(), bin.as_os_str())
+        .args(["--json", "hub", "status"])
+        .output()
+        .expect("read hub after concurrent restarts");
+    let running = serde_json::from_slice::<Value>(&status.stdout).ok();
+    let running_pid = running
+        .as_ref()
+        .and_then(|status| status["record"]["pid"].as_u64());
+    let cleanup = cas_command(race_home.path(), bin.as_os_str())
+        .env("CAS_AGENT_ROLE", "worker")
+        .env("CAS_FACTORY_SESSION", &session)
+        .args(["--json", "hub", "stop"])
+        .output()
+        .expect("stop concurrent restart fixture");
+
+    let labelled = [("restart-a", &first), ("restart-b", &second)];
+    let detail = labelled
+        .iter()
+        .map(|(name, output)| {
+            format!(
+                "{name}: exit={}, stdout={}, stderr={}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert_eq!(waiter_count, 2, "both restarts must reach the stop wait: {detail}");
+    assert!(status.status.success(), "hub status failed: {detail}");
+    assert_eq!(running.as_ref().unwrap()["running"], true, "{detail}");
+    let running_pid = running_pid.expect("running hub PID");
+    assert_ne!(running_pid, initial["pid"].as_u64().unwrap(), "{detail}");
+    assert!(
+        cleanup.status.success(),
+        "fixture cleanup failed: {}",
+        String::from_utf8_lossy(&cleanup.stderr)
+    );
+
+    let mut launched_pids = Vec::new();
+    let mut satisfied_pids = Vec::new();
+    for (name, output) in labelled {
+        let value: Value = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{name} did not emit one JSON value ({error}): {detail}"));
+        if output.status.success() {
+            let pid = value["start"]["pid"]
+                .as_u64()
+                .unwrap_or_else(|| panic!("{name} success has no hub PID: {value}"));
+            match value["start"]["already_satisfied"].as_bool() {
+                Some(false) => launched_pids.push(pid),
+                Some(true) => satisfied_pids.push(pid),
+                None => panic!("{name} success has no start disposition: {value}; {detail}"),
+            }
+            if value["start"]["already_satisfied"] == true
+                || value["stop"]["already_satisfied"] == true
+            {
+                assert_eq!(
+                    pid, running_pid,
+                    "{name} already-satisfied stop must return the running hub: {value}; {detail}"
+                );
+            }
+            assert_eq!(pid, running_pid, "{name} must report the running hub: {value}; {detail}");
+        } else {
+            let message = value["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("another cas hub instance won the machine lock")
+                    && message.contains(&format!("pid {running_pid}")),
+                "{name} reported an error inconsistent with the running winner: {value}; {detail}"
+            );
+        }
+    }
+    assert_eq!(
+        launched_pids,
+        vec![running_pid],
+        "exactly one restart may report that it launched the running hub: {detail}"
+    );
+    assert!(
+        satisfied_pids.iter().all(|pid| *pid == running_pid),
+        "a peer-satisfied restart must identify the running hub: {detail}"
+    );
+    if let Some(old_cgroup) = initial["cgroup"].as_str() {
+        assert_ne!(
+            running.as_ref().unwrap()["record"]["cgroup"].as_str(),
+            Some(old_cgroup),
+            "a replacement must not share a cgroup with the generation its stop cleans up"
+        );
+    }
 }
 
 #[path = "../../crates/cas-core/src/test_child.rs"]
@@ -2470,4 +2791,166 @@ fn hub_status_bounds_never_finishing_manager_and_reports_unknown_cas_8ee8() {
     );
     assert_eq!(status["runtime_receipt"]["hub"]["state"], "unknown");
     assert!(!home.path().join(".cas/hub").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_service_status_readiness_fits_80_columns_cas_0252() {
+    let home = private_home();
+    let bin = home.path().join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    for cli in ["claude", "codex"] {
+        cas::test_paths::warm_stub(&bin.join(cli), "#!/bin/sh\nexit 0\n");
+    }
+    let systemctl = bin.join("systemctl");
+    cas::test_paths::warm_stub(
+        &systemctl,
+        "#!/bin/sh\n[ \"$2\" = \"--version\" ] && exit 0\nexit 1\n",
+    );
+
+    let path = bin.as_os_str();
+    let mut human_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    human_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let output = human_command
+        .args(["hub", "service", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let human = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        human.lines().all(|line| line.chars().count() <= 80),
+        "service status exceeded 80 columns:\n{human}"
+    );
+    // pin: service status puts the first copyable repair command under its verdict.
+    assert_eq!(
+        human.lines().nth(1),
+        Some("  Fix: cas claude login main"),
+        "the first repair command should follow the service summary"
+    );
+    assert!(human.contains("path: ~/.claude"), "{human}");
+    assert!(human.contains("Fix: cas claude login main"), "{human}");
+    assert!(human.contains("path: ~/.codex"), "{human}");
+    assert!(human.contains("Fix: cas codex login main"), "{human}");
+    assert!(!human.contains("Fix: cas hub service install"), "{human}");
+    assert_eq!(
+        human.matches("Retry: cas hub status").count(),
+        usize::from(human.contains("service manager unknown")),
+        "{human}"
+    );
+
+    let mut json_command = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    json_command.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let json = json_command
+        .args(["hub", "service", "status", "--json"])
+        .output()
+        .unwrap();
+    assert!(json.status.success());
+    let report: Value = serde_json::from_slice(&json.stdout).unwrap();
+    let readiness = report["launch_readiness"].as_array().unwrap();
+    for (cli, profile) in [("claude", ".claude"), ("codex", ".codex")] {
+        let detail = readiness
+            .iter()
+            .find(|row| row["cli"] == cli)
+            .unwrap()["detail"]
+            .as_str()
+            .unwrap();
+        assert!(detail.contains(&home.path().join(profile).display().to_string()));
+    }
+    assert_eq!(
+        readiness
+            .iter()
+            .find(|row| row["cli"] == "grok")
+            .unwrap()["detail"],
+        "grok CLI is not installed or executable"
+    );
+
+    fs::create_dir_all(home.path().join(".cas")).unwrap();
+    fs::write(home.path().join(".cas/config.toml"), "[hub\n").unwrap();
+    let mut failed_probe = cas_command(home.path(), path);
+    #[cfg(target_os = "linux")]
+    failed_probe.env("CAS_HUB_SYSTEMCTL", &systemctl);
+    let failed_probe = failed_probe.args(["hub", "service", "status"]).output().unwrap();
+    assert!(failed_probe.status.success());
+    let failed_probe = String::from_utf8(failed_probe.stdout).unwrap();
+    assert!(failed_probe.contains("launch issue"), "{failed_probe}");
+    assert!(!failed_probe.contains("Launch readiness: healthy"), "{failed_probe}");
+    assert!(failed_probe.contains("Cause:"), "{failed_probe}");
+    assert!(failed_probe.contains("--json"), "{failed_probe}");
+    assert!(failed_probe.lines().all(|line| line.chars().count() <= 80), "{failed_probe}");
+    #[cfg(target_os = "linux")]
+    {
+        let manual = cas_command(home.path(), path)
+            .env("CAS_HUB_SYSTEMCTL", home.path().join("missing-systemctl"))
+            .args(["hub", "service", "status"])
+            .output()
+            .unwrap();
+        assert!(manual.status.success());
+        let manual = String::from_utf8(manual.stdout).unwrap();
+        assert!(manual.contains("rc script after networking and Tailscale"), "{manual}");
+        assert!(manual.contains("cas hub start --tailscale-serve"), "{manual}");
+        assert!(manual.contains("cas hub status"), "{manual}");
+        assert!(manual.lines().all(|line| line.chars().count() <= 80), "{manual}");
+    }
+    assert!(
+        human.contains("Fix: curl -fsSL https://x.ai/cli/install.sh | bash"),
+        "{human}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hub_status_prefers_live_lock_holder_over_dead_record_cas_ebbb() {
+    let home = private_home();
+    let paths = cas::hub::HubRuntimePaths::for_home(home.path());
+    let mut lock = paths.acquire_instance_lock().unwrap();
+    let mut exited = ProcessCommand::new("/usr/bin/true").spawn().unwrap();
+    let dead_pid = exited.id();
+    assert!(exited.wait().unwrap().success());
+    let record = serde_json::from_value(serde_json::json!({
+        "pid": dead_pid, "bind": "127.0.0.1", "port": 0,
+        "version": "old-record", "started_at": "2020-01-01T00:00:00Z",
+    })).unwrap();
+    paths.write_process_record(&record).unwrap();
+
+    for (phase, kinds) in [
+        ("starting", &["starting", "startup_wedged"][..]),
+        ("stopping", &["stopping"][..]),
+        ("running", &["unresponsive"][..]),
+    ] {
+        lock.set_phase(phase).unwrap();
+        let output = cas_command(home.path(), &system_path())
+            .args(["hub", "status", "--json"])
+            .output().unwrap();
+        assert!(!output.status.success(), "a lock holder alone is not ready");
+        let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(kinds.contains(&json["state"]["kind"].as_str().unwrap()), "{json}");
+        assert_eq!(json["state"]["pid"], std::process::id(), "{json}");
+        assert_eq!(json["record"]["pid"], dead_pid, "keep the historical record");
+        assert_eq!(json["running"], false);
+        assert!(!json["state"]["remedy"].as_str().unwrap().contains("`cas hub start`"));
+        let output = cas_command(home.path(), &system_path())
+            .args(["hub", "status"])
+            .output().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.starts_with(&format!("Cassy hub: pid {} is ", std::process::id())), "{text}");
+        assert!(!text.contains(&format!("last pid {dead_pid} exited")), "{text}");
+        assert!(!text.contains("`cas hub start`"), "{text}");
+    }
+
+    drop(lock);
+    // The test process is still alive; remove its released lock metadata.
+    fs::remove_file(paths.lock_path()).unwrap();
+    let output = cas_command(home.path(), &system_path())
+        .args(["hub", "status", "--json"])
+        .output().unwrap();
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["state"]["kind"], "exited");
+    assert_eq!(json["state"]["pid"], dead_pid);
+    assert_eq!(json["state"]["remedy"], "Run `cas hub start`.");
 }

@@ -115,9 +115,9 @@ Every token value in the frontmatter must be **copied from the token source**, n
 Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.md) for the three steps this skill shares with `codemap` and `project-overview`: keep-block preservation on re-runs, the thin pointer memory, and the commit. This skill's specifics:
 
 - **Keep-blocks** most often wrap `## Do's & Don'ts` rules the team wrote by hand (`❌ Never use Quasar's --q-* variables; the theme only wires --g-*.`). Put them back in the section they came from.
-- **Pointer memory title:** `project_<slug>_designmd` (slug = lowercase kebab-case of project name). Body example: `See [apps/frontend/DESIGN.md](apps/frontend/DESIGN.md) — Quasar dark-first `--g-*` theme, Playfair/Inter, 8pt grid.`
+- **Pointer memory title:** `project_<slug>_designmd` (slug = lowercase kebab-case of project name). Body example: ``See [apps/frontend/DESIGN.md](apps/frontend/DESIGN.md) — Quasar dark-first `--g-*` theme, Playfair/Inter, 8pt grid.``
 - **Lint:** `npx @google/design.md lint DESIGN.md` (schema, broken token references, WCAG contrast). Done when it is clean, or each remaining warning is listed in Overview with its reason.
-- **Commit** `DESIGN.md` so reviewers can diff it against the token source. Nothing in Cassy reads `DESIGN.md`: there is no hook, banner, or `cas` subcommand for it. The linter checks the file, not its freshness; comparing the commit dates of `DESIGN.md` and its token source is still a manual step.
+- **Commit** `DESIGN.md` so reviewers can diff it against the token source. `cas release report` reads the root `DESIGN.md` frontmatter (`source`, `maps`, `brand-mark`) for its brand; nothing checks its freshness, and there is no hook or banner for it. The linter checks the file, not its freshness; comparing the commit dates of `DESIGN.md` and its token source is still a manual step.
 - **Report back:** (a) the token source it was grounded in, (b) how many roles/components are documented, (c) any token the project is missing.
 
 ## When to run

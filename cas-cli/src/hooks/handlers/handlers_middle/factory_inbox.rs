@@ -42,9 +42,10 @@
 use std::path::Path;
 
 use cas_core::hooks::types::HookInput;
-use cas_store::QueuedPrompt;
+use cas_store::{PromptQueueStore, QueuedPrompt};
 
 fn assignment_is_stale_for_recipient(
+    queue: &dyn PromptQueueStore,
     task_store: &dyn crate::store::TaskStore,
     row: &QueuedPrompt,
     recipient: &str,
@@ -52,6 +53,15 @@ fn assignment_is_stale_for_recipient(
     let Some(task_id) = crate::prompt_revalidation::assignment_solicited_task_id(&row.prompt) else {
         return false;
     };
+    // Recovery bodies quote historical work; only the store's authenticated
+    // row predicate can exempt them from a fresh assignment's stale check.
+    match queue.is_abandonment_recovery(row.id) {
+        Ok(true) => return false,
+        Ok(false) => {}
+        Err(error) => {
+            tracing::warn!(prompt_id = row.id, %error, "could not classify abandonment recovery at hook surface");
+        }
+    }
     let Ok(task) = task_store.get(&task_id) else {
         return false;
     };
@@ -568,7 +578,7 @@ fn surface_factory_inbox_with_transport_delivery(
                 // assignment/start boilerplate before rendering it: the
                 // task may have moved beyond Open while the row waited.
                 if task_store.as_ref().is_some_and(|store| {
-                    assignment_is_stale_for_recipient(store.as_ref(), &row, alias)
+                    assignment_is_stale_for_recipient(queue.as_ref(), store.as_ref(), &row, alias)
                 }) {
                     tracing::info!(
                         target: "cas::coordination",
@@ -671,7 +681,7 @@ fn surface_factory_inbox_with_transport_delivery(
             .filter(|id| wake_ids.contains(id))
             .collect();
         block_notes.extend(withdrawn_note(&withdrawn));
-        block_notes.extend(over_budget_note(&over_budget));
+        block_notes.extend(over_budget_note(&over_budget, &*queue));
         // cas-1f0c: a named row whose full body was re-sent as a Teams copy
         // is not rendered here (the copy carries it).
         let sent_in_full: Vec<i64> = wake_ids
@@ -806,7 +816,10 @@ fn sent_in_full_note(ids: &[i64]) -> Option<String> {
 }
 
 /// cas-1f0c: rows left unread because their bodies did not fit this block.
-fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
+fn over_budget_note(
+    rows: &[(i64, usize)],
+    queue: &dyn cas_store::PromptQueueStore,
+) -> Option<String> {
     if rows.is_empty() {
         return None;
     }
@@ -826,12 +839,45 @@ fn over_budget_note(rows: &[(i64, usize)]) -> Option<String> {
     }
     if !no_room.is_empty() {
         notes.push(format!(
-            "[not shown here] Message {} did not fit in this block and stays unread; read it \
-             with inbox_poll notification_id=<id>.",
+            "[not shown here] Message {} did not fit in this block and stays unread; it is \
+             retried automatically at the next eligible turn or tool boundary.",
             ids(&no_room)
         ));
     }
-    Some(notes.join("\n"))
+    let mut note = notes.join("\n");
+    // Keep the id/summary list inside the hook's existing notes allowance.
+    let labels: Vec<_> = rows.iter().map(|(id, _)| format!("#{id} ")).collect();
+    let fixed = labels.iter().map(|s| s.chars().count()).sum::<usize>()
+        + rows.len().saturating_sub(1) * 2
+        + "\nPending: ".len();
+    let summary_limit =
+        HOOK_MAIL_NOTES_RESERVE_CHARS.saturating_sub(note.chars().count() + fixed) / rows.len();
+    let named: Vec<_> = rows
+        .iter()
+        .zip(labels)
+        .map(|((id, _), label)| {
+            let summary = match queue.queued_prompt(*id) {
+                Ok(row) => row
+                    .and_then(|row| row.summary)
+                    .unwrap_or_else(|| "no summary".into()),
+                Err(error) => {
+                    tracing::warn!(prompt_id = id, %error, "overflow summary unavailable");
+                    "summary unavailable".into()
+                }
+            };
+            let summary = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+            format!(
+                "{label}{}",
+                summary
+                    .chars()
+                    .take(summary_limit.min(80))
+                    .collect::<String>()
+            )
+        })
+        .collect();
+    note.push_str("\nPending: ");
+    note.push_str(&named.join("; "));
+    Some(note)
 }
 
 fn id_list(ids: &[i64]) -> String {

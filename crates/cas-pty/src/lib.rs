@@ -46,10 +46,12 @@ pub mod claude_trust;
 mod codex_hook_warning;
 pub mod codex_trust;
 pub mod conformance;
+mod display;
 mod error;
 pub mod input_queue;
 pub mod opencode;
 mod pty;
+pub mod store_isolation;
 pub mod violet_env;
 
 pub use claude_trust::{
@@ -72,6 +74,7 @@ pub use conformance::{
     grok_0140_conformance_receipt, grok_02114_conformance_receipt, harness_conformance_receipts,
     opencode_11823_token_plan_conformance_receipt,
 };
+pub use display::is_unsafe_terminal_character;
 pub use error::{Error, Result};
 pub use input_queue::{PTY_INPUT_BUFFER_CAP, PtyInput};
 pub use pty::{claude_supports_chrome_flag, claude_supports_flag, expand_codex_home};

@@ -683,12 +683,14 @@ impl FactoryApp {
             ReminderStatus::Fired => "Fired",
             ReminderStatus::Cancelled => "Cancelled",
             ReminderStatus::Expired => "Expired",
+            ReminderStatus::Suspended => "Suspended",
         };
         let status_color = match reminder.status {
             ReminderStatus::Pending => palette.status_warning,
             ReminderStatus::Fired => palette.status_success,
             ReminderStatus::Cancelled => palette.text_muted,
             ReminderStatus::Expired => palette.text_muted,
+            ReminderStatus::Suspended => palette.text_muted,
         };
 
         let trigger_str = match reminder.trigger_type {

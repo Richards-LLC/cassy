@@ -126,6 +126,16 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.append_note(task_id, formatted_note)
     }
 
+    fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        self.inner.append_trusted_note(task_id, formatted_note)
+    }
+
+    fn append_trusted_note_with_mutation_receipt(
+        &self, task_id: &str, formatted_note: &str, receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        self.inner.append_trusted_note_with_mutation_receipt(task_id, formatted_note, receipt_id)
+    }
+
     fn append_note_with_mutation_receipt(
         &self,
         task_id: &str,
@@ -140,8 +150,13 @@ impl TaskStore for QuarantineFilteringTaskStore {
         self.inner.update_with_mutation_receipt(task, receipt_id)
     }
 
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
-        self.inner.record_green_merge(task_id, merge_commit)
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
+        self.inner.record_merge_admission(task_id, merge_commit, admission)
     }
 
     fn delete(&self, id: &str) -> Result<()> {
@@ -151,6 +166,20 @@ impl TaskStore for QuarantineFilteringTaskStore {
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
         self.list_with_suppressed(status)
             .map(|(visible, _)| visible)
+    }
+
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let hidden = self.quarantined();
+        Ok(self
+            .inner
+            .ids_by_assignees_and_statuses(assignees, statuses)?
+            .into_iter()
+            .filter(|id| !hidden.contains(id))
+            .collect())
     }
 
     fn epic_for_branch_excluding(&self, branch: &str, excluded: &[String]) -> Result<Option<Task>> {

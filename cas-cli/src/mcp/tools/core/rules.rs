@@ -37,7 +37,10 @@ pub(crate) fn render_pending_encode_chores(tasks: &[Task]) -> String {
                 && task
                     .external_ref
                     .as_deref()
-                    .is_some_and(|reference| reference.starts_with("rule-encode:"))
+                    .is_some_and(|reference| {
+                        reference.starts_with("rule-encode:")
+                            || reference.starts_with("rule-candidate:")
+                    })
         })
         .collect();
     if pending.is_empty() {
@@ -65,6 +68,10 @@ pub(crate) fn render_pending_encode_chores(tasks: &[Task]) -> String {
     }
     output
 }
+
+/// A rule candidate is raised for a promote decision once it has been
+/// observed in this many different tasks (cas-f0a1).
+pub(crate) const CANDIDATE_DECISION_TASKS: usize = 2;
 
 fn encode_chore_ref(rule_id: &str) -> String {
     format!("rule-encode:{rule_id}")
@@ -1043,6 +1050,129 @@ impl CasCore {
 
         Ok(Self::success(output))
     }
+
+    /// cas-f0a1: a verifier never drafts a rule from one verdict. Its lesson
+    /// joins a rule candidate, which no agent context surfaces; once seen in
+    /// `CANDIDATE_DECISION_TASKS` different tasks, a decision chore asks the
+    /// supervisor and operator whether it becomes a rule.
+    pub async fn cas_rule_observe(
+        &self,
+        candidate_id: Option<String>,
+        content: String,
+        category: String,
+        verdict_link: String,
+    ) -> Result<CallToolResult, McpError> {
+        let invalid = |message: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(message),
+            data: None,
+        };
+        let (task_id, verdict_id) = verdict_link.split_once(':').ok_or_else(|| {
+            invalid(format!(
+                "source_ids must link the verdict as <task-id>:<verification-id>, got {verdict_link:?}"
+            ))
+        })?;
+        let candidate = cas_store::observe_rule_candidate(
+            &self.cas_root,
+            candidate_id.as_deref(),
+            &content,
+            &category,
+            task_id,
+            verdict_id,
+        )
+        .map_err(|error| {
+            let mut mapped = invalid(format!("Failed to record the observation: {error}"));
+            if matches!(&error, cas_store::StoreError::Database(source)
+                if cas_store::shared_db::is_busy_error(source))
+            {
+                mapped.code = ErrorCode::INTERNAL_ERROR;
+            }
+            mapped
+        })?;
+        let tasks = candidate.distinct_tasks();
+        let mut output = format!(
+            "Observed rule candidate {} ({tasks}/{CANDIDATE_DECISION_TASKS} tasks). It is not a rule and is never surfaced to agents.",
+            candidate.id
+        );
+        if tasks >= CANDIDATE_DECISION_TASKS {
+            let chore = self.ensure_candidate_decision_chore(&candidate)?;
+            output.push_str(&format!(
+                " Raised to the supervisor and operator as decision chore {chore}."
+            ));
+        }
+        Ok(Self::success(output))
+    }
+
+    /// Every rule candidate with its verdict links, for the supervisor's
+    /// promote decision.
+    pub async fn cas_rule_candidates(&self) -> Result<CallToolResult, McpError> {
+        let candidates = cas_store::list_rule_candidates(&self.cas_root).map_err(|error| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to list rule candidates: {error}")),
+            data: None,
+        })?;
+        if candidates.is_empty() {
+            return Ok(Self::success("No rule candidates."));
+        }
+        let mut output = format!("Rule candidates ({}):\n", candidates.len());
+        for candidate in &candidates {
+            let links: Vec<_> = candidate
+                .occurrences
+                .iter()
+                .map(|occurrence| format!("{}:{}", occurrence.task_id, occurrence.verdict_id))
+                .collect();
+            output.push_str(&format!(
+                "\n- {} [{}] {} task(s): {}\n  verdicts: {}\n",
+                candidate.id,
+                if candidate.category.is_empty() { "uncategorised" } else { &candidate.category },
+                candidate.distinct_tasks(),
+                candidate.content,
+                links.join(", ")
+            ));
+        }
+        Ok(Self::success(output))
+    }
+
+    /// One durable decision chore per candidate, found again by its external
+    /// reference even after it closes, so later observations never re-raise it.
+    fn ensure_candidate_decision_chore(
+        &self,
+        candidate: &cas_store::RuleCandidate,
+    ) -> Result<String, McpError> {
+        let internal = |message: String| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(message),
+            data: None,
+        };
+        let task_store = self.open_task_store()?;
+        let external_ref = format!("rule-candidate:{}", candidate.id);
+        if let Some(existing) = task_store
+            .list(None)
+            .map_err(|error| internal(format!("Failed to list rule chores: {error}")))?
+            .into_iter()
+            .find(|task| task.external_ref.as_deref() == Some(external_ref.as_str()))
+        {
+            return Ok(existing.id);
+        }
+        let id = task_store
+            .generate_id()
+            .map_err(|error| internal(format!("Failed to generate a chore ID: {error}")))?;
+        let mut chore = Task::new(id.clone(), format!("decide on rule candidate {}", candidate.id));
+        chore.task_type = TaskType::Chore;
+        chore.origin_project = task_store.project_id().map(str::to_owned);
+        chore.external_ref = Some(external_ref);
+        chore.description = format!(
+            "Verifiers observed rule candidate {} in {} different tasks. The supervisor and operator decide whether it becomes a project rule; read it and its verdict links with `rule action=candidates`. To adopt it, create the rule with those links as source_ids and promote it. Otherwise close this chore.",
+            candidate.id,
+            candidate.distinct_tasks()
+        );
+        chore.acceptance_criteria =
+            "The operator or supervisor recorded a promote or decline decision for the candidate.".into();
+        task_store
+            .create_atomic(&chore, &[], None, Some("rule-candidate"))
+            .map_err(|error| internal(format!("Failed to create the decision chore: {error}")))?;
+        Ok(id)
+    }
 }
 
 #[cfg(test)]
@@ -1333,5 +1463,54 @@ mod tests {
             assert!(render_pending_encode_chores(&[chore.clone()]).contains("chore-one"));
         }
         assert!(render_pending_encode_chores(&[]).is_empty());
+    }
+
+    /// cas-f0a1: a second similar observation joins the existing candidate
+    /// instead of drafting a rule; two different tasks raise one decision
+    /// chore; nothing reaches the rule store, so no agent context surfaces it.
+    #[tokio::test]
+    async fn a_repeat_observation_counts_against_its_candidate_and_never_becomes_a_rule() {
+        let (_temp, core) = isolated_core();
+        let lesson = "Every test-first task must add a new test file";
+        for (link, content) in [("cas-7da6:ver-1", lesson), ("cas-dbea:ver-2", "A test-first task must add a new test file")] {
+            core.cas_rule_observe(None, content.into(), "testing".into(), link.into())
+                .await
+                .unwrap();
+        }
+
+        let candidates = cas_store::list_rule_candidates(&core.cas_root).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].distinct_tasks(), 2);
+        assert!(core.open_rule_store().unwrap().list().unwrap().is_empty());
+        let decision_ref = format!("rule-candidate:{}", candidates[0].id);
+        let chores: Vec<_> = core
+            .open_task_store()
+            .unwrap()
+            .list(None)
+            .unwrap()
+            .into_iter()
+            .filter(|task| task.external_ref.as_deref() == Some(decision_ref.as_str()))
+            .collect();
+        assert_eq!(chores.len(), 1);
+        assert!(!chores[0].description.contains(lesson));
+
+        // A real pooled-store wait timeout is retryable, not a bad observation.
+        let connection = cas_store::shared_db::shared_connection(&core.cas_root.join("cas.db"))
+            .unwrap();
+        let held = connection.lock().unwrap();
+        let budget = cas_store::wait_budget::bound_waits_until(std::time::Instant::now());
+        let error = core
+            .cas_rule_observe(None, lesson.into(), "testing".into(), "cas-0ab2:ver-busy".into())
+            .await
+            .unwrap_err();
+        drop(budget);
+        drop(held);
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR, "{error}");
+        assert!(error.message.contains("retry"), "{error}");
+        let invalid = core
+            .cas_rule_observe(None, lesson.into(), "testing".into(), "missing-verdict".into())
+            .await
+            .unwrap_err();
+        assert_eq!(invalid.code, ErrorCode::INVALID_PARAMS);
     }
 }

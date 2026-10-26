@@ -273,6 +273,60 @@ fn cas_07ee_merged_delivery_no_longer_needs_attention() {
 }
 
 #[test]
+fn cas_521d_merge_request_stops_alerting_after_its_task_changes_state() {
+    let _env = env();
+    // Each case starts with its own queue and notification history.
+    for handled in [false, true] {
+        let mut f = Fixture::new();
+        let before_message = chrono::Utc::now() - chrono::Duration::seconds(1200);
+        let mut task = Task::new("cas-521d-transition".into(), "Parked delivery".into());
+        task.status = TaskStatus::AwaitingMerge;
+        task.assignee = Some("worker".into());
+        task.created_at = before_message;
+        task.updated_at = before_message;
+        crate::store::open_task_store_local(&f.cas_dir)
+            .unwrap()
+            .add(&task)
+            .unwrap();
+
+        let envelope = crate::prompt_revalidation::MergeRequestEnvelope {
+            task_id: task.id.clone(),
+            branch_tip: "a".repeat(40),
+            target_branch: "epic/test".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        let body = crate::prompt_revalidation::attach_merge_request_envelope(
+            "Please merge this parked delivery",
+            &envelope,
+        );
+        let id = f.aged("worker", "supervisor", &body);
+
+        // The supervisor's decision reopens the task for corrective work. The
+        // queued merge request stays unread, but its task lifecycle proves it was
+        // handled; it must no longer feed a supervisor_unread alert.
+        if handled {
+            task.status = TaskStatus::InProgress;
+            crate::store::open_task_store_local(&f.cas_dir)
+                .unwrap()
+                .update(&task)
+                .unwrap();
+        }
+        assert!(
+            f.queue
+                .queued_prompt(id)
+                .unwrap()
+                .is_some_and(|row| row.acked_at.is_none()),
+            "the lifecycle action must not fake an explicit message acknowledgement"
+        );
+        assert_eq!(f.scan().is_empty(), handled, "only a handled merge request loses its alert");
+    }
+}
+
+#[test]
 fn cas_07ee_same_recipient_unbound_reply_still_alarms() {
     let _env = env();
     for (sender, recipient) in [("supervisor", "worker"), ("worker", "supervisor")] {
@@ -1126,6 +1180,38 @@ fn cas_6d5c_task_lifecycle_retires_only_the_related_workers_alarms() {
         );
     }
 }
+
+/// cas-badb (GH #1302): an unread message, even one typed into the pane with no
+/// turn observed afterwards, reaches its sender and the operator, and the
+/// operator is paged once per episode.
+#[test]
+fn cas_badb_unread_message_escalates_to_sender_and_operator_once() {
+    let _env = env();
+    let mut f = Fixture::new();
+    let id = handed_off_row(&f, "supervisor", "worker");
+    f.queue
+        .record_recipient_surfaced(id, "worker", cas_store::SurfacingSource::TransportDelivered)
+        .unwrap();
+    let pages = |f: &Fixture| -> i64 {
+        rusqlite::Connection::open(f.cas_dir.join("cas.db"))
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM prompt_queue WHERE source = 'unread-message-watchdog' AND target = 'operator'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let first = f.scan();
+    assert!(
+        first.iter().any(|row| row.source == "delivery-watchdog" && row.target == "supervisor"),
+        "the sender hears that its message is unread: {first:?}"
+    );
+    assert_eq!(pages(&f), 1, "the operator is paged with the sender");
+    f.scan();
+    assert_eq!(pages(&f), 1, "one operator page per unread episode");
+}
+
 
 fn age_all(f: &Fixture) {
     rusqlite::Connection::open(f.cas_dir.join("cas.db"))

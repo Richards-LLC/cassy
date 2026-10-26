@@ -125,6 +125,10 @@ impl CloudSyncer {
         sessions: &[Session],
         max_batches: Option<usize>,
     ) -> Result<SyncResult, CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -1216,6 +1220,22 @@ impl CloudSyncer {
                             serde_json::from_str(&body).unwrap_or_default()
                         };
                         parsed.raw_body = body;
+                        match self
+                            .queue
+                            .rearm_personal_transient_network_failures_after_success(
+                                self.config.max_retries,
+                            )
+                        {
+                            Ok(0) => {}
+                            Ok(rearmed) => tracing::debug!(
+                                rearmed,
+                                "re-armed exhausted transient personal network sync rows after successful personal push"
+                            ),
+                            Err(error) => tracing::warn!(
+                                error = %error,
+                                "could not re-arm transient personal network sync rows after successful personal push"
+                            ),
+                        }
                         return Ok(parsed);
                     } else {
                         let status = resp.status();

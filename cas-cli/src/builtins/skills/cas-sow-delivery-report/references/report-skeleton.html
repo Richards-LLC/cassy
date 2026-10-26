@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<!--
+  cas-sow-delivery-report skeleton. Copy it beside the report markdown, then:
+  1. Replace the :root tokens with the project's DESIGN.md tokens. Each token
+     here is a design-spec role: copy the value of the same-named key under
+     DESIGN.md's front-matter `colors:` (bg, surface, line, line-strong, ink,
+     ink-muted, verdict, good, warning; surface-hero from the hero or sunk
+     surface, verdict-soft from a tint of verdict). Fonts come from its
+     `typography:` (display or h1 → --font-display, body1 → --font-body) and
+     DELIVERY.md → fonts, embedded as @font-face data URIs; radius from
+     `rounded:` card. Keep the role names; add the brand's own names only as
+     aliases. A light-only DESIGN.md drops the dark block.
+  2. Replace the example content (a fictional "Northwind analytics" SOW) with
+     the markdown's content. Keep every data-section marker and the order.
+  3. Keep image src values relative (shots/<id>.jpg). scripts/inline-images.py
+     turns them into data URIs to make the single-file report. Leave images
+     eager: a lazy image below the fold is blank in full-page captures and print.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northwind analytics SOW: delivery report, round 2 (2026-10-20)</title>
+<style>
+:root {
+  color-scheme: light dark;
+  /* Brand tokens: replace from DESIGN.md (role names from design-spec). */
+  --bg: #F7F4EE; --surface: #FFFFFF; --surface-hero: #F1E7DD;
+  --line: #DAD3C7; --line-strong: #8F8371;
+  --ink: #1B1D24; --ink-muted: #5A5F6E;
+  --verdict: #2E3A9F; --verdict-soft: #DDE1F7;
+  --good: #226845; --warning: #7F5504;
+  --font-display: "Iowan Old Style", Palatino, Georgia, serif;
+  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --container: 1120px; --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15161B; --surface: #1D1F26; --surface-hero: #262229;
+    --line: #3A3C46; --line-strong: #8A8E9C;
+    --ink: #F2EFE9; --ink-muted: #B4B7C2;
+    --verdict: #AEB8F5; --verdict-soft: #2B3160;
+    --good: #7FCFA1; --warning: #E7B866;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 var(--font-body); }
+a { color: var(--verdict); }
+:focus-visible { outline: 3px solid var(--verdict); outline-offset: 2px; }
+.skip { position: absolute; left: -999px; } .skip:focus { left: 8px; top: 8px; background: var(--surface); color: var(--ink); padding: 8px; }
+.wrap { max-width: var(--container); margin: 0 auto; padding: 0 24px; }
+header.brand { display: flex; flex-wrap: wrap; gap: 12px 24px; justify-content: space-between; align-items: center; padding: 20px 0; color: var(--ink-muted); font: 600 12px/16px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+/* A logo's live <text> must not inherit the label's caps and tracking, which widen it past its viewBox. */
+header.brand svg { flex: none; height: 28px; width: auto; max-width: 100%; text-transform: none; letter-spacing: normal; }
+@media (max-width: 600px) { header.brand { flex-direction: column; align-items: flex-start; } }
+.sides { align-items: start; }
+section { padding: 40px 0; border-top: 1px solid var(--line); }
+h1, h2 { font-family: var(--font-display); font-weight: 400; }
+h2 { font-size: 30px; line-height: 1.15; margin: 0 0 16px; }
+.eyebrow { font: 600 12px/16px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); margin: 0 0 8px; }
+.caption, figcaption { font-size: 14px; line-height: 20px; color: var(--ink-muted); }
+
+/* 1 verdict + outcome strip */
+[data-section=verdict] { background: var(--surface-hero); color: var(--ink); border-top: 0; padding: 40px 0 32px; }
+[data-section=verdict] h1 { font-size: clamp(30px, 4.4vw, 50px); line-height: 1.08; margin: 0 0 24px; max-width: 24ch; }
+.strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 12px; list-style: none; padding: 0; margin: 0 0 20px; }
+.strip li { border-top: 3px solid var(--verdict); padding-top: 10px; font-size: 14px; line-height: 19px; }
+.strip li.partial { border-top-style: dashed; }
+.strip svg { width: 22px; height: 22px; display: block; margin-bottom: 6px; }
+.strip b { display: block; font: 600 12px/16px var(--font-mono); color: var(--ink-muted); }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0; font: 400 14px/20px var(--font-mono); color: var(--ink-muted); }
+.meta dt { display: inline; } .meta dd { display: inline; margin: 0 0 0 6px; color: var(--ink); }
+
+/* 2 ledger */
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; line-height: 22px; }
+caption { text-align: left; font-size: 14px; color: var(--ink-muted); padding-bottom: 8px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); }
+thead th { font: 600 12px/16px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); border-bottom: 1px solid var(--line-strong); }
+td.id { font-family: var(--font-mono); white-space: nowrap; }
+.status { white-space: nowrap; font-weight: 600; }
+.status.met { color: var(--good); } .status.partial { color: var(--warning); }
+
+/* 3 before/after pairs */
+.pair { margin: 0 0 40px; break-inside: avoid; }
+.pair > figcaption { color: var(--ink); font-size: 17px; margin-bottom: 12px; max-width: 70ch; }
+.pair > figcaption q { font-style: italic; }
+.sides { display: grid; grid-template-columns: minmax(0, 1fr); gap: 24px; }
+.side { margin: 0; min-width: 0; }
+.shot { position: relative; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.shot img { display: block; width: 100%; height: auto; }
+.shot svg.mark { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.side.after .shot { border-color: var(--verdict); }
+.missing { display: grid; place-items: center; min-height: 180px; padding: 24px; border: 1px dashed var(--line-strong); border-radius: var(--radius); color: var(--ink-muted); background: var(--surface); text-align: center; }
+.side figcaption b { color: var(--ink); }
+
+/* 4 walkthrough */
+.walk { display: grid; gap: 32px; }
+.walk figure { margin: 0; max-width: 900px; break-inside: avoid; }
+
+footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14px; color: var(--ink-muted); }
+
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  header.brand { padding: 4pt 0; }
+  [data-section=verdict] { background: none; padding: 4pt 0; }
+  [data-section=verdict] h1 { max-width: none; margin-bottom: 8pt; }
+  .strip { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
+  section { padding: 8pt 0; }
+  h2 { font-size: 18pt; margin-bottom: 8pt; }
+  th, td { padding-top: 6pt; padding-bottom: 6pt; }
+  .sides { display: block; }
+  figure, tr { break-inside: avoid; }
+  /* A whole full-width pair may exceed a sheet; keep each image/caption,
+     rather than the pair, together. */
+  .pair { break-inside: auto; margin-bottom: 16pt; }
+  /* Missing history is a note, not an empty screenshot-sized print panel. */
+  .missing { min-height: 0; padding: 8pt; }
+  .walk { display: block; }
+  .walk figure + figure { margin-top: 16pt; }
+  /* Keep the explanation intact without gluing the whole comparison to it. */
+  .pair > figcaption { break-inside: avoid; margin-bottom: 4pt; }
+  .side + .side { margin-top: 16pt; }
+  h2 { break-after: avoid; }
+  /* Rounds + provenance print as one block: a footer-only last page is a defect (pdf.md). */
+  .closing { break-inside: avoid; }
+  footer { padding: 12pt 0 0; }
+  thead { display: table-header-group; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9pt; }
+  .skip { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#outcomes">Skip to outcomes</a>
+<div class="wrap">
+<header class="brand">
+  <!-- Client logo from DELIVERY.md → logo, inlined as SVG with role="img" and a <title>. -->
+  <svg viewBox="0 0 28 28" role="img" aria-labelledby="logo-t"><title id="logo-t">Northwind</title><rect width="28" height="28" rx="6" fill="currentColor"/></svg>
+  <span>Delivery report · Round 2 of 3</span>
+</header>
+</div>
+<main>
+<section data-section="verdict"><div class="wrap">
+  <p class="eyebrow">Northwind analytics SOW · outcome check</p>
+  <h1>All five outcomes are live on staging; the export layout waits on your choice.</h1>
+  <!-- Met (measured) mark: <circle cx="11" cy="11" r="8" fill="none" stroke="var(--verdict)" stroke-width="2"/><circle cx="11" cy="11" r="4" fill="var(--verdict)"/> -->
+  <ul class="strip" aria-label="Outcome status, one mark per outcome in the SOW">
+    <li><svg viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="9" fill="var(--verdict)"/></svg><b>R1 · Met (live)</b>Weekly dashboard</li>
+    <li><svg viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="9" fill="var(--verdict)"/></svg><b>R2 · Met (live)</b>Region filter</li>
+    <li><svg viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="9" fill="var(--verdict)"/></svg><b>R3 · Met (live)</b>Store ranking</li>
+    <li><svg viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="9" fill="var(--verdict)"/></svg><b>R4 · Met (live)</b>Email digest</li>
+    <li class="partial"><svg viewBox="0 0 22 22" aria-hidden="true"><circle cx="11" cy="11" r="8" fill="none" stroke="var(--verdict)" stroke-width="2"/><path d="M11 3a8 8 0 0 1 0 16z" fill="var(--verdict)"/></svg><b>R5 · Partial, your call</b>CSV export</li>
+  </ul>
+  <dl class="meta">
+    <div><dt>Environment</dt><dd>staging</dd></div>
+    <div><dt>Captured</dt><dd>2026-10-20 10:30 CT</dd></div>
+    <div><dt>Round</dt><dd>2 of 3</dd></div>
+    <div><dt>Review by</dt><dd>2026-11-03</dd></div>
+  </dl>
+</div></section>
+
+<section id="outcomes" data-section="outcomes"><div class="wrap">
+  <h2>Every outcome in the SOW, and where you can see it</h2>
+  <div class="scroll"><table>
+    <caption>Outcomes quoted from the SOW, section “Outcome”. Evidence refers to the screens later in this report.</caption>
+    <thead><tr><th scope="col">#</th><th scope="col">The SOW says</th><th scope="col">Status</th><th scope="col">Evidence</th></tr></thead>
+    <tbody>
+      <tr><th scope="row" class="id">R1</th><td>“A weekly sales dashboard for every store.”</td><td class="status met">● Met (live)</td><td><a href="#shot-R1">Dashboard screen</a></td></tr>
+      <tr><th scope="row" class="id">R5</th><td>“Managers can export any table as CSV.”</td><td class="status partial">◐ Partial</td><td>Export works on all tables. Your call: one file per table, or one combined file?</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<section data-section="changes"><div class="wrap">
+  <h2>What changed since round 1</h2>
+  <figure class="pair" id="pair-C2-1">
+    <figcaption><b>C2.1</b> You asked: <q>Can the ranking show last week next to this week?</q> The ranking now shows both weeks and the change between them.</figcaption>
+    <div class="sides">
+      <figure class="side before">
+        <div class="shot"><img src="shots/R3-store-ranking.before.jpg" alt="Store ranking in round 1: one column for this week's sales."></div>
+        <figcaption><b>Before</b> · round 1 · staging · 2026-10-06</figcaption>
+      </figure>
+      <figure class="side after">
+        <div class="shot"><img src="shots/R3-store-ranking.jpg" alt="Store ranking now: this week, last week and the change, per store.">
+          <!-- Optional svg.mark overlay: position it for the actual screenshot,
+               verify that no stroke crosses text, or leave the image unmarked. -->
+        </div>
+        <figcaption><b>After</b> · round 2 · staging · 2026-10-20</figcaption>
+      </figure>
+    </div>
+  </figure>
+  <figure class="pair" id="pair-C2-2">
+    <figcaption><b>C2.2</b> You asked: <q>Make the digest arrive Monday morning instead of Sunday night.</q> The digest is now sent Mondays at 7:00 local time.</figcaption>
+    <div class="sides">
+      <figure class="side before"><div class="missing">Before not captured: the old schedule had no screen. It is described in the SOW, section&nbsp;4.</div><figcaption><b>Before</b> · round 1</figcaption></figure>
+      <figure class="side after"><div class="shot"><img src="shots/R4-digest-settings.jpg" alt="Digest settings showing Monday 7:00."></div><figcaption><b>After</b> · round 2 · staging · 2026-10-20</figcaption></figure>
+    </div>
+  </figure>
+</div></section>
+
+<section data-section="walkthrough"><div class="wrap">
+  <h2>The delivered screens</h2>
+  <div class="walk">
+    <figure id="shot-R1"><div class="shot"><img src="shots/R1-weekly-dashboard.jpg" alt="Weekly dashboard with sales per store."></div>
+      <figcaption><b>R1 Weekly dashboard.</b> Every store's week in one view, refreshed each Monday.</figcaption></figure>
+  </div>
+</div></section>
+
+<section data-section="decisions"><div class="wrap">
+  <h2>One decision we need from you</h2>
+  <p><b>R5 CSV export:</b> should an export from a page with several tables give one file per table, or one combined file? Either is ready to switch on.</p>
+</div></section>
+
+<div class="closing">
+<section data-section="rounds"><div class="wrap">
+  <h2>Review rounds</h2>
+  <div class="scroll"><table>
+    <caption>Your SOW includes three rounds of feedback within the review cycle.</caption>
+    <thead><tr><th scope="col">Round</th><th scope="col">Delivered</th><th scope="col">Review by</th><th scope="col">Changes</th><th scope="col">Status</th></tr></thead>
+    <tbody>
+      <tr><th scope="row">1</th><td>2026-10-06</td><td>2026-10-20</td><td>first delivery</td><td>feedback received 2026-10-09</td></tr>
+      <tr><th scope="row">2</th><td>2026-10-20</td><td>2026-11-03</td><td>2 changes</td><td>awaiting your review</td></tr>
+    </tbody>
+  </table></div>
+  <p>Please send your feedback on this round as one bundle; we start round 3 when it arrives.</p>
+</div></section>
+<footer data-section="provenance"><div class="wrap">
+  <p>Screens captured from https://staging.northwind.example on 2026-10-20 between 10:30 and 10:41 CT, version 2026.10.20-1. Outcomes quoted from “Northwind analytics SOW”, signed 2026-09-15. Report prepared 2026-10-20. Markdown source: <a href="2026-10-20-northwind-analytics-round-2.md">2026-10-20-northwind-analytics-round-2.md</a>.</p>
+</div></footer>
+</div>
+</main>
+</body>
+</html>

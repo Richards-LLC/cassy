@@ -1,9 +1,11 @@
 //! One ordinary authenticated invocation: durable gate -> actual local drain ->
 //! submitting -> direct HTTP response -> validated immutable receipt storage.
+#[cfg(test)]
+use super::binding_runtime::RuntimeInventory;
+pub(crate) use super::binding_runtime::RuntimeSnapshot;
 use super::{
-    binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope},
+    binding_intake::{ChannelDisposition, IntakeJournal, IntakeScope, PauseOrigin},
     binding_reconciliation::{ReconciliationCode, ReconciliationRequest, ReconciliationResponse},
-    binding_runtime::RuntimeInventory,
 };
 use serde::Serialize;
 use std::{io::Read, path::Path, time::Duration};
@@ -92,6 +94,15 @@ impl OrdinaryBindingClient {
     /// checked against the existing ordinary team-project read, never ensure().
     pub fn repair(&self, cas_dir: &Path, scope: &IntakeScope) -> Result<RepairReport, String> {
         scope.validate()?;
+        self.repair_with_inventory(cas_dir, scope, &RuntimeSnapshot::capture(false))
+    }
+    pub(crate) fn repair_with_inventory(
+        &self,
+        cas_dir: &Path,
+        scope: &IntakeScope,
+        inventory: &RuntimeSnapshot,
+    ) -> Result<RepairReport, String> {
+        scope.validate()?;
         let local =
             crate::cloud::CloudConfig::load_from_cas_dir(cas_dir).map_err(|e| e.to_string())?;
         if local.active_team_id().as_deref() != Some(scope.team_id.as_str())
@@ -102,6 +113,17 @@ impl OrdinaryBindingClient {
         }
         let journal = IntakeJournal::new(cas_dir);
         let state = journal.read()?;
+        // A previous legacy_intake_active response is still waiting for the
+        // host to go quiet. Failure to submit this retry cannot settle it.
+        let preserve_pause = state.policies.iter().any(|policy| {
+            &policy.scope == scope
+                && matches!(
+                    policy.disposition,
+                    ChannelDisposition::Paused {
+                        origin: Some(PauseOrigin::LegacyIntakeActive),
+                    }
+                )
+        });
         // Reusing the scope's pause re-arms one an earlier blocked run released.
         let operation_id = state
             .pauses
@@ -110,22 +132,29 @@ impl OrdinaryBindingClient {
             .find(|pause| &pause.scope == scope)
             .map_or_else(Uuid::new_v4, |pause| pause.operation_id);
         let pause = journal.pause(scope.clone(), operation_id, state.generation)?;
-        // Nothing has left for Cloud yet: every refusal here releases the pause.
+        // Nothing has left for Cloud in this attempt. Release only a pause
+        // without a refusal origin, retaining a confirmed quiet-window hold.
         let blocked_before_submit = |error: String| -> Result<RepairReport, String> {
-            let error = match journal.release_unsubmitted(scope) {
+            let error = match if preserve_pause {
+                Ok(())
+            } else {
+                journal.release_unsubmitted(scope)
+            } {
                 Ok(()) => error,
-                Err(release) => format!("{error}; pause not released ({release}), rerun `cas update`"),
+                Err(release) => {
+                    format!("{error}; pause not released ({release}), rerun `cas update`")
+                }
             };
             Ok(RepairReport::blocked(scope, pause.operation_id, error))
         };
-        let inventory = match RuntimeInventory::discover(cas_dir).and_then(|inventory| {
-            inventory.drain(scope, &pause)?;
-            Ok(inventory)
-        }) {
-            Ok(inventory) => inventory,
+        let drained = inventory.for_project(cas_dir).and_then(|runtime| {
+            runtime.drain(scope, &pause)?;
+            inventory.validate()
+        });
+        match drained {
+            Ok(()) => {}
             Err(error) => return blocked_before_submit(error),
         };
-        drop(inventory);
         if let Err(error) = crate::cloud::TeamRegistration::new(
             &self.endpoint,
             &self.token,

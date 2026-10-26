@@ -58,6 +58,8 @@ pub struct EvidenceContext<'a> {
     /// authenticated runs may stand in for a local build when local auth is
     /// impossible. Empty means local builds only.
     pub deployed_origins: &'a [String],
+    /// Configured registry and this delivery's attributed files, for rebind coverage.
+    pub rebind_scope: Option<(&'a crate::config::QaConfig, &'a [String])>,
 }
 
 /// Why evidence is refused. `problem` completes "its QA evidence bundle is …";
@@ -83,6 +85,8 @@ pub struct BundleReceipt {
     pub manifest: PathBuf,
     pub head_sha: String,
     pub passed_expects: usize,
+    /// Verified documentation-only changes from the bundle to the delivery.
+    pub rebound_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -156,6 +160,7 @@ struct ManifestFiles {
     aria_json: Option<String>,
     #[serde(default)]
     cells: Vec<String>,
+    pairs: Option<String>,
     #[serde(default)]
     a11y: Vec<String>,
     #[serde(default)]
@@ -168,6 +173,153 @@ struct ManifestFiles {
     /// apart from findings the delivery introduced.
     visual_qa_baseline_json: Option<String>,
     critique: Option<String>,
+}
+
+/// Stable cell identity lives on the row; capture metadata belongs to each
+/// side, where later execution-state and independence checks can extend it.
+#[derive(Debug, Deserialize)]
+struct EvidenceCell {
+    id: String,
+    before: Option<CellCapture>,
+    after: Option<CellCapture>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CellCapture {
+    png: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EvidencePairs {
+    schema: u32,
+    task_id: String,
+    head_sha: String,
+    #[serde(default)]
+    pairs: Vec<EvidenceCell>,
+    #[serde(default)]
+    unpaired: Vec<EvidenceCell>,
+}
+
+#[derive(Default)]
+struct PairFiles {
+    current: Vec<(String, PathBuf)>,
+    baseline: Vec<(String, PathBuf)>,
+}
+
+fn validate_pairs(
+    ctx: &EvidenceContext<'_>,
+    bundle_dir: &Path,
+    relative: &str,
+    head: &str,
+) -> Result<PairFiles, EvidenceRefusal> {
+    let repair = "capture AFTER evidence for every BEFORE cell, retain baseline-only cells in unpaired[], and regenerate files.pairs; only a recorded exact-tip qa_waive or supervisor_override can waive coverage";
+    let refuse = |problem: String| EvidenceRefusal::new(problem, repair);
+    // Journey bundles share task-level qa/pairs; keep containment at the
+    // task root, while side captures remain inside the pairs directory.
+    let candidate = bundle_dir.join(relative);
+    let path = resolve_inside_task_dir(ctx, &candidate.to_string_lossy())?;
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| refuse(format!("unreadable files.pairs: {e}")))?;
+    let pairs: EvidencePairs =
+        serde_json::from_str(&raw).map_err(|e| refuse(format!("malformed files.pairs: {e}")))?;
+    if pairs.schema != 1 || pairs.task_id != ctx.task_id || pairs.head_sha != head {
+        return Err(refuse(
+            "files.pairs must use schema 1 and match bundle task_id/head_sha".into(),
+        ));
+    }
+    let mut before = std::collections::BTreeMap::new();
+    let mut after = std::collections::BTreeMap::new();
+    for cell in pairs.pairs.iter().chain(&pairs.unpaired) {
+        if cell.id.trim().is_empty() || cell.id != cell.id.trim() {
+            return Err(refuse("files.pairs has a blank or padded cell id".into()));
+        }
+        if cell.before.is_none() && cell.after.is_none() {
+            return Err(refuse(format!(
+                "files.pairs cell {} has no capture",
+                cell.id
+            )));
+        }
+        for (phase, capture, cells) in [
+            ("BEFORE", &cell.before, &mut before),
+            ("AFTER", &cell.after, &mut after),
+        ] {
+            if let Some(capture) = capture {
+                if cells.insert(cell.id.as_str(), capture).is_some() {
+                    return Err(refuse(format!(
+                        "files.pairs repeats {phase} cell {}",
+                        cell.id
+                    )));
+                }
+            }
+        }
+    }
+    let missing: Vec<_> = before
+        .keys()
+        .filter(|id| !after.contains_key(*id))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        return Err(refuse(format!(
+            "AFTER evidence is missing BEFORE cell(s): {}",
+            missing.join(", ")
+        )));
+    }
+    let dir = path.parent().expect("resolved bundle file has a directory");
+    let mut files = PairFiles::default();
+    for (phase, cells, listed) in [
+        ("before", &before, &mut files.baseline),
+        ("after", &after, &mut files.current),
+    ] {
+        for (id, capture) in cells {
+            let key = format!("pairs.{phase}[{id}]");
+            let file = resolve_bundle_file(dir, &key, &capture.png)?;
+            if !std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+                return Err(refuse(format!("files.{key} must name a nonempty capture")));
+            }
+            listed.push((key, file));
+        }
+    }
+    files.current.push(("pairs".into(), path));
+    Ok(files)
+}
+
+/// Probe optional citations for declared comparisons, including deferred proof.
+/// Unreadable/non-manifest citations are advisory here; full Bundle validation
+/// handles them strictly. Returns whether pairs were declared. Only the caller
+/// authenticates and records explicit waivers of declared-pairs failures.
+pub(crate) fn validate_cited_pair_coverage(
+    ctx: &EvidenceContext<'_>,
+) -> Result<bool, EvidenceRefusal> {
+    let Some(cited) = cited_bundle_path(ctx.notes) else {
+        return Ok(false);
+    };
+    let Ok(path) = resolve_inside_task_dir(ctx, &cited) else {
+        return Ok(false);
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return Ok(false);
+    };
+    let Some(relative) = manifest
+        .pointer("/files/pairs")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(false);
+    };
+    let relative = relative.as_str().ok_or_else(|| missing_key("pairs"))?;
+    let head = manifest
+        .get("head_sha")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| EvidenceRefusal::new("bundle head_sha is missing", cite_command(ctx)))?;
+    validate_pairs(
+        ctx,
+        path.parent().expect("manifest directory"),
+        relative,
+        head,
+    )
+    .map(|_| true)
 }
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the
@@ -371,6 +523,10 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             resolve_bundle_file(&bundle_dir, "cells", relative)?,
         ));
     }
+    let pair_files = files.pairs.as_deref()
+        .map(|relative| validate_pairs(ctx, &bundle_dir, relative, &manifest.head_sha))
+        .transpose()?.unwrap_or_default();
+    listed.extend(pair_files.current);
     for suffix in POLISH_RENDERS {
         if !files
             .polish_screenshots
@@ -462,16 +618,6 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             "push the delivery commit, then retry close".to_string(),
         )
     })?;
-    // A documented rebind preserves the execution revision. Only unchanged
-    // product/journey inputs across documentation-only commits can reuse it.
-    let delivered_time = if manifest.executed_head_sha.is_empty() {
-        delivered_time
-    } else if journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
-        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
-            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
-    } else {
-        return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
-    };
     let head_covers_delivery = manifest.head_sha == ctx.delivered_head
         || git(
             ctx.repo,
@@ -483,7 +629,16 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             ],
         )
         .is_some();
-    if !head_covers_delivery {
+    // Reuse the existing product/QA-input proof, never a second path classifier.
+    // Keep the cited manifest immutable: close records this rebind in task notes.
+    let rebound_paths = if !head_covers_delivery
+        && journeys::doc_only_rebind(ctx.repo, &manifest.head_sha, ctx.delivered_head)
+    {
+        Some(checked_rebind_paths(ctx, &manifest.head_sha, ctx.delivered_head, &rerun)?)
+    } else {
+        None
+    };
+    if !head_covers_delivery && rebound_paths.is_none() {
         return Err(EvidenceRefusal::new(
             format!(
                 "stale: it was recorded for {} but the delivery is {} (a commit landed after the bundle, or the bundle is for another build)",
@@ -493,8 +648,27 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             rerun,
         ));
     }
+    // Freshness remains bound to the executed build, including manifests that
+    // already carry an explicit documentation-only rebind.
+    let delivered_time = if !manifest.executed_head_sha.is_empty() {
+        if !journeys::doc_only_rebind(ctx.repo, &manifest.executed_head_sha, &manifest.head_sha) {
+            return Err(EvidenceRefusal::new("QA evidence rebind changed product or journey inputs", rerun));
+        }
+        checked_rebind_paths(ctx, &manifest.executed_head_sha, &manifest.head_sha, &rerun)?;
+        committer_time(ctx.repo, &manifest.executed_head_sha).ok_or_else(||
+            EvidenceRefusal::new("executed QA revision is unreadable", rerun.clone()))?
+    } else if rebound_paths.is_some() {
+        committer_time(ctx.repo, &manifest.head_sha).ok_or_else(||
+            EvidenceRefusal::new("recorded QA revision is unreadable", rerun.clone()))?
+    } else {
+        delivered_time
+    };
     if let Some(deployed) = manifest.deployed.as_ref() {
-        check_deployed_binding(ctx, deployed, &listed, &rerun)?;
+        let deployed_ctx = EvidenceContext {
+            delivered_head: if rebound_paths.is_some() { &manifest.head_sha } else { ctx.delivered_head },
+            ..*ctx
+        };
+        check_deployed_binding(&deployed_ctx, deployed, &listed, &rerun)?;
     }
     let created = chrono::DateTime::parse_from_rfc3339(manifest.created_at.trim())
         .map(|time| time.timestamp())
@@ -630,7 +804,9 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
 
     // cas-a6ab: an authenticated run must not carry its credentials.
     if manifest.deployed.is_some() {
-        check_no_secrets(&bundle_dir, &listed)?;
+        let mut scanned = listed.clone();
+        scanned.extend(pair_files.baseline);
+        check_no_secrets(&bundle_dir, &scanned)?;
     }
 
     // 6. Critique floor.
@@ -668,7 +844,87 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         manifest: manifest_path,
         head_sha: manifest.head_sha,
         passed_expects: summary.passed,
+        rebound_paths,
     })
+}
+
+/// Registry metadata may change without changing what this delivery must prove.
+/// Compare committed selections through the same engine used by close and QA.
+fn checked_rebind_paths(
+    ctx: &EvidenceContext<'_>,
+    from: &str,
+    to: &str,
+    rerun: &str,
+) -> Result<Vec<String>, EvidenceRefusal> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let unreadable = |error| EvidenceRefusal::new(
+        format!("uncheckable QA evidence rebind: {error}"), rerun,
+    );
+    // This follows the path proof. A failed Git read is not a stale-build verdict.
+    let diff = crate::qa_impact::io::git(ctx.repo, &["diff", "--name-only", from, to, "--"])
+        .map_err(|error| unreadable(error.to_string()))?;
+    let paths: Vec<String> = diff.lines().map(str::to_owned).collect();
+    let registry = ctx.rebind_scope.map(|(qa, _)| qa.registry.path.as_str())
+        .unwrap_or(crate::qa_registry::DEFAULT_PATH);
+    if !paths.iter().any(|path| path == registry) {
+        return Ok(paths);
+    }
+    let (qa, files) = ctx.rebind_scope.ok_or_else(||
+        unreadable("registry changed but the delivery's QA scope is unavailable".into()))?;
+    let changes: Vec<_> = files.iter().map(crate::qa_impact::Change::modified).collect();
+    let selected = |head| {
+        crate::qa_impact::analyze(ctx.repo, qa, &changes, None, Some(head))
+            .map(|impact| {
+                let safety = impact.safety;
+                let journeys = impact.journeys.into_iter().map(|journey| {
+                    let invariants = journey.invariants.into_iter()
+                        .map(|invariant| (invariant.id, (invariant.statement, invariant.check)))
+                        .collect::<BTreeMap<_, _>>();
+                    (
+                        journey.id,
+                        (
+                            journey.status,
+                            journey.kind,
+                            journey.evidence_required,
+                            invariants,
+                        ),
+                    )
+                }).collect::<BTreeMap<_, _>>();
+                (journeys, safety)
+            })
+            .map_err(|error| unreadable(error.to_string()))
+    };
+    let (before, before_safety) = selected(from)?;
+    let (after, after_safety) = selected(to)?;
+    let safety_changed = before_safety != after_safety;
+    let changed: BTreeSet<_> = before.keys().chain(after.keys())
+        .filter(|id| before.get(*id) != after.get(*id)).collect();
+    let mut affected = changed.clone();
+    if safety_changed {
+        affected.extend(before.keys());
+        affected.extend(after.keys());
+    }
+    if !affected.is_empty() || safety_changed {
+        let mut invariants = BTreeSet::new();
+        for id in &affected {
+            let old = before.get(*id).map(|(_, _, _, invariants)| invariants);
+            let new = after.get(*id).map(|(_, _, _, invariants)| invariants);
+            for key in old.into_iter().flat_map(|m| m.keys())
+                .chain(new.into_iter().flat_map(|m| m.keys()))
+            {
+                if old.and_then(|m| m.get(key)) != new.and_then(|m| m.get(key)) {
+                    invariants.insert(key.as_str());
+                }
+            }
+        }
+        return Err(EvidenceRefusal::new(format!(
+            "registry coverage changed: journeys [{}]; invariants [{}]; safety policy {}",
+            affected.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", "),
+            invariants.into_iter().collect::<Vec<_>>().join(", "),
+            if safety_changed { "changed" } else { "unchanged" },
+        ), rerun));
+    }
+    Ok(paths)
 }
 
 /// The report a visual-QA script writes (`visual-qa.json`). A bundle's
@@ -1056,13 +1312,38 @@ fn visual_qa_bounds_pair(
 const VISUAL_QA_TRANSLATION_METRICS: [&str; 5] =
     ["ratio", "threshold", "foreground", "background", "largeText"];
 
+/// GH #1321: an element's identity across builds. An inserted sibling shifts
+/// every later `:nth-of-type(n)`, so prefer the element's own `#id` or
+/// `data-testid`, then its DOM path without sibling positions. Tag and class
+/// names stay, so a renamed element is still a different one.
+fn visual_qa_stable_identity(finding: &serde_json::Value) -> String {
+    let selector = visual_qa_selector(finding);
+    let own = selector.rsplit('>').next().unwrap_or_default().trim();
+    if own.starts_with('#') || own.contains("[data-testid=") {
+        return own.to_string();
+    }
+    let mut stable = String::with_capacity(selector.len());
+    let mut rest = selector.as_str();
+    while let Some(start) = [":nth-of-type(", ":nth-child("]
+        .iter()
+        .filter_map(|pseudo| rest.find(pseudo))
+        .min()
+    {
+        stable.push_str(&rest[..start]);
+        rest = &rest[start..];
+        rest = rest.find(')').map_or("", |end| &rest[end + 1..]);
+    }
+    stable.push_str(rest);
+    stable
+}
+
 /// cas-5488 (GH #1152): content inserted above an element moves it without
-/// changing it. Pair a pure translation only when the exact DOM path, box
-/// size and measured defect all agree; a renamed or resized element still
-/// needs the strict position match above.
+/// changing it. Pair a pure translation only when the stable element
+/// identity, box size and measured defect all agree; a renamed or resized
+/// element still needs the strict position match above.
 fn visual_qa_translated_element(left: &serde_json::Value, right: &serde_json::Value) -> bool {
-    let selector = visual_qa_selector(left);
-    if selector.is_empty() || selector != visual_qa_selector(right) {
+    let identity = visual_qa_stable_identity(left);
+    if identity.is_empty() || identity != visual_qa_stable_identity(right) {
         return false;
     }
     let Some((left_bounds, right_bounds)) = visual_qa_bounds_pair(left, right) else {
@@ -2122,26 +2403,31 @@ pub fn delivery_test_diff(repo: &Path, from: &str, to: &str, paths: &[String]) -
 
 /// The commit range a delivery contributes: `merge-base(target, head)..head`
 /// before it merges; after it merges, the first merge on the ancestry path
-/// from `head` to `target` (`M^1..M`). A merge on the target's first-parent
+/// from `head` to `target` that brings `head` in through a merged parent
+/// (`M^1..M`), skipping the lane's own target syncs. A merge on the target's first-parent
 /// chain is the integration receipt itself and contributes `head^1..head`;
-/// later target merges cannot replace its diff.
-/// `None` when neither can be computed
-/// (for example a fast-forward merge, which leaves no merge commit).
-pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, String)> {
+/// non-merge squash/FF receipts use the recorded delivery base when known,
+/// otherwise their own parent (cas-420af). Later target merges cannot replace
+/// their diff. `None` when Git cannot resolve a boundary.
+pub fn delivery_range(
+    repo: &Path,
+    head: &str,
+    target: &str,
+    recorded_base: Option<&str>,
+) -> Option<(String, String)> {
     let merged = git(repo, &["merge-base", "--is-ancestor", head, target]).is_some();
     if merged {
-        // GH #1181: a merge on the target's first-parent chain is already
-        // the integration receipt. A worker-tip sync merge is not: its
-        // first-parent diff contains the incoming epic, so retain the
-        // ancestry-path search for that tip's later integration merge.
-        if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_some() {
-            let full_head = git(repo, &["rev-parse", "--verify", head])?;
-            if git(repo, &["rev-list", "--first-parent", target])?
-                .lines()
-                .any(|commit| commit == full_head)
-            {
-                return Some((format!("{head}^1"), head.to_string()));
-            }
+        // GH #1181 / cas-a173: any receipt on the target's first-parent
+        // chain is already integrated, whether merged or squash/FF. A
+        // worker-tip sync merge is not on that chain: retain the ancestry
+        // search for its later integration merge to exclude incoming code.
+        if receipt_on_first_parent(repo, head, target)? {
+            let base = if git(repo, &["rev-parse", "--verify", &format!("{head}^2")]).is_none() {
+                receipt_delivery_base(repo, head, recorded_base)?
+            } else {
+                format!("{head}^1")
+            };
+            return Some((base, head.to_string()));
         }
         let merges = git(
             repo,
@@ -2153,11 +2439,55 @@ pub fn delivery_range(repo: &Path, head: &str, target: &str) -> Option<(String, 
                 &format!("{head}..{target}"),
             ],
         )?;
-        let merge = merges.lines().next()?.trim().to_string();
+        // cas-cca7: the integration merge brings `head` in through a merged
+        // (non-first) parent. A merge with `head` on its first-parent side is
+        // the lane syncing its target; its first-parent diff is incoming
+        // target content, so measuring it charges other tasks' files here.
+        let merge = merges
+            .lines()
+            .map(str::trim)
+            .find(|merge| merge_brings_in(repo, merge, head))
+            .or_else(|| merges.lines().next().map(str::trim))?
+            .to_string();
         Some((format!("{merge}^1"), merge))
     } else {
         Some((git(repo, &["merge-base", target, head])?, head.to_string()))
     }
+}
+
+/// Bound the first-parent search to the receipt's parent, rather than walking
+/// the target to its root. Unlike --boundary, this cannot mistake a merged
+/// second parent for a first-parent receipt. Roots have no delivery boundary.
+pub(crate) fn receipt_on_first_parent(repo: &Path, head: &str, target: &str) -> Option<bool> {
+    let full_head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
+    let commits = git(repo, &["rev-list", "--first-parent", &format!("{head}^1..{target}")])?;
+    Some(commits.lines().any(|commit| commit == full_head))
+}
+
+/// A recorded base must resolve and precede the receipt. An unreadable supplied
+/// boundary cannot silently narrow a multi-commit delivery to its last commit.
+pub(crate) fn receipt_delivery_base(
+    repo: &Path,
+    head: &str,
+    recorded_base: Option<&str>,
+) -> Option<String> {
+    let base = recorded_base.map(str::to_owned).unwrap_or_else(|| format!("{head}^1"));
+    let full_base = git(repo, &["rev-parse", "--verify", &format!("{base}^{{commit}}")])?;
+    let full_head = git(repo, &["rev-parse", "--verify", &format!("{head}^{{commit}}")])?;
+    if full_base == full_head {
+        return None;
+    }
+    git(repo, &["merge-base", "--is-ancestor", &full_base, &full_head])?;
+    Some(base)
+}
+
+/// Whether `head` reaches `merge` through one of its non-first parents.
+fn merge_brings_in(repo: &Path, merge: &str, head: &str) -> bool {
+    git(repo, &["rev-list", "--parents", "-n", "1", merge]).is_some_and(|line| {
+        line.split_whitespace()
+            .skip(2)
+            .any(|parent| git(repo, &["merge-base", "--is-ancestor", head, parent]).is_some())
+    })
 }
 
 /// Reviewable paths changed over a range; deletions and whitespace-only
@@ -2323,6 +2653,12 @@ pub fn run_close_gate_with_write_dir(
                 short(&receipt.head_sha),
                 receipt.passed_expects
             ));
+            if let Some(paths) = receipt.rebound_paths {
+                pass.notes.push(format!(
+                    "QA evidence rebind: {} -> {}; product inputs and selected QA coverage unchanged; changed paths: {}.",
+                    receipt.head_sha, ctx.delivered_head, paths.join(", ")
+                ));
+            }
         }
         EvidenceTier::Ledger { terminal_qa } => {
             let (ledger, deferred) = validate_ledger_receipt(ctx)

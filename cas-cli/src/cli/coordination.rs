@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::coordination::external_work::{
     ExternalWorkCommand, ExternalWorkService, HttpCloudCoordinationPort, OperationContext,
-    RemoteError, SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
+    RemoteError, SqliteRequestJournal, VioletThreadResolver,
 };
 
 // Clap's generated {usage} keeps required options on one line. These help-only
@@ -305,13 +305,9 @@ impl VioletThreadResolver for CliViolet {
             )
             .await
         });
-        match result {
-            Ok(Ok(value)) => decode_violet_result(value),
-            Ok(Err(error)) => Err(RemoteError::unavailable(
-                cmcp_core::describe_upstream_call_error(&error),
-            )),
-            Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
-        }
+        // cas-85c1: the shared mapping, so a CLI claim or reconcile retries a
+        // reconnecting upstream exactly as the MCP and daemon paths do.
+        crate::coordination::external_work::violet_proxy_outcome(result)
     }
 }
 
@@ -355,7 +351,9 @@ mod tests {
 
     #[test]
     fn coordination_help_describes_flags_and_fits_eighty_columns() {
-        let mut command = Cli::command();
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("COLUMNS", "60");
+        let mut command = Cli::command().term_width(80);
         command.build();
         let coordination = command.find_subcommand("coordination").unwrap();
         let mut findings = Vec::new();
@@ -364,10 +362,12 @@ mod tests {
                 continue;
             }
             let error = Cli::command()
+                .term_width(80)
                 .try_get_matches_from(["cas", "coordination", subcommand.get_name(), "--help"])
                 .expect_err("help should exit before dispatching a coordination operation");
             assert_eq!(error.kind(), clap::error::ErrorKind::DisplayHelp);
             let help = error.to_string();
+            let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
             for line in help.lines().filter(|line| line.chars().count() > 80) {
                 findings.push(format!("{}: over 80 columns: {line}", subcommand.get_name()));
             }
@@ -379,7 +379,8 @@ mod tests {
                     .get_help()
                     .map(ToString::to_string)
                     .unwrap_or_default();
-                if description.trim().is_empty() || !help.contains(&description) {
+                let description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+                if description.is_empty() || !normalized.contains(&description) {
                     findings.push(format!(
                         "{}: --{} has no rendered explanation",
                         subcommand.get_name(),

@@ -96,7 +96,8 @@ def changed_string_matches(repo, base):
                         continue
                 label = name[1]
             else:
-                label = source[:start].splitlines()[-1].strip()[:100] or '<test file>'
+                prefix_lines = source[:start].splitlines()
+                label = (prefix_lines[-1].strip()[:100] if prefix_lines else '') or '<test file>'
             hits.add((path, source.count('\n', 0, start) + 1, label))
     return sorted(hits)
 

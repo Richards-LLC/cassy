@@ -102,8 +102,12 @@ impl Renderable for StatusLine {
     fn render(&self, fmt: &mut Formatter) -> io::Result<()> {
         if fmt.is_styled() {
             let color = self.status.color(fmt);
-            let icon = self.status.icon();
-            fmt.write_colored(&format!("{icon} {}", self.message), color)?;
+            let label = if fmt.glyphs() {
+                self.status.icon()
+            } else {
+                self.status.plain_tag()
+            };
+            fmt.write_colored(&format!("{label} {}", self.message), color)?;
         } else {
             let tag = self.status.plain_tag();
             fmt.write_raw(&format!("{tag} {}", self.message))?;
@@ -181,6 +185,20 @@ mod tests {
         }
         let output = String::from_utf8(buf).unwrap();
         assert_eq!(output, "[WARN] be careful\n");
+    }
+
+    #[test]
+    fn warning_styled_uses_ascii_tag_under_c_locale() {
+        let mut env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        env.remove("NO_COLOR");
+        let mut buf = Vec::new();
+        {
+            let mut fmt = Formatter::styled(&mut buf, ActiveTheme::default_dark());
+            StatusLine::warning("configuration refused").render(&mut fmt).unwrap();
+        }
+        let output = String::from_utf8(buf).unwrap();
+        assert!(output.contains("[WARN]"), "{output:?}");
+        assert!(!output.contains('⚠'), "{output:?}");
     }
 
     #[test]

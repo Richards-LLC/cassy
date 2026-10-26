@@ -56,6 +56,15 @@ Commit first; zero matched tests fail. Success records
 `test: PASS <sha> <package> <filter> <count>`; close imports exact-delivery
 receipts. Run the red test before fixing it, then commit and run the green test.
 
+Prove shared surfaces whole: for every changed production function, run its
+whole lib test module and every integration harness that calls it, for example
+`--lib -E 'test(close_ops::)'` plus
+`--test integration_factory -E 'test(worktree_surface_test::)'`.
+Before rewording user-facing text, grep the tests for the old wording. Measure
+a size or count claim on a real tree as well as a fixture. List each module run
+in the close reason. Named-only proofs missed same-module assertions
+and other callers' tests, so five deliveries failed at merge or review.
+
 Write or update Rust tests, read the diff, and trace callers, struct literals,
 and match arms across consumers. Before the push, cut the tests you added to the
 [fewest that fail without the change](../../cas-tdd/SKILL.md#fewest-tests). Full Rust builds and suites, cargo test,
@@ -69,6 +78,19 @@ For a supervisor's integrated run, record
 `ASSEMBLY_PROOF: head=<tested sha> result=PASS command=<cmd> log=<path>` on
 the epic. Child closes reference the epic's integration proof; final-gate
 failures return as follow-up tasks.
+
+## Capacity waits
+
+For a capped refusal caused by builder slots, CPU/memory pressure or disk
+headroom, keep the task InProgress and retain its lease. Follow the recorded
+next retry time and retry the same command; do not set status=blocked or send a
+supervisor blocker page for capacity alone. Record progress if useful, arm one
+retry reminder, then end the turn. The runner records one capacity-wait episode
+shown by worker_status; admission clears it. The daemon can queue one notice per
+episode after 20 minutes, including when no retry occurs; delivery follows normal
+supervisor readiness policy. Report an actual need for supervisor action
+immediately through the ordinary blocker message path.
+A source/test failure or a required decision still follows its own workflow.
 
 ## Browser checks
 

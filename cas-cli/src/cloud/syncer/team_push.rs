@@ -119,7 +119,36 @@ fn team_push_http_failure(status: u16, response: ureq::Response) -> CasError {
 }
 
 impl CloudSyncer {
+    fn rearm_after_successful_team_contact(&self, team_id: &str, errors: &mut Vec<String>) {
+        match self
+            .queue
+            .rearm_transient_network_failures_after_success(team_id, self.config.max_retries)
+        {
+            Ok(0) => {}
+            Ok(rearmed) => tracing::debug!(
+                team_id,
+                rearmed,
+                "re-armed exhausted transient network sync rows after successful team contact"
+            ),
+            Err(error) => {
+                let diagnostic = format!(
+                    "could not re-arm transient network sync rows after successful team contact: {error}"
+                );
+                tracing::warn!(
+                    team_id,
+                    error = %error,
+                    "could not re-arm transient network sync rows after successful team contact"
+                );
+                errors.push(diagnostic);
+            }
+        }
+    }
+
     pub fn push_team(&self, team_id: &str) -> Result<SyncResult, CasError> {
+        crate::store::detect::guard_implicit_worktree_write(
+            self.queue.cas_dir(),
+            "start cloud sync",
+        )?;
         let mut result = SyncResult::default();
         let start = Instant::now();
 
@@ -236,6 +265,9 @@ impl CloudSyncer {
         if !move_deletes.is_empty() {
             let (successful, failures) =
                 self.send_team_deletes(team_id, &move_deletes, token, &project_id);
+            if !successful.is_empty() {
+                self.rearm_after_successful_team_contact(team_id, &mut result.errors);
+            }
             for queue_id in successful {
                 let _ = self.queue.mark_synced(queue_id);
             }
@@ -292,6 +324,9 @@ impl CloudSyncer {
             // Ordinary deletes retain the historical after-upsert ordering.
             let (successful, failures) =
                 self.send_team_deletes(team_id, &normal_deletes, token, &project_id);
+            if !successful.is_empty() {
+                self.rearm_after_successful_team_contact(team_id, &mut result.errors);
+            }
             for queue_id in successful {
                 let _ = self.queue.mark_synced(queue_id);
             }
@@ -465,6 +500,7 @@ impl CloudSyncer {
                 git_remote,
             ) {
                 Ok(response) => {
+                    self.rearm_after_successful_team_contact(team_id, &mut errors);
                     if let Some(body) = response.as_ref() {
                         self.maybe_adopt_team_canonical_id(body);
                     }

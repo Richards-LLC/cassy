@@ -16,13 +16,33 @@ set -euo pipefail
 unset $(git rev-parse --local-env-vars)
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-lookup="$script_dir/find-release-prebuild.sh"
+lookup_script="$script_dir/find-release-prebuild.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin"
 
 pass=0
 fail=0
+
+# Exercise the real lookup with logical time: process scheduling must not use
+# up a fixture's one-second deadline. Unsetting Bash's special SECONDS makes it
+# an ordinary variable; the real retry sleeps advance it deterministically.
+# API timeouts are represented by the fake gh's exit124/137, the timeout process
+# boundary's public result, rather than waiting for a real child to be killed.
+run_lookup() (
+    unset SECONDS
+    SECONDS=0
+    sleep() {
+        SECONDS=$((SECONDS + $1))
+        if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
+            printf '%s\n' "$SECONDS" >"$FAKE_LOOKUP_CLOCK_FILE"
+        fi
+    }
+    if [[ -n "${FAKE_LOOKUP_CLOCK_FILE:-}" ]]; then
+        printf '0\n' >"$FAKE_LOOKUP_CLOCK_FILE"
+    fi
+    source "$lookup_script" "$@"
+)
 
 expect_field() {
     local output="$1" field="$2" expected="$3" label="$4" actual
@@ -72,6 +92,13 @@ case "$2" in
       count=$((count + 1))
       printf '%s\n' "$count" >"$count_file"
       sequence_file="$FAKE_RUNS_SEQUENCE_DIR/$count.json"
+      if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.fail" ]]; then
+        echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
+        if [[ -f "$FAKE_RUNS_SEQUENCE_DIR/$count.timeout" ]]; then
+          exit "$(<"$FAKE_RUNS_SEQUENCE_DIR/$count.timeout")"
+        fi
+        exit 1
+      fi
       [[ -f "$sequence_file" ]] || sequence_file="$FAKE_RUNS_SEQUENCE_DIR/last.json"
       cat "$sequence_file"
     else
@@ -83,6 +110,23 @@ case "$2" in
     run_id="${run_id%%/artifacts*}"
     file="${FAKE_ARTIFACTS_DIR:?}/$run_id.json"
     if [[ ! -f "$file" ]]; then exit 1; fi
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-always" ]]; then
+      echo "${FAKE_ARTIFACT_ERROR:-request failed}: HTTP ${FAKE_ARTIFACT_HTTP_STATUS:-502}; authorization: Bearer fixture-secret" >&2
+      exit "${FAKE_ARTIFACT_EXIT_STATUS:-1}"
+    fi
+    if [[ -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-once" || -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]]; then
+      count_file="$FAKE_ARTIFACTS_DIR/$run_id.artifact-attempts"
+      count=0
+      [[ -f "$count_file" ]] && count="$(<"$count_file")"
+      count=$((count + 1))
+      printf '%s\n' "$count" >"$count_file"
+      failures=1
+      [[ ! -f "$FAKE_ARTIFACTS_DIR/$run_id.fail-count" ]] || failures="$(<"$FAKE_ARTIFACTS_DIR/$run_id.fail-count")"
+      if (( count <= failures )); then
+        echo "request failed: HTTP 502; authorization: Bearer fixture-secret" >&2
+        exit 1
+      fi
+    fi
     cat "$file"
     ;;
   *)
@@ -110,23 +154,23 @@ export FAKE_ARTIFACTS_DIR="$tmp/artifacts"
 
 # 1. Complete prebuild -> adopt it.
 printf '%s' "$both_live" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found true 'a complete prebuild for the commit is adopted'
 expect_field "$out" run-id 111 'adoption names the prebuild run'
 
 # 2. Linux built, macOS missing -> decline (never publish half a release).
 printf '%s' "$linux_only" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found false 'a partial prebuild is not adopted'
 
 # 3. Artifact aged out of retention -> decline.
 printf '%s' "$macos_expired" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found false 'an expired artifact is not adopted'
 
 # 4. No prebuild run for the commit -> decline.
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found false 'a commit with no prebuild falls back to building'
 
 # 5. Newest incomplete run must not mask an older complete one.
@@ -135,12 +179,12 @@ echo '{"workflow_runs":[
   {"id":111,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
 printf '%s' "$linux_only" >"$tmp/artifacts/222.json"
 printf '%s' "$both_live" >"$tmp/artifacts/111.json"
-out="$("$lookup" deadbeef)"
+out="$(run_lookup deadbeef)"
 expect_field "$out" found true 'a complete older prebuild is still adopted'
 expect_field "$out" run-id 111 'adoption skips the incomplete run'
 
 # 6. API outage -> decline, exit 0. The release must still be able to ship.
-out="$(FAKE_RUNS_STATUS=1 "$lookup" deadbeef)"
+out="$(FAKE_RUNS_STATUS=1 run_lookup deadbeef)"
 expect_field "$out" found false 'an API failure declines instead of failing the release'
 
 # 7. A tag racing an in-flight prebuild waits, then adopts its completed assets.
@@ -152,29 +196,195 @@ echo '{"workflow_runs":[{"id":333,"status":"completed","conclusion":"success"}]}
 printf '%s' "$both_live" >"$tmp/artifacts/333.json"
 rm -f "$tmp/runs-sequence/count"
 export FAKE_RUNS_SEQUENCE_DIR="$tmp/runs-sequence"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=1 RELEASE_PREBUILD_POLL_SECONDS=0 "$lookup" racecommit)"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=1 RELEASE_PREBUILD_POLL_SECONDS=0 run_lookup racecommit)"
 expect_field "$out" found true 'an in-flight prebuild is awaited and adopted'
 expect_field "$out" run-id 333 'the completed racing prebuild run is adopted'
 unset FAKE_RUNS_SEQUENCE_DIR
 
-# 8. A prebuild that remains in flight past the bound falls back with a warning.
-echo '{"workflow_runs":[{"id":444,"status":"queued","conclusion":null}]}' \
-  >"$tmp/runs.json"
-out="$(RELEASE_PREBUILD_WAIT_SECONDS=0 "$lookup" timeoutcommit 2>&1)"
-expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
-if grep -qF 'falling back to the cold release build' <<<"$out"; then
-  printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
+# 8. A transient failure polling an in-flight exact-SHA run is retried, then
+# the completed run is adopted; diagnostics must not echo API error contents.
+mkdir -p "$tmp/transient-sequence"
+echo '{"workflow_runs":[{"id":555,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/transient-sequence/1.json"
+touch "$tmp/transient-sequence/2.fail"
+echo '{"workflow_runs":[{"id":555,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/transient-sequence/3.json"
+printf '%s' "$both_live" >"$tmp/artifacts/555.json"
+touch "$tmp/artifacts/555.fail-once"
+rm -f "$tmp/transient-sequence/count"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/transient-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
+  run_lookup transientcommit 2>"$tmp/transient.err")"
+expect_field "$out" found true 'a failed in-flight poll and artifacts query are retried before adoption'
+expect_field "$out" run-id 555 'retry adoption names the completed run'
+if grep -qF 'attempt 1 failed (HTTP 502)' "$tmp/transient.err" \
+    && ! grep -qF 'fixture-secret' "$tmp/transient.err" \
+    && ! grep -qF 'request failed' "$tmp/transient.err"; then
+  printf 'ok   a failed poll logs its HTTP status without leaking API error contents\n'
   pass=$((pass + 1))
 else
-  printf 'FAIL in-flight timeout omitted its cold-build warning\n'
+  printf 'FAIL retry diagnostic missing HTTP status or leaked API error: %s\n' \
+    "$(<"$tmp/transient.err")"
+  fail=$((fail + 1))
+fi
+unset FAKE_RUNS_SEQUENCE_DIR
+rm -f "$tmp/artifacts/555.fail-once" "$tmp/artifacts/555.artifact-attempts"
+
+# One broken completed run must not consume the poll's entire remaining wait
+# before the next completed run can supply its valid artifacts.
+mkdir -p "$tmp/fair-sequence"
+echo '{"workflow_runs":[{"id":666,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/fair-sequence/1.json"
+echo '{"workflow_runs":[
+  {"id":666,"status":"completed","conclusion":"success"},
+  {"id":777,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/fair-sequence/2.json"
+printf '%s' "$both_live" >"$tmp/artifacts/666.json"
+printf '%s' "$both_live" >"$tmp/artifacts/777.json"
+touch "$tmp/artifacts/666.fail-always"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/fair-sequence"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=6 RELEASE_PREBUILD_POLL_SECONDS=0 \
+  run_lookup faircommit 2>"$tmp/fair.err")"
+expect_field "$out" found true 'a persistently failing artifacts query does not starve another completed run'
+expect_field "$out" run-id 777 'the other completed run is adopted within the same poll'
+unset FAKE_RUNS_SEQUENCE_DIR
+
+# A lone completed run can recover after several failed artifact queries,
+# even if it was already completed at the initial lookup.
+echo '{"workflow_runs":[{"id":888,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
+printf '%s' "$both_live" >"$tmp/artifacts/888.json"
+printf '4\n' >"$tmp/artifacts/888.fail-count"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=60 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  run_lookup recoverycommit 2>"$tmp/recovery.err")"
+expect_field "$out" found true 'a lone completed run recovers after more than two failed queries'
+expect_field "$out" run-id 888 'the recovered completed run is adopted'
+
+# A just-completed run whose queries never recover uses the bounded wait,
+# then reports a query failure rather than claiming its artifacts are absent.
+mkdir -p "$tmp/query-failure-sequence"
+echo '{"workflow_runs":[{"id":889,"status":"in_progress","conclusion":null}]}' \
+  >"$tmp/query-failure-sequence/1.json"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"}]}' \
+  >"$tmp/query-failure-sequence/last.json"
+printf '%s' "$both_live" >"$tmp/artifacts/889.json"
+touch "$tmp/artifacts/889.fail-always"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/query-failure-sequence"
+for artifact_failure in 502 124 137 408 429 rate403; do
+  artifact_status=1
+  artifact_http_status="$artifact_failure"
+  artifact_error='request failed'
+  case "$artifact_failure" in
+    124|137) artifact_status="$artifact_failure"; artifact_http_status=502 ;;
+    rate403) artifact_http_status=403; artifact_error='secondary rate limit' ;;
+  esac
+  rm -f "$tmp/query-failure-sequence/count"
+  out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+    FAKE_ARTIFACT_EXIT_STATUS="$artifact_status" FAKE_ARTIFACT_HTTP_STATUS="$artifact_http_status" \
+    FAKE_ARTIFACT_ERROR="$artifact_error" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+    run_lookup outagecommit 2>"$tmp/query-failure.err")"
+  expect_field "$out" found false "persistent artifact query failure ($artifact_failure) falls back at the deadline"
+  if [[ "$(<"$tmp/query-clock")" == 12 ]] \
+      && grep -qF 'artifacts query failed' <<<"$out" \
+      && ! grep -qF 'fixture-secret' "$tmp/query-failure.err"; then
+    printf 'ok   persistent query failure consumes its wait budget with a sanitized cause\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL persistent query failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
+    fail=$((fail + 1))
+  fi
+done
+unset FAKE_RUNS_SEQUENCE_DIR
+
+# A definite permission failure on a completed run cannot recover by polling.
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  FAKE_ARTIFACT_HTTP_STATUS=403 FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+  run_lookup forbiddencommit 2>"$tmp/forbidden.err")"
+if grep -qFx 'found=false' <<<"$out" \
+    && grep -q 'reason=.*permanent.*HTTP 403' <<<"$out" \
+    && [[ "$(<"$tmp/query-clock")" == 0 ]] \
+    && ! grep -qF 'fixture-secret' "$tmp/forbidden.err"; then
+  printf 'ok   permanent artifacts permission failure declines without spending the wait budget\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL permanent artifacts failure ended at %ss with output: %s\n' "$(<"$tmp/query-clock")" "$out"
   fail=$((fail + 1))
 fi
 
-# 9. A missing commit declines rather than crash the workflow step.
-out="$(GITHUB_SHA= "$lookup")"
+# A missing completed run must not prevent adoption of another run that is
+# still in progress and publishes its artifacts on the next poll.
+mkdir -p "$tmp/missing-run-sequence"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"},
+  {"id":890,"status":"in_progress","conclusion":null}]}' >"$tmp/missing-run-sequence/1.json"
+echo '{"workflow_runs":[{"id":889,"status":"completed","conclusion":"success"},
+  {"id":890,"status":"completed","conclusion":"success"}]}' >"$tmp/missing-run-sequence/last.json"
+printf '%s' "$both_live" >"$tmp/artifacts/890.json"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=12 RELEASE_PREBUILD_POLL_SECONDS=5 \
+  FAKE_RUNS_SEQUENCE_DIR="$tmp/missing-run-sequence" FAKE_ARTIFACT_HTTP_STATUS=404 \
+  FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" run_lookup missingruncommit 2>"$tmp/missing-run.err")"
+if grep -qFx 'found=true' <<<"$out" && grep -qFx 'run-id=890' <<<"$out" \
+    && [[ "$(<"$tmp/query-clock")" == 5 ]]; then
+  printf 'ok   a run-specific 404 keeps waiting for another pending run\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL a run-specific 404 canceled another pending run: %s\n' "$out"
+  fail=$((fail + 1))
+fi
+
+# The last actual poll determines the deadline cause, even after an earlier
+# artifacts failure. The final sleep consumes the remaining logical second.
+mkdir -p "$tmp/last-poll-sequence"
+cp "$tmp/runs.json" "$tmp/last-poll-sequence/1.json"
+touch "$tmp/last-poll-sequence/2.fail"
+out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=1 \
+  FAKE_RUNS_SEQUENCE_DIR="$tmp/last-poll-sequence" FAKE_LOOKUP_CLOCK_FILE="$tmp/query-clock" \
+  run_lookup lastpollcommit 2>"$tmp/last-poll.err")"
+if grep -qFx 'found=false' <<<"$out" \
+    && grep -q 'reason=.*run lookup failed.*HTTP 502' <<<"$out" \
+    && [[ "$(<"$tmp/query-clock")" == 2 ]]; then
+  printf 'ok   final run-list failure replaces the previous artifacts deadline cause\n'
+  pass=$((pass + 1))
+else
+  printf 'FAIL final run-list failure has output: %s\n' "$out"
+  fail=$((fail + 1))
+fi
+
+# 9. A timed-out poll stays within the deadline and falls back with a sanitized
+# timeout diagnostic.
+mkdir -p "$tmp/timeout-sequence"
+echo '{"workflow_runs":[{"id":444,"status":"queued","conclusion":null}]}' \
+  >"$tmp/timeout-sequence/1.json"
+touch "$tmp/timeout-sequence/2.fail"
+export FAKE_RUNS_SEQUENCE_DIR="$tmp/timeout-sequence"
+for timeout_status in 124 137; do
+  printf '%s' "$timeout_status" >"$tmp/timeout-sequence/2.timeout"
+  rm -f "$tmp/timeout-sequence/count"
+  out="$(RELEASE_PREBUILD_WAIT_SECONDS=2 RELEASE_PREBUILD_POLL_SECONDS=0 \
+    RELEASE_PREBUILD_API_TIMEOUT_SECONDS=1 run_lookup timeoutcommit 2>&1)"
+  expect_field "$out" found false 'an in-flight prebuild times out to the cold build'
+  if grep -qF 'falling back to the cold release build' <<<"$out"; then
+    printf 'ok   an in-flight timeout emits a prominent cold-build warning\n'
+    pass=$((pass + 1))
+  else
+    printf 'FAIL in-flight timeout omitted its cold-build warning\n'
+    fail=$((fail + 1))
+  fi
+  if grep -qF "attempt 1 failed (timeout (exit $timeout_status))" <<<"$out" \
+      && ! grep -qF 'fixture-secret' <<<"$out"; then
+    printf 'ok   a timed-out poll reports exit %s without leaking API error contents\n' "$timeout_status"
+    pass=$((pass + 1))
+  else
+    printf 'FAIL timeout diagnostic missing exit %s or leaked API error: %s\n' "$timeout_status" "$out"
+    fail=$((fail + 1))
+  fi
+done
+unset FAKE_RUNS_SEQUENCE_DIR
+
+# 10. A missing commit declines rather than crash the workflow step.
+out="$(GITHUB_SHA= run_lookup)"
 expect_field "$out" found false 'an unset commit declines'
 
-# 10. A hand run without GITHUB_REPOSITORY resolves the repository and makes
+# 11. A hand run without GITHUB_REPOSITORY resolves the repository and makes
 # the real lookup (cas-0906): the gh default repository first, then origin.
 echo '{"workflow_runs":[{"id":111,"status":"completed","conclusion":"success"}]}' >"$tmp/runs.json"
 printf '%s' "$both_live" >"$tmp/artifacts/111.json"
@@ -203,7 +413,7 @@ export GIT_CEILING_DIRECTORIES="$tmp"
 
 make_repo origin https://github.com/Example/from-origin.git upstream https://github.com/Other/upstream-project
 : >"$FAKE_GH_LOG"
-out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' FAKE_REPO_VIEW=Example/from-gh "$lookup" deadbeef 2>"$tmp/err")"
+out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' FAKE_REPO_VIEW=Example/from-gh run_lookup deadbeef 2>"$tmp/err")"
 expect_field "$out" found true 'an unset repository uses the gh default repository'
 looked_up Example/from-gh 'the lookup asks the gh default repository'
 if grep -qF 'using Example/from-gh (gh repo view)' "$tmp/err"; then
@@ -213,7 +423,7 @@ else
 fi
 
 : >"$FAKE_GH_LOG"
-out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>/dev/null)"
+out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' run_lookup deadbeef 2>/dev/null)"
 expect_field "$out" found true 'without a gh default the origin remote is used'
 looked_up Example/from-origin 'origin wins over the upstream remote'
 
@@ -221,17 +431,17 @@ for url in git@github.com:Example/scp-form.git ssh://git@github.com/Example/ssh-
     make_repo origin "$url"
     expected="$(sed -E 's#^(git@github.com:|ssh://git@github.com/|https://github.com/)##; s#/$##; s#\.git$##' <<<"$url")"
     : >"$FAKE_GH_LOG"
-    out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>/dev/null)"
+    out="$(cd "$tmp/repo" && GITHUB_REPOSITORY='' run_lookup deadbeef 2>/dev/null)"
     expect_field "$out" found true "origin $url resolves"
     looked_up "$expected" "origin $url is looked up as $expected"
 done
 
-# 11. Unresolvable -> exit 2 with an error, no found= line and no API call:
+# 12. Unresolvable -> exit 2 with an error, no found= line and no API call:
 # a non-GitHub origin (even beside a GitHub upstream), no origin, no checkout.
 unresolvable() {
     local dir="$1" label="$2" status=0
     : >"$FAKE_GH_LOG"
-    out="$(cd "$dir" && GITHUB_REPOSITORY='' "$lookup" deadbeef 2>"$tmp/err")" || status=$?
+    out="$(cd "$dir" && GITHUB_REPOSITORY='' run_lookup deadbeef 2>"$tmp/err")" || status=$?
     if [[ "$status" -eq 2 ]] && ! grep -q '^found=' <<<"$out" \
         && grep -qF 'GITHUB_REPOSITORY is unset and the repository could not be resolved' "$tmp/err" \
         && [[ ! -s "$FAKE_GH_LOG" ]]; then
@@ -252,26 +462,26 @@ make_repo origin https://github.com/Example/x.git
 FAKE_REPO_VIEW='not a slug' unresolvable "$tmp/not-a-checkout" 'a malformed gh answer is not used'
 unset FAKE_GH_LOG GIT_CEILING_DIRECTORIES
 
-# 12. cas-28eb: a merge_group run built the landing tree before the queue
+# 13. cas-28eb: a merge_group run built the landing tree before the queue
 # landed it (tree 2a8b2a34 shared by two commits). It is adopted by tree id.
 tree=2a8b2a348aa3b0291dbfeaded555e6a7178f6485
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 printf '{"workflow_runs":[{"id":222,"status":"completed","conclusion":"success","head_sha":"35a177531","head_commit":{"tree_id":"%s"}}]}' \
     "$tree" >"$tmp/recent.json"
 printf '%s' "$both_live" >"$tmp/artifacts/222.json"
-out="$(FAKE_TREE="$tree" FAKE_RECENT_RUNS_JSON="$tmp/recent.json" "$lookup" 5fe54c3d5 2>/dev/null)"
+out="$(FAKE_TREE="$tree" FAKE_RECENT_RUNS_JSON="$tmp/recent.json" run_lookup 5fe54c3d5 2>/dev/null)"
 expect_field "$out" found true 'a merge-queue prebuild of the identical tree is adopted at land'
 expect_field "$out" run-id 222 'adoption names the merge-queue run'
 
-# 13. A complete run of a different tree is never adopted: the tag rebuilds.
+# 14. A complete run of a different tree is never adopted: the tag rebuilds.
 out="$(FAKE_TREE=1111111111111111111111111111111111111111 FAKE_RECENT_RUNS_JSON="$tmp/recent.json" \
-    "$lookup" 5fe54c3d5 2>/dev/null)"
+    run_lookup 5fe54c3d5 2>/dev/null)"
 expect_field "$out" found false 'a prebuild of a different tree is not adopted'
 
 # Every path exits 0.
 echo '{"workflow_runs":[]}' >"$tmp/runs.json"
 for scenario in 'deadbeef'; do
-    if "$lookup" "$scenario" >/dev/null; then
+    if run_lookup "$scenario" >/dev/null; then
         printf 'ok   lookup exits 0 for %s\n' "$scenario"
         pass=$((pass + 1))
     else

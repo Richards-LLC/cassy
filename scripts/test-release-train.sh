@@ -961,6 +961,8 @@ HTML_SHA256=$report_html_sha
 PAGE_COUNT=$report_pages
 PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf
 PDF_FILE_ID=F0FIXTUREPDF
+PDF_MESSAGE_ID=fixture-pdf-message
+PDF_MESSAGE_PERMALINK=https://example.test/pdf-message
 HTML_FILE_ID=F0FIXTUREHTML
 USER_THREAD_TS=fixture-user-thread
 DEV_THREAD_TS=fixture-dev-thread
@@ -973,6 +975,16 @@ if [[ "$status" == *"release report: verified PDF=docs/release-reports/v9.99.0.p
 else
     bad "complete release-report receipt was not accepted: $status"
 fi
+
+cp "$dir_a/release-report.receipt" "$tmp/complete-report.receipt"
+sed '/^PDF_MESSAGE_ID=/d' "$tmp/complete-report.receipt" >"$dir_a/release-report.receipt"
+status="$("$train" 9.99.0 "$wt_a" --status 2>&1 || true)"
+if [[ "$status" == *"receipt is incomplete"* && "$status" == *"PDF_MESSAGE_ID"* ]]; then
+    ok 'report receipt requires the PDF upload message ID as well as file ID'
+else
+    bad "report receipt accepted a file ID without upload message identity: $status"
+fi
+cp "$tmp/complete-report.receipt" "$dir_a/release-report.receipt"
 
 perl -pi -e 's/^PDF_REMOTE_SHA256=.*/PDF_REMOTE_SHA256=0000000000000000000000000000000000000000000000000000000000000000/' \
     "$dir_a/release-report.receipt"
@@ -1005,6 +1017,8 @@ HTML_SHA256=$html_sha
 PAGE_COUNT=$pdf_pages
 PDF_FILE_PERMALINK=https://petra-stella.slack.com/files/FIXTURE/report.pdf
 PDF_FILE_ID=F0FIXTUREPDF
+PDF_MESSAGE_ID=fixture-pdf-message
+PDF_MESSAGE_PERMALINK=https://example.test/pdf-message
 HTML_FILE_ID=F0FIXTUREHTML
 USER_THREAD_TS=${4:-missing-user-thread}
 DEV_THREAD_TS=${5:-missing-dev-thread}
@@ -1015,7 +1029,9 @@ printf '# Fixture release report\n' >"$wt_a/docs/release-reports/v9.99.0.md"
 rm "$dir_a/release-report.receipt"
 cat >"$dir_a/announce.receipt" <<'EOF'
 USER_TOP_LEVEL_ID=announce-user-thread
+USER_TOP_LEVEL_PART_IDS=["announce-user-thread"]
 DEV_TOP_LEVEL_ID=announce-dev-thread
+DEV_TOP_LEVEL_PART_IDS=["announce-dev-thread"]
 EOF
 report_out="$(CAS_RELEASE_TRAIN_REPORT_POST_CMD="$report_post" \
     "$train" 9.99.0 "$wt_a" --report 2>&1)"
@@ -1051,12 +1067,16 @@ POSTED_AT=2099-01-02T00:00:00Z
 CHANNEL=cas-internal
 CHANNEL_ID=C01234567
 USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PART_IDS=["user-1"]
 USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
 USER_REPLY_ID=user-2
+USER_REPLY_PART_IDS=["user-2"]
 USER_REPLY_PERMALINK=https://example.test/user-2
 DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PART_IDS=["dev-1"]
 DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
 DEV_REPLY_ID=dev-2
+DEV_REPLY_PART_IDS=["dev-2"]
 DEV_REPLY_PERMALINK=https://example.test/dev-2
 EOF
 standalone_receipts_output="$tmp/standalone-receipts.out"
@@ -1176,12 +1196,16 @@ cat >"$CAS_RELEASE_TRAIN_ANNOUNCE_RECEIPT" <<'RECEIPT'
 POSTED_AT=2099-01-02T00:00:00Z
 CHANNEL=cas-internal
 USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PART_IDS=["user-1"]
 USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
 USER_REPLY_ID=user-2
+USER_REPLY_PART_IDS=["user-2"]
 USER_REPLY_PERMALINK=https://example.test/user-2
 DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PART_IDS=["dev-1"]
 DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
 DEV_REPLY_ID=dev-2
+DEV_REPLY_PART_IDS=["dev-2"]
 DEV_REPLY_PERMALINK=https://example.test/dev-2
 RECEIPT
 EOF
@@ -3038,12 +3062,16 @@ cat >"$CAS_RELEASE_TRAIN_ANNOUNCE_RECEIPT" <<'RECEIPT'
 POSTED_AT=2099-01-02T00:00:00Z
 CHANNEL=cas-internal
 USER_TOP_LEVEL_ID=user-1
+USER_TOP_LEVEL_PART_IDS=["user-1"]
 USER_TOP_LEVEL_PERMALINK=https://example.test/user-1
 USER_REPLY_ID=user-2
+USER_REPLY_PART_IDS=["user-2"]
 USER_REPLY_PERMALINK=https://example.test/user-2
 DEV_TOP_LEVEL_ID=dev-1
+DEV_TOP_LEVEL_PART_IDS=["dev-1"]
 DEV_TOP_LEVEL_PERMALINK=https://example.test/dev-1
 DEV_REPLY_ID=dev-2
+DEV_REPLY_PART_IDS=["dev-2"]
 DEV_REPLY_PERMALINK=https://example.test/dev-2
 RECEIPT
 EOF

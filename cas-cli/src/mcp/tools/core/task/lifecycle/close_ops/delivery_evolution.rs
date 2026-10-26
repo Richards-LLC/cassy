@@ -793,6 +793,7 @@ pub(super) fn line_content_presence_with_resolutions(
         false,
         &[],
         false,
+        &[],
     )
 }
 
@@ -803,7 +804,7 @@ pub(super) fn resolution_content_presence(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[], false)
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], true, &[], false, &[])
 }
 
 /// Caller proves the final handoff's own content on this path before allowing
@@ -828,7 +829,22 @@ pub(super) fn line_content_presence_with_task_cycle(
         false,
         cycle,
         false,
+        &[],
     )
+}
+
+/// Epic accounting may retire a still-live owner at an independently
+/// attributed later task's ordinary commit. This never revives ownership
+/// already lost at a merge; child-close callers retain the strict replay.
+pub(super) fn line_content_presence_with_retirements(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+    retirements: &[String],
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], false, retirements)
 }
 
 /// Only the exact-final-snapshot companion may ask whether some attributed
@@ -841,7 +857,7 @@ pub(super) fn surviving_line_content(
     target: &str,
     path: &str,
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
-    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], true)
+    line_content_presence_impl(repo, parent, delivery, target, path, &[], false, &[], true, &[])
 }
 
 /// cas-24d8: one close asked for the same ownership walk about 78 times
@@ -859,6 +875,7 @@ type WalkKey = (
     bool,
     Vec<String>,
     bool,
+    Vec<String>,
 );
 
 static WALKS: std::sync::OnceLock<
@@ -878,6 +895,7 @@ fn line_content_presence_impl(
     novel_only: bool,
     cycle: &[String],
     allow_partial: bool,
+    retirements: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let commit =
         |reference: &str| super::resolve_branch_sha(repo, &format!("{reference}^{{commit}}"));
@@ -892,6 +910,7 @@ fn line_content_presence_impl(
             novel_only,
             cycle.to_vec(),
             allow_partial,
+            retirements.to_vec(),
         )),
         _ => None,
     };
@@ -912,6 +931,7 @@ fn line_content_presence_impl(
         novel_only,
         cycle,
         allow_partial,
+        retirements,
     )?;
     if let Some(key) = key
         && let Ok(mut cache) = walks.lock()
@@ -1113,6 +1133,107 @@ fn commit_messages(
         .then_some(messages)
 }
 
+/// The declared append-only builtin ledger owns added hashes under each file
+/// key, not JSON lines. A merged union may reorder keys/arrays or change commas
+/// without losing any delivery. Other generated outputs keep their existing
+/// artifact rules. Delivery-side deletions and metadata edits keep the ordinary
+/// line proof. Once additions qualify, a later ordinary commit removing an
+/// added hash remains Dropped; only the cas-2ea6 regeneration rule can accept it.
+fn reference_history_additions_presence(
+    repo: &Path,
+    parent: &str,
+    delivery: &str,
+    target: &str,
+    path: &str,
+) -> Result<Option<super::DeliveryContentPresence>, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    if path != super::REFERENCE_HISTORY_LEDGER {
+        return Ok(None);
+    }
+    let Some(blobs) = path_blobs(repo, &[parent, delivery, target], path) else {
+        return Ok(None);
+    };
+    enum ReadHistory {
+        Missing,
+        Unavailable,
+        Parsed(super::ReferenceHistory),
+    }
+    let read = |revision: &str| -> Result<ReadHistory, String> {
+        let Some(blob) = blobs.get(revision).and_then(Option::as_ref) else {
+            return Ok(ReadHistory::Missing);
+        };
+        let Ok(contents) = text(repo, &["cat-file", "blob", blob]) else {
+            return Ok(ReadHistory::Unavailable);
+        };
+        let history = super::parse_reference_history(contents.as_bytes())
+            .map_err(|error| format!("invalid reference history `{revision}:{path}`: {error}"))?;
+        Ok(ReadHistory::Parsed(history))
+    };
+    let delivered = match read(delivery)? {
+        ReadHistory::Parsed(history) => history,
+        ReadHistory::Missing | ReadHistory::Unavailable => return Ok(None),
+    };
+    let before = match read(parent)? {
+        ReadHistory::Parsed(history) => Some(history),
+        ReadHistory::Missing => None,
+        ReadHistory::Unavailable => return Ok(None),
+    };
+    if before.as_ref().is_some_and(|before| {
+        before.metadata != delivered.metadata
+            || before.files.iter().any(|(key, hashes)| {
+                delivered
+                    .files
+                    .get(key)
+                    .is_none_or(|kept| !hashes.is_subset(kept))
+            })
+    }) {
+        return Ok(None);
+    }
+    let added: BTreeMap<_, BTreeSet<_>> = delivered
+        .files
+        .iter()
+        .filter_map(|(key, hashes)| {
+            let old = before.as_ref().and_then(|before| before.files.get(key));
+            let added: BTreeSet<_> = hashes
+                .iter()
+                .filter(|hash| old.is_none_or(|old| !old.contains(*hash)))
+                .collect();
+            (!added.is_empty()).then_some((key, added))
+        })
+        .collect();
+    if added.is_empty() {
+        return Ok(None);
+    }
+    let landed = match read(target)? {
+        ReadHistory::Parsed(history) => Some(history),
+        ReadHistory::Missing => None,
+        ReadHistory::Unavailable => return Ok(None),
+    };
+    // Metadata delivered with a newly introduced ledger still needs the
+    // ordinary proof if the target changed it. Inherited metadata isn't ours.
+    if before.is_none()
+        && landed
+            .as_ref()
+            .is_some_and(|landed| landed.metadata != delivered.metadata)
+    {
+        return Ok(None);
+    }
+    let present = landed.as_ref().is_some_and(|landed| {
+        added.iter().all(|(key, hashes)| {
+            landed
+                .files
+                .get(*key)
+                .is_some_and(|kept| hashes.iter().all(|hash| kept.contains(*hash)))
+        })
+    });
+    let paths = vec![path.to_string()];
+    Ok(Some(if present {
+        super::DeliveryContentPresence::Present { paths }
+    } else {
+        super::DeliveryContentPresence::Dropped { paths }
+    }))
+}
+
 fn line_content_presence_uncached(
     repo: &Path,
     parent: &str,
@@ -1123,6 +1244,7 @@ fn line_content_presence_uncached(
     novel_only: bool,
     cycle: &[String],
     allow_partial: bool,
+    retirements: &[String],
 ) -> Result<Option<super::DeliveryContentPresence>, String> {
     let delivery_commit = super::resolve_branch_sha(repo, &format!("{delivery}^{{commit}}"))
         .ok_or("delivery line anchor does not resolve to a commit")?;
@@ -1130,6 +1252,13 @@ fn line_content_presence_uncached(
         .ok_or("delivery line target does not resolve to a commit")?;
     let delivery = delivery_commit.as_str();
     let target = target_commit.as_str();
+    // Novel merge-resolution ownership excludes imported parents; leave that
+    // attribution to the existing proof instead of claiming their hashes here.
+    if !novel_only
+        && let Some(presence) = reference_history_additions_presence(repo, parent, delivery, target, path)?
+    {
+        return Ok(Some(presence));
+    }
     let initial = match hunks(repo, parent, delivery, path) {
         Ok(hunks) => hunks,
         Err(reason) if reason.starts_with("binary delivery") => return Ok(None),
@@ -1245,7 +1374,7 @@ fn line_content_presence_uncached(
             owners.iter().any(Option::is_none)
         }
     };
-    let mut states = walk_owners(repo, delivery, target, path, owners, resolutions, cycle)?;
+    let mut states = walk_owners(repo, delivery, target, path, owners, resolutions, cycle, retirements)?;
     // cas-90d8: a later ordinary commit may rename the delivered file (for
     // example `release: vX` moving a dated release-notes draft). The
     // per-path walk reads that edge as a whole-file deletion, so carry the
@@ -1264,7 +1393,7 @@ fn line_content_presence_uncached(
         else {
             break;
         };
-        states = walk_owners(repo, &rename, target, &renamed_to, carried, resolutions, cycle)?;
+        states = walk_owners(repo, &rename, target, &renamed_to, carried, resolutions, cycle, retirements)?;
         start = rename;
         current = renamed_to;
     }
@@ -1311,6 +1440,7 @@ fn walk_owners(
     owners: Vec<Option<OwnedLines>>,
     resolutions: &[String],
     cycle: &[String],
+    retirements: &[String],
 ) -> Result<OwnerStates, String> {
     let width = owners.len();
     let history = text(
@@ -1472,7 +1602,20 @@ fn walk_owners(
                                 && cycle.iter().any(|owned| owned == commit),
                             reverted,
                             commit,
-                        )
+                        ).or_else(|| {
+                            // Only the actual ordinary loss edge can retire a
+                            // live owner. A missing parent owner never reaches
+                            // this closure, so later task work cannot excuse
+                            // an earlier merge-resolution drop.
+                            (ordinary && retirements.iter().any(|sha| sha == commit)).then(|| {
+                                let mut retired = owner.clone();
+                                retired.positions.clear();
+                                if !retired.commits.iter().any(|sha| sha == commit) {
+                                    retired.commits.push(commit.to_string());
+                                }
+                                retired
+                            })
+                        })
                     })
                 })
                 .collect();

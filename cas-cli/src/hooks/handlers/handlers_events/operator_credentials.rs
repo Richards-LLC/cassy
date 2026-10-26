@@ -9,12 +9,7 @@ use std::path::{Component, Path, PathBuf};
 use cas_core::hooks::types::HookInput;
 use serde_json::Value;
 
-const STORE_SUFFIXES: &[&str] = &[
-    ".config/neonctl",
-    ".local/share/com.vercel.cli",
-    "Library/Application Support/com.vercel.cli",
-    ".config/com.vercel.cli",
-];
+use cas_pty::store_isolation::HOME_STORE_SUFFIXES as STORE_SUFFIXES;
 
 const PATH_KEYS: &[&str] = &[
     "file_path",
@@ -103,6 +98,7 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
         return false;
     }
     let mut cwd = initial_cwd.to_path_buf();
+    let mut directory_stack = Vec::new();
     for words in super::pre_tool::shell_statement_words(command) {
         let Some(command_index) = super::pre_tool::unwrapped_command_index(&words) else {
             continue;
@@ -128,33 +124,33 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
             return true;
         }
 
-        if executable == "cd" {
+        if matches!(executable.as_str(), "cd" | "pushd") {
             if let Some(target) = cd_target(args) {
                 if path_references_store(target, &cwd, false) {
                     return true;
                 }
                 if let Some(next_cwd) = resolve_path(target, &cwd) {
+                    if executable == "pushd" {
+                        directory_stack.push(cwd.clone());
+                    }
                     cwd = next_cwd;
                 }
             } else if let Some(home) = std::env::var_os("HOME") {
+                if executable == "pushd" {
+                    directory_stack.push(cwd.clone());
+                }
                 cwd = PathBuf::from(home);
             }
             continue;
         }
-
-        let recursive = invocation_recursively_reads_directories(&executable, args);
-        for arg in args {
-            if shell_argument_is_path(&executable, arg, &cwd)
-                && path_references_store(arg, &cwd, recursive)
-            {
-                return true;
+        if executable == "popd" {
+            if let Some(previous) = directory_stack.pop() {
+                cwd = previous;
             }
+            continue;
         }
-        if is_script_interpreter(&executable)
-            && args
-                .iter()
-                .any(|arg| script_constructs_store_path(arg, &cwd))
-        {
+
+        if statement_references_store(&words, &cwd, depth) {
             return true;
         }
     }
@@ -162,6 +158,113 @@ fn shell_references_store(command: &str, initial_cwd: &Path, depth: usize) -> bo
     super::pre_tool::shell_heredoc_bodies(command)
         .iter()
         .any(|body| script_constructs_store_path(body, &cwd))
+}
+
+fn statement_references_store(words: &[String], cwd: &Path, depth: usize) -> bool {
+    if depth > 3 {
+        return false;
+    }
+    let Some(command_index) = super::pre_tool::unwrapped_command_index(words) else {
+        return false;
+    };
+    let executable = Path::new(&words[command_index])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&words[command_index])
+        .to_ascii_lowercase();
+    let args = &words[command_index + 1..];
+
+    // Inspect shell payloads as nested statement lists so a `cd` inside a
+    // `sh -c` or `bash -c` does not leak into the caller's working dir.
+    if matches!(executable.as_str(), "sh" | "bash" | "zsh" | "dash" | "ksh") {
+        return shell_command_payloads(args)
+            .into_iter()
+            .any(|payload| shell_references_store(payload, cwd, depth + 1));
+    }
+    if executable == "eval" {
+        return shell_references_store(&args.join(" "), cwd, depth + 1);
+    }
+    let cwd = &wrapper_cwd(&words[..command_index], cwd);
+
+    let recursive = invocation_recursively_reads_directories(&executable, args);
+    let recursive_operands = recursive_path_operand_indices(&executable, args);
+    let store_parent_cwd = recursive && cwd_is_store_or_parent(cwd);
+    for (index, arg) in args.iter().enumerate() {
+        let explicit_path = shell_argument_is_path(&executable, arg, cwd);
+        let inferred_recursive_path = store_parent_cwd
+            && recursive_operands.contains(&index)
+            && path_operand_is_bare_relative(arg);
+        if (explicit_path || inferred_recursive_path) && path_references_store(arg, cwd, recursive)
+        {
+            return true;
+        }
+    }
+    if store_parent_cwd
+        && matches!(executable.as_str(), "rg" | "grep" | "egrep" | "fgrep")
+        && recursive_search_defaults_to_cwd(&executable, args)
+        && recursive_path_operand_indices(&executable, args).is_empty()
+        && path_references_store(".", cwd, true)
+    {
+        return true;
+    }
+    is_script_interpreter(&executable)
+        && args
+            .iter()
+            .any(|arg| script_constructs_store_path(arg, cwd))
+}
+
+/// The directory the command runs in after its wrapper prefix: `env -C DIR`
+/// and `sudo -D DIR` (or `--chdir`) move it. `unwrapped_command_index` skips
+/// these wrappers, so their directory change is applied here from the
+/// skipped words.
+fn wrapper_cwd(prefix: &[String], cwd: &Path) -> PathBuf {
+    let mut cwd = cwd.to_path_buf();
+    let mut chdir_flag = None;
+    let mut index = 0;
+    while index < prefix.len() {
+        let word = prefix[index].as_str();
+        index += 1;
+        match Path::new(word).file_name().and_then(|name| name.to_str()) {
+            Some("env") => {
+                chdir_flag = Some("-C");
+                continue;
+            }
+            Some("sudo") => {
+                chdir_flag = Some("-D");
+                continue;
+            }
+            _ => {}
+        }
+        let Some(short) = chdir_flag else { continue };
+        let target = if word == short || word == "--chdir" {
+            index += 1;
+            prefix.get(index - 1).map(String::as_str)
+        } else {
+            word.strip_prefix("--chdir=")
+                .or_else(|| word.strip_prefix(short).filter(|dir| !dir.is_empty()))
+        };
+        if let Some(next) = target.and_then(|dir| resolve_path(dir, &cwd)) {
+            cwd = next;
+        }
+    }
+    cwd
+}
+
+fn cwd_is_store_or_parent(cwd: &Path) -> bool {
+    store_roots(cwd)
+        .iter()
+        .any(|root| cwd.starts_with(root) || root.starts_with(cwd))
+}
+
+fn path_operand_is_bare_relative(argument: &str) -> bool {
+    let normalized = normalize_path_operand(argument);
+    !normalized.is_empty()
+        && !normalized.starts_with('-')
+        && !normalized.starts_with('/')
+        && !normalized.starts_with('~')
+        && !normalized.starts_with('$')
+        && !normalized.contains('/')
+        && !normalized.contains(['*', '?', '['])
 }
 
 fn shell_command_payloads(args: &[String]) -> Vec<&str> {
@@ -201,6 +304,163 @@ fn invocation_recursively_reads_directories(name: &str, args: &[String]) -> bool
         "rsync" => has_flag("--archive", &['a']) || has_flag("--recursive", &['r']),
         _ => false,
     }
+}
+
+fn recursive_path_operand_indices(command: &str, args: &[String]) -> Vec<usize> {
+    let positionals = positional_argument_indices(command, args);
+    match command {
+        "rg" | "grep" | "egrep" | "fgrep" => {
+            let pattern_from_option = args.iter().any(|arg| {
+                matches!(arg.as_str(), "-e" | "--regexp" | "-f" | "--file")
+                    || arg.starts_with("--regexp=")
+                    || (arg.starts_with("-e") && arg.len() > 2)
+                    || (arg.starts_with("-f") && arg.len() > 2)
+            });
+            positionals
+                .into_iter()
+                .skip(usize::from(!pattern_from_option))
+                .collect()
+        }
+        "find" => args
+            .iter()
+            .enumerate()
+            .take_while(|(_, arg)| !arg.starts_with('-') && !matches!(arg.as_str(), "!" | "("))
+            .map(|(index, _)| index)
+            .collect(),
+        "tar" => tar_input_indices(args),
+        "zip" => positionals.into_iter().skip(1).collect(),
+        "cp" | "rsync" => {
+            let source_count = positionals.len().saturating_sub(1);
+            positionals.into_iter().take(source_count).collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn positional_argument_indices(command: &str, args: &[String]) -> Vec<usize> {
+    let mut indexes = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if arg == "--" {
+            indexes.extend(index + 1..args.len());
+            break;
+        }
+        if arg.starts_with('-') {
+            let takes_value = match command {
+                "rg" => matches!(
+                    arg,
+                    "-e" | "--regexp"
+                        | "-g"
+                        | "--glob"
+                        | "-t"
+                        | "--type"
+                        | "-T"
+                        | "--type-not"
+                        | "-m"
+                        | "--max-count"
+                        | "-A"
+                        | "--after-context"
+                        | "-B"
+                        | "--before-context"
+                        | "-C"
+                        | "--context"
+                        | "-j"
+                        | "--threads"
+                ),
+                "grep" | "egrep" | "fgrep" => matches!(
+                    arg,
+                    "-e" | "--regexp"
+                        | "-f"
+                        | "--file"
+                        | "-A"
+                        | "--after-context"
+                        | "-B"
+                        | "--before-context"
+                        | "-C"
+                        | "--context"
+                        | "-m"
+                        | "--max-count"
+                        | "--include"
+                        | "--exclude"
+                        | "--exclude-dir"
+                        | "--binary-files"
+                        | "--color"
+                        | "--directories"
+                ),
+                "zip" => matches!(arg, "-i" | "-x" | "-b"),
+                "cp" => matches!(
+                    arg,
+                    "-t" | "--target-directory" | "--sparse" | "--reflink" | "--backup"
+                ),
+                "rsync" => matches!(
+                    arg,
+                    "-e" | "--rsh"
+                        | "--exclude"
+                        | "--include"
+                        | "--filter"
+                        | "--rsync-path"
+                        | "--password-file"
+                        | "--backup-dir"
+                        | "--suffix"
+                ),
+                _ => false,
+            };
+            index += if takes_value { 2 } else { 1 };
+            continue;
+        }
+        indexes.push(index);
+        index += 1;
+    }
+    indexes
+}
+
+fn tar_input_indices(args: &[String]) -> Vec<usize> {
+    let mut inputs = Vec::new();
+    let mut archive_next = false;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if archive_next {
+            archive_next = false;
+            index += 1;
+            continue;
+        }
+        // A separate option value is the next word; skip exactly that word.
+        if matches!(arg, "--file" | "-f" | "--directory" | "-C") {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with("--file=") || arg.starts_with("--") {
+            index += 1;
+            continue;
+        }
+        let legacy_flags = arg.trim_start_matches('-');
+        if !legacy_flags.is_empty()
+            && legacy_flags
+                .chars()
+                .all(|ch| "cxturAfdOvhzjJZkKpm".contains(ch))
+        {
+            if legacy_flags.contains('f') {
+                archive_next = true;
+            }
+            index += 1;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        inputs.push(index);
+        index += 1;
+    }
+    inputs
+}
+
+fn recursive_search_defaults_to_cwd(command: &str, args: &[String]) -> bool {
+    command == "rg"
+        || (matches!(command, "grep" | "egrep" | "fgrep")
+            && invocation_recursively_reads_directories(command, args))
 }
 
 fn is_script_interpreter(name: &str) -> bool {
@@ -251,13 +511,7 @@ fn is_file_path_command(command: &str) -> bool {
 }
 
 fn path_operand_is_path_shaped(reference: &str) -> bool {
-    let reference = reference.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ',' | ';'));
-    let reference = reference
-        .split_once('=')
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(_, value)| value)
-        .unwrap_or(reference);
-    let reference = reference.strip_prefix('@').unwrap_or(reference);
+    let reference = normalize_path_operand(reference);
     !reference.is_empty()
         && (reference.starts_with('/')
             || reference == "~"
@@ -269,13 +523,7 @@ fn path_operand_is_path_shaped(reference: &str) -> bool {
 }
 
 fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> bool {
-    let reference = reference.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ',' | ';'));
-    let reference = reference
-        .split_once('=')
-        .filter(|(_, value)| !value.is_empty())
-        .map(|(_, value)| value)
-        .unwrap_or(reference);
-    let reference = reference.strip_prefix('@').unwrap_or(reference);
+    let reference = normalize_path_operand(reference);
     if reference.is_empty() {
         return false;
     }
@@ -296,6 +544,32 @@ fn path_references_store(reference: &str, cwd: &Path, include_parent: bool) -> b
         }
     }
     alias_references_store(reference, include_parent)
+}
+
+fn normalize_path_operand(reference: &str) -> &str {
+    let reference = reference.trim_matches(|ch: char| matches!(ch, '\'' | '"' | '`' | ',' | ';'));
+    let reference = attached_file_value(reference).unwrap_or(reference);
+    let reference = reference
+        .split_once('=')
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(_, value)| value)
+        .unwrap_or(reference);
+    reference.strip_prefix('@').unwrap_or(reference)
+}
+
+/// The value attached to a short-flag cluster such as `-d@x`, `-sSd@x` or
+/// `-sT~/x`: everything after the first flag that takes a file value. These
+/// are curl's file-reading short flags (data, upload, form, config, header,
+/// cookie).
+fn attached_file_value(word: &str) -> Option<&str> {
+    let flags = word
+        .strip_prefix('-')
+        .filter(|flags| !flags.starts_with('-'))?;
+    let (index, flag) = flags
+        .char_indices()
+        .take_while(|(_, flag)| flag.is_ascii_alphabetic())
+        .find(|(_, flag)| matches!(flag, 'd' | 'T' | 'F' | 'K' | 'H' | 'b'))?;
+    Some(&flags[index + flag.len_utf8()..])
 }
 
 fn glob_path_may_reach_root(pattern: &Path, root: &Path, include_parent: bool) -> bool {
@@ -395,28 +669,7 @@ fn bracket_class_matches(class: &[char], value: char) -> bool {
 }
 
 fn store_roots(cwd: &Path) -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".config")));
-    let data_home = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".local/share")));
-    let mut roots = Vec::new();
-    if let Some(home) = &home {
-        roots.extend(STORE_SUFFIXES.iter().map(|suffix| home.join(suffix)));
-    }
-    if let Some(config_home) = config_home {
-        roots.push(config_home.join("neonctl"));
-        roots.push(config_home.join("com.vercel.cli"));
-    }
-    if let Some(data_home) = data_home {
-        roots.push(data_home.join("com.vercel.cli"));
-    }
-    if let Some(vercel_root) = std::env::var_os("VERCEL_CONFIG_DIR") {
-        roots.push(PathBuf::from(vercel_root));
-    }
-    roots
+    cas_pty::store_isolation::operator_credential_stores(|name| std::env::var_os(name))
         .into_iter()
         .map(|root| lexical_absolute(&root, cwd))
         .collect()

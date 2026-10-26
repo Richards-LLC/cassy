@@ -29,7 +29,9 @@
 #   owner/session is printed with the exact reconnect/restart action. An MCP
 #   client's `cas serve` is allowed to reconnect through its owning client.
 #   Process identity checks require Linux procfs. On other systems the helper
-#   never signals processes or claims that the runtime epoch was verified.
+#   never signals processes or claims that the runtime epoch was verified; it
+#   turns over the CAS hub through `cas hub restart` instead (a changed install
+#   and a running hub), then checks the hub reports the new version.
 #
 # Environment:
 #   CAS_SRC                   Source checkout (default: this script's checkout,
@@ -76,6 +78,7 @@ NEW_INSTALLED_HASH="none"
 MIGRATION_STATUS="not started"
 SYNC_STATUS="not started"
 RUNTIME_STATUS="not started"
+HUB_TURNOVER_STATUS=""
 SUMMARY_PRINTED=0
 OLD_PROCESS_FILE=""
 TURNOVER_RESULTS_FILE=""
@@ -161,7 +164,52 @@ turnover_supported() {
 report_unverified_turnover() {
   RUNTIME_STATUS="unverified: process inspection unavailable on $(uname -s)"
   warn "Cannot verify or restart old CAS processes: Linux /proc process identity checks are unavailable on $(uname -s)."
-  warn "Manually restart running cas serve clients, the CAS hub service (check cas hub service status), and factory daemons/registered servers with their owners."
+  warn "Manually restart running cas serve clients and factory daemons/registered servers with their owners."
+}
+
+# The running hub's version, or nothing when no hub is running. Reads the
+# single-line `cas --json hub status` document (it exits non-zero when the hub
+# is not ready but still prints the document).
+running_hub_version() {
+  local status
+  status="$("$CAS_INSTALL" --json hub status 2>/dev/null || true)"
+  printf '%s' "$status" | grep -q '"running"[[:space:]]*:[[:space:]]*true' || return 0
+  printf '%s' "$status" | sed -n 's/.*"record"[[:space:]]*:[[:space:]]*{[^}]*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1
+}
+
+# cas-3f03e (cas-f149 P2-8): without procfs the helper cannot inspect PIDs, but
+# the hub can still be turned over through the CLI. `cas hub restart` replaces
+# it under the machine lock (and through the installed service when there is
+# one), so the update never leaves an old-binary hub beside the new one.
+turnover_hub_via_cli() {
+  local before after new_semver
+  if [ "$OLD_INSTALLED_HASH" = "$NEW_INSTALLED_HASH" ]; then
+    HUB_TURNOVER_STATUS="current (installed hash unchanged)"
+    return 0
+  fi
+  before="$(running_hub_version)"
+  if [ -z "$before" ]; then
+    HUB_TURNOVER_STATUS="no running hub"
+    return 0
+  fi
+  if [ "$DRY_RUN" = "1" ]; then
+    HUB_TURNOVER_STATUS="dry-run (would restart hub $before on the new binary)"
+    return 0
+  fi
+  new_semver="$(printf '%s' "$NEW_INSTALLED_VERSION" | sed -n 's/^cas \([0-9][^ ]*\).*/\1/p')"
+  info "Restarting the CAS hub ($before) on the newly installed binary"
+  if ! "$CAS_INSTALL" hub restart >/dev/null 2>&1; then
+    HUB_TURNOVER_STATUS="FAILED: cas hub restart exited non-zero; run cas hub status"
+    warn "CAS hub restart failed; run: cas hub status"
+    return 1
+  fi
+  after="$(running_hub_version)"
+  if [ -z "$after" ] || { [ -n "$new_semver" ] && [ "$after" != "$new_semver" ]; }; then
+    HUB_TURNOVER_STATUS="FAILED: hub after restart is ${after:-not running}, expected ${new_semver:-the new binary}"
+    warn "CAS hub is not running the new binary after restart; run: cas hub status"
+    return 1
+  fi
+  HUB_TURNOVER_STATUS="restarted on $after (was $before)"
 }
 
 resolve_cas_src() {
@@ -378,7 +426,8 @@ turnover_old_processes() {
   fi
   if ! turnover_supported; then
     report_unverified_turnover
-    return 0
+    turnover_hub_via_cli
+    return
   fi
   if [ ! -s "$OLD_PROCESS_FILE" ]; then
     RUNTIME_STATUS="verified current (no old CAS processes)"
@@ -677,6 +726,7 @@ print_summary() {
   printf '  Migrations:         %s\n' "$MIGRATION_STATUS"
   printf '  Sync:               %s\n' "$SYNC_STATUS"
   printf '  Runtime turnover:   %s\n' "$RUNTIME_STATUS"
+  [ -z "$HUB_TURNOVER_STATUS" ] || printf '  Hub turnover:       %s\n' "$HUB_TURNOVER_STATUS"
   printf '  CAS processes stopped or killed:\n'
   if [ -n "$TURNOVER_RESULTS_FILE" ] && [ -s "$TURNOVER_RESULTS_FILE" ]; then
     local pid action kind session owner cmd restart

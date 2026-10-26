@@ -1,6 +1,7 @@
 mod attribution;
 mod browser_tier_guard;
 pub(crate) mod codemap;
+pub(crate) mod docs_freshness;
 pub(crate) mod message_display;
 mod neon_sql_guard;
 mod notifications;
@@ -28,5 +29,7 @@ pub use pre_tool::handle_pre_tool_use;
 pub(crate) use pre_tool::worker_cargo_request;
 /// `cas violet post|thread` applies the same deliverable gate as a `violet_post` tool call.
 pub(crate) use publication_gate::denial as violet_publication_denial;
+pub(crate) use publication_gate::release_notes_post as violet_release_notes_post;
+pub(crate) use publication_gate::post_release_post_denial as violet_post_release_denial;
 #[cfg(test)]
 pub(crate) use pre_tool::is_harness_session_scratchpad;

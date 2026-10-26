@@ -31,7 +31,7 @@ Fresh source checks: `npm run typecheck` exit 0; `npm test` exit 0, 31 files / 4
 The two amended invariant assertions remove the old shimmer/clamp contract; all other
 existing invariants remain unchanged. Pending enrichment now reads “Enriching…”.
 
-Durable receipt root: `/home/pippenz/.cas/artifacts/cas-3c1c8/`:
+Durable receipt root: `<artifacts>/cas-3c1c8/`:
 
 - `visual-mixed/visual-qa.md` and `visual-qa.json`: strict receipt and screenshots.
 - `browser-behavior.json` and `browser-behavior.mjs`: layout and interaction proof.

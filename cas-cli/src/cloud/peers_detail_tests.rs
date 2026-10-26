@@ -163,7 +163,9 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
     agents[0]
         .metadata
         .insert("focus".into(), format!("\u{1b}[31m\n{}", "界".repeat(100)));
-    let report = PeerReport {
+    let mut report = PeerReport {
+        #[cfg(feature = "mcp-proxy")]
+        stakeholder_contacts: serde_json::json!({"state":"shared","contacts":[{"workspace_id":"T123","user_id":"U123","last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z","owner":{"registration_id":"new-owner"}}]}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -188,11 +190,20 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
         ),
         error: None,
     };
+    // cas-2db0 (QA F01): the logged-out reason wraps instead of being cut.
+    report.peers[0].supervisor.harness_auth_failed = Some("Login expired · Please run /login".into());
     for ascii in [true, false] {
         for width in [80, 120] {
             let text = render_peer_report(&report, width, ascii);
             assert!(
                 text.starts_with("[OK] 1 peer supervisor | 1 live\nRepo github.com/acme/widgets\n"),
+                "{text}"
+            );
+            let middot = if ascii { "?" } else { "·" };
+            assert!(
+                text.split_whitespace().collect::<Vec<_>>().join(" ").contains(&format!(
+                    "Harness logged out: \"Login expired {middot} Please run /login\"; messages to it are refused"
+                )),
                 "{text}"
             );
             assert!(
@@ -203,9 +214,13 @@ fn cas_559c_render_is_bounded_sanitized_and_json_preserves_values() {
             assert!(!ascii || text.is_ascii());
             assert!(text.contains("--json for untruncated values"));
             assert!(text.contains("Claims  0") && text.contains("Workers 0 live (read-only)"));
+            #[cfg(feature = "mcp-proxy")]
+            assert!(text.contains("Stakeholder contacts [shared]") && text.contains("Next allowed 2026-10-20T17:23:00Z") && text.contains("Owner new-owner"));
         }
     }
     let encoded = serde_json::to_value(&report).unwrap();
+    #[cfg(feature = "mcp-proxy")]
+    assert_eq!(encoded["stakeholder_contacts"]["contacts"][0]["last_poster"], "peer-on-prowl");
     assert_eq!(
         encoded["peers"][0]["supervisor"]["focus"],
         agents[0].metadata["focus"]
@@ -254,6 +269,8 @@ fn cas_559c_missing_account_identity_never_means_zero_claims() {
     agents[0].team_id = None; // No team authorization signal.
     let peers = peers::repo_peers(&agents, REPO, &[], None, Utc::now());
     let report = PeerReport {
+        #[cfg(feature = "mcp-proxy")]
+        stakeholder_contacts: serde_json::json!({"state":"unconfigured"}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -358,6 +375,8 @@ fn cas_a81c_claim_copy_uses_scoped_plain_ids_owner_names_and_missing_title_reaso
         lease(&foreign_key, owner_id, LeaseStatus::Active, 600),
     ];
     let report = PeerReport {
+        #[cfg(feature = "mcp-proxy")]
+        stakeholder_contacts: serde_json::json!({"state":"unconfigured"}),
         hidden_peers: 0,
         overlaps: Vec::new(),
         limitations: Vec::new(),
@@ -476,6 +495,9 @@ fn cas_cd42_two_machine_inventory_preserves_private_stale_and_claim_authority() 
             expires_at: now + Duration::hours(1),
             created_at: now,
             decided_at: Some(now),
+            decided_by: None,
+            cleanup_pending: false,
+            expiry_notice_pending: false,
         },
     )
     .unwrap();
@@ -789,4 +811,113 @@ fn cas_9f53_a_listed_peer_worker_resolves_to_its_owning_supervisor() {
     assert!(!worker.matches("bright-lynx-31@prowl"));
     assert_eq!(worker.supervisor.name, "rapid-panther-80");
     assert_eq!(worker.supervisor.session.as_deref(), Some("steady-lynx"));
+}
+
+/// cas-47a2: reset retires a dead worker's branch binding; once the new
+/// worker starts, the peer view names the new worker's branch, not the dead
+/// one as a parked delivery, and the old branch survives only as history.
+#[tokio::test]
+async fn cas_47a2_reset_then_new_worker_start_shows_the_new_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(dir.path()).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = crate::types::Task::new("cas-reset".into(), "Reassigned work".into());
+    task.status = crate::types::TaskStatus::InProgress;
+    task.assignee = Some("dead-worker".into());
+    // The dead worker's commit-time binding (attribution hook).
+    task.deliverables.parked_branch = Some("factory/dead-worker-cas-reset".into());
+    task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    tasks.add(&task).unwrap();
+
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    let reset_task = |task_id: &str| {
+        core.cas_task_reset(rmcp::handler::server::wrapper::Parameters(
+            crate::mcp::tools::TaskReleaseRequest { task_id: task_id.into(), force: None },
+        ))
+    };
+    reset_task("cas-reset").await.unwrap();
+    let reset = tasks.get("cas-reset").unwrap();
+    assert_eq!(reset.deliverables.parked_branch, None);
+    assert_eq!(reset.deliverables.factory_branch_anchor, None);
+    assert_eq!(reset.deliverables.handoff_branches, ["factory/dead-worker-cas-reset"]);
+    assert_eq!(reset.deliverables.historical_factory_branch_anchors, ["a".repeat(40)]);
+
+    // The new worker starts: assigned, in progress, live lease on its branch.
+    let mut started = reset;
+    started.status = crate::types::TaskStatus::InProgress;
+    started.assignee = Some("new-worker".into());
+    tasks.update(&started).unwrap();
+    let mut worker = agent("new-worker", "worker", "lane", "alpha", REPO, 1);
+    worker
+        .metadata
+        .insert("branch".into(), "factory/new-worker-cas-reset".into());
+    let agents = vec![agent("sup", "supervisor", "lane", "alpha", REPO, 1), worker];
+    let locks = vec![lease("cas-reset", "new-worker", LeaseStatus::Active, 600)];
+    let details = assemble_peer_details(
+        peers::repo_peers(&agents, REPO, &[], None, Utc::now()),
+        &agents,
+        &locks,
+        &[],
+        tasks.as_ref(),
+        Some("test-user"),
+        Utc::now(),
+    );
+    let work = &details[0].work;
+    let row = work.tasks.iter().find(|t| t.task_id == "cas-reset").unwrap();
+    assert_eq!(row.branch.as_deref(), Some("factory/new-worker-cas-reset"));
+    assert_eq!(row.head_sha, None);
+    assert!(
+        work.waiting_merges.iter().all(|w| w.kind != "parked_delivery"),
+        "{:?}",
+        work.waiting_merges
+    );
+
+    // cas-b28c: the stranded-branch gate still measures the retired lane.
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.name", "Fixture"]);
+    git(&["config", "user.email", "fixture@example.test"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&["checkout", "-q", "-b", "factory/dead-worker-cas-reset"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "dead worker's stranded work"]);
+    git(&["checkout", "-q", "main"]);
+    let gate = crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses(
+        &[tasks.get("cas-reset").unwrap()],
+        "main",
+        repo.path(),
+    );
+    assert_eq!(gate[0].factory_branch.as_deref(), Some("factory/dead-worker-cas-reset"));
+    assert_eq!(gate[0].unmerged_count, 1, "{:?}", gate[0]);
+
+    // cas-2b10: an old-style shared lane retired by reset is still measured,
+    // and commits claiming another task strand nothing here (cas-dbbf).
+    let mut shared = crate::types::Task::new("cas-shared".into(), "Shared-lane work".into());
+    shared.status = crate::types::TaskStatus::InProgress;
+    shared.assignee = Some("dead-worker".into());
+    shared.deliverables.parked_branch = Some("factory/dead-worker".into());
+    tasks.add(&shared).unwrap();
+    reset_task("cas-shared").await.unwrap();
+    git(&["checkout", "-q", "-b", "factory/dead-worker", "main"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "feat: later lane work (cas-beef)"]);
+    let measure = || {
+        crate::mcp::tools::core::task::lifecycle::close_ops::collect_epic_branch_statuses(
+            &[tasks.get("cas-shared").unwrap()],
+            "main",
+            repo.path(),
+        )
+        .remove(0)
+    };
+    let row = measure();
+    assert_eq!(row.factory_branch.as_deref(), Some("factory/dead-worker"), "{row:?}");
+    assert_eq!(row.unmerged_count, 0, "{row:?}");
+    git(&["commit", "-q", "--allow-empty", "-m", "dead worker's own shared-lane work"]);
+    assert_eq!(measure().unmerged_count, 2, "own work blocks epic close");
 }

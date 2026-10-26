@@ -30,6 +30,7 @@ pub fn handle_session_start(
     // after context building (cas-ae09). None for non-factory sessions.
     let mut factory_session_title: Option<String> = None;
     let mut registration_role_warning: Option<String> = None;
+    let mut lane_handoff = String::new();
 
     // Record session start for analytics and register agent
     if let Some(cas_root) = cas_root {
@@ -179,6 +180,15 @@ pub fn handle_session_start(
             eprintln!("cas: Warning: Failed to write OTEL context: {e}");
         }
 
+        // Capture/surface succession before generic orphan cleanup changes task state.
+        if agent_role.as_deref() == Some("supervisor") {
+            register_directly(&mut stores);
+            match crate::supervisor_continuity::startup_context(cas_root, &current_agent_id(input)) {
+                Ok(context) => lane_handoff = context,
+                Err(error) => eprintln!("cas: Supervisor handoff unavailable: {error}"),
+            }
+        }
+
         // Cleanup orphaned tasks from crashed/interrupted previous sessions
         let reopened = cleanup_orphaned_tasks(cas_root);
         if reopened > 0 {
@@ -255,6 +265,7 @@ pub fn handle_session_start(
     // being silently truncated by the harness at ~10KB. The base context
     // (role guidance + Cassy header + memories/tasks) is protected.
     let mut assembler = SessionContextAssembler::new(context);
+    if !lane_handoff.is_empty() { assembler.prepend_protected(lane_handoff); }
 
     if let Some(warning) = registration_role_warning {
         assembler.append_protected(warning);
@@ -285,6 +296,14 @@ pub fn handle_session_start(
     // this at the protected top of supervisor context so it survives the
     // SessionStart preview/budget compaction path.
     if is_supervisor {
+        if let Some(banner) = crate::factory_binary_skew::supervisor_banner(
+            cas_root,
+            std::env::var("CAS_FACTORY_SESSION").ok().as_deref(),
+        ) {
+            assembler.prepend_degradable_with_priority(
+                "Factory MCP binary skew", banner.clone(), banner, DegradationPriority::Context,
+            );
+        }
         if let Some(banner) =
             active_peer_supervisor_banner(cas_root, std::env::var("CAS_AGENT_NAME").ok().as_deref())
         {
@@ -295,6 +314,13 @@ pub fn handle_session_start(
                 DegradationPriority::Context,
             );
         }
+    }
+
+    if let Some(channels) = crate::cli::session_start_channels(cas_root, chrono::Utc::now()) {
+        assembler.append_degradable_with_priority(
+            "Configured Slack channels", channels.clone(), channels,
+            DegradationPriority::Context,
+        );
     }
 
     // cas-97ff (GH #1215 §1): name the other live supervisors of this repo,
@@ -350,11 +376,15 @@ pub fn handle_session_start(
         );
     }
 
+    let docs_measurement = crate::hooks::handlers::handlers_events::docs_freshness::Measurement::at(
+        Path::new(&input.cwd), cas_root,
+    );
     if let Some(staleness) =
-        crate::hooks::handlers::handlers_events::check_codemap_freshness(cas_root)
+        crate::hooks::handlers::handlers_events::codemap::evaluate_codemap_at(&docs_measurement)
+            .and_then(|evaluation| evaluation.staleness)
     {
-        let full = staleness.format_injection(is_supervisor);
-        let compact = staleness.format_injection_compact(is_supervisor);
+        let full = docs_measurement.annotate(staleness.format_injection(is_supervisor));
+        let compact = docs_measurement.annotate(staleness.format_injection_compact(is_supervisor));
         if staleness.is_high_severity(is_supervisor) {
             assembler.prepend_degradable_with_priority(
                 "Codemap freshness",
@@ -372,15 +402,12 @@ pub fn handle_session_start(
         }
     }
 
-    if let Some(repo_root) = cas_root.parent() {
-        match crate::hooks::handlers::handlers_events::project_overview::check_freshness(
-            repo_root,
-            agent_role.as_deref(),
-        ) {
+    {
+        match crate::hooks::handlers::handlers_events::project_overview::check_freshness_at(&docs_measurement) {
             // Always append so codemap retains the preview top slot when both
             // modules report high severity.
             Ok(Some(staleness)) => {
-                assembler.append_protected(staleness.format_injection(is_supervisor))
+                assembler.append_protected(docs_measurement.annotate(staleness.format_injection(is_supervisor)))
             }
             Ok(None) => {}
             Err(e) => eprintln!("cas: project-overview freshness check failed: {e}"),
@@ -732,6 +759,59 @@ mod large_artifact_staging_tests {
         ));
     }
 
+    #[test]
+    fn session_start_reports_channel_evidence_without_network_cas_cf25() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = staging_env("worker");
+        std::fs::write(tmp.path().join("config.toml"),
+            "[project]\ncanonical_id = 'qa.invalid/channels'\n[slack]\nchannels = ['C03CONFIG', 'C04NEW']\n").unwrap();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        crate::cloud::CloudConfig {
+            endpoint: format!("http://{}", server.server_addr()),
+            // Cached diagnostics work while logged out. This also avoids the
+            // handler's unrelated personal-pattern/suggestion GETs.
+            token: None,
+            team_id: Some("qa-team".into()),
+            ..Default::default()
+        }
+        .save_to_cas_dir(tmp.path())
+        .unwrap();
+        let input = session_input(tmp.path().to_str().unwrap());
+        let unchecked = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(unchecked.contains("C03CONFIG: unchecked"), "{unchecked}");
+        let now = chrono::Utc::now();
+        let path = tmp.path().join("violet-channel-check.json");
+        let mut snapshot = serde_json::json!({
+            "schema": 1, "project_id": "qa.invalid/channels", "team_id": "qa-team",
+            "checked_at": now, "channels": [{"channel_id":"C03CONFIG", "flags":["cloud_unverified"]}]
+        });
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let flagged = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(flagged.contains("C03CONFIG: cloud_unverified"), "{flagged}");
+        assert!(flagged.contains("C04NEW: unchecked"), "{flagged}");
+        snapshot["checked_at"] = serde_json::json!(now - chrono::Duration::hours(25));
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let stale = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(stale.contains("C03CONFIG: stale"), "{stale}");
+        assert!(stale.contains("cloud_unverified"), "{stale}");
+        snapshot["team_id"] = serde_json::json!("different-team");
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let foreign = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(foreign.contains("C03CONFIG: unchecked"), "{foreign}");
+        assert!(!foreign.contains("cloud_unverified"), "{foreign}");
+        snapshot["team_id"] = serde_json::json!("qa-team");
+        snapshot["checked_at"] = serde_json::json!(now);
+        snapshot["channels"] = serde_json::json!([
+            {"channel_id":"C03CONFIG", "flags":[]}, {"channel_id":"C04NEW", "flags":[]}
+        ]);
+        std::fs::write(&path, snapshot.to_string()).unwrap();
+        let healthy = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(!healthy.contains("Configured Slack channels"), "{healthy}");
+        assert!(
+            server.try_recv().unwrap().is_none(),
+            "session-start channel diagnostics must stay offline"
+        );
+    }
     #[test]
     fn session_start_includes_staging_banner_for_worker() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1101,6 +1181,10 @@ mod large_artifact_staging_tests {
                 context.contains("Current Handoff"),
                 "{label} lost the handoff pointer entirely: {context}"
             );
+            assert!(
+                context.contains("### budget-handoff-"),
+                "{label} must retain the saved handoff id: {context}"
+            );
             match role {
                 Some("worker") => assert!(context.contains("# Factory Worker"), "{label}"),
                 Some("supervisor") => assert!(context.contains("# Factory Supervisor"), "{label}"),
@@ -1304,9 +1388,15 @@ pub(crate) fn build_worker_worktree_assertion(cwd: &str, context: String) -> Str
     let cwd_path = std::path::Path::new(cwd);
     let worktree_path = std::path::Path::new(&clone_path);
     if !cwd_path.starts_with(worktree_path) {
+        let change_dir =
+            crate::worktree::GitOperations::shell_remedies([("cd", &[clone_path.as_str()][..])])
+                .map(|[command]| command)
+                .unwrap_or_else(|refusal| refusal);
+        let cwd = crate::worktree::GitOperations::visible_git_label(cwd);
+        let clone_path = crate::worktree::GitOperations::visible_git_label(&clone_path);
         warnings.push(format!(
             "⚠️  CWD MISMATCH: Session cwd ({cwd}) is outside your assigned worktree \
-            ({clone_path}).\n   Run: cd {clone_path}"
+            ({clone_path}).\n   Run: {change_dir}"
         ));
     }
 
@@ -1320,18 +1410,24 @@ pub(crate) fn build_worker_worktree_assertion(cwd: &str, context: String) -> Str
         .ok()
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    let lane = format!("factory/{worker_name}");
+    let switch =
+        crate::worktree::GitOperations::git_remedies([&["switch", &lane]]).map(|[switch]| switch);
     match branch_result {
         None => {
+            let switch = switch.clone().unwrap_or_else(|refusal| refusal);
             warnings.push(format!(
                 "⚠️  DETACHED HEAD: Cannot determine current branch — DO NOT commit here!\n   \
-                Switch first: git switch factory/{worker_name}"
+                Switch first: {switch}"
             ));
         }
         Some(ref branch) if !branch.starts_with("factory/") => {
+            let switch = switch.unwrap_or_else(|refusal| refusal);
+            let branch = crate::worktree::GitOperations::visible_git_label(branch);
             warnings.push(format!(
                 "⚠️  WRONG BRANCH: HEAD is on '{branch}' — DO NOT commit here!\n   \
                 Workers may only commit on factory/<name>. Switch first:\n   \
-                git switch factory/{worker_name}"
+                {switch}"
             ));
         }
         Some(_) => {} // factory/* — allowed
@@ -1367,6 +1463,8 @@ pub fn handle_session_end(
         None => return Ok(HookOutput::empty()),
     };
 
+    cleanup_agent_leases_for_end(cas_root, &input.session_id, input.reason.as_deref());
+
     let mut stores = HookStores::new(cas_root);
 
     // Get observations from this session
@@ -1392,10 +1490,6 @@ pub fn handle_session_end(
     if let Some(minutes) = supervisor_actionable_idle_minutes {
         eprintln!("cas: Supervisor actionable-idle minutes: {minutes}");
     }
-
-    // Clean up agent leases and reset task status - ALWAYS do this regardless of observation count
-    // cas-e9fc: a worker's `/clear` keeps its identity; see the function docs.
-    cleanup_agent_leases_for_end(cas_root, &input.session_id, input.reason.as_deref());
 
     // A default reminder is a one-shot thought attached to this exact session.
     // Cancel it synchronously at SessionEnd so a later session never receives
@@ -2671,9 +2765,12 @@ mod worker_worktree_assertion_tests {
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", Some("worker")),
             ("CAS_CLONE_PATH", Some(&p)),
+            ("CAS_AGENT_NAME", Some("worker{a,b}!e")),
         ]);
 
         let result = build_worker_worktree_assertion(&p, String::new());
+        // pin: session-start switch advice preserves the worker branch as one argument.
+        assert!(result.contains("git switch 'factory/worker{a,b}!e'"), "{result}");
         assert!(
             result.contains("WRONG BRANCH"),
             "expected WRONG BRANCH warning for 'main': {result}"

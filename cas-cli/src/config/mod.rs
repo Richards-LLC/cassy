@@ -15,6 +15,9 @@ pub(crate) mod hooks;
 pub mod operator_policy;
 mod runtime;
 mod settings;
+mod upkeep;
+pub use upkeep::{ProjectOverviewConfig, UpkeepConfig, UpkeepStage};
+pub(crate) use upkeep::refresh_upkeep;
 
 pub use hooks::*;
 pub use runtime::*;
@@ -51,6 +54,14 @@ pub struct Config {
     /// User-facing QA gate configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub qa: Option<QaConfig>,
+
+    /// Paths and directory globs used by overview freshness and G6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_overview: Option<ProjectOverviewConfig>,
+
+    /// Delivery-scoped documentation upkeep stages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upkeep: Option<UpkeepConfig>,
 
     /// Dev mode configuration for tracing
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +184,17 @@ pub struct Config {
     /// via `cas cloud project set <canonical-id>`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<ProjectConfig>,
+
+    /// Machine-wide control for the managed Viktor upstream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viktor: Option<ViktorConfig>,
+}
+
+/// Host `.cas` directory used for settings that apply across projects.
+pub fn host_config_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".cas")
 }
 
 impl Config {
@@ -241,6 +263,8 @@ impl Config {
         merge_option!(hooks);
         merge_option!(tasks);
         merge_option!(qa);
+        merge_option!(upkeep);
+        merge_option!(project_overview);
         merge_option!(dev);
         merge_option!(daemon);
         merge_option!(code);
@@ -265,12 +289,18 @@ impl Config {
         merge_option!(project);
         merge_option!(release);
         merge_option!(slack);
+        merge_option!(viktor);
         changed
     }
 
     /// Get daemon maintenance config with defaults.
     pub fn daemon(&self) -> DaemonSettings {
         self.daemon.clone().unwrap_or_default()
+    }
+
+    /// Managed Viktor is enabled by default for existing installations.
+    pub fn viktor_enabled(&self) -> bool {
+        self.viktor.as_ref().is_none_or(ViktorConfig::enabled)
     }
 
     /// Whether a probed Claude account e-mail may run the one-shot
@@ -287,6 +317,7 @@ impl Config {
 
 mod access;
 pub(crate) use access::{ConfigRetirement, retire_config};
+pub(crate) use access::validate_notification_webhook_url;
 pub(crate) use access::{RetiredConfigNotice, RetiredNoticeScope, represented_retired_config};
 pub use access::{
     get_telemetry_consent, global_cas_dir, load_global_config, prompt_telemetry_consent,

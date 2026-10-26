@@ -32,6 +32,11 @@ const TERMINAL_RUN_STATES: &[&str] = &[
     "timed_out",
 ];
 
+fn viktor_is_opted_out() -> bool {
+    crate::config::Config::load(&crate::config::host_config_dir())
+        .is_ok_and(|config| !config.viktor_enabled())
+}
+
 pub(crate) struct ViktorWatchRecorder {
     cas_root: PathBuf,
 }
@@ -44,6 +49,9 @@ pub(crate) async fn alert_unpollable_watches(
     cas_root: &Path,
     proxy: &cmcp_core::ProxyEngine,
 ) -> Result<usize, String> {
+    if viktor_is_opted_out() {
+        return Ok(0);
+    }
     if proxy.upstream_connected("viktor").await {
         return Ok(0);
     }
@@ -140,6 +148,9 @@ pub(crate) fn surface_inbound_at_session_start(
 }
 
 pub(crate) fn session_start_warning(cas_root: &Path) -> Option<String> {
+    if viktor_is_opted_out() {
+        return None;
+    }
     let health = crate::mcp::read_proxy_health_cache(cas_root).ok()?;
     let snapshot: cmcp_core::ProxyHealthSnapshot = serde_json::from_slice(&health).ok()?;
     let absent = snapshot

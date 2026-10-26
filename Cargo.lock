@@ -676,7 +676,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cas"
-version = "3.66.0"
+version = "3.81.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "cas-core"
-version = "3.66.0"
+version = "3.81.0"
 dependencies = [
  "cas-store",
  "cas-types",
@@ -869,7 +869,7 @@ dependencies = [
 
 [[package]]
 name = "cas-mcp"
-version = "3.66.0"
+version = "3.81.0"
 dependencies = [
  "cas-core",
  "cas-store",
@@ -909,6 +909,7 @@ dependencies = [
  "toml",
  "tracing",
  "unicode-width 0.2.0",
+ "url",
 ]
 
 [[package]]
@@ -968,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "cas-search"
-version = "3.66.0"
+version = "3.81.0"
 dependencies = [
  "anyhow",
  "cas-code",
@@ -991,7 +992,7 @@ dependencies = [
 
 [[package]]
 name = "cas-store"
-version = "3.66.0"
+version = "3.81.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1032,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "cas-types"
-version = "3.66.0"
+version = "3.81.0"
 dependencies = [
  "chrono",
  "glob",
@@ -1179,6 +1180,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
 ]
 
 [[package]]
@@ -6587,6 +6589,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
+ "rustix",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

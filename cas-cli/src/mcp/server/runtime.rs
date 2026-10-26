@@ -89,6 +89,7 @@ fn ensure_mcp_schema(cas_root: &std::path::Path) -> anyhow::Result<()> {
 fn startup_cloud_pull(
     cas_root: &std::path::Path,
 ) -> crate::error::Result<crate::cloud::SyncResult> {
+    crate::store::detect::guard_implicit_worktree_write(cas_root, "start cloud sync")?;
     use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, SyncQueue, SyncResult};
     use crate::store::{
         open_commit_link_store, open_event_store, open_file_change_store, open_prompt_store,
@@ -143,6 +144,14 @@ async fn run_server_impl() -> anyhow::Result<()> {
     use rmcp::ServiceExt;
 
     let cas_root = resolve_mcp_serve_root()?;
+    let cloud_sync_allowed =
+        match crate::store::detect::guard_implicit_worktree_write(&cas_root, "start cloud sync") {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("[Cassy] Cloud sync disabled: {error}");
+                false
+            }
+        };
 
     // Install panic hook before anything else can panic. Routes panics to a
     // dedicated file under `.cas/logs/cas-serve-{date}.log` with timestamp,
@@ -184,6 +193,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // store opener. All MCP configurations — including freshly spawned
     // factory workers — enter through `cas serve` and share this boundary.
     ensure_mcp_schema(&cas_root)?;
+    crate::qa_post_release::spawn_runner(cas_root.clone());
 
     // Register this repo in the host-scoped known_repos registry. Fires
     // every time `cas serve` starts in a directory with `.cas/`, catching
@@ -222,7 +232,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // Hold the JoinHandle so that if `eager_init_stores` aborts startup we can
     // cancel this task instead of leaving it racing the dying process to open
     // the same DB that just refused to open (cas-5c05 review A2).
-    let cloud_sync_handle = {
+    let cloud_sync_handle = cloud_sync_allowed.then(|| {
         let cas_root_bg = cas_root.clone();
         tokio::task::spawn(async move {
             let result = tokio::time::timeout(
@@ -242,7 +252,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 eprintln!("[Cassy] Cloud sync timed out (continuing without sync)");
             }
         })
-    };
+    });
 
     let (daemon, activity, _handle) = if enable_daemon {
         let cas_config = crate::config::Config::load(&cas_root).unwrap_or_default();
@@ -291,7 +301,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
 
         let config = EmbeddedDaemonConfig {
             cas_root: cas_root.clone(),
-            cloud_sync_enabled: cloud_config.auto_sync,
+            cloud_sync_enabled: cloud_sync_allowed && cloud_config.auto_sync,
             cloud_sync_interval_secs: cloud_config.interval_secs.max(1),
             index_code: code_config.enabled && code_role.is_writer(),
             // cas-ba66: the code-vector queue belongs to the canonical writer.
@@ -329,7 +339,9 @@ async fn run_server_impl() -> anyhow::Result<()> {
     if let Err(e) = eager_init_stores(&core, &cas_root) {
         // Cancel the cloud-sync task before bubbling the error so it stops
         // racing for the same DB during the parent's shutdown window.
-        cloud_sync_handle.abort();
+        if let Some(handle) = cloud_sync_handle {
+            handle.abort();
+        }
         return Err(e);
     }
 
@@ -366,17 +378,28 @@ async fn run_server_impl() -> anyhow::Result<()> {
     #[cfg(feature = "mcp-proxy")]
     let project_proxy_path = cas_root.join("proxy.toml");
 
-    // Refresh the credential-free, user-scoped Viktor default before loading
-    // proxy configuration. An explicit project .cas/proxy.toml is an opt-out:
-    // loading it still inherits user server definitions, so refreshing the
-    // managed default here would otherwise make a project-selected proxy
-    // surface connect to Viktor unexpectedly.
+    // Reconcile the credential-free, user-scoped Viktor default before loading
+    // proxy configuration. The machine setting persists an opt-out across
+    // serves; an explicit project .cas/proxy.toml still opts out of first-time
+    // provisioning while Viktor remains enabled.
     #[cfg(feature = "mcp-proxy")]
-    if !project_proxy_path.exists()
-        && let Ok(path) = cmcp_core::config::Scope::User.config_path()
-        && let Err(error) = cmcp_core::config::Config::refresh_viktor_managed_default(&path)
     {
-        eprintln!("[Cassy] Failed to refresh managed Viktor proxy config: {error}");
+        let viktor_enabled = match crate::config::Config::load(&crate::config::host_config_dir()) {
+            Ok(config) => config.viktor_enabled(),
+            Err(error) => {
+                eprintln!("[Cassy] Failed to read managed Viktor setting: {error}");
+                true
+            }
+        };
+        if (!project_proxy_path.exists() || !viktor_enabled)
+            && let Ok(path) = cmcp_core::config::Scope::User.config_path()
+            && let Err(error) = cmcp_core::config::Config::reconcile_viktor_managed_default(
+                &path,
+                viktor_enabled,
+            )
+        {
+            eprintln!("[Cassy] Failed to reconcile managed Viktor proxy config: {error}");
+        }
     }
 
     #[cfg(feature = "mcp-proxy")]
@@ -426,6 +449,7 @@ async fn run_server_impl() -> anyhow::Result<()> {
                 {
                     Ok(engine) => {
                         install_proxy_policy(&engine, &snapshot_config).await;
+                        crate::coordination::stakeholder_contacts::install(&engine, &cas_root).await;
                         engine
                             .set_call_observer(std::sync::Arc::new(
                                 crate::mcp::viktor_watch::ViktorWatchRecorder::new(
@@ -544,20 +568,21 @@ async fn run_server_impl() -> anyhow::Result<()> {
     // harness — a pty, or a sibling that inherited the pipe (cas-82d6c).
     let waiting = server.waiting();
     tokio::pin!(waiting);
-    tokio::select! {
+    let end_reason = tokio::select! {
         result = &mut waiting => {
             if let Err(e) = result {
                 eprintln!("[Cassy] MCP server terminated with error: {e}");
             }
+            "transport_eof"
         }
-        () = parent_watchdog.tripped() => {}
-    }
+        () = parent_watchdog.tripped() => "parent_watchdog",
+    };
 
     eprintln!("[Cassy] Shutting down, releasing tasks...");
     {
         use crate::agent_id::read_session_for_mcp;
         if let Ok(agent_id) = read_session_for_mcp(&cas_root) {
-            if let Err(e) = release_agent_tasks(&cas_root, &agent_id) {
+            if let Err(e) = release_agent_tasks(&cas_root, &agent_id, end_reason) {
                 eprintln!("[Cassy] Failed to release agent tasks for {agent_id}: {e}");
             }
         }
@@ -894,7 +919,8 @@ pub(crate) fn resolve_mcp_serve_root() -> anyhow::Result<std::path::PathBuf> {
 }
 
 /// Release all tasks claimed by an agent on shutdown and unregister the agent
-fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+fn release_agent_tasks(cas_root: &std::path::Path, agent_id: &str, reason: &str) -> anyhow::Result<()> {
+    crate::supervisor_continuity::record_end(cas_root, agent_id, Some(reason))?;
     let agent_store = open_agent_store(cas_root)?;
     agent_store.graceful_shutdown(agent_id)?;
     agent_store.clear_working_epics(agent_id)?;
@@ -1550,6 +1576,22 @@ env = { DENIED_LITERAL_FIXTURE_TOKEN = "synthetic-denied", ALLOWED_LITERAL_FIXTU
     #[cfg(feature = "mcp-proxy")]
     #[test]
     fn worker_proxy_filters_boot_and_reload_config_preserving_supervisor_gh_1047() {
+        // A runner may inherit an XDG directory with unrelated machine upstreams.
+        let inherited = tempfile::tempdir().unwrap();
+        let user_proxy = inherited.path().join("code-mode-mcp/config.toml");
+        std::fs::create_dir_all(user_proxy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &user_proxy,
+            "[servers.viktor]\ntransport = 'http'\n\
+             url = 'https://viktor.invalid/mcp'\n\
+             auth = 'env:CAS_7401_MISSING_VIKTOR_KEY'\n",
+        ).unwrap();
+        let _ambient = crate::test_env_guard::AmbientEnvRestore::set(
+            "XDG_CONFIG_HOME",
+            inherited.path(),
+        );
+        // The shared guard redirects XDG and scrubs provider credentials;
+        // keep the poisoned ambient config above to prove that boundary.
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(".cas");

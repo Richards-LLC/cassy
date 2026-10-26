@@ -346,13 +346,20 @@ impl SqliteTaskStore {
                 persisted_deliverables.parked_branch = None;
                 persisted_deliverables.merge_conflicted = false;
             }
-            let leaving_park = prev_status.as_deref() == Some("awaiting_merge")
-                && task.status != TaskStatus::Closed;
+            // cas-46ea: a hold on a merged delivery (awaiting_merge ->
+            // blocked) keeps its merge fact for the verdict close; leaving
+            // the cycle from the park or from that hold clears it.
+            let leaving_park = matches!(prev_status.as_deref(), Some("awaiting_merge" | "blocked"))
+                && !matches!(
+                    task.status,
+                    TaskStatus::Closed | TaskStatus::Blocked | TaskStatus::AwaitingMerge
+                );
             if reopening_terminal || leaving_park {
                 // cas-eda0: both describe one park/merge cycle; a new cycle
                 // must re-park and re-merge before Cassy may close for it.
                 persisted_deliverables.parked_close_reason = None;
                 persisted_deliverables.green_merge_commit = None;
+                persisted_deliverables.merge_ci_admission = None;
             }
 
             // Updates preserve the row's provenance. Only creation supplies a
@@ -360,6 +367,12 @@ impl SqliteTaskStore {
             // its next edit.
             let persisted_origin_project = task.origin_project.as_ref();
 
+            let prior_notes: Option<String> = if task.notes.lines().any(crate::task_note_markers::is_reserved_line) {
+                tx.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0)).optional()?
+            } else {
+                None
+            };
+            let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, prior_notes.as_deref());
             let rows = tx.execute(
             "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
              acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
@@ -376,7 +389,7 @@ impl SqliteTaskStore {
                 task.description,
                 task.design,
                 task.acceptance_criteria,
-                task.notes,
+                safe_notes.as_ref(),
                 new_status_str,
                 task.priority.0,
                 task.task_type.to_string(),
@@ -544,6 +557,62 @@ impl SqliteTaskStore {
         task
     }
 
+    fn append_note_inner(
+        &self,
+        task_id: &str,
+        formatted_note: &str,
+        receipt_id: &str,
+        trusted: bool,
+    ) -> Result<DateTime<Utc>> {
+        let safe_note = if trusted {
+            std::borrow::Cow::Borrowed(formatted_note)
+        } else {
+            crate::task_note_markers::neutralize_new_markers(formatted_note, None)
+        };
+        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
+            let mut replacement = None;
+            if trusted {
+                let current: Option<(String, String)> = tx.query_row(
+                    "SELECT notes, updated_at FROM tasks WHERE id = ?1",
+                    params![task_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                ).optional()?;
+                let Some((notes, updated_at)) = current else {
+                    return Err(StoreError::TaskNotFound(task_id.to_string()));
+                };
+                if formatted_note.starts_with("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---") {
+                    replacement = Some(crate::task_note_markers::replace_rendered_provenance(&notes, formatted_note));
+                }
+                if replacement.as_deref() == Some(notes.as_str())
+                    || (replacement.is_none()
+                        && crate::task_note_markers::contains_complete_lines(&notes, formatted_note)) {
+                    if !receipt_id.is_empty() {
+                        Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
+                    }
+                    return Self::parse_datetime(&updated_at)
+                        .ok_or_else(|| StoreError::Parse("invalid task updated_at".into()));
+                }
+            }
+            let now = Utc::now();
+            let rows = if let Some(next) = replacement {
+                tx.execute("UPDATE tasks SET notes = ?1, updated_at = ?2 WHERE id = ?3",
+                    params![next, now.to_rfc3339(), task_id])?
+            } else {
+                tx.execute(
+                    "UPDATE tasks SET notes = CASE WHEN notes = '' THEN ?1 ELSE notes || char(10) || char(10) || ?1 END, updated_at = ?2 WHERE id = ?3",
+                    params![safe_note.as_ref(), now.to_rfc3339(), task_id],
+                )?
+            };
+            if rows == 0 {
+                return Err(StoreError::TaskNotFound(task_id.to_string()));
+            }
+            if !receipt_id.is_empty() {
+                Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
+            }
+            Ok(now)
+        })
+    }
+
     /// Compare-and-swap reopen: rewrite the row only if it still carries
     /// `expected_status` / `expected_updated_at`.
     ///
@@ -561,6 +630,12 @@ impl SqliteTaskStore {
         expected_status: TaskStatus,
         expected_updated_at: DateTime<Utc>,
     ) -> Result<()> {
+        let prior_notes: Option<String> = if task.notes.lines().any(crate::task_note_markers::is_reserved_line) {
+            conn.query_row("SELECT notes FROM tasks WHERE id = ?1", params![task.id], |row| row.get(0)).optional()?
+        } else {
+            None
+        };
+        let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, prior_notes.as_deref());
         let rows = conn.execute(
             "UPDATE tasks SET title = ?1, description = ?2, design = ?3,
              acceptance_criteria = ?4, notes = ?5, status = ?6, priority = ?7,
@@ -578,7 +653,7 @@ impl SqliteTaskStore {
                 task.description,
                 task.design,
                 task.acceptance_criteria,
-                task.notes,
+                safe_notes.as_ref(),
                 task.status.to_string(),
                 task.priority.0,
                 task.task_type.to_string(),
@@ -829,6 +904,7 @@ impl SqliteTaskStore {
     }
 
     fn add_with_conn(conn: &Connection, task: &Task, event_session_id: Option<&str>) -> Result<()> {
+        let safe_notes = crate::task_note_markers::neutralize_new_markers(&task.notes, None);
         conn.execute(
             "INSERT INTO tasks (id, title, description, design, acceptance_criteria, notes,
              status, priority, task_type, assignee, labels, created_at, updated_at,
@@ -841,7 +917,7 @@ impl SqliteTaskStore {
                 task.description,
                 task.design,
                 task.acceptance_criteria,
-                task.notes,
+                safe_notes.as_ref(),
                 task.status.to_string(),
                 task.priority.0,
                 task.task_type.to_string(),
@@ -1208,11 +1284,30 @@ impl TaskStore for SqliteTaskStore {
         self.append_note_with_mutation_receipt(task_id, formatted_note, "")
     }
 
-    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+    fn append_trusted_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>> {
+        self.append_note_inner(task_id, formatted_note, "", true)
+    }
+
+    fn append_trusted_note_with_mutation_receipt(
+        &self,
+        task_id: &str,
+        formatted_note: &str,
+        receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        self.append_note_inner(task_id, formatted_note, receipt_id, true)
+    }
+
+    fn record_merge_admission(
+        &self,
+        task_id: &str,
+        merge_commit: &str,
+        admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
             let rows = tx.execute(
                 "UPDATE tasks
-                 SET deliverables = json_set(deliverables, '$.green_merge_commit', ?1),
+                 SET deliverables = json_set(deliverables, '$.green_merge_commit', ?1,
+                                             '$.merge_ci_admission', ?5),
                      updated_at = ?2
                  WHERE id = ?3
                    AND status = ?4
@@ -1224,6 +1319,7 @@ impl TaskStore for SqliteTaskStore {
                     Utc::now().to_rfc3339(),
                     task_id,
                     TaskStatus::AwaitingMerge.to_string(),
+                    admission.as_str(),
                 ],
             )?;
             Ok(rows == 1)
@@ -1236,27 +1332,7 @@ impl TaskStore for SqliteTaskStore {
         formatted_note: &str,
         receipt_id: &str,
     ) -> Result<DateTime<Utc>> {
-        crate::shared_db::with_immediate_write_txn_pooled(&self.conn, |tx| {
-            let now = Utc::now();
-            let rows = tx.execute(
-                "UPDATE tasks
-                 SET notes = CASE
-                     WHEN notes = '' THEN ?1
-                     ELSE notes || char(10) || char(10) || ?1
-                 END,
-                 updated_at = ?2
-                 WHERE id = ?3",
-                params![formatted_note, now.to_rfc3339(), task_id],
-            )?;
-            if rows == 0 {
-                return Err(StoreError::TaskNotFound(task_id.to_string()));
-            }
-
-            if !receipt_id.is_empty() {
-                Self::record_mutation_receipt_with_conn(tx, receipt_id, task_id)?;
-            }
-            Ok(now)
-        })
+        self.append_note_inner(task_id, formatted_note, receipt_id, false)
     }
 
     fn delete(&self, id: &str) -> Result<()> {
@@ -1340,6 +1416,29 @@ impl TaskStore for SqliteTaskStore {
         };
 
         Ok(tasks)
+    }
+
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        if assignees.is_empty() || statuses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let assignees = serde_json::to_string(assignees)?;
+        let statuses =
+            serde_json::to_string(&statuses.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM tasks
+             WHERE assignee COLLATE NOCASE IN (SELECT value FROM json_each(?1))
+               AND status IN (SELECT value FROM json_each(?2))
+             ORDER BY priority, created_at DESC",
+        )?;
+        Ok(stmt
+            .query_map(params![assignees, statuses], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// Find one recorded epic lane, preferring a live owner over historical

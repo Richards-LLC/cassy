@@ -2,6 +2,7 @@
 use super::SyncQueue;
 use crate::error::CasError;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 /// Identifiers and decisions only: never contains queued content.
 #[derive(Debug, Serialize)]
@@ -155,22 +156,46 @@ impl SyncQueue {
                 .collect::<Result<Vec<_>, _>>()?
         };
         let mut decisions = Vec::with_capacity(rows.len());
-        for row in rows {
-            let reason = eligibility(&tx, &row, team, project);
-            let eligible = reason == "enqueue_team_snapshot";
-            if apply && eligible {
-                tx.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count) VALUES(?1,?2,'upsert',?3,?4,?5,?6,0)",rusqlite::params![row.entity_type.as_str(),row.entity_id,row.payload,team,row.project_id,chrono::Utc::now().to_rfc3339()])?;
+        let mut planned = BTreeSet::new();
+        for row in &rows {
+            let mut reason = eligibility(&tx, row, team, project);
+            if reason == "enqueue_team_snapshot"
+                && !planned.insert((row.entity_type.as_str().to_string(), row.entity_id.clone()))
+            {
+                reason = "duplicate_personal_preserved";
             }
+            let eligible = reason == "enqueue_team_snapshot";
             decisions.push(TeamBackfillRow {
                 id: row.id,
                 entity_type: row.entity_type,
-                entity_id: row.entity_id,
+                entity_id: row.entity_id.clone(),
                 eligible,
                 reason,
             });
         }
+        if apply {
+            for (row, decision) in rows.iter().zip(&decisions) {
+                if decision.eligible {
+                    tx.execute("INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count) VALUES(?1,?2,'upsert',?3,?4,?5,?6,0)",rusqlite::params![row.entity_type.as_str(),row.entity_id,row.payload,team,row.project_id,chrono::Utc::now().to_rfc3339()])?;
+                }
+            }
+        }
         tx.commit()?;
         Ok(decisions)
+    }
+
+    /// Count only personal rows that would produce a new team snapshot.
+    /// Uses the same read-only eligibility plan as the explicit migration.
+    pub(crate) fn migratable_personal_row_count(
+        &self,
+        team: &str,
+        project: &str,
+    ) -> Result<usize, CasError> {
+        Ok(self
+            .migrate_personal_to_team(team, project, false)?
+            .iter()
+            .filter(|row| row.eligible)
+            .count())
     }
 
     pub(crate) fn personal_backlog_remedy(team_only: bool) -> &'static str {
@@ -186,6 +211,43 @@ impl SyncQueue {
 mod tests {
     use super::*;
     use crate::cloud::{EntityType, SyncOperation};
+
+    #[test]
+    fn cas_5aeb_backfill_preview_and_apply_agree_for_duplicate_personal_rows() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        crate::cloud::set_canonical_id_in_config_toml(&root, "p").unwrap();
+        let queue = SyncQueue::open(&root).unwrap();
+        queue.init().unwrap();
+        let mut task = crate::types::Task::new("duplicate".into(), "duplicate".into());
+        task.origin_project = Some("p".into());
+        crate::store::open_task_store_local(&root).unwrap().add(&task).unwrap();
+        queue.enqueue(
+            EntityType::Task,
+            "duplicate",
+            SyncOperation::Upsert,
+            Some(&serde_json::to_string(&task).unwrap()),
+        ).unwrap();
+        let personal_id = queue.list_all(10).unwrap()[0].id;
+        {
+            let conn = queue.conn.lock().unwrap();
+            conn.execute_batch("DROP INDEX idx_sync_queue_entity_team_project;").unwrap();
+            conn.execute(
+                "INSERT INTO sync_queue(entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count)
+                 SELECT entity_type,entity_id,operation,payload,team_id,project_id,created_at,retry_count FROM sync_queue WHERE id=?1",
+                [personal_id],
+            ).unwrap();
+        }
+
+        let preview = SyncQueue::open_read_only(&root).unwrap()
+            .migrate_personal_to_team("t", "p", false).unwrap();
+        let applied = queue.migrate_personal_to_team("t", "p", true).unwrap();
+        let count = |rows: &[TeamBackfillRow]| rows.iter().filter(|row| row.eligible).count();
+        assert_eq!(count(&preview), 1);
+        assert_eq!(count(&applied), count(&preview));
+        assert_eq!(queue.pending_for_team("t", 10, 5).unwrap().len(), 1);
+        assert_eq!(queue.personal_row_count().unwrap(), 2, "both legacy rows remain until delivery");
+    }
 
     #[test]
     fn cas_db92_backfill_preserves_scope_and_retires_only_itemized_acknowledged_snapshots() {

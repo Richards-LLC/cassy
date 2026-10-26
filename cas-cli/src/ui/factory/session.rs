@@ -53,6 +53,37 @@ pub fn daemon_trace_log_path(session_name: &str) -> PathBuf {
     session_log_dir(session_name).join("daemon-trace.log")
 }
 
+/// Append one `daemon_lifecycle` record to the session's daemon.log and
+/// daemon-trace.log (GH #1363).
+///
+/// The daemon's tracing goes to the project runtime log, so before this
+/// record a session that spawned no worker left both files empty and read
+/// as a launch that died. Every start, exit and forced exit writes one line
+/// here, synchronously, so it survives an immediate process exit. The write
+/// is best effort.
+pub(crate) fn record_daemon_lifecycle(session_name: &str, stage: &str, detail: &str) {
+    let record = serde_json::json!({
+        "timestamp": Utc::now().to_rfc3339(),
+        "event": "daemon_lifecycle",
+        "factory_session": session_name,
+        "pid": std::process::id(),
+        "stage": stage,
+        "detail": detail,
+    });
+    let line = format!("{record}\n");
+    for path in [
+        daemon_log_path(session_name),
+        daemon_trace_log_path(session_name),
+    ] {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+        }
+    }
+}
+
 /// Log file path for server stderr
 pub fn server_log_path(session_name: &str) -> PathBuf {
     session_log_dir(session_name).join("server.log")
@@ -267,6 +298,20 @@ impl SessionManager {
         }
     }
 
+    /// Save the metadata a running daemon publishes, naming the store it
+    /// tracks its worker process groups in. Every daemon start path saves
+    /// through here, so `cas kill` can reap a SIGKILLed daemon's workers
+    /// even when it ran under CAS_ROOT (cas-4b42, cas-fcb0).
+    pub(crate) fn save_daemon_metadata(
+        &self,
+        mut metadata: SessionMetadata,
+        cas_dir: &Path,
+    ) -> std::io::Result<SessionMetadata> {
+        metadata.cas_root = Some(cas_dir.to_string_lossy().to_string());
+        self.save_metadata(&metadata)?;
+        Ok(metadata)
+    }
+
     /// Save session metadata
     pub fn save_metadata(&self, metadata: &SessionMetadata) -> std::io::Result<()> {
         if !valid_session_name(&metadata.name) {
@@ -276,10 +321,28 @@ impl SessionManager {
             ));
         }
         self.ensure_dir()?;
+        let base = self
+            .sessions_dir
+            .parent()
+            .ok_or_else(|| std::io::Error::other("missing session base"))?;
+        let _lock = socket_cleanup::transition_lock(base)?;
         let path = self.sessions_dir.join(format!("{}.json", metadata.name));
         let json = serde_json::to_string_pretty(metadata)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         fs::write(path, json)
+    }
+
+    pub(crate) fn lock_inventory(&self, reap: bool) -> std::io::Result<Option<fs::File>> {
+        socket_cleanup::inventory_lock(&self.sessions_dir, reap)
+    }
+
+    pub(crate) fn reap_dead_record_locked(
+        &self,
+        path: &Path,
+        expected: &[u8],
+        gui_identity: Option<(u64, u64)>,
+    ) -> std::io::Result<bool> {
+        socket_cleanup::reap_metadata_locked(&self.sessions_dir, path, expected, gui_identity)
     }
 
     /// Load session metadata from a file
@@ -633,6 +696,7 @@ pub fn create_metadata(
         last_supervisor_mcp_call_at,
         supervisor_stall,
         project_dir: project_dir.map(|s| s.to_string()),
+        cas_root: None,
         team_name: None,
     }
 }
@@ -641,7 +705,27 @@ pub fn create_metadata(
 mod tests {
     use crate::ui::factory::session::*;
 
-    #[cfg(target_os = "linux")]
+    /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
+    /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander
+    /// launches take, saved metadata without one, so a CAS_ROOT daemon's
+    /// workers were never found. Daemon start paths save through
+    /// `save_daemon_metadata`, which always records the store.
+    #[test]
+    fn daemon_metadata_names_the_daemons_store() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let store = tempfile::tempdir().unwrap();
+        let manager = SessionManager::new();
+        manager
+            .save_daemon_metadata(
+                create_metadata("rooted", std::process::id(), "supervisor", &[], None, Some("/project"), None),
+                store.path(),
+            )
+            .unwrap();
+        let saved = manager.find_session(Some("rooted")).unwrap().unwrap().metadata;
+        assert_eq!(saved.cas_root.as_deref(), store.path().to_str());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn stale_socket(path: &Path) {
         drop(std::os::unix::net::UnixListener::bind(path).unwrap());
     }
@@ -826,10 +910,15 @@ mod tests {
         assert!(metadata_path("inspect").exists());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn bind_and_cleanup_preserve_held_sockets_with_spaces_cas_c636() {
-        let home = tempfile::tempdir().unwrap();
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+        use std::os::unix::ffi::OsStrExt;
+
+        // Darwin's sockaddr_un path is only 104 bytes; keep the disposable
+        // HOME short while still exercising spaces in the bound pathname.
+        let home = tempfile::tempdir_in("/tmp").unwrap();
         let spaced_home = home.path().join("home with spaces");
         fs::create_dir(&spaced_home).unwrap();
         let _env = crate::test_support::TestEnvGuard::with_vars(&[(
@@ -846,13 +935,54 @@ mod tests {
             std::io::ErrorKind::AddrInUse
         );
         let datagram = std::os::unix::net::UnixDatagram::bind(gui_socket_path("lease")).unwrap();
+        let nonlistener_path = socket_path("bound");
+        // A bound stream socket need not listen. A refused connect must never
+        // be mistaken for proof that its filesystem entry has no holder.
+        // SAFETY: AF_UNIX and SOCK_STREAM are valid socket arguments; the
+        // return value is checked before it is used as a file descriptor.
+        let raw = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        assert!(raw >= 0, "{}", std::io::Error::last_os_error());
+        // SAFETY: socket returned a fresh descriptor that is owned only here;
+        // this transfers it exactly once into OwnedFd.
+        let nonlistener = unsafe { OwnedFd::from_raw_fd(raw) };
+        // SAFETY: an all-zero sockaddr_un is a valid base for assigning its
+        // family, optional Darwin length, and NUL-terminated pathname below.
+        let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        address.sun_family = libc::AF_UNIX as _;
+        let bytes = nonlistener_path.as_os_str().as_bytes();
+        assert!(bytes.len() < address.sun_path.len());
+        for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+            *to = *from as _;
+        }
+        let length = std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1;
+        #[cfg(target_os = "macos")]
+        {
+            address.sun_len = length as _;
+        }
+        assert_eq!(
+            // SAFETY: nonlistener owns a live descriptor; address is initialized
+            // and length stays within sockaddr_un because bytes fit sun_path.
+            unsafe {
+                libc::bind(
+                    nonlistener.as_raw_fd(),
+                    (&address as *const libc::sockaddr_un).cast(),
+                    length as _,
+                )
+            },
+            0,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        assert!(std::os::unix::net::UnixStream::connect(&nonlistener_path).is_err());
         manager.cleanup_stale().unwrap();
         assert!(path.exists());
         assert!(gui_socket_path("lease").exists());
-        drop((live, datagram));
+        assert!(nonlistener_path.exists());
+        drop((live, datagram, nonlistener));
         manager.cleanup_stale().unwrap();
         assert!(!path.exists());
         assert!(!gui_socket_path("lease").exists());
+        assert!(!nonlistener_path.exists());
     }
 
     #[test]
@@ -869,7 +999,7 @@ mod tests {
         recorded_session("cli-dead", i32::MAX as u32);
         stale_socket(&socket_path("cli-dead"));
         stale_socket(&gui_socket_path("cli-dead"));
-        crate::cli::factory::execute_kill(Some("cli-dead"), true).unwrap();
+        crate::cli::factory::execute_kill(Some("cli-dead"), true, false).unwrap();
         assert!(!metadata_path("cli-dead").exists());
         assert!(!socket_path("cli-dead").exists());
         assert!(!gui_socket_path("cli-dead").exists());

@@ -81,16 +81,23 @@ pub(crate) fn repeated_close_refusal_stop(task_id: &str, caller_prefix: &str) ->
     )
 }
 
-/// A feature map is opt-in by the target repository's directory. The caller
-/// supplies only feature files whose Touches globs matched delivered paths.
-pub(crate) fn feature_map_drift_message(
+/// G1–G6 share the same complete escape/retry contract, in the caller's harness.
+pub(crate) fn upkeep_message(
     task_id: &str,
-    stale: &[String],
+    input_path: &str,
+    title: &str,
+    detail: &str,
+    escape_token: &str,
+    warnings: &[String],
     caller_prefix: &str,
 ) -> String {
+    let warnings = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n{}", warnings.join("\n"))
+    };
     format!(
-        "⚠️ FEATURE MAP DRIFT\n\nTask {task_id} changed paths listed by these feature files without updating them:\n{}\n\nUpdate the named feature files in docs/qa/features, or record a decision note with a non-empty reason: `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"map unchanged: <reason>\"`. Then retry `{caller_prefix}task action=close id={task_id}`.",
-        stale.iter().map(|file| format!("- {file}")).collect::<Vec<_>>().join("\n")
+        "⚠️ {title}\n\n{detail}{warnings}\n\nFix {input_path} in this branch, or record `{caller_prefix}task action=notes id={task_id} note_type=decision notes=\"{escape_token} <reason>\"` with a non-empty reason. Then retry `{caller_prefix}task action=close id={task_id}`."
     )
 }
 
@@ -101,11 +108,19 @@ pub(crate) fn commit_receipt_recovery_steps(
     parent_branch: &str,
     caller_prefix: &str,
 ) -> String {
+    let [log, show, ancestry] = match crate::worktree::GitOperations::git_remedies([
+        &["log", "--oneline", "--all"],
+        &["show", "--stat", "<sha>"],
+        &["merge-base", "--is-ancestor", "<sha>", parent_branch],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     format!(
         "find the SHA of the worker task commit OR the merge commit that carried this \
-         task's work (never an unrelated historical commit; `git log --oneline --all` \
-         lists candidates), verify it with `git show --stat <sha>` and \
-         `git merge-base --is-ancestor <sha> {parent_branch}`, then retry \
+         task's work (never an unrelated historical commit; `{log}` \
+         lists candidates), verify it with `{show}` and \
+         `{ancestry}`, then retry \
          `{caller_prefix}task action=close id={task_id} commit_receipt=<sha>` \
          (full SHA or an unambiguous abbreviation)."
     )
@@ -149,7 +164,9 @@ pub(crate) fn merge_gate_exits_paragraph(task_id: &str, supervisor_prefix: &str)
          may use `{supervisor_prefix}task action=close id={task_id} evidence_only=true \
          evidence_only_artifact_path=<absolute-path-under-artifacts_root/<project-key>/{task_id}> \
          evidence_only_reference=<PR-URL-or-branch> reason=\"...\"`; CAS measures and logs \
-         the immutable delivery paths. If the \
+         the immutable delivery's net base..tip diff. A non-evidence path that was \
+         touched and fully reverted does not disqualify the report; no history rewrite \
+         is required. If non-evidence changes remain in that net diff and the \
          supervisor declines the delivery for rework, it runs `{supervisor_prefix}task \
          action=request_changes id={task_id} reason=\"...\"`; only after that verdict \
          may the assigned worker start a fresh cycle."
@@ -268,24 +285,12 @@ pub(crate) fn verifier_spawn_denial(
 mod tests {
     use super::*;
 
-    #[test]
-    fn feature_map_refusal_names_file_and_harness_specific_escape() {
-        let message = feature_map_drift_message(
-            "cas-demo",
-            &["docs/qa/features/profile.md".to_string()],
-            "mcp__cs__",
-        );
-        assert!(message.contains("docs/qa/features/profile.md"), "{message}");
-        assert!(message.contains("mcp__cs__task action=notes id=cas-demo note_type=decision notes=\"map unchanged: <reason>\""), "{message}");
-        assert!(message.contains("mcp__cs__task action=close id=cas-demo"), "{message}");
-    }
-
     const PREFIXES: [&str; 4] = ["mcp__cas__", "mcp__cs__", "cas__", "cas_"];
 
     /// Close-gate sources whose runtime text suggests calls. Paths are
     /// relative to this file.
     // pin: Audit every close-gate source, including unexecuted refusal branches, for harness-prefixed fix commands.
-    const GATE_SOURCES: [(&str, &str); 11] = [
+    const GATE_SOURCES: [(&str, &str); 13] = [
         ("close_ops.rs", include_str!("../close_ops.rs")),
         ("stale_close_guard.rs", include_str!("../stale_close_guard.rs")),
         ("proof_scope.rs", include_str!("../proof_scope.rs")),
@@ -302,6 +307,8 @@ mod tests {
             include_str!("../../../../../../hooks/handlers/handlers_events/neon_sql_guard.rs"),
         ),
         ("gate_text.rs", include_str!("gate_text.rs")),
+        ("docs_upkeep.rs", include_str!("docs_upkeep.rs")),
+        ("registry_upkeep.rs", include_str!("registry_upkeep.rs")),
         ("snapshot_approval.rs", include_str!("snapshot_approval.rs")),
     ];
 
@@ -444,13 +451,19 @@ mod tests {
 
     #[test]
     fn commit_receipt_steps_find_verify_and_retry_with_a_complete_command() {
+        let special = commit_receipt_recovery_steps("cas-r1", "epic/{a,b}!e", "mcp__cs__");
+        // pin: ancestry instructions are copyable argv, including the SHA placeholder.
+        assert!(special.contains("git merge-base --is-ancestor '<sha>' 'epic/{a,b}!e'"), "{special}");
+        let unsafe_ref = commit_receipt_recovery_steps("cas-r1", "epic/control\u{85}label", "mcp__cs__");
+        assert!(unsafe_ref.contains("\\u{85}") && !unsafe_ref.contains("git ")
+            && !unsafe_ref.contains("mcp__cs__task"), "{unsafe_ref:?}");
         let steps = commit_receipt_recovery_steps("cas-r1", "epic/x", "mcp__cs__");
         for required in [
             "worker task commit OR the merge commit",
             "never an unrelated historical commit",
             "git log --oneline --all",
-            "git show --stat <sha>",
-            "git merge-base --is-ancestor <sha> epic/x",
+            "git show --stat '<sha>'",
+            "git merge-base --is-ancestor '<sha>' epic/x",
             "`mcp__cs__task action=close id=cas-r1 commit_receipt=<sha>`",
             "unambiguous abbreviation",
         ] {

@@ -2,6 +2,7 @@
 """Exercise fast admission against real Git trees and real no-build checks."""
 
 import os
+import re
 import importlib.util
 import json
 import sys
@@ -113,7 +114,7 @@ class FastRows(unittest.TestCase):
         self.write(".gitignore", "/cargo-called\n")
         for helper in ("release-gate.sh", "release_scratch.py", "release-portable.sh", "release-test-env.sh", "release-integration-gates.py", "cas-test-targets.py",
                        "check-workflow-run-interpolation.py", "check-changed-markdown.py", "markdownlint.py",
-                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "builtin-doc-hygiene.json",
+                       "check-lane-fast-rows.py", "check-lane-compile.py", "check-builtin-doc-hygiene.py", "check-design-paths.py", "builtin-doc-hygiene.json",
                        "check-builtin-contract-phrases.py", "check-test-env.py", "rust_test_source.py",
                        "journeys-for-diff.py", "check-builtin-skill-limits.py", "check-doctor-snapshot.py",
                        "check-migration-registry.py", "check-communication-slos.py", "ci-script-tests-for-diff.py", "check-call-shapes.py",
@@ -130,6 +131,7 @@ class FastRows(unittest.TestCase):
         self.write("cas-cli/src/builtins/skills/violet/SKILL.md", VIOLET_SKILL)
         self.write("cas-cli/src/builtins.rs", BUILTINS_RS)
         self.write("docs/qa/journeys.md", JOURNEY_CATALOG)
+        self.write("docs/design/example.brief.md", "# Example\n\nEvidence: <artifacts>/cas-1234/report.json; isolated project/home/config.\n")
         self.write("hub-web/e2e/journeys/example.journey.ts", JOURNEY_SPEC)
         self.write("cas-cli/src/cli/doctor.rs", DOCTOR_RS)
         self.write("cas-cli/tests/snapshots/component_output_test__doctor_snapshot.snap", DOCTOR_SNAPSHOT)
@@ -187,6 +189,18 @@ class FastRows(unittest.TestCase):
         self.assertEqual(proof["tip"], command(self.repo, "git", "rev-parse", "HEAD").stdout.strip())
         self.assertFalse((self.repo / "cargo-called").exists(), result.stdout + result.stderr)
         return result, proof
+
+    def test_design_docs_reject_absolute_home_paths(self):
+        self.write("docs/design/example.brief.md",
+                   "# Example\n\nEvidence: /home/alice/.cas/artifacts/cas-1234/report.json\n"
+                   "and /Users/bob/.cas/artifacts/cas-1234/report.json\n"
+                   "and /root/.cas/artifacts/cas-1234/report.json\n")
+        result = self.fast()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("FAIL markdown-lint", result.stdout)
+        self.assertIn("docs/design/example.brief.md:3", result.stdout)
+        self.assertIn("docs/design/example.brief.md:4", result.stdout)
+        self.assertIn("docs/design/example.brief.md:5", result.stdout)
 
     def test_integration_no_build_rows_pass_with_all_train_controls_exported(self):
         result, proof = self.integration_rows()
@@ -427,6 +441,15 @@ sleep 2
         result = self.fast()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL markdown-lint", result.stdout)
+
+    def test_markdown_lint_reports_both_checkers_in_one_run(self):
+        self.write("scripts/check-design-paths.py", "print('fixture path finding')\nraise SystemExit(1)\n")
+        self.write("scripts/check-changed-markdown.py", "print('fixture markdown finding')\nraise SystemExit(1)\n")
+        result = self.fast()
+        log = (self.repo / ".git/gate-rows/markdown-lint.log").read_text()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("fixture path finding", log)
+        self.assertIn("fixture markdown finding", log)
 
     def test_preview_refuses_failure_without_moving_refs_or_leaking_worktree(self):
         command(self.repo, "git", "checkout", "-qb", "factory/lane")
@@ -678,11 +701,25 @@ sleep 2
         self.assertEqual(self.install_hooks().returncode, 0)
         self.assertEqual((self.repo / ".git/config.worktree").read_bytes(), config)
         self.write("cas-cli/tests/sample.rs", "// fixed in 9.99.8\n")
+        self.write("cas-cli/Makefile", "test-ci-tiers:\n\tcd .. && python3 scripts/test-example.py\n")
+        self.write("scripts/test-example.py", "raise SystemExit('fixture diagnostic: prebuild poll expired')\n")
         self.commit()
         refused = self.push()
         self.assertNotEqual(refused.returncode, 0, refused.stderr)
         self.assertIn("FIX version-literals: ", refused.stderr)
         self.assertIn("CAS_SKIP_FAST_ROWS", refused.stderr)
+        self.assertIn("FAIL ci-script-tests-changed", refused.stderr)
+        # The real hook must keep the detailed child output after the gate's
+        # scratch guardian has exited, and tell the worker where it is.
+        retained = re.search(r"pre-push: fast-row logs: (.+)", refused.stderr)
+        self.assertIsNotNone(retained, refused.stderr)
+        logs = Path(retained.group(1))
+        row_log = logs / "ci-script-tests-changed.log"
+        original_log = row_log.read_text()
+        self.assertIn("fixture diagnostic: prebuild poll expired", original_log)
+        # pin: FAIL plus the row id is the gate's public diagnostic protocol.
+        self.assertIn("FAIL ci-script-tests-changed", (logs / "gate.log").read_text())
+        self.assertIn("ci-script-tests-changed", (logs / "timing.tsv").read_text())
         self.assertEqual(command(self.repo, "git", "ls-remote", "origin").stdout, "")
 
         skipped = self.push(CAS_SKIP_FAST_ROWS="hotfix for the queue")
@@ -692,6 +729,7 @@ sleep 2
         self.assertIn(f"{head} factory/lane skipped fast rows: hotfix for the queue", log)
 
         # A same-tip PASS receipt makes the next push free: no rows run.
+        self.write("scripts/test-example.py", "print('example ok')\n")
         self.write("cas-cli/tests/sample.rs", "#[test]\nfn sample() {}\n")
         self.commit()
         self.assertEqual(self.fast().returncode, 0)
@@ -706,6 +744,11 @@ sleep 2
         missing = self.push(MARKDOWNLINT_CLI2=str(self.repo / "missing-markdownlint"))
         self.assertNotEqual(missing.returncode, 0, missing.stderr)
         self.assertIn("FAIL markdown-lint", missing.stderr)
+        later = re.search(r"pre-push: fast-row logs: (.+)", missing.stderr)
+        self.assertIsNotNone(later, missing.stderr)
+        self.assertNotEqual(Path(later.group(1)), logs)
+        # pin: retaining evidence means its bytes survive later attempts unchanged.
+        self.assertEqual(row_log.read_text(), original_log, "later pushes retain the original failure")
 
     def test_hook_installer_preserves_existing_authority_and_refuses_workers_cas_edb0(self):
         self.copy_hook_installer()
@@ -755,7 +798,10 @@ sleep 2
     def test_overlong_release_draft_is_refused_at_park_cas_e7d4(self):
         """A cut once stopped at preflight on a draft committed hours earlier."""
         path = "docs/release-notes/2026-10-14-v9.99.8-slack.md"
-        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text()
+        # The historical draft predates the User-reply wording check (cas-c5af);
+        # drop its one config-key mention so only the punch length is under test.
+        draft = (ROOT / "docs/release-notes/2026-10-13-v3.50.1-slack.md").read_text().replace(
+            "factory.write_roots", "write_roots")
         # The Dev top-level punch: the second line of the third fenced body.
         punch = draft.split("```")[5].strip("\n").splitlines()[2]
         self.write(path, draft)

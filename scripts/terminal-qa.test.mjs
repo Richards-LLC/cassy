@@ -13,7 +13,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { analyzeCapture, contrastRatio, displayWidth, runTerminalQa, PALETTES, UsageError } from "./terminal-qa.mjs";
+import { analyzeCapture, contrastRatio, displayWidth, lineText, parseAnsi, runTerminalQa, stripAnsi, stripBsdScriptEof, PALETTES, UsageError } from "./terminal-qa.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, "terminal-qa.mjs");
@@ -40,6 +40,19 @@ async function gate(t, name, extra = {}) {
 }
 
 const checks = (report) => [...new Set(report.findings.map((f) => f.check))];
+
+test("parseAnsi preserves CRCRLF rows and overwrites from column zero after bare CR", () => {
+  const raw = "C05WRONG\r\nViolet project: qa.invalid/channels (discovery)\r\r\nCloud project: other/project; verified: yes\r\n";
+  assert.deepEqual(parseAnsi(raw).map(lineText), [
+    "C05WRONG",
+    "Violet project: qa.invalid/channels (discovery)",
+    "Cloud project: other/project; verified: yes",
+  ]);
+  assert.deepEqual(parseAnsi("Violet project\rX\r\n").map(lineText), ["Xiolet project"]);
+  assert.deepEqual(parseAnsi("long text\r\u001b[2Kshort").map(lineText), ["short"]);
+  assert.deepEqual(parseAnsi("abc\rX\bY").map(lineText), ["Ybc"]);
+  assert.equal(parseAnsi("capture\r\r\n")[0].redraws, 0);
+});
 
 // ---------------------------------------------------------------------------
 // Contrast math
@@ -173,6 +186,26 @@ test("clean fixture passes with zero findings across every run", async (t) => {
   assert.ok(report.runs.every((r) => r.exit_code === 0));
 });
 
+test("literal progress ellipses pass without a truncation escape", async (t) => {
+  assert.deepEqual(analyzeCapture({ raw: "Installing dependencies…\n", run: "80.dark" }), []);
+  const { report } = await gate(t, "literal-progress-ellipsis.sh", { progressNouns: ["project", "updates"] });
+  assert.equal(report.verdict, "PASS", JSON.stringify(report.findings, null, 2));
+  assert.deepEqual(report.findings, []);
+});
+
+test("progress-like truncated table rows and cut-off words fail without an escape", async (t) => {
+  const lines = ["Running  job-alpha  checkou...", "Loading configuration fi…", "Running  job-alpha  files...", "Building project... 12", "Fetching  updates…", "Building other...", "Reconfiguring Cassy..."];
+  const report = await runTerminalQa({
+    command: [process.execPath, "-e", `const text = ${JSON.stringify(lines.join("\n"))}; console.log(process.env.LC_ALL === "C" ? text.replaceAll("…", "...") : text)`],
+    out: tmpOut(t),
+    label: "progress-like-truncation",
+    progressNouns: ["project", "updates"],
+  });
+  assert.equal(report.verdict, "FAIL");
+  assert.deepEqual(checks(report), ["truncation-without-escape"]);
+  assert.deepEqual([...new Set(report.findings.map((f) => f.detail.token))].sort(), ["checkou...", "files...", "fi…", "other...", "project...", "updates…"]);
+});
+
 const DEFECTS = [
   ["wrapped-table.sh", "overflow"],
   ["low-contrast.sh", "contrast"],
@@ -256,10 +289,10 @@ test("report.md opens with the receipt line and the receipt is the last stdout l
   assert.ok(json.runs.every((r) => fs.existsSync(path.resolve(r.files.ansi)) && fs.existsSync(path.resolve(r.files.txt))));
 });
 
-test("the built-in CLI craft runner prints its receipt through a symlinked skills directory", (t) => {
+test("the built-in CLI craft runner accepts literal progress ellipses through a symlinked skills directory", (t) => {
   const linkedScript = symlinkedBuiltinScript(t);
   const out = tmpOut(t);
-  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--", process.execPath, "-e", 'console.log("healthy")'], { encoding: "utf8" });
+  const cli = spawnSync(process.execPath, [linkedScript, "--label", "symlinked-runner", "--out", out, "--widths", "80", "--palettes", "dark", "--progress-noun", "project", "--progress-noun", "updates", "--", fixture("literal-progress-ellipsis.sh")], { encoding: "utf8" });
   assert.equal(cli.status, 0, cli.stderr + cli.stdout);
   assert.match(cli.stdout, /^terminal-qa: PASS symlinked-runner · 4 runs · 0 fail · 0 warn · 0 allowed · .*report\.json/m);
   const report = JSON.parse(fs.readFileSync(path.join(out, "report.json"), "utf8"));
@@ -339,6 +372,7 @@ test("empty captures fail even with a wildcard allowlist", async (t) => {
   assert.equal(report.findings.filter((f) => f.check === "empty-capture").length, 11);
   assert.equal(report.allowed.length, 0);
   assert.match(fs.readFileSync(path.join(out, "report.md"), "utf8"), /^terminal-qa: FAIL/);
+  assert.equal(stripAnsi(stripBsdScriptEof(Buffer.from("^D\b\b\r\n"))).trim(), "");
 });
 
 function fakeScript(t, body) {

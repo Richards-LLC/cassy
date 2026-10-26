@@ -100,10 +100,9 @@ impl CasCore {
             .origin_project
             .as_deref()
             .unwrap_or("unassigned legacy row");
-        let origin = if project_id
-            .as_deref()
-            .is_some_and(|project_id| task.origin_project.as_deref() != Some(project_id))
+        let origin = if project_id.is_some()
             && task.origin_project.is_some()
+            && !super::task_owned_by_project(&task, &self.cas_root, project_id.as_deref())
         {
             format!("{origin} — this task is owned elsewhere")
         } else {
@@ -111,11 +110,12 @@ impl CasCore {
         };
 
         let mut output = format!(
-            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nPriority: P{}\nType: {}\nDepth: {}\nDelivery mode: {}\nOrigin project: {}\nTarget: {}\n",
+            "Task: {}\n{}\n\nTitle: {}\nStatus: {:?}\nAssignee: {}\nPriority: P{}\nType: {}\nDepth: {}\nDelivery mode: {}\nOrigin project: {}\nTarget: {}\n",
             task.id,
             "=".repeat(task.id.len() + 6),
             task.title,
             task.status,
+            task.assignee.as_deref().unwrap_or("(unassigned)"),
             task.priority.0,
             task.task_type,
             task.depth,
@@ -381,8 +381,13 @@ impl CasCore {
             if let Some(ref commit) = task.deliverables.commit_hash {
                 output.push_str(&format!("\n  Commit: {commit}"));
             }
-            if let Some(ref merge) = task.deliverables.merge_commit {
+            if let Some(merge) = task.deliverables.merge_commit.as_ref()
+                .or(task.deliverables.green_merge_commit.as_ref())
+            {
                 output.push_str(&format!("\n  Merge commit: {merge}"));
+            }
+            if task.deliverables.green_merge_commit.is_some() || task.deliverables.merge_ci_admission.is_some() {
+                output.push_str(&format!("\n  CI admission: {}", task.deliverables.effective_merge_ci_admission().label()));
             }
         }
 
@@ -596,17 +601,17 @@ impl CasCore {
             })?
         };
 
-        let project_id = super::current_project_id(&self.cas_root);
+        let project_scope = super::ProjectScope::current(&self.cas_root);
         let hidden_foreign = if req.include_foreign {
             0
         } else {
             blocked
                 .iter()
-                .filter(|(task, _)| !super::task_visible_in_project(task, project_id.as_deref()))
+                .filter(|(task, _)| !project_scope.shows(task))
                 .count()
         };
         if !req.include_foreign {
-            blocked.retain(|(task, _)| super::task_visible_in_project(task, project_id.as_deref()));
+            blocked.retain(|(task, _)| project_scope.shows(task));
         }
 
         // Apply sorting to the task field of each tuple. cas-06f9 (GH #104):
@@ -690,7 +695,8 @@ impl CasCore {
                 "Task scope must be `project` or `all`; global tasks are unsupported.",
             ));
         }
-        let project_id = super::current_project_id(&self.cas_root);
+        let project_scope = super::ProjectScope::current(&self.cas_root);
+        let project_id = project_scope.project_id();
 
         let task_store = self.open_task_store()?;
 
@@ -770,11 +776,11 @@ impl CasCore {
         } else {
             filtered
                 .iter()
-                .filter(|task| !super::task_visible_in_project(task, project_id.as_deref()))
+                .filter(|task| !project_scope.shows(task))
                 .count()
         };
         if !req.include_foreign {
-            filtered.retain(|task| super::task_visible_in_project(task, project_id.as_deref()));
+            filtered.retain(|task| project_scope.shows(task));
         }
 
         // Apply sorting

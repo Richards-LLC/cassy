@@ -59,6 +59,9 @@ pub enum ReminderStatus {
     Cancelled,
     /// TTL exceeded without firing
     Expired,
+    /// Paused while its target worker is held (cas-73b89). It neither fires
+    /// nor expires; release re-arms it.
+    Suspended,
 }
 
 /// Result of a daemon-budgeted stale-reminder expiry attempt.
@@ -77,6 +80,7 @@ impl std::fmt::Display for ReminderStatus {
             Self::Fired => write!(f, "fired"),
             Self::Cancelled => write!(f, "cancelled"),
             Self::Expired => write!(f, "expired"),
+            Self::Suspended => write!(f, "suspended"),
         }
     }
 }
@@ -90,6 +94,7 @@ impl std::str::FromStr for ReminderStatus {
             "fired" => Ok(Self::Fired),
             "cancelled" => Ok(Self::Cancelled),
             "expired" => Ok(Self::Expired),
+            "suspended" => Ok(Self::Suspended),
             _ => Err(StoreError::Parse(format!("Unknown reminder status: {s}"))),
         }
     }
@@ -268,6 +273,8 @@ const MIGRATION_CROSS_SESSION: &str =
     "ALTER TABLE reminders ADD COLUMN cross_session INTEGER NOT NULL DEFAULT 0";
 /// Migration: task context lets task-close quarantine stale reminders.
 const MIGRATION_TASK_ID: &str = "ALTER TABLE reminders ADD COLUMN task_id TEXT";
+/// Migration: when a worker hold suspended the reminder (cas-73b89).
+const MIGRATION_SUSPENDED_AT: &str = "ALTER TABLE reminders ADD COLUMN suspended_at TEXT";
 
 /// Trait for reminder storage operations
 #[allow(clippy::too_many_arguments)]
@@ -341,12 +348,33 @@ pub trait ReminderStore: Send + Sync {
     /// Cancel a reminder (must belong to the given owner)
     fn cancel(&self, id: i64, owner_id: &str) -> Result<()>;
 
-    /// Permanently cancel every pending reminder that targets an agent.
+    /// Suspend every pending reminder that targets an agent (worker hold).
     ///
-    /// Used by the factory worker-hold gate: a hold is a deliberate pause,
-    /// so pre-armed one-shot wakeups must not fire through it or revive later
-    /// with stale context after release.
-    fn cancel_pending_for_target(&self, target_id: &str) -> Result<usize>;
+    /// A hold is a pause: the worker's own wakes must not fire through it,
+    /// but cancelling them left a released worker with nothing to wake it
+    /// (cas-73b89). Suspended rows neither fire nor expire until
+    /// [`Self::resume_suspended_for_target`].
+    fn suspend_pending_for_target(&self, target_id: &str) -> Result<usize>;
+
+    /// Suspended reminders the agent owns or receives, or every suspended
+    /// reminder for `None`, so lists show a held worker's waits (cas-c5ab).
+    fn list_suspended(&self, agent_id: Option<&str>) -> Result<Vec<Reminder>>;
+
+    /// Suspended event reminders for this event type, so a matching event
+    /// during the hold can be recorded with [`Self::catch_suspended_event`].
+    fn get_suspended_event_reminders(&self, event_type: &str) -> Result<Vec<Reminder>>;
+
+    /// Record the first matching event that arrived while the reminder was
+    /// suspended. Returns whether the row recorded it.
+    fn catch_suspended_event(&self, id: i64, event: &serde_json::Value) -> Result<bool>;
+
+    /// Re-arm every suspended reminder that targets an agent (worker release).
+    ///
+    /// A reminder whose event arrived, or whose time came, during the hold
+    /// becomes a time reminder due now, so the next scan delivers it with the
+    /// caught event. Other event reminders get the hold's length back on
+    /// their TTL. Returns the number re-armed.
+    fn resume_suspended_for_target(&self, target_id: &str) -> Result<usize>;
 
     /// Cancel pending default-scoped reminders created by a completed session.
     /// Explicit cross-session reminders are deliberately retained.
@@ -520,6 +548,13 @@ impl SqliteReminderStore {
             .is_err()
         {
             conn.execute_batch(MIGRATION_TASK_ID)?;
+        }
+
+        if conn
+            .prepare_cached("SELECT suspended_at FROM reminders LIMIT 0")
+            .is_err()
+        {
+            conn.execute_batch(MIGRATION_SUSPENDED_AT)?;
         }
 
         Ok(())
@@ -820,7 +855,7 @@ impl ReminderStore for SqliteReminderStore {
         let now = Utc::now().to_rfc3339();
 
         let rows = conn.execute(
-            "UPDATE reminders SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND supervisor_id = ? AND status = 'pending'",
+            "UPDATE reminders SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND supervisor_id = ? AND status IN ('pending', 'suspended')",
             params![now, id, owner_id],
         )?;
 
@@ -833,15 +868,98 @@ impl ReminderStore for SqliteReminderStore {
         Ok(())
     }
 
-    fn cancel_pending_for_target(&self, target_id: &str) -> Result<usize> {
+    fn suspend_pending_for_target(&self, target_id: &str) -> Result<usize> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
-            "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
+            "UPDATE reminders SET status = 'suspended', suspended_at = ?1 \
              WHERE status = 'pending' AND (target_id = ?2 OR (target_id IS NULL AND supervisor_id = ?2))",
             params![now, target_id],
         )?;
         Ok(rows)
+    }
+
+    fn list_suspended(&self, agent_id: Option<&str>) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!(
+            "SELECT {} FROM reminders WHERE status = 'suspended' \
+             AND (?1 IS NULL OR supervisor_id = ?1 OR target_id = ?1) ORDER BY created_at ASC",
+            Self::SELECT_COLUMNS
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let reminders = stmt
+            .query_map(params![agent_id], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(reminders)
+    }
+
+    fn get_suspended_event_reminders(&self, event_type: &str) -> Result<Vec<Reminder>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let sql = format!(
+            "SELECT {} FROM reminders WHERE trigger_type = 'event' AND status = 'suspended' \
+             AND trigger_event = ? AND fired_event IS NULL ORDER BY created_at ASC",
+            Self::SELECT_COLUMNS
+        );
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let reminders = stmt
+            .query_map(params![event_type], Self::reminder_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(reminders)
+    }
+
+    fn catch_suspended_event(&self, id: i64, event: &serde_json::Value) -> Result<bool> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let rows = conn.execute(
+            "UPDATE reminders SET fired_event = ?1 \
+             WHERE id = ?2 AND status = 'suspended' AND fired_event IS NULL",
+            params![event.to_string(), id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    fn resume_suspended_for_target(&self, target_id: &str) -> Result<usize> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let now = Utc::now();
+        let tx = conn.unchecked_transaction()?;
+        let rows: Vec<(i64, String, Option<String>, String, bool, Option<String>)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, trigger_type, trigger_at, created_at, fired_event IS NOT NULL, suspended_at \
+                 FROM reminders WHERE status = 'suspended' \
+                 AND (target_id = ?1 OR (target_id IS NULL AND supervisor_id = ?1))",
+            )?;
+            stmt.query_map(params![target_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?))
+            })?
+            .collect::<std::result::Result<_, _>>()?
+        };
+        for (id, trigger_type, trigger_at, created_at, caught, suspended_at) in &rows {
+            let due_during_hold = trigger_at
+                .as_deref()
+                .and_then(Self::parse_datetime)
+                .is_some_and(|at| at <= now);
+            let (trigger_type, trigger_at, created_at) = if *caught || (trigger_type == "time" && due_during_hold) {
+                // Fire on the next scan, with a fresh TTL grace window.
+                ("time".to_string(), Some(now.to_rfc3339()), created_at.clone())
+            } else if trigger_type == "event" {
+                // The hold must not use up an event reminder's TTL.
+                let held = suspended_at
+                    .as_deref()
+                    .and_then(Self::parse_datetime)
+                    .map_or(chrono::Duration::zero(), |at| (now - at).max(chrono::Duration::zero()));
+                let shifted = Self::parse_datetime(created_at)
+                    .map_or_else(|| created_at.clone(), |at| (at + held).to_rfc3339());
+                (trigger_type.clone(), trigger_at.clone(), shifted)
+            } else {
+                (trigger_type.clone(), trigger_at.clone(), created_at.clone())
+            };
+            tx.execute(
+                "UPDATE reminders SET status = 'pending', suspended_at = NULL, \
+                 trigger_type = ?1, trigger_at = ?2, created_at = ?3 WHERE id = ?4",
+                params![trigger_type, trigger_at, created_at, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows.len())
     }
 
     fn cancel_pending_for_origin_session(&self, origin_session_id: &str) -> Result<usize> {
@@ -849,7 +967,7 @@ impl ReminderStore for SqliteReminderStore {
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
-             WHERE status = 'pending' AND origin_session_id = ?2 \
+             WHERE status IN ('pending', 'suspended') AND origin_session_id = ?2 \
              AND COALESCE(cross_session, 0) = 0",
             params![now, origin_session_id],
         )?;
@@ -861,7 +979,7 @@ impl ReminderStore for SqliteReminderStore {
         let now = Utc::now().to_rfc3339();
         let rows = conn.execute(
             "UPDATE reminders SET status = 'cancelled', cancelled_at = ?1 \
-             WHERE status = 'pending' AND task_id = ?2 \
+             WHERE status IN ('pending', 'suspended') AND task_id = ?2 \
              AND COALESCE(cross_session, 0) = 0",
             params![now, task_id],
         )?;
@@ -887,7 +1005,7 @@ impl ReminderStore for SqliteReminderStore {
         let cutoff = (Utc::now() - chrono::Duration::days(older_than_days)).to_rfc3339();
 
         let rows = conn.execute(
-            "DELETE FROM reminders WHERE status != 'pending' AND created_at < ?",
+            "DELETE FROM reminders WHERE status NOT IN ('pending', 'suspended') AND created_at < ?",
             params![cutoff],
         )?;
 
@@ -1378,6 +1496,74 @@ mod tests {
         let pending = store.list_pending("supervisor-1").unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].message, "Will not expire");
+    }
+
+    /// cas-73b89: a worker hold suspends the worker's reminders instead of
+    /// cancelling them, and release re-arms each one: a time that came, or an
+    /// event that arrived, during the hold is due at once; an event reminder
+    /// still waiting gets the hold's length back on its TTL.
+    #[test]
+    fn worker_hold_suspends_reminders_and_release_rearms_them() {
+        let (_temp, store) = create_test_store();
+        let time = |message, at, ttl| {
+            store
+                .create("worker-1", None, message, ReminderTriggerType::Time, Some(at), None, None, ttl, None)
+                .unwrap()
+        };
+        let event = |message| {
+            store
+                .create("worker-1", None, message, ReminderTriggerType::Event, None, Some("task_completed"), None, 3600, None)
+                .unwrap()
+        };
+        let came_during_hold = time("time came", Utc::now() - chrono::Duration::seconds(120), 60);
+        let caught = event("event came");
+        let waiting = event("still waiting");
+        let other = store
+            .create("worker-2", None, "not held", ReminderTriggerType::Event, None, Some("task_completed"), None, 3600, None)
+            .unwrap();
+
+        assert_eq!(store.suspend_pending_for_target("worker-1").unwrap(), 3);
+        assert!(store.get_due_time_reminders().unwrap().is_empty());
+        assert_eq!(store.expire_stale().unwrap(), 0, "a suspended reminder never expires");
+        let suspended: Vec<i64> = store
+            .get_suspended_event_reminders("task_completed")
+            .unwrap()
+            .iter()
+            .map(|reminder| reminder.id)
+            .collect();
+        assert_eq!(suspended, vec![caught, waiting]);
+        let completed = serde_json::json!({"event_type": "task_completed", "description": "cas-1 done"});
+        assert!(store.catch_suspended_event(caught, &completed).unwrap());
+        // A two-hour hold would have used up the waiting reminder's TTL.
+        let two_hours_ago = (Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE reminders SET created_at = ?1, suspended_at = ?1 WHERE id = ?2",
+                params![two_hours_ago, waiting],
+            )
+            .unwrap();
+
+        assert_eq!(store.resume_suspended_for_target("worker-1").unwrap(), 3);
+        assert_eq!(store.expire_stale().unwrap(), 0);
+        let mut due: Vec<(i64, Option<serde_json::Value>)> = store
+            .get_due_time_reminders()
+            .unwrap()
+            .into_iter()
+            .map(|reminder| (reminder.id, reminder.fired_event))
+            .collect();
+        due.sort_by_key(|(id, _)| *id);
+        assert_eq!(due, vec![(came_during_hold, None), (caught, Some(completed))]);
+        let mut waiting_events: Vec<i64> = store
+            .get_event_reminders("task_completed")
+            .unwrap()
+            .iter()
+            .map(|reminder| reminder.id)
+            .collect();
+        waiting_events.sort();
+        assert_eq!(waiting_events, vec![waiting, other]);
     }
 
     /// cas-57c1 (GH #984): a delay longer than the TTL still fires. The TTL

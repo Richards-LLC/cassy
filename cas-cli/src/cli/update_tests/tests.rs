@@ -390,6 +390,7 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     std::fs::write(&user, &original).unwrap();
     let mut args = update_test_args();
     args.all_projects = true;
+    args.refresh_receipt = Some(home.join("refresh.json"));
     let cli = update_test_cli(false);
     // Inject only the network probe; run the real user store/builtin phases
     // and the entire native per-project loop, including rules/skills sync.
@@ -417,7 +418,15 @@ fn cas_8235_review_full_project_loop_converges_after_registration_repair() {
     );
     assert_eq!(report.project_count, 2, "{output}");
     assert_eq!(report.failed_count, 0, "{output}");
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    for project in receipt["projects"].as_array().unwrap() {
+        assert_eq!(project["phase_documents"]["docs_upkeep"][0]["changes"].as_array().unwrap().len(), 3);
+    }
     for root in &roots {
+        let config = crate::config::Config::load(root).unwrap();
+        assert_eq!(config.upkeep().codemap(), crate::config::UpkeepStage::Observe);
+        assert_eq!(config.upkeep().product_overview(), crate::config::UpkeepStage::Observe);
+        assert_eq!(config.qa().registry.enforce, crate::config::RegistryEnforcement::Observe);
         let raw = std::fs::read_to_string(root.join("proxy.toml")).unwrap();
         let doc: toml::Value = toml::from_str(&raw).unwrap();
         assert_eq!(
@@ -471,22 +480,235 @@ fn cas_8235_doctor_keeps_working_custom_symlink_and_runs_hub_probe() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn cas_678d_round1_offline_violet_does_not_block_builtin_sync() {
+    use std::os::unix::fs::symlink;
+    struct NoNetwork;
+    impl crate::cli::integrate::violet::HubProbe for NoNetwork {
+        fn list_tools(&self, _: &cmcp_core::config::ServerConfig) -> crate::cli::integrate::violet::ProbeOutcome {
+            panic!("no Violet configuration should require a network probe");
+        }
+    }
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    env.set("COLUMNS", "80");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    let account = home.join(".claude-operator@example.com");
+    std::fs::create_dir_all(&account).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &account);
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("outside-profile-with-a-very-long-name".repeat(3)).join("skills");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join("operator.txt"), "preserve outside profile").unwrap();
+    symlink(&target, account.join("skills")).unwrap();
+    let cli = update_test_cli(true);
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || {
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&NoNetwork)
+    }));
+    result.unwrap();
+    assert!(home.join(".claude/skills/cas-worker/SKILL.md").is_file());
+    let warnings: Vec<_> = output.lines().filter(|line| !line.starts_with('{')).collect();
+    assert!(warnings.iter().all(|line| line.chars().count() <= 78), "{output}");
+    let normalized = warnings.join(" ");
+    assert!(normalized.contains("outside HOME"), "{output}");
+    assert!(output.contains("~/.claude-operator@example.com/skills"), "{output}");
+    assert!(warnings.iter().all(|line| !line.contains(home.to_str().unwrap())), "{output}");
+    let document: serde_json::Value = serde_json::from_str(output.lines().find(|line| line.starts_with('{')).unwrap()).unwrap();
+    let full_warnings = document["warnings"].as_array().expect("JSON must preserve full warning paths");
+    assert!(full_warnings.iter().any(|warning| warning.as_str().unwrap().contains(target.to_str().unwrap())), "{document}");
+    assert!(warnings.iter().any(|line| line.contains("--verbose")), "{output}");
+    assert!(!warnings.iter().any(|line| line.trim_start().starts_with("outside-profile-with")), "a path token was split: {output}");
+    let mut verbose = update_test_cli(false);
+    verbose.verbose = true;
+    let (result, expanded) = capture_phase(true, || sync_user_builtins_with_violet(&verbose, || {
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&NoNetwork)
+    }));
+    result.unwrap();
+    assert!(expanded.contains(target.to_str().unwrap()), "verbose must keep the full path token: {expanded}");
+    assert!(warnings.iter().any(|line| line.trim() == "Retry: cas update --user"), "{output}");
+    assert!(account.join("skills").is_symlink());
+    // pin: migration must never alter the rejected external target's bytes.
+    assert_eq!(std::fs::read_to_string(target.join("operator.txt")).unwrap(), "preserve outside profile");
+
+    // The ordinary shared base is inside HOME and is already a trusted target.
+    let shared = home.join(".cas/claude-base/skills");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::remove_file(account.join("skills")).unwrap();
+    symlink(&shared, account.join("skills")).unwrap();
+    let (result, accepted) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || {
+        crate::cli::integrate::violet_retirement::migrate_installed_hub_on_update_with_probe(&NoNetwork)
+    }));
+    result.unwrap();
+    assert!(!accepted.contains("Violet migration skipped") && !accepted.contains("Violet update advisory"), "{accepted}");
+    assert!(account.join("skills").is_symlink());
+    assert!(shared.join("finish/SKILL.md").is_file());
+}
+
+/// Install/update must not depend on a personal HOME seed, and both legacy
+/// overrides and edits to an installed managed finish remain the operator's.
+#[test]
+// pin: installation and update preserve the operator's exact Markdown bytes.
+fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
+    use cas_mux::SupervisorCli;
     let env = crate::test_support::TestEnvGuard::temp_home();
-    std::fs::create_dir_all(env.home().join(".claude")).unwrap();
-    sync_user_builtins_with_violet(&update_test_cli(true), || anyhow::bail!("hub offline"))
+    let home = env.home();
+    assert!(!home.join(".agents/skills/finish").exists());
+    let roots = [
+        (SupervisorCli::Claude, ".claude"),
+        (SupervisorCli::Claude, ".claude-existing@example.com"),
+        (SupervisorCli::Claude, ".cas/claude-base"),
+        (SupervisorCli::Codex, ".codex"),
+        (SupervisorCli::Codex, ".codex-existing@example.com"),
+        (SupervisorCli::Codex, ".cas/codex-base"),
+        (SupervisorCli::Grok, ".grok"),
+    ];
+    for (_, root) in roots {
+        std::fs::create_dir_all(home.join(root)).unwrap();
+    }
+    let custom = home.join(".claude-custom@example.com");
+    for path in ["commands/finish.md", "skills/finish/SKILL.md"] {
+        let path = custom.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "operator's personal finish\n").unwrap();
+    }
+    let command_only = home.join(".claude-command@example.com");
+    let seeded = home.join(".claude-seeded@example.com");
+    for (root, text) in [
+        (&command_only, "operator's command-only finish\n"),
+        (
+            &seeded,
+            include_str!("../../../tests/data/finish-cas-f4ea.md"),
+        ),
+    ] {
+        std::fs::create_dir_all(root.join("commands")).unwrap();
+        std::fs::write(root.join("commands/finish.md"), text).unwrap();
+    }
+    let cli = update_test_cli(true);
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || Ok(())));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let accounts = receipt["finish_accounts"].as_array().unwrap();
+    let named_account = home.join(".codex-existing@example.com");
+    assert_eq!(accounts.iter().find(|row| row["path"] == named_account.to_str().unwrap()).unwrap()["updated"], 1);
+    assert!(accounts.iter().any(|row| row["preserved"] == serde_json::json!(["commands/finish.md"])));
+    for (harness, root) in roots {
+        let installed = home.join(root).join("skills/finish/SKILL.md");
+        assert!(
+            installed.is_file(),
+            "{root} missing finish after real update"
+        );
+        let builtin = crate::builtins::skill_catalog_for_harness(harness)
+            .iter()
+            .find(|file| file.path == "skills/finish/SKILL.md")
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&installed).unwrap(),
+            builtin.content
+        );
+        assert!(!home.join(root).join("commands/finish.md").exists());
+        // Retain the managed marker: an operator edit still takes precedence.
+        std::fs::write(
+            &installed,
+            format!("{}\nOperator customization.\n", builtin.content),
+        )
         .unwrap();
-    assert!(
-        env.home()
-            .join(".claude/skills/cas-worker/SKILL.md")
-            .is_file()
+    }
+    let command = home.join(".claude/commands/finish.md");
+    std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+    std::fs::write(&command, "customized command after install\n").unwrap();
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    assert!(seeded.join("skills/finish/SKILL.md").is_file());
+    assert!(!seeded.join("commands/finish.md").exists());
+    assert!(!command_only.join("skills/finish/SKILL.md").exists());
+    // pin: a custom legacy command remains the callable entrypoint, byte-for-byte.
+    assert_eq!(
+        std::fs::read_to_string(command_only.join("commands/finish.md")).unwrap(),
+        "operator's command-only finish\n"
     );
+    // pin: preserve or install the exact command/skill bytes at the harness boundary.
+    assert_eq!(
+        std::fs::read_to_string(command).unwrap(),
+        "customized command after install\n"
+    );
+    for (_, root) in roots {
+        // pin: preserve or install the exact command/skill bytes at the harness boundary.
+        assert!(
+            std::fs::read_to_string(home.join(root).join("skills/finish/SKILL.md"))
+                .unwrap()
+                .ends_with("Operator customization.\n"),
+            "{root}"
+        );
+    }
+    for path in ["commands/finish.md", "skills/finish/SKILL.md"] {
+        // pin: preserve or install the exact command/skill bytes at the harness boundary.
+        assert_eq!(
+            std::fs::read_to_string(custom.join(path)).unwrap(),
+            "operator's personal finish\n"
+        );
+    }
+    // Retiring default account homes must not disable the named-account refresh.
+    for default in [".claude", ".codex"] {
+        std::fs::remove_dir_all(home.join(default)).unwrap();
+    }
+    let named = home.join(".codex-existing@example.com/skills/finish/SKILL.md");
+    std::fs::remove_file(&named).unwrap();
+    let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
+    result.unwrap();
+    assert!(named.is_file());
+    assert!(human.contains("~/.codex-existing@example.com: finish 1 updated"), "{human}");
+    assert!(human.contains("1 preserved"), "{human}");
+    // Inject just the filesystem discovery failure; defaults and shared bases
+    // must still run through the actual update writer and JSON receipt.
+    let base_finish = home.join(".cas/claude-base/skills/finish/SKILL.md");
+    std::fs::remove_file(&base_finish).unwrap();
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_discovery(&cli, || Ok(()), |provider, home| {
+        if provider == crate::accounts::Provider::Claude {
+            Err(std::io::Error::other("account directory unavailable"))
+        } else {
+            crate::accounts::discover(provider, home)
+        }
+    }));
+    result.unwrap();
+    assert!(base_finish.is_file());
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let warnings = receipt["account_discovery_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].as_str().unwrap().contains("claude account discovery failed: account directory unavailable"));
+    // Init and project refresh use this same writer, including OpenCode's
+    // physical project skills (its user catalog is projected at launch).
+    let project = home.join("project");
+    for (harness, dir) in [
+        (SupervisorCli::Claude, ".claude"),
+        (SupervisorCli::Codex, ".codex"),
+        (SupervisorCli::Grok, ".grok"),
+        (SupervisorCli::OpenCode, ".opencode"),
+    ] {
+        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+        let path = project.join(dir).join("skills/finish/SKILL.md");
+        assert!(path.is_file(), "{harness:?} missing project finish");
+        assert!(!project.join(dir).join("commands/finish.md").exists());
+        std::fs::write(&path, "project finish override\n").unwrap();
+        crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+        // pin: preserve or install the exact command/skill bytes at the harness boundary.
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "project finish override\n"
+        );
+        if harness == SupervisorCli::Claude {
+            std::fs::remove_file(&path).unwrap();
+            let command = project.join(dir).join("commands/finish.md");
+            std::fs::create_dir_all(command.parent().unwrap()).unwrap();
+            std::fs::write(command, "project command override\n").unwrap();
+            crate::builtins::sync_all_builtins_for_project(harness, &project).unwrap();
+            assert!(!path.exists(), "project command must not be shadowed");
+        }
+    }
 }
 
 #[test]
 fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
-    let env = crate::test_support::TestEnvGuard::temp_home();
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
     std::fs::create_dir_all(env.home().join(".claude")).unwrap();
     let mut args = update_test_args();
     args.dry_run = true;
@@ -496,6 +718,105 @@ fn cas_678d_round1_dry_run_without_user_store_does_not_write() {
     execute(&args, &update_test_cli(true), None).unwrap();
     assert!(!env.home().join(".claude/skills").exists());
     assert!(!env.home().join(".config/cas/credentials.env").exists());
+
+
+    // The native project sweep must preview upkeep adoption without changing
+    // the config. Discovery excludes /tmp, so use the sanctioned fixture root.
+    let fixture = tempfile::tempdir_in(crate::test_paths::runtime_fixture_parent()).unwrap();
+    let project = fixture.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&project)
+        .status().unwrap().success());
+    let root = crate::store::init_cas_dir(&project).unwrap();
+    let config_path = root.join("config.toml");
+    let original = std::fs::read(&config_path).unwrap();
+    env.set("CAS_ROOT", &root);
+    env.set("CAS_PROJECT_ROOTS", fixture.path());
+    env.set_current_dir(&project);
+    args.user = false;
+    args.all_projects = true;
+    args.refresh_receipt = Some(fixture.path().join("refresh.json"));
+    let report = refresh_all_projects(
+        &args, &update_test_cli(false), Some(&root), None, None, None,
+    ).unwrap();
+    assert_eq!(report.project_count, 1);
+    assert_eq!(std::fs::read(&config_path).unwrap(), original);
+    let receipt = read_refresh_receipt(args.refresh_receipt.as_ref().unwrap()).unwrap();
+    let changes = receipt["projects"][0]["phase_documents"]["docs_upkeep"][0]["changes"]
+        .as_array().expect("dry run must report planned upkeep changes");
+    assert_eq!(changes.len(), 3);
+    for stage in ["upkeep.codemap = observe", "upkeep.product_overview = observe", "qa.registry.enforce = observe"] {
+        assert!(changes.iter().any(|change| change.as_str().unwrap().starts_with(stage)), "{changes:?}");
+        assert!(report.verbose_summary.contains(stage), "{}", report.verbose_summary);
+    }
+}
+
+#[test]
+fn personal_codex_finish_prevents_duplicate_builtin_cas_14aa() {
+    use cas_mux::SupervisorCli;
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home();
+    let accounts = [".codex", ".codex-named@example.com", ".cas/codex-base"];
+    for account in accounts {
+        std::fs::create_dir_all(home.join(account)).unwrap();
+    }
+    let cli = update_test_cli(true);
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    let project = home.join("project");
+    crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
+    let copies: Vec<_> = accounts.iter().map(|account| home.join(account).join("skills/finish/SKILL.md"))
+        .chain(std::iter::once(project.join(".codex/skills/finish/SKILL.md"))).collect();
+    assert!(copies.iter().all(|path| path.is_file()), "seed the existing builtin upgrade case");
+
+    let personal = home.join(".agents/skills/finish/SKILL.md");
+    let customized = "---\nname: finish\ndescription: My wrap-up\n---\nKeep my personal procedure.\n";
+    std::fs::create_dir_all(personal.parent().unwrap()).unwrap();
+    std::fs::write(&personal, customized).unwrap();
+    let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
+    result.unwrap();
+    assert!(human.contains("personal finish takes precedence; removed"), "{human}");
+    assert!(!human.contains("skills/finish/SKILL.md (no longer shipped"), "{human}");
+    crate::builtins::sync_all_builtins_for_project(SupervisorCli::Codex, &project).unwrap();
+    for builtin in &copies {
+        assert_eq!([&personal, builtin].iter().filter(|path| path.is_file()).count(), 1,
+            "Codex must see exactly the personal finish, not {} too", builtin.display());
+    }
+    assert_eq!(std::fs::read_to_string(&personal).unwrap(), customized);
+    // A new account and another update must keep the same precedence.
+    let fresh = home.join(".codex-fresh@example.com");
+    std::fs::create_dir_all(&fresh).unwrap();
+    sync_user_builtins_with_violet(&cli, || Ok(())).unwrap();
+    assert!(!fresh.join("skills/finish/SKILL.md").exists());
+    assert!(crate::builtins::preview_all_codex_builtins(&fresh).unwrap().iter().all(|file| file.path != "skills/finish/SKILL.md"));
+    assert!(!crate::builtins::install_parity_for_harness(SupervisorCli::Codex, &fresh).missing.iter().any(|file| file == "skills/finish/SKILL.md"));
+
+    // A retained managed marker alone is never proof of pristine content.
+    let custom_copy = &copies[0];
+    let custom_body = "---\nmanaged_by: cas\n---\nMy customized Codex finish.\n";
+    std::fs::write(custom_copy, custom_body).unwrap();
+    let (result, output) = capture_phase(true, || sync_user_builtins_with_violet(&cli, || Ok(())));
+    result.unwrap();
+    let receipt: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
+    let warnings = receipt["builtin_warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    let warning = warnings[0].as_str().unwrap();
+    assert!(warning.contains(personal.to_str().unwrap()) && warning.contains(custom_copy.to_str().unwrap()), "{warning}");
+    assert_eq!(std::fs::read_to_string(custom_copy).unwrap(), custom_body);
+    let long_profile = format!(".codex-{}@example.com", "operator".repeat(12));
+    let long_copy = home.join(&long_profile).join("skills/finish/SKILL.md");
+    std::fs::create_dir_all(long_copy.parent().unwrap()).unwrap();
+    std::fs::write(&long_copy, custom_body).unwrap();
+    let (result, human) = capture_phase(true, || sync_user_builtins_with_violet(&update_test_cli(false), || Ok(())));
+    result.unwrap();
+    assert!(human.contains("~/.agents/skills/finish/SKILL.md"), "{human}");
+    assert!(human.contains("~/.codex/skills/finish/SKILL.md"), "{human}");
+    let joined: String = human.split_whitespace().collect();
+    assert!(joined.contains(&format!("~/{long_profile}/skills/finish/SKILL.md")), "{human}");
+    assert!(human.lines().all(|line| line.chars().count() <= 78), "{human}");
+    assert!(!human.contains("...") && !human.contains('—'), "{human}");
+    assert_eq!(std::fs::read_to_string(personal).unwrap(), customized);
 }
 
 #[test]
@@ -2182,7 +2503,40 @@ fn partial_refresh_transcript_leads_with_binary_then_refresh_verdict_cas_0aa5() 
     for raw in ["Checking target-arch", "Managed files: 3 conflicts", "Retained intentionally"] {
         assert!(!output.contains(raw), "raw phase output {raw:?} leaked:\n{output}");
     }
+    let lines = output.lines().collect::<Vec<_>>();
+    let warning = lines
+        .iter()
+        .position(|line| line.contains("serve  Tailscale Serve inactive:"))
+        .expect("hub Serve finding is printed");
+    assert!(lines[warning].trim_end().ends_with("Tailscale Serve inactive:"), "{output}");
+    assert_eq!(
+        lines[warning + 1].trim(),
+        "tailscale is stopped; hub remains loopback-only",
+        "the transport cause belongs on its own indented line:\n{output}"
+    );
     assert!(output.lines().all(|line| line.chars().count() <= 80), "{output}");
+}
+
+#[test]
+fn cloud_findings_keep_c_locale_cause_and_remedy_cas_2c9c() {
+    for (summary, cause, remedy) in [
+        (
+            "[WARN] Push incomplete - 1 rejected by cloud (invalid_json_nul x1) - invalid_json_nul: Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184, then `cas cloud queue --retry --retry-reason invalid_json_nul` - queued rows remain - run cas cloud queue --retry\n",
+            "push incomplete: 1 rejected by cloud (invalid_json_nul x1)",
+            "Follow https://github.com/Richards-LLC/petra-stella-cloud/issues/184, then `cas cloud queue --retry --retry-reason invalid_json_nul`",
+        ),
+        (
+            "[WARN] Pull incomplete - 1 errors - run cas cloud pull\n",
+            "pull incomplete: 1 errors",
+            "cas cloud pull",
+        ),
+    ] {
+        assert_eq!(
+            findings::cause_and_remedy("cloud sync: counts only", summary),
+            (cause.to_owned(), Some(remedy.to_owned())),
+            "lost cloud finding from {summary:?}"
+        );
+    }
 }
 
 #[test]
@@ -2457,6 +2811,8 @@ fn cas_6718_drifted_project(home: &Path) -> PathBuf {
     cas_6718_git(&project, &["config", "user.name", "Fixture"]);
     cas_6718_git(&project, &["add", "."]);
     cas_6718_git(&project, &["commit", "-qm", "project baseline"]);
+    cas_6718_git(&project, &["branch", "-M", "main"]);
+    cas_6718_git(&project, &["checkout", "-qb", "repair/managed-files"]);
     rule.content = "Current authoritative source content".into();
     store.update(&rule).unwrap();
     syncer.sync_rule(&rule).unwrap();
@@ -2525,6 +2881,136 @@ fn skills_refresh_reports_git_index_lock_without_removing_it_cas_7c9b() {
         assert!(lock_path.exists(), "update must never remove the lock");
         assert_eq!(std::fs::read(project.join(".git/index")).unwrap(), index);
     }
+}
+
+#[test]
+fn managed_commit_names_local_only_pr_next_step_cas_3b812() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let project = cas_6718_drifted_project(env.home());
+    let root = project.join(".cas");
+    env.set("CAS_ROOT", &root);
+    let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+    let (result, output) = capture_phase(true, || {
+        sync_claude_files_into(&update_test_cli(false), Some(&root), Some(&project))
+    });
+    let report = result.unwrap();
+    assert_eq!(report.outcome, "committed");
+    assert_ne!(cas_6718_git(&project, &["rev-parse", "HEAD"]), before);
+    let next: Vec<_> = output.lines().filter(|line| line.contains("local-only")).collect();
+    assert_eq!(next.len(), 1, "committed repair needs one local-only next step: {output}");
+    assert!(next[0].contains("origin") && next[0].contains("PR"), "{}", next[0]);
+    assert!(next[0].is_ascii() && next[0].len() <= 80, "{}", next[0]);
+    let (result, current) = capture_phase(true, || {
+        sync_claude_files_into(&update_test_cli(false), Some(&root), Some(&project))
+    });
+    assert_eq!(result.unwrap().outcome, "current");
+    assert!(!current.contains("local-only"), "{current}");
+    // The multi-project sweep must not hide a pending PR in successful details.
+    let sweep_project = cas_6718_drifted_project(&env.home().join("sweep"));
+    let sweep_root = sweep_project.join(".cas");
+    env.set("CAS_ROOT", &sweep_root);
+    let (phase, _) = capture_phase(true, || refresh_project_files(&update_test_cli(false), &sweep_root, false));
+    assert!(matches!(phase, ProjectPhase::Warning(_)), "{phase:?}");
+    assert!(phase.detail().contains("local-only") && phase.detail().contains("PR"), "{phase:?}");
+}
+
+#[test]
+fn managed_reconcile_never_commits_to_integration_branches_cas_32e3() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.remove("CAS_AGENT_ROLE");
+    env.remove("CAS_SKIP_FACTORY_TOOLING");
+    let home = env.home().to_path_buf();
+    let mut failures = Vec::new();
+    for (branch, can_commit) in [
+        ("main", false),
+        ("staging", false),
+        ("production", false),
+        ("release/base", false),
+        ("epic/shared", false),
+        ("repair/managed", true),
+        ("detached", false),
+        ("repair/config-unreadable", false),
+        ("release/shared-state", false),
+        ("repair/unknown-default", false),
+    ] {
+        let project = cas_6718_drifted_project(&home.join(branch));
+        let root = if branch == "release/shared-state" {
+            // A worktree may use the main checkout's store/config without a
+            // project-local .cas. Exercise that actual sync call-site pattern.
+            // Remove generated rule WIP that needs the local store's authority;
+            // this row isolates commit policy after the store moves away.
+            cas_6718_git(&project, &["checkout", "--", ".claude/rules/cas/rule-fixture.md"]);
+            let shared = home.join("shared-cas-state");
+            std::fs::rename(project.join(".cas"), &shared).unwrap();
+            shared
+        } else {
+            project.join(".cas")
+        };
+        env.set("CAS_ROOT", &root);
+        cas_6718_git(&project, &["update-ref", "refs/remotes/origin/production", "HEAD"]);
+        cas_6718_git(&project, &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/production"]);
+        if branch == "detached" {
+            cas_6718_git(&project, &["checkout", "--detach", "-q", "HEAD"]);
+        } else {
+            cas_6718_git(&project, &["checkout", "-qB", branch]);
+        }
+        if branch == "main" {
+            // A same-named tag must not change the checked-out branch identity.
+            cas_6718_git(&project, &["tag", "main", "HEAD"]);
+        }
+        let path = root.join("config.toml");
+        let mut config: toml_edit::DocumentMut = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        let configured_base = if branch == "release/shared-state" { branch } else { "release/base" };
+        config["factory"]["epic_base_branch"] = toml_edit::value(configured_base);
+        std::fs::write(&path, config.to_string()).unwrap();
+        if branch == "repair/config-unreadable" {
+            // A directory fails config reading on every host, including root.
+            std::fs::remove_file(&path).unwrap();
+            std::fs::create_dir(&path).unwrap();
+        }
+        if branch == "repair/unknown-default" {
+            cas_6718_git(&project, &["branch", "-D", "main"]);
+            cas_6718_git(&project, &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"]);
+            cas_6718_git(&project, &["update-ref", "-d", "refs/remotes/origin/production"]);
+        }
+        let before = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        let (result, output) = capture_phase(true, || sync_claude_files_into(
+            &update_test_cli(branch != "repair/config-unreadable"), Some(&root), Some(&project),
+        ));
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => {
+                failures.push(format!("{branch}: update aborted instead of keeping repair staged: {error}"));
+                continue;
+            }
+        };
+        let after = cas_6718_git(&project, &["rev-parse", "HEAD"]);
+        if (after != before) != can_commit || report.commit.is_some() != can_commit {
+            failures.push(format!("{branch}: expected can_commit={can_commit}, outcome={}, commit={:?}", report.outcome, report.commit));
+        }
+        assert!(report.commit_error.is_none(), "{branch}: {:?}", report.commit_error);
+        if !can_commit && report.commit.is_none() {
+            assert_eq!(report.outcome, "staged", "{branch}");
+            assert!(report.staged > 0);
+            assert!(!cas_6718_git(&project, &["diff", "--cached", "--name-only"]).is_empty());
+        }
+        if branch == "repair/config-unreadable" {
+            let json = serde_json::to_value(&report).unwrap();
+            let warning = json["commit_warning"].as_str().expect("guard error needs a structured warning");
+            assert!(warning.contains("config") && warning.contains("staged"), "{warning}");
+            let lines: Vec<_> = output.lines().filter(|line| line.contains(warning)).collect();
+            assert_eq!(lines.len(), 1, "{output}");
+            assert!(lines[0].is_ascii() && lines[0].len() <= 78, "{}", lines[0]);
+            assert!(path.is_dir(), "update must not replace the unreadable config");
+        }
+        if branch != "repair/unknown-default" {
+            assert_eq!(cas_6718_git(&project, &["rev-parse", "refs/remotes/origin/production"]), before);
+        }
+        assert!(check_managed_commit(report).is_ok(), "staged guard refusals must exit successfully");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -2771,7 +3257,8 @@ fn cas_6718_update_preserves_project_edits_hooks_and_existing_staging() {
         env.set("CAS_AGENT_ROLE", if mode == "worker-sync" { "worker" } else { "supervisor" });
         env.set("CAS_PROJECT_ROOTS", &fixture_home);
         env.set_current_dir(&project);
-        cas_6718_git(&project, &["branch", "-M", "main"]);
+        // Hook refusal is tested on a branch where automatic commits are allowed.
+        cas_6718_git(&project, &["branch", "-M", "repair/hook-refusal"]);
         let head = cas_6718_git(&project, &["rev-parse", "HEAD"]);
         let readme = project.join("README.md");
         std::fs::write(&readme, "Unstaged user work survives refusal\n").unwrap();
@@ -2973,6 +3460,10 @@ fn cas_4585_native_update_retires_config_preserving_values_comments_and_noop() {
         "[code_review]\nowner = 'worker'\nfuture_owner = 'keep this too'\n",
         "[jev] # old integration\nendpoint = 'fixture-only-endpoint'\n",
         "[project]\ncanonical_id = 'retirement-fixture'\n",
+        // Explicit stages opt out of the upkeep adoption window (covered by
+        // the native sweep test), so only retirement changes this config.
+        "[upkeep]\ncodemap = 'enforce'\nproduct_overview = 'enforce'\n",
+        "[qa.registry]\nenforce = 'enforce'\n",
     );
     for dir in [&root, &host, &global] {
         std::fs::write(dir.join("config.toml"), legacy).unwrap();
@@ -3224,11 +3715,14 @@ fn cas_4585_native_update_keeps_bad_configs_and_other_phase_remedies() {
             && !output.contains("retired config settings remain ignored"),
         "receipted config failures must not replay duplicate or projection findings: {output}"
     );
+    // Longer phase remedies can wrap this cause between words at 80 columns.
+    let prose = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        rendered.matches("config is read-only").count(),
+        prose.matches("config is read-only").count(),
         1,
         "{rendered}"
     );
+    assert!(rendered.lines().all(|line| line.chars().count() <= 80), "{rendered}");
     assert!(
         rendered.contains("cas update --user"),
         "existing phase remedy lost: {rendered}"
@@ -3325,4 +3819,127 @@ fn cas_4585_retirement_preserves_dotted_inline_and_multiline_config() {
             "unchanged"
         );
     }
+}
+
+#[test]
+fn modified_reference_warning_wraps_losslessly_and_uses_user_scope_cas_5e59() {
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    env.set("NO_COLOR", "1");
+    let home = env.home().to_path_buf();
+    let root = crate::store::init_cas_dir(&home.join("project")).unwrap();
+    env.set("CAS_ROOT", &root);
+    let destination = home.join(".claude");
+    std::fs::create_dir_all(&destination).unwrap();
+    sync_all_builtins_for_harness(cas_mux::SupervisorCli::Claude, &destination).unwrap();
+    let path = "skills/cas-worker/references/discipline.md";
+    let edited = destination.join(path);
+    let local = "# Local instructions\n\nPreserve every word of our local customization.\n";
+    std::fs::write(&edited, local).unwrap();
+
+    for columns in ["80", "120"] {
+        env.set("COLUMNS", columns);
+        let (result, output) = capture_phase(true, || {
+            UpdateStepTracker::new(1, true).run("Distributing built-ins to user-level", || {
+                sync_user_builtins_with_violet(&update_test_cli(false), || Ok(()))
+            })
+        });
+        result.unwrap();
+        let warning = output.split_once("[WARN]").expect("modified reference warning").1;
+        assert!(output.lines().all(|line| ratatui::text::Line::from(line).width() <= 80), "{output}");
+        let prose = warning.split_whitespace().collect::<Vec<_>>().join(" ");
+        // pin: preserve the existing explanation in full; wrapping must not elide it.
+        assert!(prose.contains("1 locally modified builtin reference file(s) in ~/.claude were preserved (content matches no version Cassy has shipped):"), "{output}");
+        assert!(prose.contains(path), "{output}");
+        // pin: lossless advice must keep every word and the actionable user command.
+        assert!(prose.contains("Review each file; to accept the Cassy version, delete it and rerun `cas update --user`."), "{output}");
+        assert!(output.lines().any(|line| line.contains("`cas update --user`.")), "{output}");
+        assert!(!prose.contains("--sync") && !prose.contains('…'), "{output}");
+        assert_eq!(std::fs::read_to_string(&edited).unwrap(), local);
+    }
+
+    // The same real reporting path must retain the project-scoped remedy.
+    let result = SyncResult {
+        modified_reference_files: vec![path.to_owned()],
+        ..SyncResult::default()
+    };
+    let (reported, output) = capture_phase(true, || {
+        report_builtin_sync(&result, ".claude", &ActiveTheme::default())
+    });
+    reported.unwrap();
+    assert!(output.lines().all(|line| ratatui::text::Line::from(line).width() <= 80), "{output}");
+    let prose = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(prose.contains("cas update --sync") && !prose.contains("--user"), "{output}");
+}
+
+#[test]
+fn update_reaps_dead_metadata_without_touching_live_sessions_cas_9299() {
+    use crate::ui::factory::{SessionManager, create_metadata, gui_socket_path, metadata_path};
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let roots = env.home().join("empty-projects");
+    std::fs::create_dir_all(&roots).unwrap();
+    env.set("CAS_PROJECT_ROOTS", &roots);
+    env.remove("CAS_ROOT");
+    env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead = child.id();
+    assert!(child.wait().unwrap().success());
+    let manager = SessionManager::new();
+    for (name, pid) in [
+        ("dead9299", dead),
+        ("held9299", dead),
+        ("live9299", std::process::id()),
+    ] {
+        manager
+            .save_metadata(&create_metadata(
+                name,
+                pid,
+                "supervisor",
+                &[],
+                None,
+                None,
+                None,
+            ))
+            .unwrap();
+    }
+    for name in ["dead9299", "live9299"] {
+        drop(std::os::unix::net::UnixListener::bind(gui_socket_path(name)).unwrap());
+    }
+    let held = std::os::unix::net::UnixListener::bind(gui_socket_path("held9299")).unwrap();
+    let args = update_test_args();
+    let run = || {
+        refresh_all_projects_with_user_refresh(
+            &args,
+            &update_test_cli(true),
+            None,
+            None,
+            None,
+            None,
+            || ProjectPhase::Skipped("isolated user phase".into()),
+        )
+        .unwrap()
+    };
+    run();
+    assert!(
+        !metadata_path("dead9299").exists(),
+        "update must reap a proven-dead record"
+    );
+    assert!(
+        metadata_path("held9299").exists(),
+        "held metadata retains project attribution"
+    );
+    assert!(metadata_path("live9299").exists());
+    assert!(gui_socket_path("live9299").exists());
+    assert!(gui_socket_path("held9299").exists());
+    assert_eq!(
+        gui_socket_path("dead9299").exists(),
+        !cfg!(any(target_os = "linux", target_os = "macos"))
+    );
+    std::fs::write(metadata_path("bad9299"), "incomplete receipt").unwrap();
+    run();
+    assert!(metadata_path("bad9299").exists());
+    assert!(
+        metadata_path("live9299").exists(),
+        "repeat cleanup retains live ownership"
+    );
+    drop(held);
 }

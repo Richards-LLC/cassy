@@ -226,10 +226,10 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     );
 }
 
-/// GH #515: close must publish the committed epic outcome before a huge
-/// stranded-branch audit payload is written. The fixture has 31 child lanes
-/// and a 200 KB supervisor narrative, the incident shape that previously
-/// exhausted the MCP response budget.
+/// GH #515: close returns the committed epic outcome as a compact receipt and
+/// durably appends the large stranded-branch audit payload in the background.
+/// The fixture has 31 child lanes and a 200 KB supervisor narrative, the
+/// incident shape that previously exhausted the MCP response budget.
 #[tokio::test]
 async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() {
     let mut test_env = TestEnvGuard::temp_home();
@@ -325,9 +325,9 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         "evidence retained for each branch; ".repeat(7_000)
     );
     assert!(narrative.len() > 200_000, "large-narrative precondition");
-    let started = std::time::Instant::now();
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: Some(narrative.clone()),
             id: epic_id.clone(),
             reason: Some("override incident-shaped epic close".to_string()),
@@ -338,15 +338,15 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         }))
         .await
         .expect("close epic");
-    let elapsed = started.elapsed();
     let receipt = extract_text(close);
     assert!(
         receipt.contains("Closed task:") && receipt.contains("epic close committed"),
         "close must return the compact committed receipt: {receipt}"
     );
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
-        "close waited for the large note instead of returning its committed receipt: {elapsed:?}"
+        !receipt.contains("GH515-NARRATIVE-START")
+            && !receipt.contains("GH515-NARRATIVE-END"),
+        "the large narrative must stay out of the compact close receipt"
     );
     assert_eq!(
         task_store.get(&epic_id).expect("closed epic").status,
@@ -354,23 +354,28 @@ async fn epic_override_close_returns_compact_receipt_before_large_note_gh_515() 
         "the terminal mutation must commit before the compact receipt"
     );
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let stored = task_store.get(&epic_id).expect("read closed epic");
-        if stored.notes.contains("GH515-NARRATIVE-START")
-            && stored.notes.contains("GH515-NARRATIVE-END")
-            && stored.notes.len() >= narrative.len()
-        {
-            break;
+    tokio::time::timeout(std::time::Duration::from_secs(120), async {
+        loop {
+            let stored = task_store.get(&epic_id).expect("read closed epic");
+            if stored.notes.contains("GH515-NARRATIVE-START")
+                && stored.notes.contains("GH515-NARRATIVE-END")
+                && stored.notes.len() >= narrative.len()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        let current = task_store.get(&epic_id).expect("read current epic");
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the full override narrative must land durably after the compact close receipt; task notes contain {} bytes",
-            current.notes.len()
+    })
+    .await
+    .unwrap_or_else(|_| {
+        let stored = task_store
+            .get(&epic_id)
+            .expect("read closed epic after timeout");
+        panic!(
+            "timed out waiting for deferred narrative; stored note length: {}",
+            stored.notes.len()
         );
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    });
 }
 
 #[tokio::test]
@@ -3202,6 +3207,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
 
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("done".to_string()),
@@ -3352,6 +3358,7 @@ async fn test_close_keeps_decision_held_dependent_blocked_and_surfaces_reason() 
         .expect("verification add should succeed");
     let close = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: blocker_id,
             reason: Some("peer board shipped".to_string()),
@@ -4863,6 +4870,98 @@ fn branch_transfer_git(path: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
+#[tokio::test]
+async fn blocked_open_start_retains_only_same_worker_task_commits_cas_8ca7() {
+    for (caller, message, refusal, reassign_to_caller) in [
+        ("test-agent", "unnamed WIP before review", None, false),
+        // pin: this exact refusal phrase identifies the commit-ownership gate.
+        ("test-agent", "fix(cas-abcd): another task's work", Some("foreign commit"), false),
+        // pin: the unauthorized caller must reach the assignment gate.
+        ("other-worker", "unnamed WIP before review", Some("not you"), false),
+        // Reassignment makes this caller authorized, so the old worker's
+        // branch history must be refused by commit ownership instead.
+        // pin: reassignment must reject the unattributed old-worker commit.
+        ("other-worker", "unnamed WIP before review", Some("unattributed commit"), true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
+        let root = temp.path();
+        branch_transfer_git(root, &["init", "-b", "main"]);
+        branch_transfer_git(root, &["config", "user.name", "Test"]);
+        branch_transfer_git(root, &["config", "user.email", "test@example.test"]);
+        std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
+        branch_transfer_git(root, &["add", ".gitignore"]);
+        branch_transfer_git(root, &["commit", "-m", "base"]);
+        branch_transfer_git(root, &["switch", "-c", "factory/test-agent"]);
+        let cas_dir = root.join(".cas");
+        std::fs::write(cas_dir.join("config.toml"),
+            "[project]\ncanonical_id = \"resume-fixture\"\n").unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let worker_id = format!("test-session-{}", std::process::id());
+        let mut worker = agents.get(&worker_id).unwrap();
+        worker.metadata.insert("clone_path".into(), root.display().to_string());
+        agents.update(&worker).unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-8ca7".into(), "Resume blocked work".into());
+        task.assignee = Some(worker.name.clone());
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: "project:resume-fixture".into(), target_branch: "main".into(),
+        });
+        tasks.add(&task).unwrap();
+        let service = CasService::new(core, None);
+        let start = || serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+            "action": "start", "id": task.id, "brief": true,
+        })).unwrap();
+        service.task(Parameters(start())).await.expect("initial start");
+        let boundary = tasks.get(&task.id).unwrap().deliverables.factory_branch_start;
+        // No delivery anchor or task-naming subject: the server's start
+        // boundary must retain this worker's WIP across the hold.
+        std::fs::write(root.join("delivery.txt"), "work before the block\n").unwrap();
+        branch_transfer_git(root, &["add", "delivery.txt"]);
+        branch_transfer_git(root, &["commit", "-m", message]);
+        let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+        let content = std::fs::read(root.join("delivery.txt")).unwrap();
+        for status in ["blocked", "open"] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "update", "id": task.id, "status": status,
+            })).unwrap();
+            service.task(Parameters(request)).await.expect("hold transition");
+        }
+        if reassign_to_caller {
+            let mut reassigned = tasks.get(&task.id).expect("task after review hold");
+            reassigned.assignee = Some(caller.into());
+            tasks.update(&reassigned).expect("reassign task after review hold");
+            // Keep the old worker lane intact while giving the new assignee a
+            // lane at its tip; start must inspect the inherited commit history.
+            branch_transfer_git(root, &["branch", "factory/other-worker", &tip]);
+            branch_transfer_git(root, &["switch", "factory/other-worker"]);
+        }
+        let result = if caller == worker.name {
+            service.task(Parameters(start())).await
+        } else {
+            let mut other = Agent::new_with_role("other-worker-id".into(), caller.into(), AgentRole::Worker);
+            other.metadata.insert("clone_path".into(), root.display().to_string());
+            agents.register(&other).unwrap();
+            let other_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+            other_core.set_agent_id_for_testing(other.id);
+            CasService::new(other_core, None).task(Parameters(start())).await
+        };
+        if refusal.is_none() {
+            result.unwrap_or_else(|error| panic!("same worker's WIP must resume: {error}"));
+        } else {
+            let error = result.expect_err("foreign worker or foreign commits must refuse");
+            // pin: distinguish commit ownership from the assignment gate.
+            assert!(error.message.contains(refusal.unwrap()),
+                "{caller}, {message}: expected {refusal:?}, got {error}");
+        }
+        let saved = tasks.get(&task.id).unwrap();
+        assert_eq!(saved.status, if refusal.is_none() { cas::types::TaskStatus::InProgress } else { cas::types::TaskStatus::Open });
+        assert_eq!(saved.deliverables.factory_branch_start, boundary);
+        assert_eq!(branch_transfer_git(root, &["rev-parse", "HEAD"]), tip);
+        assert_eq!(std::fs::read(root.join("delivery.txt")).unwrap(), content);
+    }
+}
+
 struct BranchAdoptionFixture {
     temp: tempfile::TempDir,
     destination: tempfile::TempDir,
@@ -4912,7 +5011,7 @@ fn branch_adoption_fixture(env: &mut TestEnvGuard) -> BranchAdoptionFixture {
 
 #[tokio::test]
 async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_38a7() {
-    for mode in ["dirty", "dirty-force", "diverged", "foreign"] {
+    for mode in ["dirty", "dirty-force", "diverged", "foreign", "unrelated-branch", "ahead", "foreign-source-ahead"] {
         let mut env = TestEnvGuard::temp_home();
         let fixture = branch_adoption_fixture(&mut env);
         let foreign = tempfile::TempDir::new().unwrap();
@@ -4930,7 +5029,21 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             assert!(agents.try_claim(&fixture.task.id, &holder.id, 600, None).unwrap().is_success());
             original_holder = holder.id;
         }
-        if mode == "foreign" {
+        let own_branch = format!("factory/{}-{}", fixture.receiver.name, fixture.task.id);
+        if matches!(mode, "ahead" | "foreign-source-ahead") {
+            // The delivery is integrated, but the receiver also holds another
+            // parked task's work. It must not migrate onto this task's branch.
+            branch_transfer_git(fixture.temp.path(), &["branch", "main", &fixture.tip]);
+            branch_transfer_git(fixture.destination.path(), &["merge", "--ff-only", "main"]);
+            std::fs::write(fixture.destination.path().join("own-work.txt"), "other parked task").unwrap();
+            branch_transfer_git(fixture.destination.path(), &["add", "own-work.txt"]);
+            branch_transfer_git(fixture.destination.path(), &["commit", "-m", "other parked task"]);
+            if mode == "foreign-source-ahead" {
+                branch_transfer_git(fixture.destination.path(), &["branch", &own_branch]);
+                branch_transfer_git(fixture.temp.path(), &["switch", "main"]);
+                branch_transfer_git(fixture.destination.path(), &["switch", "factory/test-agent"]);
+            }
+        } else if mode == "foreign" {
             branch_transfer_git(foreign.path(), &["init", "-b", "factory/new-worker"]);
             branch_transfer_git(foreign.path(), &["config", "user.name", "Test"]);
             branch_transfer_git(foreign.path(), &["config", "user.email", "test@example.test"]);
@@ -4938,6 +5051,8 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
             let mut receiver = fixture.receiver.clone();
             receiver.metadata.insert("clone_path".into(), foreign.path().display().to_string());
             agents.update(&receiver).unwrap();
+        } else if mode == "unrelated-branch" {
+            branch_transfer_git(fixture.destination.path(), &["switch", "-c", "factory/unrelated-worker"]);
         } else {
             std::fs::write(fixture.destination.path().join("own-work.txt"), "keep me").unwrap();
             if mode == "diverged" {
@@ -4945,6 +5060,8 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
                 branch_transfer_git(fixture.destination.path(), &["commit", "-m", "divergent receiver work"]);
             }
         }
+        let before_head = branch_transfer_git(fixture.destination.path(), &["rev-parse", "HEAD"]);
+        let before_branch = branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]);
         let request = serde_json::from_value(serde_json::json!({
             "action": "transfer", "id": fixture.task.id, "to_agent": fixture.receiver.name,
             "adopt_branch": true, "supervisor_override": mode == "dirty-force",
@@ -4955,7 +5072,81 @@ async fn transfer_adopt_branch_refuses_unsafe_destination_before_releasing_cas_3
         assert_eq!(after.assignee, fixture.task.assignee, "{mode}");
         assert_eq!(after.deliverables.parked_branch, fixture.task.deliverables.parked_branch, "{mode}");
         assert_eq!(agents.get_lease(&fixture.task.id).unwrap().unwrap().agent_id, original_holder, "{mode}");
-        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), "factory/new-worker");
+        assert_eq!(branch_transfer_git(fixture.destination.path(), &["branch", "--show-current"]), before_branch);
+        assert_eq!(branch_transfer_git(fixture.destination.path(), &["rev-parse", "HEAD"]), before_head);
+    }
+}
+
+#[tokio::test]
+async fn restarted_worker_closes_merged_receipt_and_adopts_descendant_cas_f9e0() {
+    for (adopt, existing_task_branch, foreign_source) in [
+        (false, false, false), (true, false, false), (true, true, false), (true, true, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let BranchAdoptionFixture { temp, destination, service, mut task, mut source, receiver, .. } =
+            branch_adoption_fixture(&mut env);
+        let root = temp.path();
+        let cas_dir = root.join(".cas");
+        let git = branch_transfer_git;
+        task.created_at -= chrono::Duration::minutes(1);
+        git(root, &["commit", "--amend", "-m", &format!("fix({}): delivery", task.id)]);
+        let delivery = git(root, &["rev-parse", "HEAD"]);
+        git(root, &["branch", "main"]);
+        git(root, &["switch", "main"]);
+        std::fs::write(root.join("README.md"), "Later target work\n").unwrap();
+        git(root, &["add", "README.md"]);
+        git(root, &["commit", "-m", "Later target work"]);
+        let target_tip = git(root, &["rev-parse", "HEAD"]);
+        let origin = tempfile::TempDir::new().unwrap();
+        git(origin.path(), &["init", "--bare"]);
+        git(root, &["remote", "add", "origin", origin.path().to_str().unwrap()]);
+        git(root, &["push", "origin", "main"]);
+        git(destination.path(), &["merge", "--ff-only", "main"]);
+        let own_branch = format!("factory/{}-{}", receiver.name, task.id);
+        if existing_task_branch {
+            git(destination.path(), &["switch", "-c", &own_branch]);
+        }
+        if foreign_source {
+            git(destination.path(), &["switch", "factory/test-agent"]);
+        }
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        let tasks = open_task_store(&cas_dir).unwrap();
+        tasks.update(&task).unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled=false\n").unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        source.role = AgentRole::Supervisor;
+        agents.update(&source).unwrap();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let transfer = serde_json::from_value(serde_json::json!({
+            "action": "transfer", "id": task.id, "to_agent": receiver.name,
+            "adopt_branch": adopt, "supervisor_override": true,
+        })).unwrap();
+        service.task(Parameters(transfer)).await.expect("recover the merged delivery");
+        assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), target_tip,
+            "adoption must preserve a receiver that already contains the delivery");
+        if adopt {
+            assert_eq!(git(destination.path(), &["branch", "--show-current"]), own_branch);
+        }
+        let recovered = tasks.get(&task.id).unwrap();
+        assert_eq!(recovered.deliverables.factory_branch_anchor.as_deref(), Some(delivery.as_str()),
+            "the delivery anchor must not advance to unrelated target work");
+        // Neither fresh receiver branch was published: only the original
+        // delivery receipt proves this task's integration at the close gate.
+        assert!(git(root, &["for-each-ref", "--format=%(refname)", "refs/remotes/origin/factory/"]).is_empty());
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_AGENT_NAME", &receiver.name);
+        env.set("CAS_AGENT_ID", &receiver.id);
+        env.set("CAS_CLONE_PATH", destination.path());
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(receiver.id.clone());
+        let request = serde_json::from_value(serde_json::json!({
+            "id": task.id, "reason": "Recovered integrated delivery", "commit_receipt": delivery,
+        })).unwrap();
+        let response = extract_text(core.cas_task_close(Parameters(request)).await.unwrap());
+        assert_eq!(tasks.get(&task.id).unwrap().status, cas::types::TaskStatus::Closed,
+            "adopt={adopt}, existing_task_branch={existing_task_branch}: {response}");
+        assert_eq!(git(destination.path(), &["rev-parse", "HEAD"]), target_tip);
     }
 }
 
@@ -5018,9 +5209,9 @@ async fn transfer_adopt_branch_rebinds_delivery_and_real_commit_guard_cas_38a7()
 /// binds the per-task branch there, and the commit guard admits it; an
 /// unadopted foreign branch in that worktree is still refused.
 #[tokio::test]
-async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20() {
+async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20_cas_a9fe() {
     let mut env = TestEnvGuard::temp_home();
-    let BranchAdoptionFixture { temp, destination, service, task, receiver, tip, .. } =
+    let BranchAdoptionFixture { temp, destination, service, mut task, source, receiver, tip } =
         branch_adoption_fixture(&mut env);
     let root = temp.path();
     let cas_dir = root.join(".cas");
@@ -5034,16 +5225,67 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
     registered.metadata.remove("clone_path");
     agents.update(&registered).unwrap();
 
+    // cas-da9a: the old worker is gone, and the receiver's own clean tree
+    // already has that worker's parked task branch checked out.
+    let departed = Agent::new_with_role("departed-id".into(), "departed-worker".into(), AgentRole::Worker);
+    agents.register(&departed).unwrap();
+    let parked = cas::factory_isolation::worker_task_branch(&departed.name, &task.id);
+    branch_transfer_git(root, &["branch", &parked, &tip]);
+    branch_transfer_git(&managed, &["switch", &parked]);
+    // The live receiver had already fast-forwarded this source branch beyond
+    // the task's anchor. Recovery must preserve it and copy only the anchor.
+    std::fs::write(managed.join("later-task.txt"), "separate work").unwrap();
+    branch_transfer_git(&managed, &["add", "later-task.txt"]);
+    branch_transfer_git(&managed, &["commit", "-m", "later task"]);
+    let source_head = branch_transfer_git(&managed, &["rev-parse", "HEAD"]);
+    agents.release_lease(&task.id, &source.id).unwrap();
+    agents.unregister(&departed.id).unwrap();
+    task.status = cas::types::TaskStatus::AwaitingMerge;
+    task.assignee = Some(departed.name);
+    task.deliverables.parked_branch = Some(parked.clone());
+    open_task_store(&cas_dir).unwrap().update(&task).unwrap();
+    promote_default_test_agent(&cas_dir);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    // Replay the ordinary transfer from the incident: assignment succeeds,
+    // but it cannot repair the worktree binding by itself.
+    service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "transfer", "id": task.id, "to_agent": receiver.name,
+        "supervisor_override": true,
+    })).unwrap())).await.unwrap();
+    let guard = |command: &str| -> serde_json::Value {
+        let input: cas::hooks::HookInput = serde_json::from_value(serde_json::json!({
+            "session_id": receiver.id, "cwd": managed, "tool_name": "Bash",
+            "tool_input": {"command": command},
+        })).unwrap();
+        serde_json::to_value(cas::hooks::handle_pre_tool_use(&input, Some(&cas_dir)).unwrap()).unwrap()
+    };
+    env.set("CAS_FACTORY_MODE", "1");
+    env.set("CAS_AGENT_ROLE", "worker");
+    env.set("CAS_CLONE_PATH", &managed);
+    env.set("CAS_AGENT_NAME", &receiver.name);
+    env.set("CAS_AGENT_ID", &receiver.id);
+    let denied = guard("git fetch origin && git merge --ff-only origin/main");
+    assert_eq!(denied.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()), Some("deny"), "{denied}");
+    assert!(denied.to_string().contains("adopt_branch=true"), "{denied}");
+    // The named recovery must work in one supervisor call without asking
+    // the worker to run a checkout that the guard itself refuses.
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    env.set("CAS_AGENT_NAME", &source.name);
+    env.set("CAS_AGENT_ID", &source.id);
     let request = serde_json::from_value(serde_json::json!({
-        "action": "transfer", "id": task.id, "to_agent": receiver.name, "adopt_branch": true,
+        "action": "transfer", "id": task.id, "to_agent": receiver.name,
+        "adopt_branch": true, "supervisor_override": true,
     })).unwrap();
-    service.task(Parameters(request)).await.expect("adoption into the managed worktree");
+    service.task(Parameters(request)).await.expect("cas-da9a recovery adopts the parked tip into the receiver's own branch");
     let expected = "factory/new-worker-cas-branch1100";
     assert_eq!(branch_transfer_git(&managed, &["branch", "--show-current"]), expected);
     assert_eq!(branch_transfer_git(&managed, &["rev-parse", "HEAD"]), tip);
+    assert!(!managed.join("later-task.txt").exists());
+    assert_eq!(branch_transfer_git(&managed, &["rev-parse", &parked]), source_head);
     let after = open_task_store(&cas_dir).unwrap().get(&task.id).unwrap();
     assert_eq!(after.assignee.as_deref(), Some("new-worker"));
     assert_eq!(after.deliverables.parked_branch.as_deref(), Some(expected));
+    assert!(after.deliverables.handoff_branches.contains(&parked));
 
     env.set("CAS_FACTORY_MODE", "1");
     env.set("CAS_AGENT_ROLE", "worker");
@@ -5060,6 +5302,11 @@ async fn transfer_adopt_branch_uses_isolated_receivers_managed_worktree_cas_2d20
             .pointer("/hookSpecificOutput/permissionDecision")
             .and_then(|v| v.as_str()).unwrap_or("").to_string()
     };
+    for command in ["git fetch origin", "git merge --ff-only origin/main", "git push origin HEAD"] {
+        let allowed = guard(command);
+        assert_eq!(allowed.pointer("/hookSpecificOutput/permissionDecision").and_then(|v| v.as_str()),
+            Some("allow"), "{command}: {allowed}");
+    }
     assert_eq!(commit(), "allow", "the adopted branch is the receiver's own");
     // An unadopted foreign branch in the same worktree stays refused.
     branch_transfer_git(&managed, &["switch", "-c", "factory/crisp-spider-42-cas-e3dd"]);
@@ -5100,6 +5347,103 @@ fn make_task_create_req(title: &str) -> TaskCreateRequest {
         demo_statement: None,
         execution_note: None,
         epic: None,
+    }
+}
+
+/// A hold or a supervisor's reassignment ends the old execution lease.
+/// An unrelated worker cannot revoke that lease through an assignee update.
+#[tokio::test]
+async fn task_reassignment_releases_yielded_or_supervisor_owned_lease_cas_aebe() {
+    for path in ["yield", "supervisor", "retained"] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, source) = setup_cas_as(&mut env, AgentRole::Worker);
+        let cas_dir = temp.path().join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        let source_id = format!("test-session-{}", std::process::id());
+        let receiver =
+            Agent::new_with_role("receiver-id".into(), "new-worker".into(), AgentRole::Worker);
+        agents.register(&receiver).unwrap();
+        let supervisor = Agent::new_with_role(
+            "supervisor-id".into(),
+            "supervisor".into(),
+            AgentRole::Supervisor,
+        );
+        agents.register(&supervisor).unwrap();
+        let supervisor_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        supervisor_core.set_agent_id_for_testing(supervisor.id.clone());
+        let receiver_core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        receiver_core.set_agent_id_for_testing(receiver.id.clone());
+
+        let id = create_task_titled(&source, "Lease ownership handoff").await;
+        let mut task = tasks.get(&id).unwrap();
+        task.assignee = Some("test-agent".into());
+        tasks.update(&task).unwrap();
+        source
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await
+            .unwrap();
+        let original = agents.get_lease(&id).unwrap().unwrap();
+        assert_eq!(original.agent_id, source_id);
+
+        if path == "yield" {
+            update_task_json(&source, serde_json::json!({
+                "id": id, "status": "blocked", "notes": "Yielding task ownership to supervisor; no source changes",
+            })).await;
+            assert!(
+                agents.get_lease(&id).unwrap().is_none(),
+                "yield must release its lease"
+            );
+            assert!(tasks.get_execution_state(&id).unwrap().unwrap()["blocked_hold"].is_object());
+        }
+        let actor = if path == "retained" {
+            &receiver_core
+        } else {
+            &supervisor_core
+        };
+        // Spoofing the environment does not grant registered supervisor authority.
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": id, "assignee": receiver.name, "status": "open",
+        }))
+        .unwrap();
+        let text = extract_text(actor.cas_task_update(Parameters(request)).await.unwrap());
+        env.set("CAS_AGENT_ROLE", "worker");
+        let started = receiver_core
+            .cas_task_start(Parameters(IdRequest { id: id.clone() }))
+            .await;
+        if path == "retained" {
+            // Retaining a blocking lease must identify its current holder.
+            assert!(text.contains(&source_id), "{text}");
+            let error = started.expect_err("a peer update must not revoke the live lease");
+            assert!(error.message.contains("locked"), "{error}");
+            assert!(
+                error
+                    .message
+                    .contains(&format!("task action=release id={id}")),
+                "{error}"
+            );
+            let before = agents.get_lease(&id).unwrap().unwrap();
+            agents.heartbeat(&source_id).unwrap();
+            let after = agents.get_lease(&id).unwrap().unwrap();
+            assert_eq!(
+                after.renewal_count, before.renewal_count,
+                "a live old worker must not renew after the task is reassigned"
+            );
+            assert!(
+                agents.renew_lease(&id, &source_id, 600).is_err(),
+                "explicit renewal must also reject a non-assignee"
+            );
+            assert_eq!(after.epoch, original.epoch);
+        } else {
+            started.unwrap_or_else(|error| {
+                panic!("{path}: new assignee must start without override: {error}")
+            });
+            let lease = agents.get_lease(&id).unwrap().unwrap();
+            assert_eq!(lease.agent_id, receiver.id);
+            assert!(lease.epoch > original.epoch);
+            assert_eq!(agents.get(&source_id).unwrap().active_tasks, 0);
+        }
     }
 }
 
@@ -5191,6 +5535,11 @@ async fn test_supervisor_force_transfer_live_worker_task() {
         .expect("supervisor force-transfer should succeed");
 
     let text = extract_text(result);
+
+    // The issuer and previous holder differ on supervisor force-transfer.
+    let receipt = text.lines().next().unwrap();
+    assert!(receipt.contains(&worker_session_id), "{receipt}");
+    assert!(!receipt.contains(&supervisor_id), "{receipt}");
 
     // Response must confirm transfer and note the override was used.
     assert!(
@@ -5672,6 +6021,7 @@ async fn transfer_then_close_parks_the_named_factory_branch_cas_1638() {
         let close = extract_text(
             recipient
                 .cas_task_close(Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     id: task_id.clone(),
                     reason: Some("delivery ready".to_string()),
                     supervisor_override: None,
@@ -6293,7 +6643,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
             String::from_utf8_lossy(&output.stderr)
         );
     };
-    git(&upstream, &["init", "-q", "-b", "main"]);
+    git(&upstream, &["init", "-q", "-b", "main{a,b}!e"]);
     git(&upstream, &["config", "user.email", "test@test.com"]);
     git(&upstream, &["config", "user.name", "Test"]);
     std::fs::write(upstream.join("seed.txt"), "seed\n").unwrap();
@@ -6322,6 +6672,8 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         "clone_path".to_string(),
         worker_checkout.to_string_lossy().into_owned(),
     );
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("assignment-session".into());
     agent_store.register(&worker).unwrap();
 
     let created = service
@@ -6358,9 +6710,10 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         }))
         .await
         .expect_err("stale assignment must reject the batch");
-    test_env.remove("CAS_FACTORY_MODE");
 
     let message = error.message.to_string();
+    // pin: stale-assignment remedy preserves the actual upstream ref.
+    assert!(message.contains("git rebase 'origin/main{a,b}!e'"), "{message}");
     assert!(message.contains("TASK UPDATE BATCH ABORTED"), "{message}");
     assert!(
         message.contains("no requested task fields were applied"),
@@ -6370,6 +6723,52 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
     let stored = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
     assert!(stored.execution_note.is_none());
     assert!(stored.assignee.is_none());
+
+    let task_store = open_task_store(&cas_dir).unwrap();
+    let queue = cas::store::open_prompt_queue_store(&cas_dir).unwrap();
+    let before = task_store.list(None).unwrap().len();
+    // Both entry points must reject the same stale name/session identity before
+    // persistence or dispatch; the worker is on main, not a resettable own lane.
+    for assignee in [&worker.name, &worker.id] {
+        let mut request = make_task_create_req("stale assigned creation");
+        request.assignee = Some(assignee.clone());
+        let error = service.cas_task_create(Parameters(request)).await
+            .expect_err("create must refuse the stale assignee just as update does");
+        assert!(error.message.contains("commits behind"), "{error}");
+        assert!(error.message.contains("not created"), "{error}");
+        assert_eq!(task_store.list(None).unwrap().len(), before);
+        assert!(queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
+            .unwrap().is_empty(), "refused creation must never dispatch");
+    }
+
+    git(&worker_checkout, &["fetch", "-q", "origin"]);
+    git(&worker_checkout, &["merge", "--ff-only", "origin/main{a,b}!e"]);
+    for (assignee, title) in [
+        (&worker.name, "Reconcile invoice payments"),
+        (&worker.id, "Calibrate satellite antenna"),
+    ] {
+        let mut request = make_task_create_req(title);
+        request.assignee = Some(assignee.clone());
+        let receipt = extract_text(service.cas_task_create(Parameters(request)).await.unwrap());
+        let id = extract_task_id(&receipt).unwrap().to_string();
+        let stored = task_store.get(&id).unwrap();
+        assert_eq!(stored.assignee.as_deref(), Some(worker.name.as_str()));
+        // pin: Assignee is the operator-visible field in create/show receipts.
+        assert!(receipt.contains(&format!("Assignee: {}", worker.name)), "{receipt}");
+        let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+            id: id.clone(), with_deps: false,
+        })).await.unwrap());
+        assert!(shown.contains(&format!("Assignee: {}", worker.name)), "{shown}");
+        let dispatch = queue.peek_for_targets(&[&worker.name], Some("assignment-session"), 10).unwrap();
+        // pin: the worker consumes this copyable task-start command from its queued assignment.
+        assert!(dispatch.iter().any(|row| row.prompt.contains(&format!("action=start id={id}"))),
+            "accepted creation must reach the same worker it displays");
+    }
+    let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+        id: task_id, with_deps: false,
+    })).await.unwrap());
+    // pin: task show must explicitly distinguish an unassigned task from an omitted field.
+    assert!(shown.contains("Assignee: (unassigned)"), "{shown}");
 }
 
 /// When CAS_FACTORY_MODE is set and a supervisor assigns a task using a

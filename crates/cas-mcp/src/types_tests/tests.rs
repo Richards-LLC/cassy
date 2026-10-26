@@ -520,6 +520,14 @@ fn coordination_blocker_type_survives_agent_mapping() {
 }
 
 #[test]
+fn cas_1e7e2_wake_opt_out_survives_coordination_mapping() {
+    let request: CoordinationRequest=serde_json::from_value(serde_json::json!({
+        "action":"message", "target":"supervisor", "wake":"false"
+    })).unwrap();
+    assert_eq!(request.to_agent_request("message").wake,Some(false));
+}
+
+#[test]
 fn coordination_reply_reference_survives_agent_mapping() {
     let req: CoordinationRequest = serde_json::from_str(
         r#"{"action":"message","target":"worker-a","in_reply_to":7602,"summary":"acknowledged","message":"I read your escalation."}"#,
@@ -549,6 +557,12 @@ fn test_coordination_maps_target_cache_dry_run_to_factory_request() {
         r#"{"action":"gc_cleanup","force":true,"dry_run":false,"reclaim_unknown_target":"/repo/.cas/old/target"}"#,
     ).unwrap();
     assert_eq!(req.to_factory_request().reclaim_unknown_target.as_deref(), Some("/repo/.cas/old/target"));
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"gc_report","json":true,"full":true}"#,
+    ).unwrap();
+    let factory = req.to_factory_request();
+    assert_eq!(factory.json, Some(true));
+    assert_eq!(factory.full, Some(true));
 }
 
 #[test]
@@ -1089,6 +1103,12 @@ fn every_action_field_publishes_its_dispatch_list_as_an_enum() {
     for (tool, schema, expected) in cases {
         assert_eq!(action_enum(schema), expected, "{tool} action enum drifted");
     }
+
+    let coordination = serde_json::to_value(schemars::schema_for!(CoordinationRequest)).unwrap();
+    assert_eq!(
+        coordination["properties"]["occurrence_id"]["description"],
+        "reply_intent only: optional; when supplied, use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID"
+    );
 }
 
 #[test]

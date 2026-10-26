@@ -728,18 +728,14 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
     );
     let diagnostic = row.last_error.as_deref().unwrap();
     assert!(
-        diagnostic.contains("PostgreSQL jsonb cannot store U+0000"),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("lossless"), "{diagnostic}");
-    assert!(
-        diagnostic.contains("petra-stella-cloud/issues/184"),
+        diagnostic.contains("U+0000 in task notes now round-trips losslessly"),
         "{diagnostic}"
     );
     assert!(
         diagnostic.contains("cas cloud queue --retry --retry-reason invalid_json_nul"),
         "{diagnostic}"
     );
+    assert!(!diagnostic.contains("repair-task-note-nuls"), "{diagnostic}");
     let requests = server.received_requests().await.unwrap();
     assert_eq!(
         decode_push_body(&requests[0])["tasks"][0]["notes"],
@@ -747,7 +743,7 @@ async fn nul_rejection_preserves_task_payload_and_explains_cloud_blocker() {
     );
     assert!(
         queue.intentional_park_counts(None, 5).unwrap().is_empty(),
-        "unsupported data stays a failure"
+        "the remote rejection remains a retryable failure until the targeted retry"
     );
 }
 
@@ -824,6 +820,232 @@ async fn team_push_serializes_task_dependency_collection() {
     let payload: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
     assert_eq!(payload["task_dependencies"][0]["from_id"], "cas-616e-from");
     assert_eq!(payload["task_dependencies"][0]["dep_type"], "blocks");
+}
+
+#[tokio::test]
+async fn cas_596d_successful_team_push_rearms_only_transient_exhausted_rows_once() {
+    use crate::cloud::{CloudConfig, CloudSyncer, CloudSyncerConfig, EntityType, SyncOperation};
+    use tempfile::tempdir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    let team_id = "team-401-403-auth-cas-596d";
+    Mock::given(method("POST"))
+        .and(path(format!("/api/teams/{team_id}/sync/push")))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/sync/push"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let temp = tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("config.toml"),
+        "[project]\ncanonical_id = \"p\"\n",
+    )
+    .unwrap();
+    let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+    queue.init().unwrap();
+    let config = CloudSyncerConfig::default();
+    let max_retries = config.max_retries;
+    let dns_host = "cloud-auth-401-403.example.invalid";
+    let dns_error = format!(
+        "Network error: https://{dns_host}/api/teams/{team_id}/sync/push: resolve dns name '{dns_host}:443': No ip address for {dns_host}"
+    );
+
+    for (id, error, outcome) in [
+        ("entry-dns-exhausted", dns_error.as_str(), None),
+        (
+            "entry-auth-exhausted",
+            "Team push failed with status 401: unauthorized",
+            None,
+        ),
+        (
+            "entry-rejected-exhausted",
+            "permanent cloud rejection: reason=project_mismatch",
+            Some("rejected"),
+        ),
+        (
+            "entry-stale-rejection-dns",
+            dns_error.as_str(),
+            Some("rejected"),
+        ),
+    ] {
+        queue
+            .enqueue_for_team(
+                EntityType::Skill,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
+                team_id,
+            )
+            .unwrap();
+        let row_id = queue
+            .list_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+            .id;
+        for _ in 0..max_retries {
+            queue.mark_failed(row_id, error).unwrap();
+        }
+        if let Some(outcome) = outcome {
+            queue
+                .record_row_outcome(row_id, outcome, Some("test"))
+                .unwrap();
+        }
+    }
+
+    queue
+        .enqueue(
+            EntityType::Skill,
+            "entry-personal-dns-exhausted",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-personal-dns-exhausted","origin_project":"p"}"#),
+        )
+        .unwrap();
+    let personal_row = queue
+        .list_all(20)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "entry-personal-dns-exhausted")
+        .unwrap();
+    for _ in 0..max_retries {
+        queue.mark_failed(personal_row.id, &dns_error).unwrap();
+    }
+
+    queue
+        .enqueue(
+            EntityType::Skill,
+            "entry-personal-null-team-dns-exhausted",
+            SyncOperation::Upsert,
+            Some(r#"{"id":"entry-personal-null-team-dns-exhausted","origin_project":"p"}"#),
+        )
+        .unwrap();
+    let legacy_personal_row = queue
+        .list_all(20)
+        .unwrap()
+        .into_iter()
+        .find(|row| row.entity_id == "entry-personal-null-team-dns-exhausted")
+        .unwrap();
+    let db = rusqlite::Connection::open(temp.path().join("cas.db")).unwrap();
+    db.execute(
+        "UPDATE sync_queue SET team_id = NULL WHERE id = ?1",
+        [legacy_personal_row.id],
+    )
+    .unwrap();
+    drop(db);
+    for _ in 0..max_retries {
+        queue
+            .mark_failed(legacy_personal_row.id, &dns_error)
+            .unwrap();
+    }
+
+    let enqueue_successful_push = |id: &str| {
+        queue
+            .enqueue_for_team(
+                EntityType::Skill,
+                id,
+                SyncOperation::Upsert,
+                Some(&format!(r#"{{"id":"{id}","origin_project":"p"}}"#)),
+                team_id,
+            )
+            .unwrap();
+    };
+    enqueue_successful_push("entry-cloud-contact-one");
+
+    let syncer = Arc::new(CloudSyncer::new(
+        queue.clone(),
+        CloudConfig {
+            endpoint: server.uri(),
+            token: Some("test-token".to_string()),
+            ..Default::default()
+        },
+        config,
+    ));
+    let syncer_for_push = syncer.clone();
+    let first = tokio::task::spawn_blocking(move || syncer_for_push.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(first.errors.is_empty(), "{:?}", first.errors);
+    assert_eq!(first.pushed_skills, 1);
+    let row = |id: &str| {
+        queue
+            .list_all(20)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.entity_id == id)
+            .unwrap()
+    };
+    let dns = row("entry-dns-exhausted");
+    assert_eq!(
+        dns.retry_count, 0,
+        "a successful Cloud push re-arms DNS failures"
+    );
+    assert!(dns.last_error.is_none());
+    for id in [
+        "entry-auth-exhausted",
+        "entry-rejected-exhausted",
+        "entry-stale-rejection-dns",
+    ] {
+        assert_eq!(row(id).retry_count, max_retries, "{id} stays parked");
+    }
+
+    for _ in 0..max_retries {
+        queue
+            .mark_failed(dns.id, &dns_error)
+            .unwrap();
+    }
+    enqueue_successful_push("entry-cloud-contact-two");
+    let syncer_for_push = syncer.clone();
+    let second = tokio::task::spawn_blocking(move || syncer_for_push.push_team(team_id))
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(second.errors.is_empty(), "{:?}", second.errors);
+    assert_eq!(second.pushed_skills, 1);
+    assert_eq!(row("entry-dns-exhausted").retry_count, max_retries);
+
+    let syncer_for_personal_push = syncer.clone();
+    tokio::task::spawn_blocking(move || {
+        syncer_for_personal_push.push_personal_payload(serde_json::Map::new(), "test-token")
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let personal_dns = row("entry-personal-dns-exhausted");
+    assert_eq!(
+        personal_dns.retry_count, 0,
+        "a successful personal push re-arms DNS failures"
+    );
+    assert!(personal_dns.last_error.is_none());
+    assert_eq!(
+        row("entry-personal-null-team-dns-exhausted").retry_count,
+        0,
+        "a successful personal push re-arms legacy NULL team rows"
+    );
+
+    for _ in 0..max_retries {
+        queue.mark_failed(personal_dns.id, &dns_error).unwrap();
+    }
+    let syncer_for_personal_push = syncer.clone();
+    tokio::task::spawn_blocking(move || {
+        syncer_for_personal_push.push_personal_payload(serde_json::Map::new(), "test-token")
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(row("entry-personal-dns-exhausted").retry_count, max_retries);
 }
 
 #[tokio::test]
@@ -1930,6 +2152,120 @@ async fn team_pull_preserves_live_started_owner_cas_c4a52() {
 }
 
 #[tokio::test]
+async fn team_pull_parked_projection_requires_new_lifecycle_event_cas_755a() {
+    use crate::mcp::tools::core::task::audit;
+    let actor = cas_types::Agent::new("remote-supervisor-id".into(), "remote-supervisor".into());
+    let project = "park-owner";
+    let parked_at = chrono::DateTime::parse_from_rfc3339("2026-10-20T11:55:00Z")
+        .unwrap().with_timezone(&chrono::Utc);
+    let mut local = Task::new("cas-96ce4".into(), "delivered work".into());
+    local.status = TaskStatus::AwaitingMerge;
+    local.updated_at = parked_at;
+    local.pending_worktree_merge = true;
+    local.deliverables.parked_branch = Some("factory/replay-cas-96ce4".into());
+    local.deliverables.factory_branch_anchor = Some("a".repeat(40));
+    let old_reset = audit::reset_note(parked_at - chrono::Duration::minutes(25), TaskStatus::Open, None, false, "dead-session recovery");
+    local.notes = format!("{old_reset}\n\n{}", audit::parked_note(parked_at, "MERGE REQUIRED"));
+    let mut stale = team_task_fixture(
+        &local.id, TaskStatus::Open, project, project,
+        parked_at + chrono::Duration::minutes(3),
+    );
+    stale["notes"] = serde_json::json!(old_reset);
+    for status in [TaskStatus::InProgress, TaskStatus::Open] {
+        let mut projection = stale.clone();
+        projection["status"] = serde_json::json!(status);
+        let (_temp, result, store, queue) = pull_team_task_fixtures(
+            project, vec![projection], Some(local.clone()),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let retained = store.get(&local.id).unwrap();
+        assert!(retained.lifecycle_matches(&local), "11:58 projection must not undo 11:55 park: {retained:?}");
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(!retained.notes.contains("[CAS_SYNC_STATUS]"));
+        assert_eq!(queue.list_conflicts(10).unwrap().len(), 1);
+
+        // cas-f268: suppressing a merge as moot must not follow a stale pull.
+        use crate::prompt_revalidation::{
+            MergeRequestDecision, MergeRequestDelivery, MergeRequestEnvelope,
+            merge_request_delivery_decision,
+        };
+        let envelope = MergeRequestEnvelope {
+            task_id: local.id.clone(),
+            branch_tip: "a".repeat(40),
+            target_branch: "main".into(),
+            target_branch_tip: "b".repeat(40),
+            anchor_tip: None,
+            commits_not_on_target_base: 1,
+            pr_number: None,
+            source_freshness_unavailable: None,
+        };
+        assert_eq!(
+            merge_request_delivery_decision(
+                Some(&retained), &envelope,
+                &MergeRequestDecision::Pending { target_tip: "b".repeat(40) },
+            ),
+            MergeRequestDelivery::Deliver,
+        );
+    }
+
+    // A previous cycle's closed_at must not replace the current park boundary.
+    let mut previous_cycle = local.clone();
+    previous_cycle.closed_at = Some(parked_at - chrono::Duration::hours(1));
+    let mut old_action = stale.clone();
+    old_action["notes"] = serde_json::json!(format!(
+        "{old_reset}\n\n{}", audit::reopen_note(parked_at - chrono::Duration::minutes(1), TaskStatus::Closed, false, &actor, "earlier cycle"),
+    ));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(
+        project, vec![old_action], Some(previous_cycle.clone()),
+    ).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert!(store.get(&local.id).unwrap().lifecycle_matches(&previous_cycle));
+
+    // Exercise the production audit writers, including parked review resets,
+    // proof-scope correction and merge-conflict resume (ver-f582f640f022).
+    let action_at = parked_at + chrono::Duration::minutes(4);
+    for (status, note) in [
+        (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::Closed, false, &actor, "regression found")),
+        (TaskStatus::Open, audit::reopen_note(action_at, TaskStatus::AwaitingMerge, true, &actor, "reset review scope")),
+        (TaskStatus::Open, audit::proof_scope_fix_note(action_at, &actor, "correct proof", "Proof targets widened.")),
+        (TaskStatus::InProgress, audit::merge_recovery_note(action_at, "factory/replay-cas-96ce4")),
+        (TaskStatus::Open, cas_store::request_changes_audit_note(parked_at, "Correct delivery", "prior commits remain")),
+        (TaskStatus::Open, audit::reset_note(action_at, TaskStatus::AwaitingMerge, Some("worker"), false, "dead-session recovery")),
+    ] {
+        let mut reopened = stale.clone();
+        let mut projected = local.clone();
+        projected.updated_at = parked_at + chrono::Duration::minutes(6);
+        projected.notes.push_str("\n\n[2026-10-20 12:01] [CAS_SYNC_STATUS] source=team_pull applied_status=awaiting_merge");
+        reopened["status"] = serde_json::json!(status);
+        reopened["updated_at"] = serde_json::json!(parked_at + chrono::Duration::minutes(7));
+        reopened["notes"] = serde_json::json!(format!("{}\n\n{note}", local.notes));
+        let (_temp, result, store, _queue) = pull_team_task_fixtures(
+            project, vec![reopened], Some(projected),
+        ).await;
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.pulled_tasks, 1, "{note}");
+        let reopened = store.get(&local.id).unwrap();
+        assert_eq!(reopened.status, status, "{note}");
+        assert!(reopened.notes.contains("prior_status=awaiting_merge"));
+    }
+
+    // The real uppercase cancellation writer establishes the same-minute
+    // boundary needed to recognize a subsequent authorized reopen.
+    let mut cancelled = local.clone();
+    cancelled.status = TaskStatus::Cancelled;
+    cancelled.closed_at = Some(parked_at);
+    cancelled.notes = audit::cancel_note(parked_at, &actor, "scope ended", None);
+    let mut reopened = stale;
+    reopened["notes"] = serde_json::json!(format!("{}\n\n{}", cancelled.notes,
+        audit::reopen_note(parked_at + chrono::Duration::seconds(30), TaskStatus::Cancelled, false, &actor, "scope restored")));
+    let (_temp, result, store, _queue) = pull_team_task_fixtures(project, vec![reopened], Some(cancelled)).await;
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    assert_eq!(result.pulled_tasks, 1);
+    assert_eq!(store.get(&local.id).unwrap().status, TaskStatus::Open);
+}
+
+#[tokio::test]
 async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
     for (before, after) in [
         (TaskStatus::Open, TaskStatus::InProgress),
@@ -1937,6 +2273,7 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
         (TaskStatus::InProgress, TaskStatus::Cancelled),
         (TaskStatus::Blocked, TaskStatus::InProgress),
         (TaskStatus::AwaitingMerge, TaskStatus::InProgress),
+        (TaskStatus::AwaitingMerge, TaskStatus::Closed),
     ] {
         let project = "fresh-owner";
         let mut local = Task::new("cas-86eb-fresh".into(), "fresh lifecycle".into());
@@ -1951,6 +2288,12 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
             project,
             local.updated_at + chrono::Duration::minutes(1),
         );
+        if before == TaskStatus::AwaitingMerge {
+            raw["notes"] = serde_json::json!(format!(
+                "[{}] Decision: changes requested by supervisor. Correct delivery",
+                (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+            ));
+        }
         if !matches!(after, TaskStatus::Closed | TaskStatus::Cancelled) {
             raw["assignee"] = serde_json::json!(local.assignee);
         }
@@ -1973,6 +2316,193 @@ async fn team_pull_newer_remote_lifecycle_updates_still_apply() {
 }
 
 #[tokio::test]
+async fn team_pull_reports_peer_close_blocked_by_local_lifecycle_cas_33bc() {
+    for (offset, reason) in [
+        (-1, "lifecycle_timestamp"),
+        (60, "local_mutation_or_delivery_or_live_execution"),
+    ] {
+        let project = "peer-close-owner";
+        let mut local = Task::new("cas-peer-closed".into(), "peer delivery".into());
+        local.status = TaskStatus::AwaitingMerge;
+        local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
+        local.deliverables.parked_branch = Some("factory/replay".into());
+        let remote = team_task_fixture(
+            &local.id,
+            TaskStatus::Closed,
+            project,
+            project,
+            local.updated_at + chrono::Duration::seconds(offset),
+        );
+        let (temp, result, store, queue) = pull_team_fixtures_with_delivery(
+            project,
+            vec![remote],
+            vec![local.clone()],
+            Vec::new(),
+            Vec::new(),
+            1,
+            Some(cas_types::WorkerDeliveryState::AwaitingMerge),
+            None,
+        )
+        .await;
+
+        assert_eq!(store.get(&local.id).unwrap().status, TaskStatus::AwaitingMerge);
+        assert_eq!(result.pulled_tasks, 0);
+        assert!(result.task_status_transitions.is_empty());
+        assert!(result.errors.iter().any(|error| {
+            error.contains(&local.id)
+                && error.contains("closed")
+                && error.contains("awaiting_merge")
+                && error.contains(reason)
+                && error.contains("cas cloud conflicts --json")
+        }), "peer close must name the skipped row and guard: {:?}", result.errors);
+
+        // cas-45f4: after the cursor advances, both pull paths must still
+        // surface the journaled guard even when Cloud sends no task rows.
+        use crate::store::{
+            open_commit_link_store, open_event_store, open_file_change_store,
+            open_prompt_store, open_rule_store_local, open_skill_store_local,
+            open_spec_store, open_store_local,
+        };
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let team_id = "team-cas-2125";
+        let watermark = "2026-09-01T12:00:00Z";
+        assert_eq!(
+            queue.get_metadata(&format!("last_team_pull_at_{team_id}_{project}")).unwrap().as_deref(),
+            Some(watermark),
+        );
+        // Give the personal scope an established cursor too.
+        queue.set_metadata("last_pull_at", watermark).unwrap();
+        for endpoint in [super::pull::PULL_PATH.to_string(), format!("/api/teams/{team_id}/sync/pull")] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .and(query_param("since", watermark))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "entries": [], "tasks": [], "rules": [], "skills": [],
+                    "pulled_at": watermark, "team_id": team_id, "status": "ok",
+                })))
+                .expect(2)
+                .mount(&server)
+                .await;
+        }
+        let pull = |team: bool| {
+            // A new syncer proves that the warning survives process-local state.
+            let syncer = CloudSyncer::new_for_project(
+                queue.clone(),
+                crate::cloud::CloudConfig {
+                    endpoint: server.uri(), token: Some("test-token".into()),
+                    ..Default::default()
+                },
+                CloudSyncerConfig::default(), project.into(), temp.path(),
+            );
+            let entries = open_store_local(temp.path()).unwrap();
+            let rules = open_rule_store_local(temp.path()).unwrap();
+            let skills = open_skill_store_local(temp.path()).unwrap();
+            if team {
+                syncer.pull_team(team_id, project, entries.as_ref(), store.as_ref(), rules.as_ref(), skills.as_ref())
+            } else {
+                syncer.pull(
+                    entries.as_ref(), store.as_ref(), rules.as_ref(), skills.as_ref(),
+                    open_spec_store(temp.path()).unwrap().as_ref(),
+                    open_event_store(temp.path()).unwrap().as_ref(),
+                    open_prompt_store(temp.path()).unwrap().as_ref(),
+                    open_file_change_store(temp.path()).unwrap().as_ref(),
+                    open_commit_link_store(temp.path()).unwrap().as_ref(),
+                )
+            }.unwrap()
+        };
+        let journal_count = queue.list_conflicts(100).unwrap().len();
+        for team in [false, true] {
+            let second = pull(team);
+            assert_eq!(second.pulled_tasks, 0);
+            assert_eq!(second.errors, result.errors, "guard must persist on empty pull (team={team})");
+            assert_eq!(queue.list_conflicts(100).unwrap().len(), journal_count, "reporting must not journal the conflict again");
+        }
+        let mut resolved = store.get(&local.id).unwrap();
+        resolved.status = TaskStatus::Closed;
+        store.update(&resolved).unwrap();
+        for team in [false, true] {
+            assert!(pull(team).errors.is_empty(), "resolved guard must stop surfacing (team={team})");
+        }
+    }
+}
+
+#[tokio::test]
+async fn successful_pull_keeps_applied_data_when_guard_report_read_fails_cas_963f() {
+    use crate::store::{
+        open_commit_link_store, open_event_store, open_file_change_store,
+        open_prompt_store, open_rule_store_local, open_skill_store_local,
+        open_spec_store, open_store_local, open_task_store_local,
+    };
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    for team in [false, true] {
+        let project = "guard-read-project";
+        let team_id = "guard-read-team";
+        let watermark = "2026-10-23T01:00:00Z";
+        let server = MockServer::start().await;
+        let endpoint = if team {
+            format!("/api/teams/{team_id}/sync/pull")
+        } else {
+            super::pull::PULL_PATH.to_string()
+        };
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "entries": [], "rules": [], "skills": [], "team_id": team_id,
+                "tasks": [team_task_fixture("cas-963f-applied", TaskStatus::Open,
+                    project, project, chrono::Utc::now())],
+                "pulled_at": watermark, "status": "ok",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("config.toml"),
+            format!("[project]\ncanonical_id = \"{project}\"\n")).unwrap();
+        let queue = Arc::new(SyncQueue::open(temp.path()).unwrap());
+        queue.init().unwrap();
+        let entries = open_store_local(temp.path()).unwrap();
+        let tasks = open_task_store_local(temp.path()).unwrap();
+        let rules = open_rule_store_local(temp.path()).unwrap();
+        let skills = open_skill_store_local(temp.path()).unwrap();
+        let specs = open_spec_store(temp.path()).unwrap();
+        let events = open_event_store(temp.path()).unwrap();
+        let prompts = open_prompt_store(temp.path()).unwrap();
+        let changes = open_file_change_store(temp.path()).unwrap();
+        let commits = open_commit_link_store(temp.path()).unwrap();
+        // Break only the advisory journal read in this disposable database.
+        // Normal row application and pull cursor writes remain available.
+        rusqlite::Connection::open(temp.path().join("cas.db")).unwrap()
+            .execute_batch("DROP TABLE sync_conflicts").unwrap();
+        let syncer = CloudSyncer::new_for_project(
+            queue.clone(),
+            crate::cloud::CloudConfig {
+                endpoint: server.uri(), token: Some("test-token".into()),
+                ..Default::default()
+            },
+            CloudSyncerConfig::default(), project.into(), temp.path(),
+        );
+        let pulled = if team {
+            syncer.pull_team(team_id, project, entries.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref())
+        } else {
+            syncer.pull(entries.as_ref(), tasks.as_ref(), rules.as_ref(), skills.as_ref(),
+                specs.as_ref(), events.as_ref(), prompts.as_ref(), changes.as_ref(), commits.as_ref())
+        };
+        assert_eq!(tasks.get("cas-963f-applied").unwrap().status, TaskStatus::Open);
+        let cursor = if team { format!("last_team_pull_at_{team_id}_{project}") } else { "last_pull_at".into() };
+        assert_eq!(queue.get_metadata(&cursor).unwrap().as_deref(), Some(watermark));
+        let result = pulled.expect("advisory guard read must not fail an already applied pull");
+        assert_eq!(result.pulled_tasks, 1);
+        assert!(result.errors.iter().any(|error| error.contains("guarded peer closes")
+            && error.contains("sync_conflicts")), "team={team}: {:?}", result.errors);
+    }
+}
+
+#[tokio::test]
 async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
     let project = "delivery-owner";
     let mut local = Task::new("cas-86eb-delivery".into(), "parked delivery".into());
@@ -1980,13 +2510,18 @@ async fn team_pull_delivery_transaction_rejects_even_newer_lifecycle_row() {
     local.updated_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     local.pending_worktree_merge = true;
     local.deliverables.parked_branch = Some("factory/replay".into());
-    let raw = team_task_fixture(
+    let mut raw = team_task_fixture(
         &local.id,
         TaskStatus::InProgress,
         project,
         project,
         local.updated_at + chrono::Duration::minutes(1),
     );
+    // A valid remote action reaches the independent live-delivery veto.
+    raw["notes"] = serde_json::json!(format!(
+        "[{}] Decision: changes requested by supervisor. Correct delivery",
+        (local.updated_at + chrono::Duration::minutes(1)).format("%Y-%m-%d %H:%M"),
+    ));
     let (_temp, result, store, queue) = pull_team_fixtures_with_delivery(
         project,
         vec![raw],
@@ -2218,7 +2753,6 @@ async fn team_pull_keeps_one_provenance_block_across_received_at_formats_cas_a8e
     assert_eq!(task.notes.matches("--- BEGIN SERVER-ATTESTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
     assert_eq!(task.notes.matches("--- BEGIN CLIENT-ASSERTED PROPOSAL PROVENANCE ---").count(), 1, "{}", task.notes);
     assert!(task.notes.contains("[2026-10-17 21:30] accepted"), "ordinary notes survive: {}", task.notes);
-    assert_eq!(accepted_proposal_execution_project(&task).as_deref(), Some("target-project"));
 }
 
 #[tokio::test]

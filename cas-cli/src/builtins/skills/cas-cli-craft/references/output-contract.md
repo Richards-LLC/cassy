@@ -64,6 +64,16 @@ the body once; no double rules, no boxes around paragraphs.
 - Not a TTY: append one line per phase transition with a timestamp; no redraws, no spinner,
   no cursor movement. The receipt line is identical in both modes.
 - Anything over two seconds shows progress; anything over thirty names what it is waiting on.
+- Literal progress `...` or `…` passes the gate for a whole line starting with a capitalized
+  `-ing` verb and ending in a complete noun: `Cassy`, `dependencies`, `packages`, `files`,
+  or `configuration` by default. Declare additional complete nouns with repeatable
+  `--progress-noun` flags: `--progress-noun project --progress-noun updates` admits
+  `Building project...` and `Fetching updates…`. Keep this invocation in the project's
+  concept brief; the report records declarations as `progress_nouns`. Programmatic callers
+  pass `progressNouns: ["project", "updates"]` to `runTerminalQa` or `analyzeCapture`.
+  Declare whole words, never cut prefixes. Use single spaces between words; indentation
+  and trailing padding are allowed. Cut words, column gaps, undeclared nouns and trailing
+  counters still require the truncation escape. Unicode still needs an ASCII C-locale fallback.
 
 ## Errors and warnings
 
@@ -72,7 +82,7 @@ state the **cause** in the reader's words, give **one remedy** as a command. A s
 an internal type name, or a paragraph is a defect. Repeated findings collapse to one row with a
 count and one remedy; the reader sees the instances under `--verbose`.
 
-```
+```text
 ⚠ registered project roots   14 stale /tmp roots are excluded from discovery
   → cas known-repos forget --stale
 ```

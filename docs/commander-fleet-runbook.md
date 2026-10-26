@@ -237,22 +237,35 @@ reboot. Both definitions invoke `cas hub serve --bind 127.0.0.1 --port 4173`
 and request tailnet-only Tailscale Serve HTTPS by default. They never contain
 hub identity, auth state, tokens, or credential paths.
 
-`cas hub start`, `cas hub restart`, service install and `cas update` request
-Serve even when the previous hub was loopback-only. Existing HTTPS port choices
-are preserved during restart/update. Use `--no-tailscale-serve` for an explicit
-loopback-only launch or service install. For a persistent host opt-out, add to
-`~/.cas/config.toml` (the hub reads host configuration, not project configuration):
+`cas hub start`, `cas hub restart`, service install and `cas update` read the
+persistent host transport mode from `~/.cas/config.toml`. Set it once with:
+
+```sh
+cas config set hub.transport_mode loopback
+cas hub restart
+```
+
+The modes are `auto` (default: try Tailscale Serve, retain loopback with a warning
+if interactive publication fails), `required` (refuse startup without Serve), and `loopback`
+(never publish). On macOS, Auto service startup still exits after bounded
+publication retries so launchd KeepAlive retries at boot. Interactive Auto fallback
+prints the transport warning and `cas hub start --loopback` remedy on stderr,
+including with JSON output. For example:
 
 ```toml
 [hub]
-tailscale_serve = false
+transport_mode = "required"
 ```
 
-An explicit `--tailscale-serve` overrides this setting for that launch; an
-explicit `--no-tailscale-serve` overrides the default. Service definitions encode
-the resolved choice so the service child cannot re-enable an opted-out launch.
-The next update reapplies the host configuration. Configure this host file with
-`CAS_ROOT="$HOME/.cas" cas config set hub.tailscale_serve false --store cas-root`.
+Restart, service launches and updates honor the saved mode and preserve existing
+HTTPS port choices. `--tailscale-serve` and `--no-tailscale-serve` remain single
+launch overrides; service install encodes that launch choice. The old
+`hub.tailscale_serve` boolean is a compatibility fallback only when no mode is set
+(`false` maps to `loopback`, otherwise `auto`). Project configuration does not
+change the machine hub policy. `cas config get|set|reset hub.*` and
+`cas config list --section hub` use the host file, from any working directory,
+including outside a project. `HOME` selects that host; `CAS_ROOT` and `--store`
+select project stores and do not redirect hub settings.
 
 After a binary update, Cassy starts a stopped hub if its service is installed
 or `~/.cas/hub/machine-id` exists. A machine with neither stays stopped and
@@ -261,7 +274,8 @@ checks have bounded timeouts. Starting a previously absent hub is best effort:
 one attempt records `action=start_failed` and its cause if the service cannot
 start, while update continues. Recovery of an existing runtime still fails
 if loopback cannot be verified. Missing Tailscale, logout, Serve permission or publication
-failure leaves a healthy loopback hub and does not fail the update. Its receipt
+failure in `auto` mode leaves a healthy loopback hub and does not fail the update.
+In `required` mode, publication failure refuses startup and update verification. Its receipt
 records `verified=true`, `loopback_verified=true`, `transport_verified=false`,
 a reason in `transport_warning`, and a remedy; run `tailscale status`, then
 `cas hub restart` after fixing the cause.

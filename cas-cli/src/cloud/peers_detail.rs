@@ -114,6 +114,8 @@ pub struct PeerEpicSplit {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PeerReport {
+    #[cfg(feature = "mcp-proxy")]
+    pub stakeholder_contacts: serde_json::Value,
     pub status: String,
     /// Original Cloud activation read for this registration; status-only, never authority.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +176,8 @@ impl PeerReport {
             })
             .collect();
         Self {
+            #[cfg(feature = "mcp-proxy")]
+            stakeholder_contacts: serde_json::json!({"state":"not_requested"}),
             activation: None,
             observed_at: now,
             limitations: vec![
@@ -411,7 +415,7 @@ pub fn assemble_peer_details(
                 .and_then(|a| meta(a, "branch"))
                 .map(str::to_string);
             let mut detail = PeerDetail {
-                outcome: if supervisor.live { "live" } else { "stale" }.into(),
+                outcome: peer_outcome(&supervisor).into(),
                 owner: supervisor.name.clone(),
                 work: PeerWork::new(&supervisor, owner, visibility, now),
                 supervisor,
@@ -440,6 +444,10 @@ pub fn discover_peer_report(
 ) -> Result<PeerReport, CasError> {
     let detail = detail || selected.is_some();
     let mut report = PeerReport::new(cas_root, self_id, detail);
+    #[cfg(feature = "mcp-proxy")]
+    if detail {
+        report.stakeholder_contacts = crate::coordination::stakeholder_contacts::StakeholderContacts::from_project(cas_root).status();
+    }
     let Some(repo) = report.canonical_id.as_deref() else {
         report.status = "no_project_identity".into();
         report.error = Some("project has no canonical id; configure [project] canonical_id".into());
@@ -547,7 +555,7 @@ pub fn discover_peer_report(
         report.peers = supervisors
             .into_iter()
             .map(|supervisor| PeerDetail {
-                outcome: if supervisor.live { "live" } else { "stale" }.into(),
+                outcome: peer_outcome(&supervisor).into(),
                 owner: supervisor.name.clone(),
                 work: PeerWork::new(
                     &supervisor,
@@ -636,12 +644,7 @@ fn in_flight_overlaps(
 }
 
 pub fn ascii_terminal() -> bool {
-    let locale = ["LC_ALL", "LC_CTYPE", "LANG"]
-        .into_iter()
-        .find_map(|key| std::env::var(key).ok().filter(|s| !s.is_empty()))
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    !(locale.contains("utf-8") || locale.contains("utf8"))
+    !crate::ui::components::locale_is_utf8()
 }
 
 /// Plain text, with no terminal control sequences from untrusted metadata.
@@ -724,6 +727,15 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             ));
             line(format!("  Epic    {}", peer.epic_label()));
             line(format!("  Heartbeat {}s ago", peer.heartbeat_age_secs));
+            // GH #1319: it heartbeats, but nothing it receives is read.
+            // Wrapped, never cut: the reason is the point of the line.
+            if let Some(failure) = peer.harness_auth_failed.as_deref() {
+                let text =
+                    format!("Harness logged out: \"{}\"; messages to it are refused", clean(failure));
+                for piece in wrap_words(&text, width, "  ", "    ") {
+                    line(piece);
+                }
+            }
             if !report.detail {
                 continue;
             }
@@ -866,6 +878,12 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
             ));
         }
     }
+    #[cfg(feature = "mcp-proxy")]
+    if report.detail {
+        for contact_line in crate::coordination::stakeholder_contacts::render_status(&report.stakeholder_contacts) {
+            line(contact_line);
+        }
+    }
     for mailbox_line in report.mailbox_status.lines() {
         line(mailbox_line.to_string());
     }
@@ -874,6 +892,41 @@ pub fn render_peer_report(report: &PeerReport, width: usize, ascii: bool) -> Str
         out.push_str("--json for untruncated values (MCP: json=true)\n");
     }
     out
+}
+
+/// Greedy word wrap to `width` display columns: `first` prefixes the first
+/// line and `rest` each continuation. A single word wider than a line is
+/// left whole, for the caller's own bound to cut.
+fn wrap_words(text: &str, width: usize, first: &str, rest: &str) -> Vec<String> {
+    let columns = |value: &str| ratatui::text::Line::raw(value).width();
+    let mut lines = Vec::new();
+    let mut current = first.to_string();
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        if !empty && columns(&current) + 1 + columns(word) > width {
+            lines.push(std::mem::replace(&mut current, rest.to_string()));
+            empty = true;
+        }
+        if !empty {
+            current.push(' ');
+        }
+        current.push_str(word);
+        empty = false;
+    }
+    if !empty {
+        lines.push(current);
+    }
+    lines
+}
+
+/// A peer's headline state. A supervisor whose harness is logged out
+/// heartbeats like a live one but reads nothing (GH #1319).
+fn peer_outcome(peer: &peers::Peer) -> &'static str {
+    match (peer.harness_auth_failed.is_some(), peer.live) {
+        (true, _) => "logged out",
+        (false, true) => "live",
+        (false, false) => "stale",
+    }
 }
 
 #[cfg(test)]

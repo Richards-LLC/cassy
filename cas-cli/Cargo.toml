@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "3.66.0"
+version = "3.81.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -65,7 +65,7 @@ cas-pty = { path = "../crates/cas-pty" }
 ghostty_vt = { path = "../crates/ghostty_vt" }
 
 # CLI Framework
-clap = { version = "4.5", features = ["derive", "env", "string"] }
+clap = { version = "4.5", features = ["derive", "env", "string", "wrap_help"] }
 
 # Database
 rusqlite = { version = "0.39", features = ["bundled", "backup"] }
@@ -83,7 +83,7 @@ grep-matcher = "0.1"
 rayon = "1.10"
 
 # Terminal UI
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29"
 
 # Interactive prompts (one-shot CLI Q&A flows for `cas integrate` — purpose-built

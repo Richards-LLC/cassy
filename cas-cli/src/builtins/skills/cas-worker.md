@@ -7,9 +7,17 @@ metadata:
 
 # Factory Worker
 
-Each assignment authorizes and requires the fewest affected tests ([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)); `CONTRIBUTING` names the commands.
-Workers close their own tasks; never ask the supervisor to close for you.
-Docs-only and no-code tasks prove their acceptance check; don't add code tests.
+Factory workers run the targeted tests for their change themselves. Every task
+assignment authorizes and requires the fewest tests that fail without the change,
+a few that each prove one behaviour
+([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)), and running its affected
+targeted tests. Affected means the whole test module of each changed
+production function plus every integration harness that calls it, not only the
+tests you named ([discipline.md](references/discipline.md)).
+A case added to an existing test file satisfies `test-first`. Workers close their own tasks; never ask the supervisor to close
+your task on their behalf. `CONTRIBUTING` names the scoped test commands. Docs-only and no-code tasks prove their
+acceptance check instead (e.g. markdownlint, `cas codemap status`, a published
+artifact); don't add code tests to them.
 
 Execute one assigned task in your checkout. SILENT EXECUTION: output results,
 errors and the return contract only.
@@ -37,9 +45,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and send one `merge_request=true` message;
    its body is the request, so do not send a separate prose summary or ACK before
-   or after it. Don't poll for it: after a green merge and an approved verdict
-   Cassy closes the task and tells you once; re-close only when the merge
-   receipt says a gate still holds. Read [recovery.md](references/recovery.md)
+   or after it. Don't poll: the merge's verdict closes the task (you hear
+   once) or reopens it with findings. Don't re-close or block on it. Read [recovery.md](references/recovery.md)
    for the waiting rule and for rejection or crossed-message handling.
 
 One event gets one message. A successful `task action=start` is its own
@@ -61,14 +68,17 @@ use assigned work; `ready` and `available` are backlog
   and handoffs to `target=supervisor`.
 - Use `kind=status` for actionable updates that allow work to continue, or
   `kind=ready` for completed work awaiting coordination: these request a typed action wake.
-  Ordinary updates stay inbox-only.
+  Send receipts with `kind=receipt`, or use `wake=false` for an FYI that can wait.
 - Never block the pane: run long commands in the background with a log.
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
-- Checkpoint, never compact: commit, push and note, then request a respawn when
-  context runs low.
+- Checkpoint, never compact: at ~80% context, commit, push, write
+  [HANDOFF.md](references/recovery.md), then request a respawn.
 - When close says verification required, quote its guidance in `need:`.
 
 ## Blockers and review waits
+
+For build-admission capacity refusals, follow
+[Capacity waits](references/discipline.md#capacity-waits) before the blocker sequence below.
 
 When required supervisor review or approval blocks work (e.g. publication),
 enter awaiting supervisor review:
@@ -127,5 +137,6 @@ need: <what the supervisor must do, one line, or none>
 ```
 
 Coordination uses the literal string `supervisor` and both `summary` and `message`.
-Authenticated typed blocker, merge, status/ready, verification or lifecycle
-events may wake an idle supervisor. Text alone stays inbox-only; proof stays in notes.
+Directed messages wake an idle supervisor after debounce and pair rate limits.
+Receipts, pure acknowledgements, broadcasts and `wake=false` wait in the inbox
+on the next turn; proof stays in notes.

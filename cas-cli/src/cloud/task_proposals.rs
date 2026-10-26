@@ -184,8 +184,29 @@ impl TaskProposalClient {
         request: &CreateTaskProposalRequest,
     ) -> Result<CreateTaskProposalResponse, TaskProposalError> {
         let url = self.team_url("task-proposals");
-        let response = self.post_json(&url, request)?;
-        validate_create_response(&response, &self.team_id, request)?;
+        let response: CreateTaskProposalResponse = self.post_json(&url, request)?;
+        // cas-3556: the server folds an aliased target (a repository URL) into
+        // the project's canonical id. Accept that fold only when the cloud
+        // alias registry confirms it, so the receipt still names one project.
+        let requested = &request.target_project_canonical_id;
+        let attested = &response.provenance.server_attested.target_project_canonical_id;
+        let expected_target = if attested == requested {
+            requested.clone()
+        } else {
+            crate::cloud::fetch_project_alias_record(
+                &self.endpoint,
+                &self.token,
+                requested,
+                Some(&self.team_id),
+                self.timeout,
+            )
+                .ok()
+                .flatten()
+                .map(|record| record.canonical_id)
+                .filter(|canonical| canonical == attested)
+                .unwrap_or_else(|| requested.clone())
+        };
+        validate_create_response(&response, &self.team_id, request, &expected_target)?;
         Ok(response)
     }
 
@@ -449,13 +470,20 @@ fn validate_create_response(
     response: &CreateTaskProposalResponse,
     team_id: &str,
     request: &CreateTaskProposalRequest,
+    expected_target: &str,
 ) -> Result<(), TaskProposalError> {
     if response.state != "proposed" {
         return Err(contract("create returned a non-proposed state"));
     }
     let proposal = proposal_from_create_response(response);
-    validate_task_proposal(&proposal, team_id, None, None, Some("proposed"))?;
     let server = &response.provenance.server_attested;
+    validate_task_proposal(
+        &proposal,
+        team_id,
+        None,
+        None,
+        Some("proposed"),
+    )?;
     if server.client_request_id != request.client_request_id {
         return Err(contract(
             "create response client_request_id did not match request",
@@ -463,15 +491,17 @@ fn validate_create_response(
     }
     // cas-a968 (GH #1281): this response is Cloud's receipt for this attempt,
     // so the proposal is persisted. When Cloud attests a different project
-    // identity (for example a registry alias), still refuse to confirm it, but
-    // return the receipt so the caller never resends it as a new attempt.
+    // identity not confirmed by the registry, refuse to confirm it but return
+    // the receipt so the caller never resends it as a new attempt. Structural,
+    // team and attempt checks above still reject malformed or unrelated receipts.
     if server.origin_project_canonical_id != request.origin_project_canonical_id
-        || server.target_project_canonical_id != request.target_project_canonical_id
+        || server.target_project_canonical_id != expected_target
     {
         return Err(TaskProposalError::Contract(format!(
             "Refusing untrusted cloud proposal response: proposal response project identity did not match the request. \
              Cloud persisted proposal {} (target task {}) for proposal_attempt_id {}, attesting origin {} and target {}; \
-             the request named origin {} and target {}. It is not confirmed here and no local blocker was recorded. \
+             the request named origin {} and target {}; expected target for identity comparison: {}. \
+             It is not confirmed here and no local blocker was recorded. \
              Do not create it again under a new attempt id: a retry with the same proposal_attempt_id returns this \
              receipt, and the target project's proposal_inbox lists the proposal.",
             response.proposal_id,
@@ -481,6 +511,7 @@ fn validate_create_response(
             server.target_project_canonical_id,
             request.origin_project_canonical_id,
             request.target_project_canonical_id,
+            expected_target,
         )));
     }
     Ok(())
@@ -873,15 +904,16 @@ mod tests {
     }
 
     /// cas-a968 (GH #1281): Cloud persisted the proposal but attests another
-    /// spelling of the target (a registry alias). The create is still refused,
+    /// origin while the registry confirms an aliased target. The create is refused,
     /// but the refusal carries Cloud's receipt, and a retry with the same
     /// attempt id sends the identical request and gets the same receipt.
     #[tokio::test]
     async fn create_identity_mismatch_refusal_carries_the_persisted_receipt_cas_a968() {
         let server = MockServer::start().await;
-        let request = create_request();
+        let mut request = create_request();
+        request.target_project_canonical_id = "target-alias".into();
         let mut attested = provenance();
-        attested["server_attested"]["target_project_canonical_id"] = json!("target-alias");
+        attested["server_attested"]["origin_project_canonical_id"] = json!("unexpected-origin");
         Mock::given(method("POST"))
             .and(path("/api/teams/team-1/task-proposals"))
             .and(body_json(serde_json::to_value(&request).unwrap()))
@@ -895,16 +927,79 @@ mod tests {
             .mount(&server)
             .await;
 
+        Mock::given(method("GET"))
+            .and(path("/api/account/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "projects": [{ "canonical_id": "target-project", "aliases": ["target-alias"] }]
+            })))
+            .mount(&server)
+            .await;
+
         let refusals = tokio::task::spawn_blocking(move || {
             let client = client(&server);
             [client.create(&request).unwrap_err(), client.create(&request).unwrap_err()].map(|error| error.to_string())
         })
         .await
         .unwrap();
-        assert_eq!(refusals[0], refusals[1], "the retry dedupes to the same receipt");
-        for receipt in ["did not match the request", "proposal-1", "cas-0123456789abcdef", "request-1", "target-alias", "target-project"] {
-            assert!(refusals[0].contains(receipt), "{receipt} missing: {}", refusals[0]);
+        assert_eq!(
+            refusals[0], refusals[1],
+            "the retry dedupes to the same receipt"
+        );
+        for receipt in [
+            "did not match the request",
+            "proposal-1",
+            "cas-0123456789abcdef",
+            "request-1",
+            "target-alias",
+            "target-project",
+            "unexpected-origin",
+            "expected target for identity comparison: target-project",
+        ] {
+            assert!(
+                refusals[0].contains(receipt),
+                "{receipt} missing: {}",
+                refusals[0]
+            );
         }
+    }
+
+    /// cas-3556: the server may fold a requested alias into another project
+    /// id only when the projects registry confirms that alias; otherwise the
+    /// receipt is still refused.
+    #[tokio::test]
+    async fn create_refuses_a_folded_target_the_registry_does_not_confirm() {
+        let server = MockServer::start().await;
+        let mut request = create_request();
+        request.target_project_canonical_id = "github.com/acme/unrelated".to_string();
+        Mock::given(method("POST"))
+            .and(path("/api/teams/team-1/task-proposals"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "proposal_id": "proposal-1",
+                "target_task_id": "cas-0123456789abcdef",
+                "state": "proposed",
+                "provenance": provenance()
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/account/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "projects": [{ "canonical_id": "target-project", "aliases": [] }]
+            })))
+            .mount(&server)
+            .await;
+
+        let error = tokio::task::spawn_blocking(move || client(&server).create(&request))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(error, TaskProposalError::Contract(_)), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("expected target for identity comparison: github.com/acme/unrelated"),
+            "{error}"
+        );
     }
 
     #[tokio::test]

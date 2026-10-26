@@ -52,6 +52,14 @@ impl CasCore {
             data: None,
         })?;
 
+        if let Some(message) = super::caller_note_marker_rejection(&req.note) {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
+
         let supervisor_override = req.supervisor_override.unwrap_or(false);
         let registered_supervisor = if supervisor_override {
             self.resolve_live_supervisor_authority().map_err(|error| McpError {
@@ -80,6 +88,34 @@ impl CasCore {
             data: None,
         })?;
 
+        let proof_note = matches!(
+            req.note_type.to_ascii_lowercase().as_str(),
+            "platform_proof" | "loaded_proof"
+        );
+        let config = self.load_config();
+        let base = crate::config::resolved_factory_artifacts_root(
+            config.factory().artifacts_root.as_deref(),
+        );
+        let prepared = cas_store::SqliteArtifactStore::open(&self.cas_root)
+            .map_err(anyhow::Error::from)
+            .and_then(|artifacts| {
+                crate::artifacts::proof::prepare_note(
+                    &artifacts, &req.id, &req.note, &base, proof_note,
+                )
+            });
+        let (note, warnings) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                tracing::warn!(task_id = %req.id, error = %error, "artifact proof lookup unavailable; saving note without references");
+                (
+                    req.note.clone(),
+                    vec![format!(
+                        "artifact proof lookup unavailable; note saved without attached references: {error}"
+                    )],
+                )
+            }
+        };
+
         // Format the note with type prefix and timestamp
         let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
         let type_prefix = match req.note_type.to_lowercase().as_str() {
@@ -92,10 +128,16 @@ impl CasCore {
             _ => "📝 PROGRESS",
         };
 
-        let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, req.note);
+        let formatted_note = format!("[{}] {} {}", timestamp, type_prefix, note);
 
-        task_store
-            .append_note(&req.id, &formatted_note)
+        // prepare_note adds only committed ledger records after the caller's
+        // raw note has passed the marker rejection above.
+        let append = if formatted_note.lines().any(cas_store::task_note_markers::is_reserved_line) {
+            task_store.append_trusted_note(&req.id, &formatted_note)
+        } else {
+            task_store.append_note(&req.id, &formatted_note)
+        };
+        append
             .map_err(|e| McpError {
                 code: ErrorCode::INTERNAL_ERROR,
                 message: Cow::from(format!("Failed to append task note: {e}")),
@@ -116,10 +158,11 @@ impl CasCore {
             );
         }
 
-        Ok(Self::success(format!(
-            "Added {} note to task {}",
-            req.note_type, req.id
-        )))
+        let mut response = format!("Added {} note to task {}", req.note_type, req.id);
+        for warning in warnings {
+            response.push_str(&format!("\nWarning: {warning}"));
+        }
+        Ok(Self::success(response))
     }
 
     fn record_task_note_activity(

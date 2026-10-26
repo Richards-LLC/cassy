@@ -51,9 +51,22 @@ pub(super) fn enqueue_and_send(
                 .map_err(crate::CasError::from)
         })
         .map_err(|e| failed(e, None))?;
-    let result = (|| -> anyhow::Result<i64> {
+    let result = (|| -> anyhow::Result<(i64, Option<String>)> {
         let mut conn = connection(root)?;
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if !message.dedupe_key.is_empty() {
+            let existing: Option<(i64, Option<String>)> = tx.query_row(
+                "SELECT id,cloud_id FROM peer_message_outbox
+                 WHERE sender_agent_id=?1
+                 AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.dedupe_key')=?2
+                 AND json_extract(CASE WHEN json_valid(payload) THEN payload END,'$.recipient_agent_id')=?3 LIMIT 1",
+                params![message.sender_agent_id, message.dedupe_key, message.recipient_agent_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional()?;
+            if let Some(existing) = existing {
+                return Ok(existing);
+            }
+        }
         let now = chrono::Utc::now().timestamp();
         tx.execute("INSERT INTO peer_message_outbox(sender_agent_id,sender_name,sender_session,recipient,payload,created_at,next_attempt_at) VALUES (?1,?2,?3,?4,'',?5,?5)",
             params![sender.id,sender.name,sender.factory_session,recipient,now])?;
@@ -63,19 +76,24 @@ pub(super) fn enqueue_and_send(
         use sha2::{Digest, Sha256};
         let identity =
             serde_json::to_vec(&(&message.sender_agent_id, &message.recipient_agent_id, id))?;
-        message.dedupe_key = format!(
-            "peer:{}:{:x}",
-            message.sender_agent_id.chars().take(64).collect::<String>(),
-            Sha256::digest(identity)
-        );
+        if message.dedupe_key.is_empty() {
+            message.dedupe_key = format!(
+                "peer:{}:{:x}",
+                message.sender_agent_id.chars().take(64).collect::<String>(),
+                Sha256::digest(identity)
+            );
+        }
         tx.execute(
             "UPDATE peer_message_outbox SET payload=?1 WHERE id=?2",
             params![serde_json::to_string(&message)?, id],
         )?;
         tx.commit()?;
-        Ok(id)
+        Ok((id, None))
     })();
-    let id = result.map_err(|e| failed(e, None))?;
+    let (id, sent) = result.map_err(|e| failed(e, None))?;
+    if let Some(id) = sent {
+        return Ok(SendReceipt { id, status: "duplicate".into() });
+    }
     retry_peer_send(root, id)
 }
 

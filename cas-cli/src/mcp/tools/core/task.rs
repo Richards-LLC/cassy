@@ -1,3 +1,4 @@
+pub(crate) mod audit;
 pub(crate) mod integration_batch;
 pub(crate) mod block_hold;
 mod dependencies;
@@ -6,8 +7,21 @@ mod notes;
 pub(crate) use notes::note_notification_ids;
 mod proposals;
 mod query;
+mod rebind;
 pub(crate) mod repo_context;
 mod update;
+
+/// Caller text appended to the task timeline cannot forge the marker lines
+/// emitted by artifact publication or server-attested proposal sync.
+pub(crate) fn caller_note_marker_rejection(text: &str) -> Option<&'static str> {
+    if crate::cloud::syncer::contains_proposal_provenance_marker(text) {
+        Some("Task notes cannot contain the proposal provenance markers; Cassy renders that block itself from the server-attested proposal (cas-3556).")
+    } else if crate::artifacts::proof::contains_proof_marker(text) {
+        Some("Task notes cannot contain ARTIFACT_PROOF: markers; artifact action=publish writes verified proof references.")
+    } else {
+        None
+    }
+}
 
 /// Return the canonical identity of the project represented by a Cassy root.
 pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
@@ -15,19 +29,76 @@ pub(crate) fn current_project_id(cas_root: &std::path::Path) -> Option<String> {
 }
 
 pub(crate) fn task_belongs_to_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
-    project_id.is_some_and(|project_id| {
-        task.origin_project.as_deref() == Some(project_id)
-            // cas-8a252 (GH #1275): an accepted cross-project task keeps its
-            // proposer in origin_project and executes in its attested target.
-            || crate::cloud::syncer::accepted_proposal_execution_project(task)
-                .is_some_and(|target| crate::cloud::project_ids_match(&target, project_id))
-    })
+    project_id.is_some_and(|project_id| task.origin_project.as_deref() == Some(project_id))
 }
 
-/// Task board reads retain legacy rows that have no origin attribution. Rows
-/// with an origin are local only when that origin matches the current project.
-pub(crate) fn task_visible_in_project(task: &cas_types::Task, project_id: Option<&str>) -> bool {
-    task.origin_project.is_none() || task_belongs_to_project(task, project_id)
+/// cas-3556: an accepted cross-project proposal belongs to the project that
+/// accepted it, while `origin_project` keeps naming the proposer. Only the
+/// local acceptance record, written by the accept path and the sync pull of a
+/// server-attested proposal, says so; free-text notes never do.
+pub(crate) fn task_accepted_into_project(
+    task: &cas_types::Task,
+    cas_root: &std::path::Path,
+    project_id: Option<&str>,
+) -> bool {
+    let Some(project) = project_id.and_then(crate::cloud::canonical_project_id) else {
+        return false;
+    };
+    cas_store::accepted_proposal_target(cas_root, &task.id)
+        .ok()
+        .flatten()
+        .and_then(|target| crate::cloud::canonical_project_id(&target))
+        .is_some_and(|target| target == project)
+}
+
+/// Whether `task` is this project's own work for an ownership check such as
+/// the QA batch: its origin is this project, or it is a proposal accepted here.
+pub(crate) fn task_owned_by_project(
+    task: &cas_types::Task,
+    cas_root: &std::path::Path,
+    project_id: Option<&str>,
+) -> bool {
+    task_belongs_to_project(task, project_id) || task_accepted_into_project(task, cas_root, project_id)
+}
+
+/// The current project as board reads see it (cas-11ba): its identity plus
+/// the tasks accepted into it from cross-project proposals, loaded once per
+/// read so a listing needs no per-task query.
+pub(crate) struct ProjectScope {
+    project_id: Option<String>,
+    accepted: std::collections::HashSet<String>,
+}
+
+impl ProjectScope {
+    pub(crate) fn current(cas_root: &std::path::Path) -> Self {
+        let project_id = current_project_id(cas_root);
+        let project = project_id.as_deref().and_then(crate::cloud::canonical_project_id);
+        let accepted = match project {
+            Some(project) => cas_store::accepted_proposal_targets(cas_root)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, target)| {
+                    crate::cloud::canonical_project_id(target).is_some_and(|target| target == project)
+                })
+                .map(|(task_id, _)| task_id)
+                .collect(),
+            None => Default::default(),
+        };
+        Self { project_id, accepted }
+    }
+
+    pub(crate) fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    /// Task board reads retain legacy rows that have no origin attribution.
+    /// Rows with an origin are local when that origin matches the current
+    /// project, or when the task is a proposal accepted into it.
+    pub(crate) fn shows(&self, task: &cas_types::Task) -> bool {
+        task.origin_project.is_none()
+            || task_belongs_to_project(task, self.project_id.as_deref())
+            || self.accepted.contains(&task.id)
+    }
 }
 
 /// Resolve one task assignee/caller token to the registered agent it names.
@@ -190,7 +261,7 @@ mod assignee_identity_tests {
 /// caller owns that write so the repair is durable (see `cas_task_start`).
 ///
 /// cas-a0d2 / GH #690: refusing an unattributed row here contradicted
-/// [`task_visible_in_project`], which lists exactly those rows as this
+/// [`ProjectScope::shows`], which lists exactly those rows as this
 /// project's work. A task created by any client that does not stamp
 /// `origin_project` — an older `cas serve` still running after an upgrade, a
 /// pre-m241 database, a hand-inserted row — therefore appeared on the board,
@@ -204,7 +275,7 @@ pub(crate) fn ensure_task_origin(
     action: &str,
 ) -> Result<Option<String>, rmcp::ErrorData> {
     let project_id = current_project_id(cas_root);
-    if task_belongs_to_project(task, project_id.as_deref()) {
+    if task_owned_by_project(task, cas_root, project_id.as_deref()) {
         return Ok(None);
     }
 

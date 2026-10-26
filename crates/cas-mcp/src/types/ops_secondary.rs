@@ -492,8 +492,24 @@ pub struct ArtifactRequest {
     )]
     pub action: String,
 
-    /// Task the artifact belongs to (publish, list)
-    #[schemars(description = "Task ID owning the artifact, e.g. 'cas-b72a' (publish, list)")]
+    /// Receipt appended with a portable artifact reference after Cloud commits.
+    #[schemars(
+        description = "Optional task proof receipt to append after publish commits to Cloud; one call publishes and attaches the log"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+
+    /// Category of the attached receipt.
+    #[schemars(
+        description = "Note type for publish with notes (default platform_proof; also loaded_proof)"
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_type: Option<String>,
+
+    /// Task the artifact belongs to (publish, list, fetch)
+    #[schemars(
+        description = "Task ID owning the artifact, e.g. 'cas-b72a' (publish, list, fetch)"
+    )]
     #[serde(default)]
     pub task_id: Option<String>,
 
@@ -504,8 +520,8 @@ pub struct ArtifactRequest {
     #[serde(default)]
     pub path: Option<String>,
 
-    /// Artifact record ID (show, post)
-    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show, post)")]
+    /// Artifact record ID (show, fetch, post)
+    #[schemars(description = "Artifact record ID, e.g. 'art-7f3a9c21' (show, fetch, post)")]
     #[serde(default)]
     pub id: Option<String>,
 
@@ -633,9 +649,19 @@ pub struct TeamRequest {
 pub struct FactoryRequest {
     /// Action to perform
     #[schemars(
-        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=, answer or cancel with id=<split> decision=, list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
+        description = "Action: 'spawn_workers', 'shutdown_workers', 'recycle_worker' (recycle one idle worker in place while preserving its name, worktree, and recipe), 'hold_worker', 'release_worker', 'worker_status', 'worker_activity', 'clear_context' (real harness context reset — confirmed against the recipient's new session id, or it errors; never reports an unverified success), 'my_context', 'sync_all_workers', 'gc_report', 'gc_cleanup', 'epic_status' (per-child branch merge state), 'focus_epic' (pin or clear displayed epic focus), 'epic_split' (split an epic's children with a peer supervisor: propose with id=<epic> target=<peer> mine= theirs=; answer, cancel, or release a moved child with id=<split> decision= and task_id=<child>; list with no arguments), 'remind' (create reminder), 'remind_list' (list reminders), 'remind_cancel' (cancel a reminder), 'server_start' (run a long-lived server under CAS), 'server_stop', 'server_list' (what is listening and who started it), 'restart_spawn_queue' (supervisor-only: recover a stalled spawn queue without restarting the session)"
     )]
     pub action: String,
+
+    /// Return complete GC inventory as one JSON document.
+    #[schemars(description = "gc_report: one JSON document with report_text, full_report and complete machine_status")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub json: Option<bool>,
+
+    /// Return the original unabridged GC report.
+    #[schemars(description = "gc_report: original full report including raw status; incompatible with limit/offset")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
 
     /// Generic id field used by entity-targeted actions. For
     /// `shutdown_workers`, this accepts either the worker's registered id or
@@ -716,7 +742,7 @@ pub struct FactoryRequest {
     /// Target agent for hold_worker, release_worker, recycle_worker, clear_context, or remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent for hold_worker/release_worker/clear_context/message/remind ('all_workers' broadcasts where supported). hold_worker/release_worker also accept worker_names. remind: who receives it (default self)."
+        description = "Agent for hold_worker/release_worker/clear_context/message/remind; hold/release also accept worker_names. all_workers where supported; remind defaults to self."
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -804,7 +830,7 @@ pub struct FactoryRequest {
     /// `tag_exists` with filter `{"tag":"<tag>"}`; external conditions
     /// require `cross_session=true` and default to a seven-day TTL.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'epic_split_decided', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
@@ -812,7 +838,7 @@ pub struct FactoryRequest {
     /// JSON filter for event matching. GH #1207: each external event's
     /// required keys are published here, not learnt from rejections.
     #[schemars(
-        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
+        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: epic_split_decided {\"split_id\":\"<split>\"}; branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
     )]
     #[serde(default)]
     pub remind_filter: Option<String>,
@@ -822,9 +848,9 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// TTL in seconds for the reminder (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry)
+    /// TTL in seconds for the reminder (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -865,7 +891,7 @@ pub struct FactoryRequest {
     /// Worker reasoning effort override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'. 'max' is accepted only by models whose registry recipe allows it (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to all workers in this spawn request."
+        description = "spawn_workers effort: minimal, low, medium, high, xhigh, max. max requires a supporting registry recipe (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to every worker."
     )]
     #[serde(default)]
     pub effort: Option<String>,
@@ -873,7 +899,7 @@ pub struct FactoryRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude workers (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue and never crossed between providers."
+        description = "spawn_workers: Claude CLAUDE_CONFIG_DIR (explicit drops inherited ANTHROPIC_API_KEY for OAuth); Codex CODEX_HOME (auth.json required); Grok warns, unsupported. Default: supervisor's harness directory, captured at enqueue; never shared across providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -891,28 +917,28 @@ pub struct FactoryRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command (e.g. 'npm run dev'), instead of a raw background `&`; only registered servers survive worker teardown. Runs under `sh -c` from cwd; stdout/stderr go to a log file, never inherited."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
     )]
     #[serde(default)]
     pub command: Option<String>,
 
     /// Working directory for `server_start`.
     #[schemars(
-        description = "server_start: working directory to run the command in (defaults to the current directory)"
+        description = "server_start working directory (default current)."
     )]
     #[serde(default)]
     pub cwd: Option<String>,
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start: the port the server is expected to listen on. Advisory only — server_list reports the ports actually bound, observed from the process itself."
+        description = "server_start expected port (advisory); server_list reports actual bound ports."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
 
     /// Whether a registered server outlives its worker.
     #[schemars(
-        description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
+        description = "server_start: true outlives worker teardown outside containment; false stays contained (default)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
@@ -920,28 +946,28 @@ pub struct FactoryRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+        description = "epic_split: CSV child ids you claim now in Cloud, all or nothing. Optional for grants; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+        description = "epic_split: CSV child ids offered to target, claimed on accept. Optional for requests; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+        description = "epic_split id=<split>: accept (claim your share), reject (with reason), cancel (release own claims, notify peer), status (decision, decider, observed claims)."
     )]
     #[serde(default)]
     pub decision: Option<String>,
 
     /// Lifetime of an unanswered epic split proposal.
     #[schemars(
-        description = "epic_split propose: seconds the proposal stays open unanswered (default 1800, max 86400)"
+        description = "epic_split proposal TTL seconds (default 1800, max 86400)."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub ttl_secs: Option<i64>,
@@ -981,10 +1007,15 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub peer: Option<String>,
 
-    /// Machine-readable peer report with untruncated values.
-    #[schemars(description = "peers only: return one JSON document with untruncated values")]
+    /// Machine-readable peer or GC report with untruncated values.
+    #[schemars(description = "peers/gc_report: one JSON document, untruncated")]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub json: Option<bool>,
+
+    /// Original GC report including complete machine-status lines.
+    #[schemars(description = "gc_report: unabridged; not with limit/offset")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
 
     /// cas-2a5a: `all` lists every supervisor of the caller's own account.
     #[schemars(description = "peers only: `all` lists your account's supervisors in every project")]
@@ -1032,8 +1063,10 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_u32")]
     pub offer_ttl_secs: Option<u32>,
 
-    /// cas-f869: reply_intent's optional Cloud occurrence id.
-    #[schemars(description = "reply_intent: optional occurrence id")]
+    /// cas-f869: reply_intent's optional caller-generated Cloud occurrence id.
+    #[schemars(
+        description = "reply_intent only: optional; when supplied, use a caller-generated UUID, not a Slack message ts; omit it or pass a UUID"
+    )]
     #[serde(default)]
     pub occurrence_id: Option<String>,
 
@@ -1043,7 +1076,7 @@ pub struct CoordinationRequest {
     /// A reminder linked to this task is quarantined when it closes unless
     /// `cross_session=true` explicitly keeps it.
     #[schemars(
-        description = "Task ID. loop_start/worktree_create: the loop's or worktree's task. spawn_workers: pre-assign to the one spawned worker; an open task_id also authorizes a spawn without an active EPIC. server_start: owning task; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message with merge_request=true: the parked merge delivery."
+        description = "Task ID. loop_start/worktree_create: its task. spawn_workers: pre-assign the one spawned worker (an open task_id authorizes a spawn without an active EPIC). server_start: owner; server_list: owner filter. remind: bind stale-context cleanup (close quarantines it unless cross_session=true). message merge_request=true: the parked delivery."
     )]
     #[serde(default)]
     pub task_id: Option<String>,
@@ -1070,6 +1103,11 @@ pub struct CoordinationRequest {
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub blocker: Option<bool>,
+
+    /// Suppress an idle supervisor wake while retaining ordinary inbox delivery.
+    #[schemars(description = "message: false keeps this directed message inbox-only; acknowledgements and broadcasts never wake")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub wake: Option<bool>,
 
     /// Explicit notification this message acknowledges or answers.
     #[schemars(
@@ -1110,7 +1148,7 @@ pub struct CoordinationRequest {
     /// Target agent name for hold_worker/release_worker/clear_context/message/remind.
     /// `worker_names` is accepted as an alias for hold_worker/release_worker.
     #[schemars(
-        description = "Target agent for hold_worker/release_worker/clear_context/message/remind ('all_workers' broadcasts where supported). hold_worker/release_worker also accept worker_names. remind: who receives it (default self)."
+        description = "Agent for hold_worker/release_worker/clear_context/message/remind; hold/release also accept worker_names. all_workers where supported; remind defaults to self."
     )]
     #[serde(default)]
     pub target: Option<String>,
@@ -1138,7 +1176,7 @@ pub struct CoordinationRequest {
 
     /// Force operation (shutdown, worktree cleanup/merge, gc_cleanup, sync_all_workers)
     #[schemars(
-        description = "Override the dirty/in-progress guard. shutdown_workers: required to stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never authorizes trunk (allow_trunk does). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
+        description = "Override the dirty/in-progress guard. shutdown_workers: stop a mid-task, dirty or unpushed worker (check its worktree first). worktree_cleanup/worktree_merge: proceed despite uncommitted changes; never trunk (allow_trunk). sync_all_workers: rebase a stale or offline worker that is dirty (WIP stashed, restored) or mid-task; a live worker's worktree is always skipped and a mid-rebase one refused, even with force=true."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub force: Option<bool>,
@@ -1147,7 +1185,7 @@ pub struct CoordinationRequest {
     /// task WorkTarget is declared (cas-0b32/cas-84df). Independent of `force`
     /// so authorizing trunk never bypasses dirty-worktree protection.
     #[schemars(
-        description = "worktree_merge only: allow the fallback to the configured trunk when no epic or task WorkTarget is declared (a declared WorkTarget never needs it). Refusals name the trunk destination first; trunk pushes warn loudly. Separate from force= (dirty worktree)."
+        description = "worktree_merge only: allow the fallback to the configured trunk when no epic or task WorkTarget is declared (a declared one never needs it). Refusals name the trunk first; trunk pushes warn. Separate from force=."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub allow_trunk: Option<bool>,
@@ -1263,8 +1301,8 @@ pub struct CoordinationRequest {
     #[serde(default)]
     pub event_type: Option<String>,
 
-    /// Payload (for queue_notify)
-    #[schemars(description = "JSON payload containing event details")]
+    /// Event details or exact-tip supervisor test evidence.
+    #[schemars(description = "queue_notify: event JSON. record_test_receipt (supervisor, with task_id): {head: full SHA, repo, cargo_args: nextest argv, log_path: one-run log, exit_code: 0}; both checkouts clean at head; never runs Cargo.")]
     #[serde(default)]
     pub payload: Option<String>,
 
@@ -1312,7 +1350,7 @@ pub struct CoordinationRequest {
 
     /// Whether workers need isolated git worktrees
     #[schemars(
-        description = "Give each worker its own git worktree (branch and directory); prefer true. false or omitted shares one mutable checkout and risks contamination: HEAD can switch between tool calls, commits can land on another worker's branch, HEAD:<mine> pushes can graft foreign commits, skill files can change mid-session. Such spawn receipts warn."
+        description = "Give each worker its own git worktree; prefer true. false or omitted shares one mutable checkout: HEAD can switch between calls, commits can land on another worker's branch, HEAD:<mine> pushes can graft foreign commits, skill files can change mid-session. Such spawns warn."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub isolate: Option<bool>,
@@ -1344,7 +1382,7 @@ pub struct CoordinationRequest {
     /// Worker reasoning effort override for spawn_workers.
     /// Applies to every spawned worker in this request.
     #[schemars(
-        description = "Worker reasoning effort override: 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'. 'max' is accepted only by models whose registry recipe allows it (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to all workers in this spawn_workers request."
+        description = "spawn_workers effort: minimal, low, medium, high, xhigh, max. max requires a supporting registry recipe (Claude Fable/Opus, Codex Astra/Sol); Luna stays xhigh. Applies to every worker."
     )]
     #[serde(default)]
     pub effort: Option<String>,
@@ -1352,7 +1390,7 @@ pub struct CoordinationRequest {
     /// Account directory override for spawn_workers: CLAUDE_CONFIG_DIR for
     /// Claude workers, CODEX_HOME for Codex workers.
     #[schemars(
-        description = "spawn_workers account directory: CLAUDE_CONFIG_DIR for Claude (e.g. '~/.claude-alt'; an explicit value drops an inherited ANTHROPIC_API_KEY so the OAuth account is used), CODEX_HOME for Codex (must hold auth.json); Grok has no account plumbing and warns. Omitted: the supervisor's own directory for that harness, captured at enqueue, never crossed between providers."
+        description = "spawn_workers: Claude CLAUDE_CONFIG_DIR (explicit drops inherited ANTHROPIC_API_KEY for OAuth); Codex CODEX_HOME (auth.json required); Grok warns, unsupported. Default: supervisor's harness directory, captured at enqueue; never shared across providers."
     )]
     #[serde(default)]
     pub config_dir: Option<String>,
@@ -1390,7 +1428,7 @@ pub struct CoordinationRequest {
     /// and `tag_exists` with `{\"tag\":\"<tag>\"}`; both require
     /// `cross_session=true` and default to a seven-day TTL.
     #[schemars(
-        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
+        description = "Event type that triggers reminder: 'task_completed', 'task_blocked', 'worker_idle', 'epic_completed', 'epic_split_decided', 'branch_contained_in', 'tag_exists', or 'ci_completed'. The external conditions branch_contained_in, tag_exists and ci_completed require cross_session=true and a remind_filter (see remind_filter)."
     )]
     #[serde(default)]
     pub remind_event: Option<String>,
@@ -1398,7 +1436,7 @@ pub struct CoordinationRequest {
     /// JSON filter for event matching. GH #1207: each external event's
     /// required keys are published here, not learnt from rejections.
     #[schemars(
-        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
+        description = "JSON filter for event matching. Task events match any event field, e.g. '{\"task_id\":\"cas-a1b2\"}' or '{\"worker\":\"worker-3\"}'. Required keys: epic_split_decided {\"split_id\":\"<split>\"}; branch_contained_in {\"commit\":\"<sha-or-ref>\",\"target_branch\":\"main\"} (commit aliases branch_tip/branch/sha; target_branch alias target); tag_exists {\"tag\":\"<tag>\"}; ci_completed {\"sha\":\"<full 40-character sha>\",\"workflow\":\"CI\"} (workflow optional). Other keys are refused."
     )]
     #[serde(default)]
     pub remind_filter: Option<String>,
@@ -1408,9 +1446,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// Time-to-live in seconds for the reminder (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry)
+    /// Time-to-live in seconds for the reminder (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -1447,9 +1485,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub orphans: Option<bool>,
 
-    /// Preview cleanup without making changes.
+    /// Preview destructive cleanup; gc_cleanup still performs baseline metadata maintenance.
     #[schemars(
-        description = "Preview cleanup; gc_cleanup caches default to true."
+        description = "Preview destructive cleanup; gc_cleanup still performs baseline metadata maintenance and caches default to dry-run."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub dry_run: Option<bool>,
@@ -1468,28 +1506,28 @@ pub struct CoordinationRequest {
     // ========== Server registry (cas-7c93, GH #87) ==========
     /// Shell command for `server_start`.
     #[schemars(
-        description = "server_start: the shell command (e.g. 'npm run dev'), instead of a raw background `&`; only registered servers survive worker teardown. Runs under `sh -c` from cwd; stdout/stderr go to a log file, never inherited."
+        description = "server_start: sh -c in cwd; stdout/stderr to a log. Use registered servers, not raw &; only registered servers can survive teardown."
     )]
     #[serde(default)]
     pub command: Option<String>,
 
     /// Working directory for `server_start`.
     #[schemars(
-        description = "server_start: working directory to run the command in (defaults to the current directory)"
+        description = "server_start working directory (default current)."
     )]
     #[serde(default)]
     pub cwd: Option<String>,
 
     /// Expected listening port for `server_start`.
     #[schemars(
-        description = "server_start: the port the server is expected to listen on. Advisory only — server_list reports the ports actually bound, observed from the process itself."
+        description = "server_start expected port (advisory); server_list reports actual bound ports."
     )]
     #[serde(default, deserialize_with = "deser::option_i32")]
     pub port: Option<i32>,
 
     /// Whether a registered server outlives its worker.
     #[schemars(
-        description = "server_start: true to place the server outside worker containment so it survives worker teardown (shared/long-lived services). Default false: the server stays in the worker's containment scope and dies with it."
+        description = "server_start: true outlives worker teardown outside containment; false stays contained (default)."
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub shared: Option<bool>,
@@ -1497,28 +1535,28 @@ pub struct CoordinationRequest {
     // ========== Epic split between peer supervisors (cas-4736) ==========
     /// Children of the epic the caller takes.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids you take; claimed in Cassy Cloud now, all or nothing"
+        description = "epic_split: CSV child ids you claim now in Cloud, all or nothing. Optional for grants; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub mine: Option<String>,
 
     /// Children of the epic offered to the peer.
     #[schemars(
-        description = "epic_split propose: comma-separated child task ids offered to the peer (target); they claim them only if they accept"
+        description = "epic_split: CSV child ids offered to target, claimed on accept. Optional for requests; mine/theirs cannot both be empty."
     )]
     #[serde(default)]
     pub theirs: Option<String>,
 
     /// Answer to, or end of, an epic split.
     #[schemars(
-        description = "epic_split with id=<split id>: 'accept' (claims only your share), 'reject' (with reason), or 'cancel' (either side; releases only your own claims and tells the peer)"
+        description = "epic_split id=<split>: accept (claim your share), reject (with reason), cancel (release own claims, notify peer), status (decision, decider, observed claims)."
     )]
     #[serde(default)]
     pub decision: Option<String>,
 
     /// Lifetime of an unanswered epic split proposal.
     #[schemars(
-        description = "epic_split propose: seconds the proposal stays open unanswered (default 1800, max 86400)"
+        description = "epic_split proposal TTL seconds (default 1800, max 86400)."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub ttl_secs: Option<i64>,
@@ -1559,6 +1597,7 @@ impl CoordinationRequest {
             task_id: self.task_id.clone(),
             merge_request: self.merge_request,
             blocker: self.blocker,
+            wake: self.wake,
             remind_delay_secs: self.remind_delay_secs,
             remind_message: self.remind_message.clone(),
             in_reply_to: self.in_reply_to,
@@ -1588,6 +1627,8 @@ impl CoordinationRequest {
     pub fn to_factory_request(&self) -> super::FactoryRequest {
         super::FactoryRequest {
             action: self.action.clone(),
+            json: self.json,
+            full: self.full,
             id: self.id.clone(),
             name: self.name.clone(),
             count: self.count,

@@ -16,6 +16,74 @@ use crate::factory_target_cache::{FilesystemCapacity, TargetCachePolicy};
 // per live/requested lane; the configurable target-cache watermark stays free.
 const ESTIMATED_LANE_GROWTH_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// cas-f8a6: a scratch GC that reclaimed nothing is not repeated by every
+/// spawn and capped check (each a separate process) until this cooldown
+/// expires or free space moves materially. Capacity is always re-measured.
+const ADMISSION_GC_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+const ADMISSION_GC_STATE: &str = "build-guard-admission-gc.json";
+const MATERIAL_CHANGE_MIN_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// The last admission GC for one Cassy root, keyed by its location under `cas_root`.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct AdmissionGcAttempt {
+    at_unix_secs: u64,
+    reclaimed_bytes: u64,
+    total_bytes: u64,
+    available_bytes: u64,
+}
+
+fn unix_secs(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+/// True when the last attempt reclaimed nothing, is inside the cooldown, and
+/// the disk has not changed materially since; any doubt runs the GC.
+fn admission_gc_cooling_down(cas_root: &Path, disk: &FilesystemCapacity) -> bool {
+    let Some(attempt) = std::fs::read_to_string(cas_root.join(ADMISSION_GC_STATE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<AdmissionGcAttempt>(&text).ok())
+    else {
+        return false;
+    };
+    let now = unix_secs(std::time::SystemTime::now());
+    let material = MATERIAL_CHANGE_MIN_BYTES.max(disk.total_bytes / 100);
+    attempt.reclaimed_bytes == 0
+        && attempt.at_unix_secs <= now
+        && now - attempt.at_unix_secs < ADMISSION_GC_COOLDOWN.as_secs()
+        && attempt.total_bytes == disk.total_bytes
+        && attempt.available_bytes.abs_diff(disk.available_bytes) < material
+}
+
+/// Best effort and atomic: a lost record only costs one extra scan.
+fn record_admission_gc(cas_root: &Path, reclaimed_bytes: u64, disk: &FilesystemCapacity) {
+    let attempt = AdmissionGcAttempt {
+        at_unix_secs: unix_secs(std::time::SystemTime::now()),
+        reclaimed_bytes,
+        total_bytes: disk.total_bytes,
+        available_bytes: disk.available_bytes,
+    };
+    let Ok(text) = serde_json::to_string(&attempt) else {
+        return;
+    };
+    let temporary = cas_root.join(format!(".{ADMISSION_GC_STATE}.{}.tmp", std::process::id()));
+    if std::fs::write(&temporary, text).is_ok()
+        && std::fs::rename(&temporary, cas_root.join(ADMISSION_GC_STATE)).is_err()
+    {
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
+
+/// Shared projected disk admission. GC reserves the configured builder cap so
+/// it can restore headroom before the next capped build is refused.
+pub(crate) fn disk_pressure(disk: &FilesystemCapacity, lanes: usize) -> bool {
+    let growth = ESTIMATED_LANE_GROWTH_BYTES.saturating_mul(lanes as u64);
+    let available = disk.available_bytes.saturating_sub(growth);
+    let reserve =
+        (u128::from(disk.total_bytes) * u128::from(100 - disk.high_watermark_percent)) / 100;
+    disk.pressure || u128::from(available) <= reserve
+}
+
 /// Linux PSI stall percentages and reclaimable memory, with native macOS memory.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct HostPressure {
@@ -95,23 +163,78 @@ impl BuildGuardSnapshot {
         mut self,
         cas_root: &Path,
         config: &FactoryConfig,
-        probe: impl FnOnce(&Path, TargetCachePolicy) -> std::io::Result<FilesystemCapacity>,
+        probe: impl Fn(&Path, TargetCachePolicy) -> std::io::Result<FilesystemCapacity>,
     ) -> Self {
-        let target = cas_types::factory_scratch::parse_scratch_root(config.scratch_root.as_deref())
-            .unwrap_or_else(|| cas_root.to_path_buf());
-        // A scratch root may not have been created when spawn is admitted.
-        let existing = target
-            .ancestors()
-            .find(|path| path.exists())
-            .unwrap_or(&target);
-        self.disk = Some(
-            probe(existing, TargetCachePolicy::from(config)).map_err(|error| {
+        let existing = crate::factory_scratch::build_filesystem(cas_root, config);
+        let policy = TargetCachePolicy::from(config);
+        let measure = || {
+            probe(&existing, policy).map_err(|error| {
                 format!(
                     "disk capacity unavailable for {}: {error}",
                     existing.display()
                 )
-            }),
-        );
+            })
+        };
+        self.disk = Some(measure());
+        let lanes = self
+            .live_cargo_workers
+            .saturating_add(self.requested_builders);
+        let pressured = match &self.disk {
+            Some(Ok(disk)) if self.requested_builders > 0 && disk_pressure(disk, lanes) => {
+                Some(disk.clone())
+            }
+            _ => None,
+        };
+        if let Some(disk) = &pressured
+            && admission_gc_cooling_down(cas_root, disk)
+        {
+            eprintln!(
+                "Build guard scratch GC skipped: the last attempt reclaimed nothing within {}s and free space is unchanged",
+                ADMISSION_GC_COOLDOWN.as_secs()
+            );
+        } else if pressured.is_some() {
+            // One attempt per admission, with the same provenance, quiet-window,
+            // warm retention and nonblocking destructive locks as manual GC.
+            let reclaimed = match crate::factory_target_cache::reclaim_scratch_for_admission(
+                cas_root,
+                policy,
+                |path, policy| {
+                    // GC reloads persisted configuration. A changed or absent
+                    // scratch setting must not redirect this admission's probe.
+                    if path != existing {
+                        return Err(std::io::Error::other(
+                            "scratch filesystem changed during admission; cleanup deferred",
+                        ));
+                    }
+                    probe(path, policy)
+                },
+            ) {
+                Ok(report) => {
+                    eprintln!(
+                        "Build guard scratch GC: reclaimed {} bytes from {} target(s); warm, live and unverifiable targets retained",
+                        report.reclaimed_bytes,
+                        report
+                            .caches
+                            .iter()
+                            .filter(|cache| cache.disposition
+                                == crate::factory_target_cache::CacheDisposition::Reclaimed)
+                            .count(),
+                    );
+                    Some(report.reclaimed_bytes)
+                }
+                Err(error) => {
+                    eprintln!("Build guard scratch GC deferred: {error}");
+                    None
+                }
+            };
+            // Even a partial cleanup or competing GC may have freed capacity.
+            // Never credit planned/logical bytes as actual filesystem headroom.
+            self.disk = Some(measure());
+            // A deferred GC is retried; only a completed attempt starts the cooldown.
+            if let (Some(reclaimed), Some(Ok(disk))) = (reclaimed, &self.disk) {
+                record_admission_gc(cas_root, reclaimed, disk);
+            }
+        }
         self
     }
 
@@ -151,12 +274,7 @@ impl BuildGuardSnapshot {
                     let lanes = self
                         .live_cargo_workers
                         .saturating_add(self.requested_builders);
-                    let growth = ESTIMATED_LANE_GROWTH_BYTES.saturating_mul(lanes as u64);
-                    let available = disk.available_bytes.saturating_sub(growth);
-                    let reserve = (u128::from(disk.total_bytes)
-                        * u128::from(100 - disk.high_watermark_percent))
-                        / 100;
-                    if disk.pressure || u128::from(available) <= reserve {
+                    if disk_pressure(disk, lanes) {
                         violations.push(format!(
                             "disk {:.2}GiB available; estimated {} lane(s) x 10GiB growth would reach the {}% high watermark; free target caches before retrying",
                             disk.available_bytes as f64 / 1024_f64.powi(3),
@@ -575,6 +693,179 @@ fn live_cargo_worker_count(cas_root: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the filesystem capacity boundary is injected; inventory, planning,
+    /// provenance, process/lifetime/Cargo locks and deletion remain real.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn admission_reclaims_previous_session_scratch_and_remeasures_cas_ed60() {
+        use std::fs;
+        use std::time::{Duration, SystemTime};
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let cas = env.home().join("repo/.cas");
+        let scratch = env.home().join("scratch");
+        fs::create_dir_all(cas.join("worktrees")).unwrap();
+        fs::write(cas.join("config.toml"), format!(
+            "[factory]\nscratch_root = {:?}\nmax_concurrent_builders = 1\ntarget_cache_min_idle_secs = 60\ntarget_cache_retention_count = 1\n",
+            scratch.display().to_string()
+        )).unwrap();
+        let config = crate::config::Config::load(&cas).unwrap().factory();
+        let mut targets = Vec::new();
+        for (name, age) in [
+            ("z-old", 400),
+            ("a-next", 300),
+            ("b-spare", 250),
+            ("warm", 200),
+            ("live", 100),
+        ] {
+            let worker = cas.join("worktrees").join(name);
+            fs::create_dir_all(&worker).unwrap();
+            drop(
+                crate::factory_target_cache::owner::acquire(&cas, &worker)
+                    .unwrap()
+                    .unwrap(),
+            );
+            let target = crate::factory_scratch::worker_target_dir(&worker);
+            fs::create_dir_all(target.join("debug")).unwrap();
+            fs::write(target.join("debug/.cargo-lock"), "").unwrap();
+            fs::File::create(target.join("debug/output"))
+                .unwrap()
+                .set_len(6 * 1024_u64.pow(3))
+                .unwrap();
+            let time =
+                filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(age));
+            for entry in walkdir::WalkDir::new(&target).contents_first(true) {
+                filetime::set_file_mtime(entry.unwrap().path(), time).unwrap();
+            }
+            targets.push((worker, target));
+        }
+        // Previous factory sessions leave durable target provenance after checkout cleanup.
+        for (worker, _) in &targets[..3] {
+            fs::remove_dir_all(worker).unwrap();
+        }
+        let _live = crate::factory_target_cache::owner::acquire(&cas, &targets[4].0)
+            .unwrap()
+            .unwrap();
+        let unmanaged = scratch.join("verify-unmanaged");
+        fs::create_dir_all(&unmanaged).unwrap();
+        fs::write(unmanaged.join("proof"), "review only").unwrap();
+        let unknown = targets[0].1.parent().unwrap().join("missing-checkout");
+        fs::create_dir(&unknown).unwrap();
+        fs::write(unknown.join("output"), "review only").unwrap();
+        let snapshot =
+            evaluate(32, Some(0.0), 0, 1, 1).with_disk_probe(&cas, &config, |path, policy| {
+                assert_eq!(path, scratch);
+                crate::factory_target_cache::capacity_status_with(path, policy, |_| {
+                    assert!(
+                        targets[0].1.exists() == targets[1].1.exists() || !targets[0].1.exists(),
+                        "the oldest dead target must be deleted first, regardless of its name"
+                    );
+                    let deleted = targets[..2]
+                        .iter()
+                        .filter(|(_, path)| !path.exists())
+                        .count();
+                    let available = (16 + 6 * deleted as u64) * 1024_u64.pow(3);
+                    Ok(crate::fs_space::FsSpace {
+                        total_bytes: 100 * 1024_u64.pow(3),
+                        available_bytes: available,
+                        free_bytes: available,
+                    })
+                })
+            });
+        assert!(
+            !targets[0].1.exists(),
+            "admission must reclaim the stale dead-owner target itself"
+        );
+        assert!(
+            snapshot.violations().is_empty(),
+            "fresh capacity should admit: {:?}",
+            snapshot.violations()
+        );
+        assert_eq!(snapshot.disk.unwrap().unwrap().used_percent, 72);
+        assert!(
+            !targets[1].1.exists(),
+            "reclaim until measured usage reaches the low watermark"
+        );
+        assert!(targets[2].1.exists(), "stop deleting dead targets once the low watermark is reached");
+        assert!(targets[3].1.exists(), "warm cache must survive");
+        assert!(targets[4].1.exists(), "live cache must survive");
+        assert!(unknown.exists(), "unverifiable checkout must survive");
+        assert_eq!(
+            fs::read_to_string(unmanaged.join("proof")).unwrap(),
+            "review only"
+        );
+    }
+
+    /// cas-f8a6: a fruitless admission GC is not repeated on every request.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fruitless_admission_gc_cools_down_but_still_measures_cas_f8a6() {
+        use std::cell::Cell;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let cas = env.home().join("repo/.cas");
+        let scratch = env.home().join("scratch");
+        std::fs::create_dir_all(cas.join("worktrees")).unwrap();
+        std::fs::create_dir_all(&scratch).unwrap();
+        std::fs::write(
+            cas.join("config.toml"),
+            format!(
+                "[factory]\nscratch_root = {:?}\n",
+                scratch.display().to_string()
+            ),
+        )
+        .unwrap();
+        let config = crate::config::Config::load(&cas).unwrap().factory();
+        let gib = 1024_u64.pow(3);
+        let available = Cell::new(10 * gib);
+        let probes = Cell::new(0);
+        let admit = || {
+            let before = probes.get();
+            let snapshot =
+                evaluate(32, Some(0.0), 0, 1, 1).with_disk_probe(&cas, &config, |path, policy| {
+                    probes.set(probes.get() + 1);
+                    crate::factory_target_cache::capacity_status_with(path, policy, |_| {
+                        Ok(crate::fs_space::FsSpace {
+                            total_bytes: 100 * gib,
+                            available_bytes: available.get(),
+                            free_bytes: available.get(),
+                        })
+                    })
+                });
+            (probes.get() - before, snapshot)
+        };
+        let (first, _) = admit();
+        assert!(
+            first > 1,
+            "pressured admission runs the scratch GC: {first} probe(s)"
+        );
+        let (second, snapshot) = admit();
+        assert_eq!(
+            second, 1,
+            "nothing was reclaimable: no rescan inside the cooldown"
+        );
+        assert!(
+            snapshot
+                .refusal_message()
+                .contains("Waiting for build admission: disk 10.00GiB available"),
+            "the refusal still reports freshly measured usage: {}",
+            snapshot.refusal_message()
+        );
+        available.set(4 * gib);
+        let (changed, _) = admit();
+        assert!(
+            changed > 1,
+            "a material change in free bytes ends the cooldown"
+        );
+        let state = cas.join(ADMISSION_GC_STATE);
+        let mut attempt: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+        attempt["at_unix_secs"] =
+            (attempt["at_unix_secs"].as_u64().unwrap() - ADMISSION_GC_COOLDOWN.as_secs() - 1)
+                .into();
+        std::fs::write(&state, attempt.to_string()).unwrap();
+        let (expired, _) = admit();
+        assert!(expired > 1, "an expired cooldown runs the scratch GC again");
+    }
 
     #[test]
     fn cas_94ed_disk_admission_projects_target_growth_on_scratch_volume() {

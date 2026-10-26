@@ -111,8 +111,9 @@ pub use sort::{
 };
 pub use spec::{Spec, SpecStatus, SpecType};
 pub use task::{
-    DeliveryMode, IntegrationBatchEvidence, EvidenceOnlyEvidence, NegativeResultEvidence, PreCloseHookEvidence, Priority,
-    TASK_EXECUTION_STATE_MAX_BYTES, Task, TaskBlockedHold, TaskDeliverables, TaskDepth, TaskDoor, TaskRisk,
+    MergeCiAdmission,
+    DeliveryMode, EpicBranchOrigin, FactoryBranchStart, IntegrationBatchEvidence, EvidenceOnlyEvidence, NegativeResultEvidence, PreCloseHookEvidence, Priority,
+    TASK_EXECUTION_STATE_MAX_BYTES, SplitTakeoverAuthorization, Task, TaskBlockedHold, TaskDeliverables, TaskDepth, TaskDoor, TaskRisk,
     TaskStatus, TaskTerminalOutcome, TaskType, WorkTarget, merge_task_execution_state_patch,
     normalize_proof_targets, parse_proof_targets, proof_targets_to_string,
     validate_task_execution_state,

@@ -10,6 +10,11 @@ pub mod operator_ops;
 mod read_ops;
 mod util;
 
+pub(super) use read_ops::{
+    config_key_has_override, editor_config_values, load_editor_config, reset_config_value,
+    save_editor_changes,
+};
+
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -39,7 +44,7 @@ pub enum ConfigCommands {
     /// Show differences from default configuration
     Diff(ConfigDiffArgs),
 
-    /// Reset config option(s) to default
+    /// Remove a config override to restore its default (or reset all options)
     Reset(ConfigResetArgs),
 
     /// Export configuration to file
@@ -216,6 +221,19 @@ pub struct ConfigEditArgs {
     /// Include advanced options
     #[arg(short, long)]
     pub all: bool,
+}
+
+/// Key-specific host commands do not depend on project discovery or CAS_ROOT.
+pub(super) fn host_root_for_command(cmd: &ConfigCommands) -> Option<std::path::PathBuf> {
+    let key = match cmd {
+        ConfigCommands::Get(args) => args.key.as_str(),
+        ConfigCommands::Set(args) => args.key.as_str(),
+        ConfigCommands::Reset(args) => args.key.as_str(),
+        ConfigCommands::Describe(args) => args.key.as_str(),
+        ConfigCommands::List(args) if args.section.as_deref() == Some("hub") => "hub.",
+        _ => return None,
+    };
+    read_ops::host_scoped_key(key).then(crate::config::host_config_dir)
 }
 
 /// Execute a config command

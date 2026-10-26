@@ -1,11 +1,10 @@
 //! Public coordination-surface tests for the director worker-hold gate.
 //!
-//! Kept in a dedicated test process because session metadata is rooted under
-//! `HOME`; changing that process-global variable inside the broad factory MCP
-//! test binary would race unrelated Codex-availability tests.
+//! Session metadata is rooted under HOME. Use the grouped harness's canonical
+//! environment guard so these fixtures cannot race messaging/status fixtures.
 
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use crate::test_env_guard::TestEnvGuard;
 
 use cas::mcp::{CasCore, CasService};
 use cas::store::{ReminderTriggerType, init_cas_dir, open_agent_store, open_reminder_store};
@@ -43,42 +42,6 @@ impl TestEnv {
         agent.factory_session = Some(factory_session.to_string());
         store.register(&agent).unwrap();
         agent.id
-    }
-}
-
-fn env_lock() -> MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-}
-
-struct EnvGuard {
-    saved: Vec<(String, Option<String>)>,
-    _lock: MutexGuard<'static, ()>,
-}
-
-impl EnvGuard {
-    fn set(vars: &[(&str, &str)]) -> Self {
-        let lock = env_lock();
-        let mut saved = Vec::new();
-        for (key, value) in vars {
-            let key = (*key).to_string();
-            saved.push((key.clone(), std::env::var(&key).ok()));
-            unsafe { std::env::set_var(key, value) };
-        }
-        Self { saved, _lock: lock }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        for (key, value) in self.saved.drain(..) {
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-        }
     }
 }
 
@@ -124,17 +87,13 @@ fn write_metadata(env: &TestEnv, session: &str, workers: &[String]) -> PathBuf {
 
 #[tokio::test]
 async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
-    let home = TempDir::new().unwrap();
+    let mut guard = TestEnvGuard::temp_home();
     let session = "session-worker-hold";
     let worker = "lively-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "supervisor"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
+    guard.set("CAS_AGENT_ROLE", "supervisor");
+    guard.set("CAS_FACTORY_SESSION", session);
     let env = TestEnv::new();
     let worker_id = env.register_worker(worker, session);
-    let path = write_metadata(&env, session, &[worker.to_string()]);
     let reminders = open_reminder_store(&env.cas_root).unwrap();
     reminders
         .create(
@@ -151,6 +110,33 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
         .unwrap();
     assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
 
+    // cas-c5ab: before the session metadata exists the hold cannot be
+    // persisted, and the failed hold changes no reminder.
+    env.service
+        .coordination(Parameters(request("hold_worker", worker)))
+        .await
+        .expect_err("an unpersisted hold fails");
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
+    let path = write_metadata(&env, session, &[worker.to_string()]);
+
+    // cas-5f4b: when suspending fails after the hold is saved, the hold is
+    // rolled back and the reminder stays pending.
+    let db = rusqlite::Connection::open(env.cas_root.join("cas.db")).unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER refuse_suspend BEFORE UPDATE OF status ON reminders \
+         WHEN NEW.status = 'suspended' BEGIN SELECT RAISE(ABORT, 'suspend refused'); END;",
+    )
+    .unwrap();
+    env.service
+        .coordination(Parameters(request("hold_worker", worker)))
+        .await
+        .expect_err("a failed suspend fails the hold");
+    let rolled_back: cas::ui::factory::SessionMetadata =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(rolled_back.held_workers.is_empty());
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
+    db.execute_batch("DROP TRIGGER refuse_suspend;").unwrap();
+
     let result = env
         .service
         .coordination(Parameters(request("hold_worker", worker)))
@@ -158,8 +144,15 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
         .expect("public hold action");
     let hold_result = result_text(&result);
     assert!(hold_result.contains(worker));
-    assert!(hold_result.contains("Cancelled 1 pending reminder"), "{hold_result}");
     assert!(reminders.list_pending_for_target(&worker_id).unwrap().is_empty());
+    // cas-c5ab: the suspended reminder is still listed, labelled held.
+    let listed = env
+        .service
+        .coordination(Parameters(serde_json::from_value(serde_json::json!({"action": "remind_list"})).unwrap()))
+        .await
+        .expect("remind_list");
+    let listed = result_text(&listed);
+    assert!(listed.contains("watch worker after hold") && listed.contains("[held"), "{listed}");
     let held: cas::ui::factory::SessionMetadata =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(held.held_workers, vec![worker.to_string()]);
@@ -179,22 +172,18 @@ async fn hold_and_release_update_session_state_and_worker_status_cas_60dd() {
     let released: cas::ui::factory::SessionMetadata =
         serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(released.held_workers.is_empty());
-    assert!(
-        reminders.list_pending_for_target(&worker_id).unwrap().is_empty(),
-        "release must not revive cancelled one-shot watchdog reminders"
-    );
+    // cas-73b89: release re-arms the suspended reminder.
+    assert_eq!(reminders.list_pending_for_target(&worker_id).unwrap().len(), 1);
 }
+
 
 #[tokio::test]
 async fn worker_cannot_change_hold_state_cas_60dd() {
-    let home = TempDir::new().unwrap();
+    let mut guard = TestEnvGuard::temp_home();
     let session = "session-worker-hold-policy";
     let worker = "lively-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "worker"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
+    guard.set("CAS_AGENT_ROLE", "worker");
+    guard.set("CAS_FACTORY_SESSION", session);
     let env = TestEnv::new();
     env.register_worker(worker, session);
     let path = write_metadata(&env, session, &[worker.to_string()]);
@@ -212,14 +201,11 @@ async fn worker_cannot_change_hold_state_cas_60dd() {
 
 #[tokio::test]
 async fn supervisor_cannot_hold_foreign_session_worker_cas_60dd() {
-    let home = TempDir::new().unwrap();
+    let mut guard = TestEnvGuard::temp_home();
     let session = "session-worker-hold-scope";
     let worker = "foreign-crow";
-    let _guard = EnvGuard::set(&[
-        ("HOME", home.path().to_str().unwrap()),
-        ("CAS_AGENT_ROLE", "supervisor"),
-        ("CAS_FACTORY_SESSION", session),
-    ]);
+    guard.set("CAS_AGENT_ROLE", "supervisor");
+    guard.set("CAS_FACTORY_SESSION", session);
     let env = TestEnv::new();
     env.register_worker(worker, "another-factory-session");
     let path = write_metadata(&env, session, &[]);

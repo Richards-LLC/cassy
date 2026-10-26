@@ -159,7 +159,12 @@ impl ConfigMeta {
                 }
                 Constraint::OneOf(options) => {
                     if !options.iter().any(|o| o.eq_ignore_ascii_case(value)) {
-                        return Err(format!("Value must be one of: {}", options.join(", ")));
+                        let valid_values = options.join(", ");
+                        return Err(if self.key == "hub.transport_mode" {
+                            format!("{} must be one of: {valid_values}", self.key)
+                        } else {
+                            format!("Value must be one of: {valid_values}")
+                        });
                     }
                 }
                 _ => {}

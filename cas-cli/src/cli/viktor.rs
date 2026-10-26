@@ -16,6 +16,26 @@ use std::collections::HashMap;
 use crate::cli::Cli;
 use std::fmt;
 
+/// Persist the machine-wide Viktor choice and reconcile the user MCP config.
+pub(crate) fn set_enabled(enabled: bool) -> anyhow::Result<()> {
+    let host_root = crate::config::host_config_dir();
+    let mut config = crate::config::Config::load(&host_root)?;
+    config.set("viktor.enabled", &enabled.to_string())?;
+    config.save(&host_root)?;
+    reconcile_managed_proxy(enabled)
+}
+
+pub(crate) fn reconcile_managed_proxy(enabled: bool) -> anyhow::Result<()> {
+    #[cfg(feature = "mcp-proxy")]
+    {
+        let path = cmcp_core::config::Scope::User.config_path()?;
+        cmcp_core::config::Config::reconcile_viktor_managed_default(&path, enabled)?;
+    }
+    #[cfg(not(feature = "mcp-proxy"))]
+    let _ = enabled;
+    Ok(())
+}
+
 #[derive(Args, Debug, Clone, Default)]
 pub struct ViktorArgs {
     #[command(subcommand)]

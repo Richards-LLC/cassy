@@ -14,6 +14,7 @@ use tempfile::TempDir;
 fn cas_cmd() -> Command {
     let mut cmd = Command::new(cas::test_paths::cas_binary());
     cmd.env_remove("CAS_ROOT");
+    cmd.env_remove("COLUMNS");
     cmd.env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
@@ -26,13 +27,22 @@ fn cas_cmd() -> Command {
 /// being listed here.
 #[test]
 fn test_codex_help_shows_shortcut_description() {
-    cas_cmd()
+    let output = cas_cmd()
         .args(["codex", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("supervisor"))
-        .stdout(predicate::str::contains("--list-profiles"))
-        .stdout(predicate::str::contains("`cas factory` flags pass through"));
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8_lossy(&output);
+    let normalized = help.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(normalized.contains("supervisor"), "{help}");
+    assert!(normalized.contains("--list-profiles"), "{help}");
+    assert!(
+        normalized.contains("`cas factory` flags pass through"),
+        "{help}"
+    );
 }
 
 #[test]

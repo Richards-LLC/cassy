@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::ai_enrichment::HttpAiEnrichmentProvider;
 use crate::cli::Cli;
-use crate::config::Config;
+use crate::config::{Config, HubTransportMode};
 use crate::hub::{
     AuthStore, DEFAULT_HUB_PORT, DEFAULT_VIEWER_QUEUE_CAPACITY, DaemonConnector, HubProcessRecord,
     HubLockHolder, HubRuntimePaths, HubState, LocalSessionReadModel, MachineEventBus,
@@ -25,6 +25,11 @@ use crate::hub::{
 const HUB_LIFECYCLE_TIMEOUT: Duration = Duration::from_secs(10);
 const HUB_CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const HUB_LAUNCH_TIMEOUT: Duration = Duration::from_secs(5);
+// Leave the launcher's readiness budget time to observe a peer or child exit.
+const HUB_STARTUP_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const _: () = assert!(HUB_STARTUP_LOCK_TIMEOUT.as_nanos() < HUB_LAUNCH_TIMEOUT.as_nanos());
+const HUB_PEER_RECORD_PUBLISH_TIMEOUT: Duration = Duration::from_millis(250);
+const HUB_PEER_RECORD_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 fn hub_launch_timeout(tailscale_serve: bool) -> Duration {
     if tailscale_serve {
@@ -76,7 +81,7 @@ pub struct HubArgs {
     /// Publish through tailnet-only Tailscale Serve HTTPS (on by default)
     #[arg(long, global = true, conflicts_with = "no_tailscale_serve")]
     pub tailscale_serve: bool,
-    /// Keep this launch loopback-only (overrides hub.tailscale_serve)
+    /// Keep this launch loopback-only (overrides hub.transport_mode for this launch)
     #[arg(long, visible_alias = "loopback", global = true, conflicts_with = "tailscale_serve")]
     pub no_tailscale_serve: bool,
     /// Tailscale Serve HTTPS port (443 is the stable no-port URL)
@@ -98,6 +103,14 @@ pub enum HubCommands {
     /// Gracefully stop the machine hub
     Stop(HubStopArgs),
     /// Stop and start the hub while preserving machine identity
+    ///
+    /// Detached restart: one `{stop,start}` JSON; start errors include `stop`.
+    ///
+    /// Stop keys: `stopped`, `pid`, `tailscale_serve_removed`, `tailscale_warning`.
+    ///
+    /// Stop also has `already_satisfied`; supervised restart reports hub status.
+    ///
+    /// Start also has `already_satisfied` when a peer launches the requested hub.
     Restart(HubServeArgs),
     /// Install, inspect, or remove boot-persistent hub supervision
     Service(HubServiceArgs),
@@ -224,6 +237,9 @@ pub struct HubServeArgs {
     /// Internal timestamp captured by the detached launcher.
     #[arg(long, hide = true)]
     pub launched_at: Option<String>,
+    /// Launch-owned channel for a detached child's startup failure.
+    #[arg(long, hide = true)]
+    pub startup_error_file: Option<std::path::PathBuf>,
     /// Cassy-created cgroup scope passed through the detached launch barrier.
     #[arg(long, hide = true)]
     pub cgroup: Option<std::path::PathBuf>,
@@ -251,6 +267,7 @@ impl Default for HubServeArgs {
             port: DEFAULT_HUB_PORT,
             launched_by: "cli".to_owned(),
             launched_at: None,
+            startup_error_file: None,
             cgroup: None,
             prior_tailscale_serve_port: None,
             prior_tailscale_serve_target: None,
@@ -272,7 +289,7 @@ enum HubStartDecision {
 struct HubRestartSpec {
     bind: IpAddr,
     port: u16,
-    tailscale_serve: bool,
+    transport_mode: HubTransportMode,
     tailscale_port: u16,
 }
 
@@ -425,12 +442,18 @@ fn default_hub_command() -> HubCommands {
 
 /// The machine hub reads host configuration, independent of the invoking project.
 /// An old process record/receipt preserves ports, never the publication policy.
-fn host_tailscale_default() -> Result<bool> {
+fn host_transport_mode() -> Result<HubTransportMode> {
     let root = crate::store::known_repos::host_cas_dir();
-    Ok(Config::load(&root)?
-        .hub
-        .and_then(|hub| hub.tailscale_serve)
-        .unwrap_or(true))
+    Ok(Config::load(&root)?.hub.unwrap_or_default().transport_mode())
+}
+
+fn host_tailscale_default() -> Result<bool> {
+    Ok(host_transport_mode()?.publishes())
+}
+
+// A service must exit on failed publication so launchd KeepAlive retries boot startup.
+fn publication_failure_is_fatal(mode: HubTransportMode, service_startup: bool) -> bool {
+    mode.publishes() && (service_startup || mode == HubTransportMode::Required)
 }
 
 fn tailscale_policy(explicit_on: bool, explicit_off: bool, configured: bool) -> bool {
@@ -606,7 +629,7 @@ struct RelaunchIntent<'a> {
 /// How a stop resolved.
 enum StopOutcome {
     /// The hub is gone and the machine is quiescent.
-    Stopped,
+    Stopped(HubStopReceipt),
     /// A concurrent command already produced the hub the caller was going to
     /// relaunch. Only reachable with a [`RelaunchIntent`].
     ///
@@ -617,7 +640,73 @@ enum StopOutcome {
     AlreadySatisfied(Box<HubProcessRecord>),
 }
 
-/// Wait for the machine to go quiescent, unless the relaunch is already done.
+#[derive(Serialize)]
+struct HubStopReceipt {
+    stopped: bool,
+    pid: Option<u32>,
+    tailscale_serve_removed: bool,
+    tailscale_warning: Option<String>,
+}
+
+#[derive(Serialize)]
+struct HubRestartStopReceipt {
+    stopped: bool,
+    pid: Option<u32>,
+    tailscale_serve_removed: Option<bool>,
+    tailscale_warning: Option<String>,
+    already_satisfied: bool,
+}
+
+struct HubStartOutcome {
+    record: HubProcessRecord,
+    already_satisfied: bool,
+}
+
+impl HubStartOutcome {
+    fn into_restart_json(self) -> Result<serde_json::Value> {
+        let mut value = serde_json::to_value(self.record)?;
+        let object = value
+            .as_object_mut()
+            .context("hub process record must serialize as a JSON object")?;
+        object.insert(
+            "already_satisfied".to_owned(),
+            serde_json::Value::Bool(self.already_satisfied),
+        );
+        Ok(value)
+    }
+}
+
+impl From<HubStopReceipt> for HubRestartStopReceipt {
+    fn from(stop: HubStopReceipt) -> Self {
+        Self {
+            stopped: stop.stopped,
+            pid: stop.pid,
+            tailscale_serve_removed: Some(stop.tailscale_serve_removed),
+            tailscale_warning: stop.tailscale_warning,
+            already_satisfied: false,
+        }
+    }
+}
+
+impl HubRestartStopReceipt {
+    fn already_satisfied() -> Self {
+        Self {
+            stopped: false,
+            pid: None,
+            tailscale_serve_removed: None,
+            tailscale_warning: None,
+            already_satisfied: true,
+        }
+    }
+}
+
+enum StopWait {
+    /// Keep the machine exclusive until old-generation cleanup finishes.
+    Quiescent(crate::hub::HubInstanceLock),
+    AlreadySatisfied(Box<HubProcessRecord>),
+}
+
+/// Wait for exclusive cleanup ownership, unless the relaunch is already done.
 ///
 /// `settle_pid` is the hub we just signalled: quiescence additionally requires
 /// that process to be gone. `stale_pid` is never accepted as satisfying — the
@@ -630,7 +719,10 @@ fn wait_for_stop_or_satisfying_hub(
     relaunch: Option<&RelaunchIntent<'_>>,
     force: bool,
     stop_deadline: Option<crate::bounded_process::Deadline>,
-) -> Result<Option<HubProcessRecord>> {
+) -> Result<StopWait> {
+    #[cfg(debug_assertions)]
+    mark_restart_stop_waiter_for_test()?;
+
     let deadline = Instant::now() + timeout;
     loop {
         ensure_stop_budget(stop_deadline)?;
@@ -649,10 +741,12 @@ fn wait_for_stop_or_satisfying_hub(
         // alone then reports a false stop timeout.
         let quiescent = lock.is_some()
             && (force || settle_pid.is_none_or(|pid| !process_is_running(pid)));
-        drop(lock);
         if quiescent {
-            return Ok(None);
+            let mut lock = lock.expect("quiescence requires the machine lock");
+            lock.set_phase("stopping")?;
+            return Ok(StopWait::Quiescent(lock));
         }
+        drop(lock);
         if let Some(intent) = relaunch
             && let Ok(record) = paths.read_process_record()
             && stale_pid != Some(record.pid)
@@ -666,7 +760,7 @@ fn wait_for_stop_or_satisfying_hub(
             )
             && record_is_ready(paths, &record)
         {
-            return Ok(Some(record));
+            return Ok(StopWait::AlreadySatisfied(Box::new(record)));
         }
         if Instant::now() >= deadline {
             if let Some(holder) = holder.as_ref()
@@ -800,6 +894,12 @@ fn wait_for_lock_or_satisfying_hub(
         if let Some(lock) = paths.try_acquire_instance_lock()? {
             return Ok(LaunchWait::Acquired(lock));
         }
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_LAUNCH_WAIT_BARRIER",
+            "launch-waiter",
+            "release-launch-waiter",
+            std::process::id(),
+        )?;
         if let Ok(record) = paths.read_process_record()
             && running_hub_satisfies_request(
                 &record,
@@ -948,7 +1048,7 @@ pub(super) fn hub_state_label(state: HubDisplayState, pid: u32) -> String {
     }
 }
 
-fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
+pub(super) fn lock_holder_display_state(holder: &HubLockHolder) -> HubDisplayState {
     lock_holder_display_state_with_timeout(holder, HUB_LAUNCH_TIMEOUT)
 }
 
@@ -1013,7 +1113,7 @@ fn render_status(
     state: HubDisplayState,
     binary_version: &str,
 ) -> String {
-    if state == HubDisplayState::Running {
+    let mut rendered = if state == HubDisplayState::Running {
         let endpoint = record
             .public_url
             .as_deref()
@@ -1035,10 +1135,92 @@ fn render_status(
                 .unwrap_or(&record.started_at),
             record.version,
         )
+    };
+    if let Some(warning) = version_warning(state, &record.version, binary_version) {
+        rendered.push_str(&format!("\nWarning: {warning}"));
     }
+    rendered
+}
+
+fn version_warning(
+    state: HubDisplayState,
+    running_version: &str,
+    binary_version: &str,
+) -> Option<String> {
+    (state == HubDisplayState::Running && running_version != binary_version).then(|| {
+        format!(
+            "hub version drift (running {running_version}, binary {binary_version})\n  Fix: cas hub service install"
+        )
+    })
 }
 
 pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
+    let result = execute_command(args, cli);
+    let required_policy = matches!(
+        args.command,
+        Some(HubCommands::Start(_) | HubCommands::Restart(_))
+    )
+        && host_transport_mode().is_ok_and(|mode| mode == HubTransportMode::Required);
+    // Warn on every interactive path, including an already-running hub and JSON
+    // output. Keep diagnostics on stderr so stdout remains one JSON document.
+    if !required_policy
+        && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_)))
+        && let Ok(paths) = HubRuntimePaths::default_for_user()
+        && let Ok(record) = paths.read_process_record()
+        && let Some(warning) = &record.transport_warning
+        && record_is_ready(&paths, &record)
+    {
+        eprintln!("{}", format_hub_transport_warning(warning));
+    }
+    result
+}
+
+fn format_hub_transport_warning(warning: &str) -> String {
+    format!(
+        "Tailscale Serve inactive; hub is loopback-only.\n\
+         Cause: {warning}\n\
+         Retry: tailscale status && cas hub restart"
+    )
+}
+
+fn required_transport_refusal(
+    args: &HubArgs,
+    paths: &HubRuntimePaths,
+    issue: Option<&str>,
+) -> String {
+    let (operation, loopback, retry) = match &args.command {
+        Some(HubCommands::Restart(_)) => {
+            let state = paths
+                .read_process_record()
+                .ok()
+                .filter(|record| record_is_ready(paths, record))
+                .map(|record| {
+                    format!(
+                        "Restart refused; existing hub (pid {}) remains running.",
+                        record.pid
+                    )
+                })
+                .unwrap_or_else(|| "Restart refused before stopping any hub.".to_owned());
+            (state, "cas hub restart --loopback", "cas hub restart")
+        }
+        _ => (
+            "Start refused; no hub was started.".to_owned(),
+            "cas hub start --loopback",
+            "cas hub start",
+        ),
+    };
+    let mut message = format!("Hub transport required: Tailscale is unavailable.\n{operation}");
+    if let Some(issue) = issue {
+        message.push('\n');
+        message.push_str(issue);
+    }
+    message.push_str(&format!(
+        "\nRetry: TAILSCALE_SOCKET=<signed-in-socket> {retry}.\nOr run `{loopback}`."
+    ));
+    message
+}
+
+fn execute_command(args: &HubArgs, cli: &Cli) -> Result<()> {
     let requested = match &args.command {
         Some(HubCommands::Start(_) | HubCommands::Restart(_) | HubCommands::Serve(_))
         | Some(HubCommands::Service(HubServiceArgs {
@@ -1055,14 +1237,16 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
         ),
         _ => args.tailscale_serve,
     };
-    if requested && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
+    if requested && host_transport_mode()? == HubTransportMode::Required
+        && matches!(args.command, Some(HubCommands::Start(_) | HubCommands::Restart(_))) {
         let paths = HubRuntimePaths::default_for_user()?;
         let manager = TailscaleServeManager::new(paths.root());
-        if manager.cli_available() {
-            let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
-            if let Some(issue) = issue {
-                anyhow::bail!("{issue}\nSelect a daemon with TAILSCALE_SOCKET or run `cas hub start --loopback`.");
-            }
+        if !manager.cli_available() {
+            anyhow::bail!(required_transport_refusal(args, &paths, None));
+        }
+        let issue = manager.login_issue().unwrap_or_else(|error| Some(error.to_string()));
+        if let Some(issue) = issue {
+            anyhow::bail!(required_transport_refusal(args, &paths, Some(&issue)));
         }
     }
     match args.command.clone().unwrap_or_else(default_hub_command) {
@@ -1085,7 +1269,7 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             // `hub stop` still goes through stop(), which passes no intent.
             match stop_with_output(
                 cli,
-                true,
+                !cli.json,
                 Some(RelaunchIntent {
                     args: &serve,
                     tailscale_serve,
@@ -1095,7 +1279,16 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
             )? {
                 StopOutcome::AlreadySatisfied(record) => {
                     if cli.json {
-                        println!("{}", serde_json::to_string(&record)?);
+                        let stop = HubRestartStopReceipt::already_satisfied();
+                        let start = HubStartOutcome {
+                            record: *record,
+                            already_satisfied: true,
+                        }
+                        .into_restart_json()?;
+                        println!(
+                            "{}",
+                            serde_json::json!({"stop": stop, "start": start})
+                        );
                     } else {
                         println!(
                             "hub already running (pid {}, version {}) — a concurrent start won the race",
@@ -1104,15 +1297,36 @@ pub fn execute(args: &HubArgs, cli: &Cli) -> Result<()> {
                     }
                     Ok(())
                 }
-                StopOutcome::Stopped => {
-                    start_with_output_resolved(
+                StopOutcome::Stopped(stop) => {
+                    let stop = HubRestartStopReceipt::from(stop);
+                    let start = match start_with_output_resolved(
                         &serve,
                         cli,
                         tailscale_serve,
                         tailscale_port,
-                        true,
+                        !cli.json,
                         cli_launch_origin(),
-                    )
+                    ) {
+                        Ok(start) => start,
+                        Err(error) if cli.json => {
+                            let message = super::json_error_message(&error);
+                            println!(
+                                "{}",
+                                serde_json::json!({
+                                    "status": "error",
+                                    "message": message,
+                                    "stop": stop,
+                                })
+                            );
+                            return Err(super::JsonReportedFailure(error).into());
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    if cli.json {
+                        let start = start.into_restart_json()?;
+                        println!("{}", serde_json::json!({"stop": stop, "start": start}));
+                    }
+                    Ok(())
                 }
             }
         }
@@ -1243,6 +1457,42 @@ fn start_with_output_from(
         emit_output,
         launch_origin,
     )
+    .map(|_| ())
+}
+
+fn peer_hub_record_after_child_exit(
+    paths: &HubRuntimePaths,
+    launcher_pid: u32,
+) -> Result<Option<u32>> {
+    let mut deadline = None;
+    loop {
+        let peer_holders = paths
+            .lock_holders()
+            .into_iter()
+            .filter(|holder| holder.pid != launcher_pid && process_is_running(holder.pid))
+            .map(|holder| holder.pid)
+            .collect::<Vec<_>>();
+        if let Some(record) = paths.read_process_record().ok()
+            && peer_holders.contains(&record.pid)
+        {
+            return Ok(Some(record.pid));
+        }
+        if peer_holders.is_empty() {
+            return Ok(None);
+        }
+        if deadline.is_none() {
+            hold_hub_test_barrier(
+                "CAS_TEST_HUB_PEER_RECORD_WAIT_BARRIER",
+                "peer-record-wait",
+                "release-peer-record-wait",
+                launcher_pid,
+            )?;
+            deadline = Some(Instant::now() + HUB_PEER_RECORD_PUBLISH_TIMEOUT);
+        } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(None);
+        }
+        std::thread::sleep(HUB_PEER_RECORD_POLL_INTERVAL);
+    }
 }
 
 fn start_with_output_resolved(
@@ -1252,7 +1502,7 @@ fn start_with_output_resolved(
     tailscale_port: u16,
     emit_output: bool,
     launch_origin: HubLaunchOrigin,
-) -> Result<()> {
+) -> Result<HubStartOutcome> {
     let paths = HubRuntimePaths::default_for_user()?;
     validate_control_bind(
         SocketAddr::new(args.bind, args.port),
@@ -1291,7 +1541,10 @@ fn start_with_output_resolved(
                             );
                         }
                     }
-                    return Ok(());
+                    return Ok(HubStartOutcome {
+                        record,
+                        already_satisfied: true,
+                    });
                 }
                 HubStartDecision::Restart {
                     version_drift,
@@ -1332,7 +1585,10 @@ fn start_with_output_resolved(
                                 record.pid, record.version
                             );
                         }
-                        return Ok(());
+                        return Ok(HubStartOutcome {
+                            record: *record,
+                            already_satisfied: true,
+                        });
                     }
                     return start_with_output_resolved(
                         args,
@@ -1373,9 +1629,13 @@ fn start_with_output_resolved(
                     record.pid, record.version
                 );
             }
-            return Ok(());
+            return Ok(HubStartOutcome {
+                record: *record,
+                already_satisfied: true,
+            });
         }
     };
+    cleanup_stale_launcher_files(paths.root());
     let prior_record = paths.read_process_record().ok();
     let stale_cgroup = prior_record.as_ref().and_then(|record| record.cgroup.clone());
     let prior_serve_target = prior_record.as_ref().and_then(|record| {
@@ -1403,6 +1663,10 @@ fn start_with_output_resolved(
     let launch_file = paths
         .root()
         .join(format!(".launcher-{stamp}-{}.go", std::process::id()));
+    let startup_error_file = paths
+        .root()
+        .join(format!(".launcher-{stamp}-{}.error", std::process::id()));
+    let _startup_error_file_guard = ScopedFile::new(startup_error_file.clone());
     let _launcher_pid_file_guard = ScopedFile::new(launcher_pid_file.clone());
     let _launch_file_guard = ScopedFile::new(launch_file.clone());
 
@@ -1435,6 +1699,8 @@ fn start_with_output_resolved(
         .arg(launch_origin.as_str())
         .arg("--launched-at")
         .arg(&launched_at)
+        .arg("--startup-error-file")
+        .arg(&startup_error_file)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log));
@@ -1483,9 +1749,19 @@ fn start_with_output_resolved(
         }
     };
     let cgroup = factory_worker_session().and_then(|session| {
-        crate::ui::factory::cgroup::join_shared_scope(&session, "hub", launcher_pid)
+        crate::ui::factory::cgroup::join_shared_scope(
+            &session,
+            &format!("hub-{launcher_pid}"),
+            launcher_pid,
+        )
     });
     drop(launch_guard);
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_LAUNCH_BARRIER",
+        "launcher",
+        "release-launchers",
+        launcher_pid,
+    )?;
     let launch_metadata = cgroup
         .as_deref()
         .map(|path| path.to_string_lossy().into_owned())
@@ -1494,13 +1770,32 @@ fn start_with_output_resolved(
         terminate_failed_launch(&mut child, cgroup.as_deref());
         return Err(error.into());
     }
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_LAUNCH_BARRIER",
+        "monitor",
+        "release-monitors",
+        launcher_pid,
+    )?;
 
     let deadline = Instant::now() + hub_launch_timeout(tailscale_serve);
     while Instant::now() < deadline {
         if let Ok(record) = paths.read_process_record() {
             if record_is_ready(&paths, &record) {
-                if launch_origin != HubLaunchOrigin::Update && tailscale_serve
-                    && TailscaleServeManager::new(paths.root()).cli_available()
+                let already_satisfied = record.pid != launcher_pid
+                    || record.launched_at.as_deref() != Some(launched_at.as_str());
+                if already_satisfied {
+                    terminate_failed_launch(&mut child, cgroup.as_deref());
+                }
+                if let Err(error) = hold_hub_test_barrier(
+                    "CAS_TEST_HUB_READY_BARRIER",
+                    "ready-observer",
+                    "release-ready-observers",
+                    launcher_pid,
+                ) {
+                    terminate_failed_launch(&mut child, cgroup.as_deref());
+                    return Err(error);
+                }
+                if tailscale_serve && host_transport_mode()? == HubTransportMode::Required
                     && let Some(warning) = &record.transport_warning
                 {
                     let warning = warning.clone();
@@ -1516,34 +1811,68 @@ fn start_with_output_resolved(
                         .map(str::to_owned)
                         .unwrap_or_else(|| format!("http://{}:{}", record.bind, record.port));
                     println!("Cassy hub started at {endpoint} (pid {})", record.pid);
-                    if launch_origin != HubLaunchOrigin::Update
-                        && let Some(warning) = &record.transport_warning
-                    {
-                        eprintln!("Tailscale Serve inactive: {warning}; hub remains loopback-only");
-                        eprintln!("Check `tailscale status`, then run `cas hub restart`.");
-                    }
                 }
-                return Ok(());
+                return Ok(HubStartOutcome {
+                    record,
+                    already_satisfied,
+                });
             }
         }
         if let Some(status) = child.try_wait().context("poll detached cas hub")? {
-            if let Ok(record) = paths.read_process_record()
-                && record_is_ready(&paths, &record)
-            {
-                anyhow::bail!(
-                    "another cas hub instance won the machine lock (pid {}); replacement process exited with {}",
-                    record.pid,
-                    status
+            let winner_pid = peer_hub_record_after_child_exit(&paths, launcher_pid)?;
+            if let Some(winner_pid) = winner_pid {
+                let error = anyhow::anyhow!(
+                    "another cas hub instance won the machine lock (pid {winner_pid}); replacement process exited with {status} before becoming ready; inspect {}",
+                    paths.log_path().display()
                 );
+                terminate_failed_launch(&mut child, cgroup.as_deref());
+                return Err(error);
             }
+            let startup_reason = std::fs::read_to_string(&startup_error_file)
+                .ok()
+                .filter(|reason| !reason.trim().is_empty())
+                .map(|reason| format!(": {}", reason.trim()))
+                .unwrap_or_default();
             let error = anyhow::anyhow!(
-                "cas hub replacement exited with {status} before becoming ready; inspect {}",
+                "cas hub replacement exited with {status} before becoming ready{startup_reason}; inspect {}",
                 paths.log_path().display()
             );
             terminate_failed_launch(&mut child, cgroup.as_deref());
             return Err(error);
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+    if let Ok(record) = paths.read_process_record()
+        && record.pid != launcher_pid
+        && record_is_live(&record)
+        && running_hub_satisfies_request(
+            &record,
+            args,
+            tailscale_serve,
+            tailscale_port,
+            env!("CARGO_PKG_VERSION"),
+            tailscale_cli_available(&paths),
+        )
+    {
+        if record_is_ready(&paths, &record) {
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+            return Ok(HubStartOutcome {
+                record,
+                already_satisfied: true,
+            });
+        }
+        if paths
+            .lock_holders()
+            .iter()
+            .any(|holder| holder.pid == record.pid)
+        {
+            let pid = record.pid;
+            terminate_failed_launch(&mut child, cgroup.as_deref());
+            anyhow::bail!(
+                "another cas hub instance won the machine lock (pid {pid}); this restart launch did not become ready before timeout; inspect {}",
+                paths.log_path().display()
+            );
+        }
     }
     let error = anyhow::anyhow!(
         "cas hub did not become ready; inspect {}",
@@ -1554,6 +1883,50 @@ fn start_with_output_resolved(
 }
 
 struct ScopedFile(std::path::PathBuf);
+
+fn cleanup_stale_launcher_files(root: &std::path::Path) {
+    cleanup_stale_launcher_files_with(root, process_is_running);
+}
+
+fn cleanup_stale_launcher_files_with(
+    root: &std::path::Path,
+    is_alive: impl Fn(u32) -> bool,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(name) = name.strip_prefix(".launcher-") else {
+            continue;
+        };
+        let Some((stem, extension)) = name.rsplit_once('.') else {
+            continue;
+        };
+        if !matches!(extension, "pid" | "go" | "error") {
+            continue;
+        }
+        let Some((stamp, pid)) = stem.rsplit_once('-') else {
+            continue;
+        };
+        if stamp.parse::<i64>().is_err() {
+            continue;
+        }
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        if pid == 0 || pid > i32::MAX as u32 || is_alive(pid) {
+            continue;
+        }
+        let _ = std::fs::remove_file(entry.path());
+    }
+}
 
 impl ScopedFile {
     fn new(path: std::path::PathBuf) -> Self {
@@ -1693,6 +2066,15 @@ fn serve_foreground_logged(
         tailscale_port,
         &paths,
     )?;
+    let transport_mode = if tailscale_serve {
+        match host_transport_mode()? {
+            // An explicit --tailscale-serve overrides the saved loopback choice.
+            HubTransportMode::Loopback => HubTransportMode::Auto,
+            configured => configured,
+        }
+    } else {
+        HubTransportMode::Loopback
+    };
     // AuthStore::open takes an exclusive auth.lock. Do this before claiming
     // hub.lock: a stale auth writer must never leave a launchd hub process
     // holding the machine lock while it waits indefinitely.
@@ -1719,7 +2101,31 @@ fn serve_foreground_logged(
         // machine-lock owner with no listener to diagnose or stop.
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let actual = listener.local_addr()?;
-        let mut lock = paths.acquire_instance_lock()?;
+        let lock = paths.try_acquire_instance_lock()?;
+        if lock.is_none() {
+            hold_hub_test_barrier(
+                "CAS_TEST_HUB_STARTUP_LOCK_BARRIER",
+                "startup-lock-waiter",
+                "release-startup-lock",
+                std::process::id(),
+            )?;
+        }
+        // The launcher hands ownership to this process without an atomic lock
+        // transfer. Let a concurrent stop finish its bounded cleanup rather
+        // than treating a transient owner in that gap as a failed launch.
+        let mut lock = match lock {
+            Some(lock) => lock,
+            None => match paths.wait_for_instance_lock(HUB_STARTUP_LOCK_TIMEOUT) {
+                Ok(lock) => lock,
+                Err(error) => {
+                    // Keep this launch's actual failure separate from shared hub.log.
+                    if let Some(path) = &args.startup_error_file {
+                        let _ = std::fs::write(path, format!("{error:#}"));
+                    }
+                    return Err(error);
+                }
+            },
+        };
         let tailscale_manager = TailscaleServeManager::new(paths.root());
         let prior_serve_target = args.prior_tailscale_serve_port.zip(args.prior_tailscale_serve_target.clone())
             .or_else(|| paths.read_process_record().ok().and_then(|previous| {
@@ -1744,7 +2150,19 @@ fn serve_foreground_logged(
             transport_warning: None,
             nofile_limit,
         };
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_RECORD_PUBLICATION_BARRIER",
+            "hub-record-pending",
+            "release-hub-record",
+            record.pid,
+        )?;
         paths.write_process_record(&record)?;
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_STARTUP_BARRIER",
+            "hub-starting",
+            "release-hub-startup",
+            record.pid,
+        )?;
         let mut startup_guard = HubStartupGuard::new(paths.clone(), tailscale_manager.clone());
 
         let (tailscale_listener, tailscale, transport_warning) = if tailscale_serve {
@@ -1769,8 +2187,13 @@ fn serve_foreground_logged(
             );
             match ensure_result {
                 Ok(receipt) => (Some(proxy_listener), Some(receipt), None),
-                Err(error) if service_startup => {
-                    return Err(error).context("Tailscale Serve service startup exhausted its bounded retries");
+                Err(error) if publication_failure_is_fatal(transport_mode, service_startup) => {
+                    let context = if service_startup {
+                        "Tailscale Serve service startup exhausted its bounded retries"
+                    } else {
+                        "Hub transport required: Tailscale Serve startup failed"
+                    };
+                    return Err(error).context(context);
                 }
                 Err(error) => {
                     let warning = error.to_string();
@@ -1942,6 +2365,46 @@ async fn serve_with_bounded_connection_drain(
 }
 
 #[cfg(debug_assertions)]
+fn hold_hub_test_barrier(
+    environment: &str,
+    marker: &str,
+    release: &str,
+    pid: u32,
+) -> Result<()> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    let Some(root) = std::env::var_os(environment) else {
+        return Ok(());
+    };
+    let root = PathBuf::from(root);
+    fs::create_dir_all(&root)?;
+    fs::write(
+        root.join(format!("{marker}-{pid}")),
+        format!("{}\n", std::process::id()),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !root.join(release).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::ensure!(
+        root.join(release).exists(),
+        "test hub barrier {environment} timed out"
+    );
+    Ok(())
+}
+
+#[cfg(not(debug_assertions))]
+fn hold_hub_test_barrier(
+    _environment: &str,
+    _marker: &str,
+    _release: &str,
+    _pid: u32,
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
 fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
     use std::fs;
     use std::path::PathBuf;
@@ -1969,6 +2432,19 @@ fn hold_instance_lock_after_record_removal_for_test() -> Result<()> {
         root.join("release").exists(),
         "test hub lock-release barrier timed out"
     );
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn mark_restart_stop_waiter_for_test() -> Result<()> {
+    let Some(root) = std::env::var_os("CAS_TEST_HUB_LOCK_RELEASE_BARRIER") else {
+        return Ok(());
+    };
+    let root = std::path::PathBuf::from(root);
+    std::fs::write(
+        root.join(format!("restart-stop-waiter-{}", std::process::id())),
+        b"waiting\n",
+    )?;
     Ok(())
 }
 
@@ -2340,17 +2816,33 @@ fn status(cli: &Cli) -> Result<()> {
                     )
                 })
                 .unwrap_or_else(|| error.to_string());
-            anyhow::bail!("cas hub runtime record unavailable: {detail}");
+            return Err(super::JsonReportedFailure(anyhow::anyhow!(
+                "cas hub runtime record unavailable: {detail}"
+            ))
+            .into());
         }
     };
-    let state = hub_display_state(&paths, &record);
+    let record_state = hub_display_state(&paths, &record);
+    // A replacement can own the machine lock before publishing its record.
+    // Keep the dead record as history, but report the live holder's identity
+    // and phase, just as `hub service status` does (cas-ebbb).
+    let holder = if record_state == HubDisplayState::Exited {
+        paths.lock_holders().into_iter().next()
+    } else {
+        None
+    };
+    let state = holder.as_ref().map(lock_holder_display_state).unwrap_or(record_state);
+    let pid = holder.as_ref().map(|holder| holder.pid).unwrap_or(record.pid);
     let live = state == HubDisplayState::Running;
     let service_warning = super::hub_service::inactive_detached_warning(&paths, Some(&record))?;
     let transport = hub_transport_report(&paths, Some(&record));
     // cas-0140: a failing audit writer refuses every audited request and
     // used to be visible only as a log that fell silent.
     let audit = crate::hub::audit_writer_report(paths.root(), chrono::Utc::now());
-    let open_files = crate::hub::open_files::OpenFilesReport::for_process(record.pid, record.nofile_limit);
+    let open_files = crate::hub::open_files::OpenFilesReport::for_process(
+        pid,
+        if holder.is_some() { None } else { record.nofile_limit },
+    );
     if cli.json {
         let runtime_receipt = runtime_receipt(
             &paths, Some(&record), Some(state), &transport, probe_window_started_at,
@@ -2359,9 +2851,12 @@ fn status(cli: &Cli) -> Result<()> {
             "{}",
             serde_json::json!({
                 "running": live,
-                "state": hub_record_state_json(&record, state),
+                "state": holder.as_ref().map(lock_holder_state_json)
+                    .unwrap_or_else(|| hub_record_state_json(&record, state)),
                 "record": record,
+                "lock_holder": holder.as_ref().map(lock_holder_json),
                 "binary": env!("CARGO_PKG_VERSION"),
+                "version_warning": version_warning(state, &record.version, env!("CARGO_PKG_VERSION")),
                 "tailscale_serve": transport,
                 "service_warning": service_warning,
                 "service_status": service_status(service_warning),
@@ -2371,10 +2866,15 @@ fn status(cli: &Cli) -> Result<()> {
             })
         );
     } else {
-        println!(
-            "{}",
-            render_status(&record, state, env!("CARGO_PKG_VERSION"))
-        );
+        if holder.is_some() {
+            println!("Cassy hub: {}", hub_state_label(state, pid));
+            println!("  remedy: {}", hub_state_remedy(state, pid));
+        } else {
+            println!(
+                "{}",
+                render_status(&record, state, env!("CARGO_PKG_VERSION"))
+            );
+        }
         if let Some(warning) = service_warning {
             println!("ERROR: {warning}");
         }
@@ -2382,6 +2882,17 @@ fn status(cli: &Cli) -> Result<()> {
         println!("{}", render_audit_status(&audit));
         println!("{}", render_open_files_status(&open_files));
     }
+    status_verdict(live, service_warning, &transport, &audit)
+        .map_err(|error| super::JsonReportedFailure(error).into())
+}
+
+/// Failures found after `hub status` printed its report.
+fn status_verdict(
+    live: bool,
+    service_warning: Option<&str>,
+    transport: &HubTransportReport,
+    audit: &crate::hub::AuditWriterReport,
+) -> Result<()> {
     anyhow::ensure!(live, "cas hub is not ready; see status above");
     // cas-621ec: a hub serving outside its installed service has no restart
     // supervision; that is an error, not a footnote.
@@ -2648,7 +3159,7 @@ fn stop_with_output_before(
     // foreground process now always tears it down on SIGTERM, so stop must
     // judge the final outcome instead of which process issued `serve off`.
     let owned_tailscale_receipt = tailscale_manager.owned_receipt();
-    if record.as_ref().is_some_and(record_is_live) {
+    let cleanup_lock = if record.as_ref().is_some_and(record_is_live) {
         let record = record.as_ref().expect("live record exists");
         #[cfg(unix)]
         nix::sys::signal::kill(
@@ -2659,7 +3170,13 @@ fn stop_with_output_before(
         Command::new("taskkill")
             .args(["/PID", &record.pid.to_string()])
             .status()?;
-        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+        hold_hub_test_barrier(
+            "CAS_TEST_HUB_STOP_WAIT_BARRIER",
+            "stop-wait",
+            "release-stop-wait",
+            std::process::id(),
+        )?;
+        wait_for_stop_or_satisfying_hub(
             &paths,
             Some(record.pid),
             stale_pid,
@@ -2667,13 +3184,11 @@ fn stop_with_output_before(
             relaunch.as_ref(),
             force,
             stop_deadline,
-        )? {
-            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
-        }
+        )?
     } else {
         // Record absence does not authorize stale cleanup: a shutting-down hub
         // may already have removed it while still holding the machine lock.
-        if let Some(satisfying) = wait_for_stop_or_satisfying_hub(
+        wait_for_stop_or_satisfying_hub(
             &paths,
             None,
             stale_pid,
@@ -2681,10 +3196,28 @@ fn stop_with_output_before(
             relaunch.as_ref(),
             force,
             stop_deadline,
-        )? {
-            return Ok(StopOutcome::AlreadySatisfied(Box::new(satisfying)));
+        )?
+    };
+    let cleanup_lock = match cleanup_lock {
+        StopWait::AlreadySatisfied(record) => {
+            // Adoption skips teardown of the live peer, but not removal of an
+            // empty old scope. Never kill here or remove a shared/ancestor
+            // scope containing the winner (including legacy shared scopes).
+            if let Some(old_scope) = hub_cgroup.as_deref()
+                && record.cgroup.as_deref().is_none_or(|live_scope| !live_scope.starts_with(old_scope))
+            {
+                crate::ui::factory::cgroup::remove_scope(old_scope);
+            }
+            return Ok(StopOutcome::AlreadySatisfied(record));
         }
-    }
+        StopWait::Quiescent(lock) => lock,
+    };
+    hold_hub_test_barrier(
+        "CAS_TEST_HUB_STOP_CLEANUP_BARRIER",
+        "stop-cleanup",
+        "release-stop-cleanup",
+        std::process::id(),
+    )?;
     if let Some(cgroup) = hub_cgroup {
         if let Err(error) = crate::ui::factory::cgroup::kill_scope(&cgroup) {
             tracing::warn!(
@@ -2709,23 +3242,28 @@ fn stop_with_output_before(
     };
     paths.remove_process_record()?;
     ensure_stop_budget(stop_deadline)?;
+    // Launchers and foreground hubs publish under this same machine lock.
+    // Releasing it before cleanup would let a replacement's record or owned
+    // Tailscale mapping be removed by the previous generation's stop.
+    drop(cleanup_lock);
+    let receipt = HubStopReceipt {
+        stopped: true,
+        pid: record.as_ref().map(|record| record.pid),
+        tailscale_serve_removed: matches!(&tailscale_outcome, Ok((true, _))),
+        tailscale_warning: tailscale_outcome
+            .as_ref()
+            .err()
+            .map(ToString::to_string),
+    };
     if emit_output && cli.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "stopped":true,
-                "pid":record.as_ref().map(|record| record.pid),
-                "tailscale_serve_removed":matches!(&tailscale_outcome, Ok((true, _))),
-                "tailscale_warning":tailscale_outcome.as_ref().err().map(ToString::to_string),
-            })
-        );
+        println!("{}", serde_json::to_string(&receipt)?);
     } else if emit_output {
         if let Some(record) = &record {
             println!("Cassy hub stopped (pid {})", record.pid);
         } else {
             println!("Cassy hub was not running");
         }
-        match tailscale_outcome {
+        match &tailscale_outcome {
             Ok((true, Some(receipt))) => println!(
                 "Removed Cassy Tailscale Serve mapping at {}",
                 receipt.public_url
@@ -2737,7 +3275,7 @@ fn stop_with_output_before(
             Err(error) => eprintln!("Tailscale Serve mapping left untouched: {error}"),
         }
     }
-    Ok(StopOutcome::Stopped)
+    Ok(StopOutcome::Stopped(receipt))
 }
 
 fn update_prior_state(
@@ -2764,7 +3302,7 @@ fn update_prior_state(
 fn update_restart_spec(
     record: Option<&HubProcessRecord>,
     receipt: Option<&TailscaleServeReceipt>,
-    tailscale_serve: bool,
+    transport_mode: HubTransportMode,
 ) -> Result<HubRestartSpec> {
     let bind = record
         .map(|record| record.bind.parse())
@@ -2777,7 +3315,7 @@ fn update_restart_spec(
         // the kernel choose a free port rather than colliding with another
         // hub's well-known port on the same machine.
         port: record.map_or(0, |record| record.port),
-        tailscale_serve,
+        transport_mode,
         tailscale_port: receipt
             .map(|receipt| receipt.https_port)
             .or_else(|| record.and_then(|record| record.tailscale_serve_port))
@@ -2798,7 +3336,7 @@ fn verify_updated_hub(
     anyhow::ensure!(holder.pid == record.pid && holder.phase == "running",
         "new hub lock is not in running phase");
     anyhow::ensure!(record_is_live(&record), "new hub loopback /v1/health is not ready");
-    if !spec.tailscale_serve {
+    if !spec.transport_mode.publishes() {
         anyhow::ensure!(
             !tailscale_enabled(&record),
             "hub still requests Tailscale Serve despite opt-out"
@@ -2811,6 +3349,7 @@ fn verify_updated_hub(
         });
     }
     if let Some(warning) = record.transport_warning.as_deref() {
+        spec.transport_mode.require_publication(false).with_context(|| warning.to_owned())?;
         return Ok(unavailable_update_transport(warning));
     }
     let manager = TailscaleServeManager::new(paths.root());
@@ -2838,6 +3377,7 @@ fn verify_updated_hub(
         Ok(_) => Some("public Tailscale /v1/health did not report ready".to_owned()),
         Err(error) => Some(format!("{error:#}")),
     };
+    spec.transport_mode.require_publication(public_failure.is_none())?;
     let remedy = public_failure.as_ref().map(|_| {
         "Check MagicDNS and `tailscale status`, then retry the public URL; the hub and Serve route are healthy.".to_owned()
     });
@@ -2906,11 +3446,19 @@ fn finish_update_hub_verification(
             outcome.prior_state,
         );
         if let Some(warning) = outcome.transport_warning.as_deref() {
-            eprintln!("cas update: {warning}");
+            eprintln!("{}", format_update_transport_warning(warning));
             if let Some(remedy) = outcome.remedy.as_deref() {
                 eprintln!("cas update: {remedy}");
             }
         }
+    }
+}
+
+fn format_update_transport_warning(warning: &str) -> String {
+    if let Some(cause) = warning.strip_prefix("Tailscale Serve inactive: ") {
+        format!("cas update: Tailscale Serve inactive:\n  {cause}")
+    } else {
+        format!("cas update: {warning}")
     }
 }
 
@@ -2955,19 +3503,12 @@ pub(crate) fn restart_stale_hub(
     // cas-621ec: rewrite an installed unit to the current restart policy
     // before any early return below, so a hub that needs no restart, or is
     // not running at all, still gets the new policy on this update.
-    let tailscale_serve = host_tailscale_default()?;
-    let service_changed = match super::hub_service::refresh_installed_service(tailscale_serve) {
-        Ok(changed) => changed,
-        Err(error) => {
-            tracing::warn!(error = %format!("{error:#}"), "cas update: hub service unit refresh failed");
-            if !cli.json {
-                eprintln!(
-                    "cas update: could not refresh the hub service definition: {error:#}; rerun `cas hub service install` to rewrite it"
-                );
-            }
-            false
-        }
-    };
+    let transport_mode = host_transport_mode()?;
+    let tailscale_serve = transport_mode.publishes();
+    // Never restart through a definition we could not validate or refresh:
+    // the manager would simply launch its old candidate again.
+    let service_changed = super::hub_service::refresh_installed_service(tailscale_serve)
+        .context("cannot refresh hub service; run `cas hub service install` before retrying `cas update`")?;
     let paths = HubRuntimePaths::default_for_user()?;
     let record = paths.read_process_record().ok();
     let holder = paths.lock_holders().into_iter().next();
@@ -2977,7 +3518,7 @@ pub(crate) fn restart_stale_hub(
         .flatten();
     let prior_state =
         update_prior_state(&paths, record.as_ref(), holder.as_ref(), receipt.is_some());
-    let mut spec = update_restart_spec(record.as_ref(), receipt.as_ref(), tailscale_serve)?;
+    let mut spec = update_restart_spec(record.as_ref(), receipt.as_ref(), transport_mode)?;
     if record.is_none()
         && receipt.is_none()
         && let Some(port) = super::hub_service::installed_https_port()?
@@ -3024,7 +3565,7 @@ pub(crate) fn restart_stale_hub(
     let attempt = || -> Result<bool> {
         // The service manager owns its own stop/start sequence; a detached hub
         // must be stopped through the same force path as `cas hub restart`.
-        if super::hub_service::restart_supervised(cli, spec.tailscale_serve, spec.tailscale_port)? {
+        if super::hub_service::restart_supervised(cli, spec.transport_mode.publishes(), spec.tailscale_port)? {
             return Ok(true);
         }
         let stopped = stop_with_output(
@@ -3032,7 +3573,7 @@ pub(crate) fn restart_stale_hub(
             false,
             Some(RelaunchIntent {
                 args: &args,
-                tailscale_serve: spec.tailscale_serve,
+                tailscale_serve: spec.transport_mode.publishes(),
                 tailscale_port: spec.tailscale_port,
             }),
             true,
@@ -3041,7 +3582,7 @@ pub(crate) fn restart_stale_hub(
             start_with_output_from(
                 &args,
                 cli,
-                spec.tailscale_serve,
+                spec.transport_mode.publishes(),
                 spec.tailscale_port,
                 false,
                 HubLaunchOrigin::Update,
@@ -3093,14 +3634,15 @@ pub(crate) fn restart_stale_hub(
         outcome.loopback_verified = record_is_ready(&paths, &record);
         outcome.public_url = record.public_url;
     }
-    outcome.transport_verified = spec.tailscale_serve.then_some(false);
-    let remedy = if spec.tailscale_serve {
+    outcome.transport_verified = spec.transport_mode.publishes().then_some(false);
+    let remedy = if spec.transport_mode.publishes() {
         "Inspect ~/.cas/hub/update-recovery-*.txt, then run `cas hub restart --force --tailscale-serve`."
     } else {
         "Inspect ~/.cas/hub/update-recovery-*.txt, then run `cas hub restart --force`."
     };
     outcome.remedy = Some(remedy.to_owned());
-    if spec.tailscale_serve && prior_state != "none" {
+    if spec.transport_mode.publishes()
+        && (prior_state != "none" || transport_mode == HubTransportMode::Required) {
         outcome.transport_error = outcome.failure.as_ref().map(|failure| {
             format!("cas update: Tailscale Serve verification failed: {failure}; {remedy}")
         });
@@ -3941,6 +4483,14 @@ mod tests {
 
         assert!(rendered.contains("version 3.4.1"), "{rendered}");
         assert!(rendered.contains("binary: 3.7.7"), "{rendered}");
+        assert!(rendered.contains("version drift"), "{rendered}");
+        assert!(rendered.contains("cas hub service install"), "{rendered}");
+        let current = render_status(
+            &record("3.7.7", DEFAULT_HUB_PORT, None),
+            HubDisplayState::Running,
+            "3.7.7",
+        );
+        assert!(!current.contains("version drift"), "{current}");
     }
 
     #[test]
@@ -3952,10 +4502,51 @@ mod tests {
         let rendered = render_status(&stale, HubDisplayState::Exited, "3.7.7");
 
         assert!(rendered.contains("last pid 42 exited"), "{rendered}");
+        assert!(rendered.contains("cas hub start"), "{rendered}");
+        assert!(!rendered.contains("version drift"), "{rendered}");
+        assert!(!rendered.contains("cas hub service install"), "{rendered}");
         assert!(
             rendered.contains("started by update at 2026-09-01T12:34:56Z"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn stale_launcher_files_are_removed_without_touching_live_files() {
+        let root = tempfile::tempdir().unwrap();
+        let stale_pid = 111;
+        let live_pid = 222;
+        for extension in ["pid", "go", "error"] {
+            std::fs::write(
+                root.path().join(format!(".launcher-7-{stale_pid}.{extension}")),
+                b"stale",
+            )
+            .unwrap();
+            std::fs::write(
+                root.path().join(format!(".launcher-8-{live_pid}.{extension}")),
+                b"live",
+            )
+            .unwrap();
+        }
+        let unrelated = root.path().join(".launcher-unrelated.error");
+        std::fs::write(&unrelated, b"unrelated").unwrap();
+
+        cleanup_stale_launcher_files_with(root.path(), |pid| pid == live_pid);
+
+        for extension in ["pid", "go", "error"] {
+            assert!(
+                !root
+                    .path()
+                    .join(format!(".launcher-7-{stale_pid}.{extension}"))
+                    .exists()
+            );
+            assert!(
+                root.path()
+                    .join(format!(".launcher-8-{live_pid}.{extension}"))
+                    .exists()
+            );
+        }
+        assert!(unrelated.exists());
     }
 
     /// cas-0140: the status screen tells a quiet audit log (OK, with the last
@@ -4072,9 +4663,9 @@ mod tests {
     fn update_publication_policy_ignores_old_record_flags_and_honors_opt_out() {
         let old = record("3.4.1", 4310, None);
         let spec =
-            update_restart_spec(Some(&old), None, tailscale_policy(false, false, true)).unwrap();
+            update_restart_spec(Some(&old), None, HubTransportMode::Auto).unwrap();
         assert!(
-            spec.tailscale_serve,
+            spec.transport_mode.publishes(),
             "old loopback record must adopt the default"
         );
         assert_eq!(spec.port, old.port);
@@ -4082,11 +4673,11 @@ mod tests {
         let disabled = update_restart_spec(
             Some(&published),
             None,
-            tailscale_policy(false, false, false),
+            HubTransportMode::Loopback,
         )
         .unwrap();
         assert!(
-            !disabled.tailscale_serve,
+            !disabled.transport_mode.publishes(),
             "config=false overrides old publication"
         );
         assert_eq!(disabled.tailscale_port, 8443);
@@ -4108,25 +4699,50 @@ mod tests {
     }
 
     #[test]
-    fn host_hub_opt_out_survives_config_round_trip() {
-        let temp = tempfile::tempdir().unwrap();
+    fn macos_auto_service_publication_failure_is_fatal_cas_3f03e() {
+        assert!(publication_failure_is_fatal(HubTransportMode::Auto, true),
+            "launchd must retry Auto publication after bounded startup retries");
+        assert!(!publication_failure_is_fatal(HubTransportMode::Auto, false),
+            "interactive Auto may retain loopback with a visible warning");
+        assert!(publication_failure_is_fatal(HubTransportMode::Required, false));
+        assert!(!publication_failure_is_fatal(HubTransportMode::Loopback, true));
+    }
+
+    #[test]
+    fn host_hub_transport_mode_survives_config_round_trip_cas_3f03e() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
         let mut config = Config::default();
-        assert_eq!(config.get("hub.tailscale_serve").as_deref(), Some("true"));
-        config.set("hub.tailscale_serve", "false").unwrap();
-        config.save(temp.path()).unwrap();
-        let loaded = Config::load(temp.path()).unwrap();
-        assert_eq!(loaded.hub.unwrap().tailscale_serve, Some(false));
+        assert_eq!(config.get("hub.transport_mode").as_deref(), Some("auto"));
+        for mode in ["required", "loopback", "auto"] {
+            config.set("hub.transport_mode", mode).unwrap();
+            config.save(&root).unwrap();
+            let loaded = Config::load(&root).unwrap();
+            assert_eq!(loaded.get("hub.transport_mode").as_deref(), Some(mode));
+            // Restart and update resolve the host file, not a stale process record.
+            let policy = host_transport_mode().unwrap();
+            assert_eq!(policy.as_str(), mode);
+            let spec = update_restart_spec(Some(&record("old", 4310, Some(8443))), None, policy).unwrap();
+            assert_eq!(spec.transport_mode, policy);
+            assert_eq!(spec.transport_mode.publishes(), mode != "loopback");
+            assert_eq!(policy.require_publication(false).is_err(), mode == "required");
+            assert!(policy.require_publication(true).is_ok());
+        }
+        assert!(config.set("hub.transport_mode", "invalid").is_err());
+        // Existing host opt-outs remain effective until a mode is explicitly set.
+        let legacy: Config = toml::from_str("[hub]\ntailscale_serve = false\n").unwrap();
+        assert_eq!(legacy.get("hub.transport_mode").as_deref(), Some("loopback"));
     }
 
     #[test]
     fn update_transport_failure_is_a_warning_with_working_recovery() {
         let verification = unavailable_update_transport("tailscale CLI is unavailable");
         assert_eq!(verification.transport_verified, Some(false));
-        assert!(
-            verification
-                .transport_warning
-                .unwrap()
-                .contains("Tailscale Serve inactive")
+        assert_eq!(
+            format_update_transport_warning(
+                verification.transport_warning.as_deref().unwrap()
+            ),
+            "cas update: Tailscale Serve inactive:\n  tailscale CLI is unavailable; hub remains loopback-only"
         );
         assert!(verification.remedy.unwrap().contains("cas hub restart"));
     }

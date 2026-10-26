@@ -193,10 +193,14 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
 fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
+    // cas-c8de: the account probes and the codex version probe share one
+    // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
-    preflight_account_auth_with(specs, |cli, account_dir| {
-        crate::capability::probe_account_auth(cli, account_dir, deadline)
-    })
+    preflight_account_auth_with(
+        specs,
+        |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
+        || installed_codex_version(deadline),
+    )
 }
 
 /// Probe-injected core of [`preflight_account_auth`], so the refusal policy is
@@ -204,6 +208,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
 fn preflight_account_auth_with(
     specs: &[cas_mux::WorkerSpec],
     probe: impl Fn(cas_mux::SupervisorCli, Option<&str>) -> cas_factory::CapabilityEvidence,
+    codex_version: impl Fn() -> Option<String>,
 ) -> Result<(), String> {
     let mut seen: std::collections::BTreeSet<(cas_mux::SupervisorCli, Option<String>)> =
         std::collections::BTreeSet::new();
@@ -239,7 +244,7 @@ fn preflight_account_auth_with(
             crate::factory_auth_health::auth_failure_remedy(spec.cli, account_dir.as_deref()),
         ));
     }
-    preflight_codex_model_support(specs, chrono::Utc::now())
+    preflight_codex_model_support(specs, chrono::Utc::now(), &codex_version)
 }
 
 /// Refuse a Codex spawn whose target account cannot run its model, before any
@@ -253,12 +258,15 @@ fn preflight_account_auth_with(
 fn preflight_codex_model_support(
     specs: &[cas_mux::WorkerSpec],
     now: chrono::DateTime<chrono::Utc>,
+    codex_version: &dyn Fn() -> Option<String>,
 ) -> Result<(), String> {
     use crate::factory_auth_health::{CodexModelSupport, codex_account_model_support};
     let mut seen = std::collections::BTreeSet::new();
-    // cas-49d3: the codex that will run the worker, probed once and only when
-    // a Codex spec names a model; the catalogue is judged against it.
-    let mut installed_codex: Option<Option<String>> = None;
+    // cas-49d3: the codex that will run the worker, judged against the
+    // catalogue. cas-c8de: probed at most once, and only when a catalogue
+    // would otherwise refuse.
+    let installed_codex: std::cell::OnceCell<Option<String>> = std::cell::OnceCell::new();
+    let installed = || installed_codex.get_or_init(codex_version).clone();
     for spec in specs {
         if spec.cli != cas_mux::SupervisorCli::Codex {
             continue;
@@ -278,9 +286,8 @@ fn preflight_codex_model_support(
         let Some(home) = codex_home_path(account_dir.as_deref()) else {
             continue;
         };
-        let installed = installed_codex.get_or_insert_with(installed_codex_version).as_deref();
         if let CodexModelSupport::Unsupported { catalog, listed } =
-            codex_account_model_support(&home, model, now, installed)
+            codex_account_model_support(&home, model, now, &installed)
         {
             let account = account_dir
                 .as_deref()
@@ -299,13 +306,13 @@ fn preflight_codex_model_support(
 }
 
 /// `codex --version` of the codex on `PATH` (the binary a worker spawn runs),
-/// bounded so a hung binary cannot stall a spawn; `None` when it cannot be read.
-fn installed_codex_version() -> Option<String> {
-    let budget = std::time::Duration::from_secs(3);
+/// bounded by the preflight's own deadline (cas-c8de) so a hung binary
+/// cannot stall a spawn; `None` when it cannot be read in time.
+fn installed_codex_version(deadline: crate::bounded_process::Deadline) -> Option<String> {
     let output = crate::bounded_process::run_command(
         std::process::Command::new("codex").arg("--version"),
-        crate::bounded_process::Deadline::after(budget),
-        budget,
+        deadline,
+        std::time::Duration::from_secs(3),
     )
     .ok()?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -885,7 +892,7 @@ fn shutdown_worktree_cleanup_verdict(path: &std::path::Path, has_open_tasks: boo
 /// pushed, so safety is whether its tip is reachable from the repository's
 /// target branch. A repository without any remote has the same local contract
 /// even for legacy push-branch task rows.
-fn shutdown_worktree_safety(
+pub(crate) fn shutdown_worktree_safety(
     path: &std::path::Path,
     local_merge_delivery: bool,
     target_branches: &[String],
@@ -2335,6 +2342,11 @@ impl CasService {
             .filter(|brief| !brief.is_empty())
             .map(str::to_string);
         if let Some(brief) = spawn_brief.as_deref() {
+            if let Some(message) =
+                crate::mcp::tools::core::task::caller_note_marker_rejection(brief)
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS, message));
+            }
             if req.task_id.is_none() {
                 return Err(Self::error(
                     ErrorCode::INVALID_PARAMS,
@@ -2369,21 +2381,17 @@ impl CasService {
         let mut task_id_authorization: Option<Result<(), String>> = None;
         let mut preassigned_task: Option<cas_types::Task> = None;
         let mut stale_assignee_notice = String::new();
-        let mut split_spawn_note = String::new();
         if let Some(ref task_id) = req.task_id {
-            // cas-4736: never pre-assign a child the peer took under a
-            // binding epic split, unless forced.
+            // Takeover needs an existing worker registration to bind to.
+            // Spawn first, then use an authenticated, reasoned assignment.
             if let Some(hold) =
                 crate::cloud::epic_split::split_hold_for(&self.inner.cas_root, task_id)
             {
                 let prefix = crate::mcp::tools::core::guidance::caller_prefix();
-                if !req.force.unwrap_or(false) {
-                    return Err(Self::error(
-                        ErrorCode::INVALID_PARAMS,
-                        hold.refusal(task_id, &prefix),
-                    ));
-                }
-                split_spawn_note = hold.override_note(task_id, &prefix);
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    hold.refusal(task_id, &prefix),
+                ));
             }
             let requested_worker_count = if worker_names.is_empty() {
                 count
@@ -2647,6 +2655,24 @@ impl CasService {
                     no_active_epic_guidance(&why),
                 ));
             }
+        }
+
+        // Refuse locally knowable provision failures before provider probes,
+        // brief/delivery-mode writes or the success-shaped enqueue receipt.
+        if isolate
+            && let Ok(repo) = crate::worktree::GitOperations::detect_repo_root(&self.inner.cas_root)
+        {
+            let focused_branch = ctx.factory_session.as_deref()
+                .and_then(crate::ui::factory::preferred_epic_id_from_session_metadata_named)
+                .and_then(|id| task_store.get(&id).ok())
+                .and_then(|epic| epic.branch);
+            crate::ui::factory::preflight_spawn_base(
+                &self.inner.cas_root,
+                &repo,
+                req.task_id.as_deref(),
+                focused_branch.as_deref(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error))?;
         }
 
         let slots = if worker_names.is_empty() {
@@ -2990,7 +3016,7 @@ impl CasService {
             .task_id
             .as_ref()
             .map(|id| {
-                format!("\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}{split_spawn_note}")
+                format!("\nTask: {id} will be pre-assigned once the worker boots{stale_assignee_notice}")
             })
             .unwrap_or_default();
         // cas-0078: peer findings, measured before the queue row existed.
@@ -3158,6 +3184,25 @@ impl CasService {
                 format!("Failed to list agents: {e}"),
             )
         })?;
+        let caller_id = self.inner.get_registered_agent_id_read_only().ok();
+        let adopted_workers: std::collections::HashSet<String> = all_agents
+            .iter()
+            .filter(|worker| {
+                ctx.supervisor_authorized
+                    && !worker.visible_to_factory_session(factory_session.as_deref())
+            })
+            .filter(|worker| {
+                crate::factory_session_scope::adopted_worker_supervisor(
+                    &self.inner.cas_root,
+                    worker,
+                )
+                .is_some_and(|owner| {
+                    Some(&owner.id) == caller_id.as_ref()
+                        && owner.factory_session == factory_session
+                })
+            })
+            .map(|worker| worker.id.clone())
+            .collect();
         // Every registered worker, before scope/ownership filtering. Used only
         // to tell "unknown" apart from "refused" in the error path (cas-2c05).
         let all_registry_workers: Vec<cas_types::Agent> = all_agents
@@ -3174,7 +3219,8 @@ impl CasService {
                 .into_iter()
                 .filter(|agent| {
                     agent.role == AgentRole::Worker
-                        && agent.visible_to_factory_session(factory_session.as_deref())
+                        && (agent.visible_to_factory_session(factory_session.as_deref())
+                            || adopted_workers.contains(&agent.id))
                         && (factory_session.is_some()
                             || (matches!(
                                 agent.status,
@@ -3380,11 +3426,128 @@ impl CasService {
             ));
         }
 
+        // Orphan PTYs cannot be attached to this daemon. Stop only durable,
+        // fingerprinted groups from the proven-dead original session; retain
+        // the normal queued pane path for every worker already owned here.
+        let groups = if selected
+            .iter()
+            .any(|worker| adopted_workers.contains(&worker.id))
+        {
+            crate::ui::factory::process_groups::list(&self.inner.cas_root)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        for worker in selected
+            .iter()
+            .filter(|worker| adopted_workers.contains(&worker.id))
+        {
+            let original_groups: Vec<_> = groups
+                .iter()
+                .filter(|group| {
+                    group.worker_name == worker.name
+                        && Some(&group.factory_session) == worker.factory_session.as_ref()
+                })
+                .collect();
+            if original_groups.is_empty() {
+                let current = agent_store
+                    .get(&worker.id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if current.status == AgentStatus::Shutdown {
+                    // The daemon retires the row before killing. Only a retired
+                    // worker with no remaining recorded group is already done.
+                    continue;
+                }
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Cannot stop adopted worker {}: no recorded process-group identity; no signal was sent to this worker in this request",
+                        worker.name
+                    ),
+                ));
+            }
+            for group in original_groups {
+                let current = agent_store
+                    .get(&worker.id)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if current.factory_session != worker.factory_session
+                    || current.name != worker.name
+                    || !crate::factory_session_scope::adopted_worker_supervisor(
+                        &self.inner.cas_root,
+                        &current,
+                    )
+                    .is_some_and(|owner| {
+                        Some(&owner.id) == caller_id.as_ref()
+                            && owner.factory_session == factory_session
+                    })
+                {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        "Adoption authority changed before shutdown; nothing further was signalled",
+                    ));
+                }
+                // Tool children may enter separate process groups. Capture
+                // ancestry before stopping the leader; revalidate every PID.
+                let (pid, starttime) = (group.pgid, group.pid_starttime);
+                let tree_stopped = tokio::task::spawn_blocking(move || {
+                    crate::ui::factory::server_registry::kill_process_tree_fingerprinted(pid, starttime)
+                })
+                .await
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if tree_stopped && crate::ui::factory::process_groups::status(group)
+                    == crate::ui::factory::process_groups::ProcessGroupStatus::Unverifiable
+                {
+                    // macOS may withhold the fingerprint of the just-killed
+                    // zombie leader until its parent reaps it. The verified
+                    // tree is stopped; preserve the ambiguous group record
+                    // for GC rather than signal a numerically identified group.
+                    continue;
+                }
+                let outcome = crate::ui::factory::process_groups::reap(&self.inner.cas_root, group)
+                    .await
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                if outcome == crate::ui::factory::process_groups::ReapOutcome::FingerprintMismatch {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_REQUEST,
+                        "Adopted worker process identity changed; registration preserved",
+                    ));
+                }
+            }
+            let held = agent_store
+                .graceful_shutdown(&worker.id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+            super::orphan_recovery::recover_worker_retired_on_request(
+                &self.inner.cas_root,
+                agent_store.as_ref(),
+                worker,
+                &held,
+                "adopted worker shutdown",
+            );
+            retire_dead_worker_for_shutdown(
+                &self.inner.cas_root,
+                &worker.name,
+                worker.factory_session.as_deref(),
+            )
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        }
         let worker_names: Vec<String> = selected
             .iter()
+            .filter(|worker| !adopted_workers.contains(&worker.id))
             .map(|worker| worker.name.clone())
             .chain(selected_launched_names.iter().cloned())
             .collect();
+
+        if worker_names.is_empty() {
+            return Ok(Self::success(format!(
+                "Shut down adopted workers: {}. Worktrees preserved.",
+                selected
+                    .iter()
+                    .map(|worker| worker.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
 
         // Validation passed: queue only the exact resolved names. `count=None`
         // is intentional — the daemon must not re-expand this decision.
@@ -3795,29 +3958,18 @@ impl CasService {
             ));
         };
 
-        // Hold semantics deliberately cancel rather than suspend: reminders
-        // are one-shot watchdogs whose original timing and event context are
-        // stale once a supervisor has explicitly parked the worker. Release
-        // restores normal future signaling but never resurrects old waits.
-        let cancelled_reminders = if held {
-            let reminders = open_reminder_store(&self.inner.cas_root).map_err(|error| {
-                Self::error(
-                    ErrorCode::INTERNAL_ERROR,
-                    format!("Failed to open reminder store: {error}"),
-                )
-            })?;
-            reminders
-                .cancel_pending_for_target(&worker.id)
-                .map_err(|error| {
-                    Self::error(
-                        ErrorCode::INTERNAL_ERROR,
-                        format!("Failed to cancel pending worker reminders: {error}"),
-                    )
-                })?
-        } else {
-            0
-        };
-
+        // cas-73b89: a hold suspends the worker's reminders and release
+        // re-arms them. Cancelling them left a released worker with no wake:
+        // kind-hound-79 sat idle for about an hour after a one-minute hold.
+        // cas-c5ab: the hold state is persisted first, so a failed write
+        // leaves the reminders untouched; a failed reminder update rolls the
+        // hold state back.
+        let reminders = open_reminder_store(&self.inner.cas_root).map_err(|error| {
+            Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to open reminder store: {error}"),
+            )
+        })?;
         let path = metadata_path(&factory_session);
         persist_session_metadata_worker_hold_at(&path, worker_name, held).map_err(|error| {
             Self::error(
@@ -3825,6 +3977,24 @@ impl CasService {
                 format!("Failed to update worker hold state: {error}"),
             )
         })?;
+        let updated = if held {
+            reminders.suspend_pending_for_target(&worker.id)
+        } else {
+            reminders.resume_suspended_for_target(&worker.id)
+        };
+        let reminder_count = match updated {
+            Ok(count) => count,
+            Err(error) => {
+                let rollback = persist_session_metadata_worker_hold_at(&path, worker_name, !held)
+                    .err()
+                    .map(|rollback| format!("; restoring the hold state also failed: {rollback}"))
+                    .unwrap_or_default();
+                return Err(Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Failed to update the worker's reminders: {error}{rollback}"),
+                ));
+            }
+        };
 
         let event_type = if held {
             "worker_hold_armed"
@@ -3843,10 +4013,12 @@ impl CasService {
         let verb = if held { "Held" } else { "Released" };
         let reminder_summary = if held {
             format!(
-                " Cancelled {cancelled_reminders} pending reminder(s) targeted to this worker; release does not revive cancelled one-shot reminders."
+                " Suspended {reminder_count} pending reminder(s) targeted to this worker; release_worker re-arms them."
             )
         } else {
-            String::new()
+            format!(
+                " Re-armed {reminder_count} suspended reminder(s); any whose event or time came during the hold fires on the next daemon tick."
+            )
         };
         Ok(Self::success(format!(
             "{verb} worker {worker_name} for factory session {factory_session}. Hold state survives a daemon restart of this session and is cleared on worker removal or session shutdown.{reminder_summary}"
@@ -3868,7 +4040,8 @@ impl CasService {
         })?;
 
         // Snapshot execution before housekeeping can remove a dead worker.
-        // The fast poll does no Git, network, history scan or stale mutation.
+        // The fast poll does no Git, network or stale mutation. Binary-skew
+        // detection below reads bounded epoch history and caches its CLI probe.
         let factory_session = current_factory_session();
         let liveness_rows = worker_liveness_rows(
             &self.inner.cas_root,
@@ -3877,16 +4050,23 @@ impl CasService {
             chrono::Utc::now(),
         )
         .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
+        let binary_versions = crate::factory_binary_skew::snapshot(&self.inner.cas_root)
+            .map(|snapshot| crate::factory_binary_skew::render(&snapshot, factory_session.as_deref()))
+            .unwrap_or_else(|reason| format!("Factory MCP versions: unavailable ({reason})"));
         let (scoped_worker_count, outside_scope_worker_count) =
             worker_status_scope_counts(store.as_ref(), factory_session.as_deref())
                 .map_err(|e| Self::error(ErrorCode::INTERNAL_ERROR, e))?;
         if req.summary.unwrap_or(false) {
-            let summary = render_worker_liveness_summary_scoped(
+            let mut summary = render_worker_liveness_summary_scoped(
                 &liveness_rows,
                 factory_session.as_deref(),
                 scoped_worker_count,
                 outside_scope_worker_count,
             );
+            summary.push_str(&format!("\n{binary_versions}"));
+            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+                factory_session.as_deref(), chrono::Utc::now());
+            if !capacity.is_empty() { summary.push_str(&format!("\n{capacity}")); }
             // cas-73b5: the fast poll surfaces a wedged daemon loop too.
             let health = factory_session
                 .as_deref()
@@ -3924,7 +4104,8 @@ impl CasService {
                 })
                 .unwrap_or_default();
             let shutdown = crate::cloud::shutdown::health(&self.inner.cas_root, chrono::Utc::now());
-            let mailbox_health = format!("{presence}{shutdown}{mailbox_health}");
+            let session_ends = crate::supervisor_continuity::status_section(&self.inner.cas_root);
+            let mailbox_health = format!("{presence}{shutdown}{mailbox_health}{session_ends}");
             return Ok(Self::success(if health.is_empty() {
                 format!("{summary}\n{}", mailbox_health.trim_end())
             } else {
@@ -4294,6 +4475,9 @@ impl CasService {
                 msg.push_str("\n\n");
                 msg.push_str(warning);
             }
+            let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+                factory_session.as_deref(), chrono::Utc::now());
+            if !capacity.is_empty() { msg.push_str(&format!("\n{capacity}\n")); }
             msg.push_str(&undelivered_section);
             msg.push_str(&spawn_section);
             msg.push_str(&died_section);
@@ -4304,6 +4488,7 @@ impl CasService {
                     "\nFiltered stale agent record(s): {stale_pruned} (>{worker_stale_threshold_secs}s heartbeat age)\n"
                 ));
             }
+            msg.push_str(&format!("\n{binary_versions}\n"));
             return Ok(Self::success(msg));
         }
 
@@ -4420,6 +4605,9 @@ impl CasService {
         // timestamp) so worker_status can distinguish the normal dispatch
         // grace window from a worker that has held work without ever
         // starting it past the configured stall threshold.
+        let capacity = crate::factory_capacity_wait::render(&self.inner.cas_root,
+            factory_session.as_deref(), chrono::Utc::now());
+        if !capacity.is_empty() { output.push_str(&format!("{capacity}\n\n")); }
         let all_open_tasks: Vec<cas_types::Task> = {
             use crate::store::open_task_store;
             match open_task_store(&self.inner.cas_root)
@@ -5295,6 +5483,8 @@ impl CasService {
             ));
         }
 
+        output.push_str(&format!("\n{binary_versions}\n"));
+        output.push_str(&crate::supervisor_continuity::status_section(&self.inner.cas_root));
         Ok(Self::success(output))
     }
 
@@ -5674,17 +5864,19 @@ impl CasService {
         // supervisor's live workers; every other target names exactly one.
         let recipients: Vec<cas_types::Agent> = if target == "all_workers" {
             live_agents
-                .into_iter()
+                .iter()
                 .filter(|agent| {
                     agent.role == AgentRole::Worker
                         && agent.visible_to_factory_session(factory_session.as_deref())
                         && owned.as_ref().is_none_or(|set| set.contains(&agent.name))
                 })
+                .cloned()
                 .collect()
         } else {
             let found = live_agents
-                .into_iter()
+                .iter()
                 .find(|agent| agent.name == target)
+                .cloned()
                 .ok_or_else(|| {
                     Self::error(
                         ErrorCode::INVALID_PARAMS,
@@ -5724,20 +5916,17 @@ impl CasService {
                 format!("Failed to open message queue: {e}"),
             )
         })?;
-        let source = self
-            .inner
-            .get_agent_id()
-            .unwrap_or_else(|_| "unknown".to_string());
+        let caller = self.inner.get_agent_id().ok();
+        let source = caller.clone().unwrap_or_else(|| "unknown".to_string());
         // cas-d9a8: stamp the reset control row with the registry id of the
         // caller CAS actually resolved. `source` above falls back to the string
         // "unknown", which is not an identity, so the stamp is taken from a
         // real agent row or omitted entirely.
-        let queue_origin = crate::store::open_agent_store(&self.inner.cas_root)
-            .ok()
-            .and_then(|store| store.get(&source).ok())
-            .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
-                agent_id: agent.id,
-            });
+        let source_agent = agent_store.get(&source).ok();
+        let resume_source =
+            resume_brief_sender(source_agent.as_ref(), &live_agents, factory_session.as_deref());
+        let queue_origin = source_agent
+            .map(|agent| cas_store::QueueOrigin::RegisteredAgent { agent_id: agent.id });
 
         // Pre-flight every recipient BEFORE queueing anything: an unsupported
         // harness or an unlocatable transcript directory means Cassy could never
@@ -5931,7 +6120,35 @@ impl CasService {
             output.push_str(&format!("❌ {refusal}\n"));
         }
 
-        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() {
+        // Only a new transcript proves the old context is gone. Queue its
+        // replacement brief afterwards, including already-received answers.
+        // Codex resets return through the recycle path above, whose daemon
+        // completion already queues this same brief.
+        let mut brief_failed = false;
+        for name in confirmed.iter().map(|(name, _, _)| name).chain(
+            lost.iter()
+                .filter_map(|(name, _, restored)| restored.is_ok().then_some(name)),
+        ) {
+            match crate::ui::factory::enqueue_context_resume_brief(
+                &self.inner.cas_root,
+                &resume_source,
+                factory_session.as_deref(),
+                name,
+            ) {
+                Ok(Some(id)) => output.push_str(&format!(
+                    "✅ {name}: resume brief queued (notification #{id}).\n"
+                )),
+                Ok(None) => {}
+                Err(error) => {
+                    brief_failed = true;
+                    output.push_str(&format!(
+                        "❌ {name}: context reset landed, but its resume brief could not be queued: {error}. Recover from task notes and received supervisor messages before continuing.\n"
+                    ));
+                }
+            }
+        }
+
+        if !outstanding.is_empty() || !refusals.is_empty() || !lost.is_empty() || brief_failed {
             // Never report success for a reset that was not observed.
             return Err(Self::error(ErrorCode::INTERNAL_ERROR, output));
         }
@@ -5946,6 +6163,7 @@ impl CasService {
         &self,
         req: CoordinationRequest,
     ) -> Result<CallToolResult, McpError> {
+        let include_session_ends = !req.json.unwrap_or(false);
         let cas_root = self.inner.cas_root.clone();
         // Read-only: never auto-register or revive the caller for a lookup.
         let self_id = self.inner.get_registered_agent_id_read_only().ok();
@@ -5996,6 +6214,9 @@ impl CasService {
             )
         })?
         .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
+        let text = if include_session_ends {
+            format!("{text}{}", crate::supervisor_continuity::status_section(&self.inner.cas_root))
+        } else { text };
         Ok(Self::success(text))
     }
 
@@ -6459,12 +6680,11 @@ impl CasService {
         use cas_types::WorktreeStatus;
         use std::path::Path;
 
-        if req.limit == Some(0) {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "gc_report limit must be positive",
-            ));
-        }
+        let view = GcReportView::from_request(&req)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        // Leave headroom for metadata/proc reads and response rendering within
+        // the eight-second report target. All bulk inventories share this end.
+        let report_deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
 
         let stale_after = req.older_than_secs.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
@@ -6523,7 +6743,8 @@ impl CasService {
             )),
             &closed_task_ids,
         );
-        artifact_report.include_review_roots();
+        artifact_report.include_review_roots_until(Some(report_deadline.min(
+            std::time::Instant::now() + std::time::Duration::from_millis(250))));
         let target_cache_report = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let live_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
@@ -6533,12 +6754,12 @@ impl CasService {
                 agent_store.as_ref(),
                 worktree_store.as_ref(),
             );
-            crate::factory_target_cache::inspect(
+            crate::factory_target_cache::inspect_until(
                 &self.inner.cas_root,
                 policy,
                 &known_roots,
                 &live_roots,
-                true,
+                report_deadline,
             )
         };
         let host_registry_pids = crate::store::known_repos::host_registry_open_pids();
@@ -6570,6 +6791,16 @@ impl CasService {
             orphan_processes.servers.len(),
             orphan_processes.reapable_count(),
         ));
+        // cas-c634: reminders whose issuer and recipient are both gone; no
+        // live agent would otherwise see them held or expiring.
+        out.push_str(&format!(
+            "Orphaned reminders (issuer and recipient gone): {}\n",
+            crate::ui::factory::daemon::runtime::external_wake::orphaned_reminder_count(
+                &self.inner.cas_root,
+                chrono::Utc::now(),
+                &crate::mcp::tools::service::agent_liveness::agent_process_is_alive,
+            )
+        ));
         match agent_store.list(None) {
             Ok(agents) => out.push_str(&serve_memory_report(&agents)),
             Err(error) => out.push_str(&format!("\nServe memory: agent inventory unavailable: {error}\n")),
@@ -6594,9 +6825,12 @@ impl CasService {
             );
         }
         out.push_str(&orphan_processes.render());
-        out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
+        out.push_str(&crate::factory_target_cache::scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
-        out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
+        out.push_str(&crate::factory_scratch::render_relocated_until(
+            &self.inner.cas_root, target_cache_report.as_ref().ok(), Some(report_deadline)));
+        out.push_str(&crate::factory_review_scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
+        out.push_str(&crate::factory_review_scratch::unmanaged_large_until(&self.inner.cas_root, Some(report_deadline)));
         out.push_str(&artifact_report.render());
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
@@ -6635,15 +6869,22 @@ impl CasService {
 
         // cas-75a8 (GH #1296): task-named simulators, read-only here.
         if crate::task_simulators::supported() {
-            let tasks = crate::store::open_task_store(&self.inner.cas_root)
-                .and_then(|store| store.list(None).map_err(Into::into))
-                .unwrap_or_default();
-            out.push_str(&crate::task_simulators::render(&crate::task_simulators::inventory(
-                &crate::task_simulators::Simctl::default(),
-                &tasks,
-                &crate::task_ownership::KnownProjects::load(&self.inner.cas_root),
-                chrono::Utc::now(),
-            )));
+            let cas_root = self.inner.cas_root.clone();
+            // simctl and isolated ownership children wait synchronously (up
+            // to 10s per store); none of that work belongs on the async runtime.
+            let text = tokio::task::spawn_blocking(move || {
+                let tasks = crate::store::open_task_store(&cas_root)
+                    .and_then(|store| store.list(None).map_err(Into::into))
+                    .unwrap_or_default();
+                crate::task_simulators::render(&crate::task_simulators::inventory(
+                    &crate::task_simulators::Simctl::default(),
+                    &tasks,
+                    &crate::task_ownership::KnownProjects::load(&cas_root),
+                    chrono::Utc::now(),
+                ))
+            }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Simulator inventory worker failed: {error}")))?;
+            out.push_str(&text);
         }
 
         if !live_viktor_watches.is_empty() {
@@ -6723,20 +6964,24 @@ impl CasService {
         match target_cache_report {
             Ok(report) => {
                 out.push_str(&format!(
-                    "\nCargo target cache pressure:\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  exact cache bytes: {}\n  selected reclaimable bytes: {}\n",
+                    "\nCargo target cache pressure:\n  filesystem: {}\n  reserved builders: {}\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  measured cache bytes: {}\n  selected reclaimable bytes: {}\n  inventory complete: {}\n",
+                    report.filesystem_path.display(),
+                    report.reserved_builders,
                     report.filesystem.used_percent,
                     report.filesystem.high_watermark_percent,
                     report.filesystem.low_watermark_percent,
                     report.filesystem.pressure,
                     report.candidate_bytes,
                     report.selected_bytes,
+                    report.inventory_complete,
                 ));
                 for cache in &report.caches {
                     out.push_str(&format!(
-                        "  - {} bytes={} scan_ms={} state={:?} reason={}\n",
+                        "  - {} bytes={} scan_ms={} owner={} state={:?} reason={}\n",
                         cache.path.display(),
                         cache.bytes,
                         cache.scan_elapsed_ms,
+                        cache.worktree.display(),
                         cache.disposition,
                         cache.reason,
                     ));
@@ -6787,7 +7032,7 @@ impl CasService {
         out.push_str(&self.db_branch_gc_section());
 
         Ok(Self::success(render_gc_report_response(
-            &out, req.limit, req.offset,
+            &out, view,
         )))
     }
 
@@ -6948,6 +7193,27 @@ impl CasService {
         }
         let mut report =
             render_epic_status_collection(epic_id, parent_branch, &collection, &stacked_on);
+        // cas-fd4c: a successor stacked on an open predecessor epic must not
+        // silently fall behind it until the predecessor lands.
+        if let Some(branch) = epic.branch.as_deref().filter(|branch| !branch.trim().is_empty()) {
+            use crate::mcp::tools::core::task::lifecycle::epic_lane;
+            let blockers: Vec<String> = task_store
+                .get_blockers(epic_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|task| task.id)
+                .collect();
+            if let Some((predecessor, predecessor_branch)) =
+                epic_lane::open_predecessor_epic(task_store.as_ref(), &blockers)
+            {
+                report.push_str(&epic_lane::stale_base_note(
+                    &close_project_root,
+                    branch,
+                    &predecessor,
+                    &predecessor_branch,
+                ));
+            }
+        }
         let staged: Vec<_> = subtasks.iter().filter(|task| task.status == cas_types::TaskStatus::AwaitingMerge).filter_map(|task| task.deliverables.integration_batch.as_ref().map(|batch| (task, batch))).collect();
         if !staged.is_empty() {
             report.push_str("\nStaged integration batch receipts:\n");
@@ -7379,24 +7645,32 @@ impl CasService {
         // cas-75a8 (GH #1296): task-named simulators share the artifacts=true
         // opt-in; without it they are listed, never deleted.
         if crate::task_simulators::supported() {
-            let simctl = crate::task_simulators::Simctl::default();
-            // Every task, not only closed ones, so an open task's device is
-            // named as kept rather than as unknown.
-            let simulators = crate::store::open_task_store(&self.inner.cas_root)
-                .map_err(anyhow::Error::from)
-                .and_then(|store| store.list(None).map_err(anyhow::Error::from))
-                .and_then(|tasks| {
-                    let others = crate::task_ownership::KnownProjects::load(&self.inner.cas_root);
-                    crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
-                });
-            output.push_str(&crate::task_simulators::render(&simulators));
-            if artifact_authorized && let Ok(simulators) = &simulators {
-                let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
-                output.push_str(&format!("  Task simulators deleted: {}\n", deleted.len()));
-                for failure in failed {
-                    output.push_str(&format!("  Task simulator delete failed: {failure}\n"));
+            let cas_root = self.inner.cas_root.clone();
+            // Keep inventory, ownership probes and any authorized simctl
+            // deletes together on the blocking pool, with the same gates.
+            let text = tokio::task::spawn_blocking(move || {
+                let simctl = crate::task_simulators::Simctl::default();
+                // Every task, not only closed ones, so an open task's device
+                // is named as kept rather than as unknown.
+                let simulators = crate::store::open_task_store(&cas_root)
+                    .map_err(anyhow::Error::from)
+                    .and_then(|store| store.list(None).map_err(anyhow::Error::from))
+                    .and_then(|tasks| {
+                        let others = crate::task_ownership::KnownProjects::load(&cas_root);
+                        crate::task_simulators::inventory(&simctl, &tasks, &others, chrono::Utc::now())
+                    });
+                let mut text = crate::task_simulators::render(&simulators);
+                if artifact_authorized && let Ok(simulators) = &simulators {
+                    let (deleted, failed) = crate::task_simulators::reclaim(&simctl, simulators);
+                    text.push_str(&format!("  Task simulators deleted: {}\n", deleted.len()));
+                    for failure in failed {
+                        text.push_str(&format!("  Task simulator delete failed: {failure}\n"));
+                    }
                 }
-            }
+                text
+            }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
+                format!("Simulator cleanup worker failed: {error}")))?;
+            output.push_str(&text);
         }
         match trace_cleanup {
             Ok((files, bytes)) => output.push_str(&format!(
@@ -7406,6 +7680,7 @@ impl CasService {
         }
 
         output.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
+        output.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, target_cache_mutation_authorized));
         if !orphan_process_summary.killed.is_empty() {
             output.push_str(&format!(
                 "\nKilled pids: {}",
@@ -7485,7 +7760,7 @@ fn render_target_cache_report(report: &crate::factory_target_cache::TargetCacheR
         output.push_str(&format!("\n  - {} bytes={} scan_ms={} state={:?} reason={}",
             cache.path.display(), cache.bytes, cache.scan_elapsed_ms, cache.disposition, cache.reason));
     }
-    output.push_str(&format!("\n{}\nTARGET_CACHE_STATUS_JSON={}", report.remediation, report.machine_json()));
+    output.push_str(&format!("\nFilesystem: {} ({}% used; pressure={}; reserved builders={})\n{}\nTARGET_CACHE_STATUS_JSON={}", report.filesystem_path.display(), report.filesystem.used_percent, report.filesystem.pressure, report.reserved_builders, report.remediation, report.machine_json()));
     output
 }
 
@@ -7540,31 +7815,88 @@ const GC_REPORT_PAGE_MAX: usize = 100;
 const GC_REPORT_PAGE_MAX_BYTES: usize = 32 * 1024;
 const GC_REPORT_SAMPLE_ITEMS: usize = 3;
 const GC_REPORT_SAMPLE_CHARS: usize = 180;
-const GC_REPORT_CATEGORY_HEADING_MAX_CHARS: usize = 512;
-const GC_REPORT_MACHINE_STATUS_MAX_BYTES: usize = 8 * 1024;
+const GC_REPORT_CATEGORY_HEADING_MAX_CHARS: usize = 60;
+const GC_REPORT_HUMAN_WIDTH: usize = 79;
+
+#[derive(Clone, Copy)]
+enum GcReportView {
+    Summary,
+    Page { limit: usize, offset: usize },
+    Full,
+    Json,
+}
+
+impl GcReportView {
+    fn from_request(req: &FactoryRequest) -> Result<Self, &'static str> {
+        if req.limit == Some(0) {
+            return Err("gc_report limit must be positive");
+        }
+        let json = req.json.unwrap_or(false);
+        let full = req.full.unwrap_or(false);
+        let paging = req.limit.is_some() || req.offset.is_some();
+        if (json || full) && paging {
+            return Err("gc_report: use full/json or limit/offset separately");
+        }
+        Ok(if json {
+            Self::Json
+        } else if full {
+            Self::Full
+        } else if paging {
+            Self::Page {
+                limit: req.limit.unwrap_or(GC_REPORT_PAGE_SIZE),
+                offset: req.offset.unwrap_or(0),
+            }
+        } else {
+            Self::Summary
+        })
+    }
+}
 
 /// Keep the default tool result compact while preserving every original line
 /// behind explicit, zero-based `limit`/`offset` pages.
-fn render_gc_report_response(
-    full_report: &str,
-    limit: Option<usize>,
-    offset: Option<usize>,
-) -> String {
+fn render_gc_report_response(full_report: &str, view: GcReportView) -> String {
     const HEADER: &str = "Factory GC Report\n=================\n";
     let detail = full_report
         .strip_prefix(HEADER)
         .unwrap_or(full_report)
         .trim_start_matches('\n');
 
-    if limit.is_some() || offset.is_some() {
+    if let GcReportView::Page { limit, offset } = view {
         let lines = detail.lines().collect::<Vec<_>>();
-        let requested_limit = limit.unwrap_or(GC_REPORT_PAGE_SIZE);
-        let page_size = requested_limit.min(GC_REPORT_PAGE_MAX);
-        let start = offset.unwrap_or(0).min(lines.len());
-        return render_gc_report_page(&lines, start, page_size, requested_limit);
+        let page_size = limit.min(GC_REPORT_PAGE_MAX);
+        let start = offset.min(lines.len());
+        return render_gc_report_page(&lines, start, page_size, limit);
     }
-
-    summarize_gc_report(full_report, detail)
+    match view {
+        GcReportView::Full => full_report.to_owned(),
+        GcReportView::Json => {
+            // These are existing machine wire payloads, before any human
+            // projection. Keep malformed producer output explicit as well.
+            let machine_status: serde_json::Map<String, serde_json::Value> = full_report
+                .lines()
+                .filter(|line| gc_report_is_machine_status_line(line))
+                .filter_map(|line| line.split_once('='))
+                .map(|(key, raw)| {
+                    (
+                        key.to_owned(),
+                        serde_json::from_str(raw).unwrap_or_else(
+                            |error| serde_json::json!({"raw": raw, "error": error.to_string()}),
+                        ),
+                    )
+                })
+                .collect();
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "schema_version": 1,
+                    "report_text": summarize_gc_report(full_report, detail),
+                    "full_report": full_report,
+                    "machine_status": machine_status,
+                })
+            )
+        }
+        _ => summarize_gc_report(full_report, detail),
+    }
 }
 
 fn summarize_gc_report(full_report: &str, detail: &str) -> String {
@@ -7573,17 +7905,13 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         .map(|section| section.trim_matches('\n'))
         .filter(|section| !section.trim().is_empty());
     let metrics = sections.next().unwrap_or_default();
+    let category_count = sections.clone().filter(|section| {
+        !section.lines().next().is_some_and(gc_report_is_machine_status_line)
+            && !section.starts_with("Note:")
+    }).count();
     let mut summary = format!(
-        "Factory GC Report\n=================\nFull report: {} bytes; detail pages contain at most {} zero-based lines and {} bytes. Use `factory action=gc_report limit={} offset=0` for full detail.\n\n",
-        full_report.len(),
-        GC_REPORT_PAGE_MAX,
-        GC_REPORT_PAGE_MAX_BYTES,
-        GC_REPORT_PAGE_SIZE,
+        "[INFO] GC review: {category_count} inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n\n"
     );
-    let machine_status_lines = detail
-        .lines()
-        .filter(|line| gc_report_is_machine_status_line(line))
-        .collect::<Vec<_>>();
     if !metrics.is_empty() {
         for line in metrics.lines() {
             if !gc_report_is_machine_status_line(line) {
@@ -7592,7 +7920,7 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             }
         }
         summary.push_str(
-            "\n\nInventory summary (category counts/bytes; first up to 3 items per category):\n",
+            "\nInventory (first up to 3 items per category):\n",
         );
     }
 
@@ -7604,7 +7932,23 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
         if gc_report_is_machine_status_line(heading) {
             continue;
         }
-        let label = gc_report_category_label(heading);
+        if heading.starts_with("Note:") {
+            summary.push('\n');
+            summary.push_str(section);
+            summary.push('\n');
+            continue;
+        }
+        // Keep actionable artifact counts independent of the potentially long
+        // root. Full/JSON/pages retain the producer's complete original heading.
+        // Split from the right so a root containing the marker stays opaque.
+        let (label, artifact_counts) = if let Some((_, counts)) = heading
+            .strip_prefix("Durable task artifacts: root=")
+            .and_then(|values| values.rsplit_once(" closed-task candidates="))
+        {
+            ("Durable task artifacts".to_owned(), Some(counts))
+        } else {
+            (gc_report_category_label(heading), None)
+        };
         let detail_lines = lines
             .iter()
             .skip(1)
@@ -7617,15 +7961,13 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             .filter(|line| gc_report_is_inventory_item(line))
             .collect::<Vec<_>>();
         let item_count = item_lines.len();
-        let section_bytes = lines
-            .iter()
-            .filter(|line| !gc_report_is_machine_status_line(line))
-            .map(|line| line.len().saturating_add(1))
-            .sum::<usize>();
         summary.push_str(&format!(
-            "- {label}: {item_count} items, {section_bytes} bytes\n"
+            "- {label}: {item_count} items\n"
         ));
 
+        if let Some(counts) = artifact_counts {
+            summary.push_str(&format!("  Counts: closed-task candidates={counts}\n"));
+        }
         if let Some(context) = detail_lines
             .iter()
             .copied()
@@ -7640,14 +7982,70 @@ fn summarize_gc_report(full_report: &str, detail: &str) -> String {
             summary.push_str(&format!("  Sample: {}\n", gc_report_short_line(item)));
         }
     }
-    if !machine_status_lines.is_empty() {
-        summary.push_str("\nMachine-readable status:\n");
-        for line in machine_status_lines {
-            summary.push_str(&gc_report_bounded_machine_status_line(line));
-            summary.push('\n');
+    summary.push_str(&format!(
+        "\nDetails: cas factory gc report --full\nJSON: cas factory gc report --json\nMCP pages: factory action=gc_report limit=100 offset=0\nReport: {} bytes; full text and status are opt-in.\n",
+        full_report.len(),
+    ));
+    gc_report_fit_human(&summary)
+}
+
+/// A shared, destination-independent preview: printable ASCII, hanging
+/// indents and whole tokens. Full/JSON views retain every original value.
+fn gc_report_ascii(text: &str) -> String {
+    let mut ascii = String::new();
+    for character in text.chars() {
+        if character.is_ascii() && !character.is_control() {
+            ascii.push(character);
+        } else {
+            ascii.extend(character.escape_default());
         }
     }
-    summary
+    ascii
+}
+
+fn gc_report_shorten_token(word: &str, width: usize) -> String {
+    if word.len() <= width {
+        return word.to_owned();
+    }
+    let keep = width.saturating_sub(3);
+    let head = keep / 3;
+    format!(
+        "{}...{}",
+        &word[..head],
+        &word[word.len() - (keep - head)..]
+    )
+}
+
+fn gc_report_fit_human(text: &str) -> String {
+    let mut output = String::new();
+    for original in text.lines() {
+        let ascii = gc_report_ascii(original);
+        let (prefix, body) = ["  Counts: ", "  Context: ", "  Sample: "]
+            .into_iter()
+            .find_map(|prefix| ascii.strip_prefix(prefix).map(|body| (prefix, body)))
+            .unwrap_or(("", ascii.as_str()));
+        let indent = if prefix.is_empty() { 2 } else { prefix.len() };
+        let mut line = prefix.to_owned();
+        let mut has_word = false;
+        for word in body.split_whitespace() {
+            let word = gc_report_shorten_token(word, GC_REPORT_HUMAN_WIDTH - indent);
+            let needed = word.len() + usize::from(has_word);
+            if has_word && line.len() + needed > GC_REPORT_HUMAN_WIDTH {
+                output.push_str(line.trim_end());
+                output.push('\n');
+                line = " ".repeat(indent);
+                has_word = false;
+            }
+            if has_word {
+                line.push(' ');
+            }
+            line.push_str(&word);
+            has_word = true;
+        }
+        output.push_str(line.trim_end());
+        output.push('\n');
+    }
+    output
 }
 
 fn render_gc_report_page(
@@ -7712,15 +8110,12 @@ fn gc_report_page_text(
 }
 
 fn gc_report_category_label(heading: &str) -> String {
-    let heading = heading.trim().trim_end_matches(':').trim();
-    let chars = heading.chars().collect::<Vec<_>>();
-    if chars.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
-        return heading.to_string();
+    let heading = gc_report_ascii(heading.trim().trim_end_matches(':').trim());
+    if heading.len() <= GC_REPORT_CATEGORY_HEADING_MAX_CHARS {
+        heading
+    } else {
+        format!("{}...", &heading[..GC_REPORT_CATEGORY_HEADING_MAX_CHARS - 3])
     }
-    let half = GC_REPORT_CATEGORY_HEADING_MAX_CHARS / 2;
-    let start = chars[..half].iter().collect::<String>();
-    let end = chars[chars.len() - half..].iter().collect::<String>();
-    format!("{start}…{end}")
 }
 
 fn gc_report_is_inventory_item(line: &str) -> bool {
@@ -7741,109 +8136,66 @@ fn gc_report_is_machine_status_line(line: &str) -> bool {
 }
 
 fn gc_report_short_line(line: &str) -> String {
-    let mut chars = line.chars();
-    let short = chars.by_ref().take(GC_REPORT_SAMPLE_CHARS).collect::<String>();
-    if chars.next().is_some() {
-        format!("{short}…")
+    let line = gc_report_ascii(line);
+    if line.len() <= GC_REPORT_SAMPLE_CHARS {
+        line
     } else {
-        short
+        format!("{}...", &line[..GC_REPORT_SAMPLE_CHARS - 3])
     }
 }
 
-fn gc_report_bounded_machine_status_line(line: &str) -> String {
-    if line.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
-        return line.to_string();
+/// cas-d1e0: who a context-reset resume brief says it is from.
+/// cas-e13c: `live_agents` is the handler's active agent list, so naming
+/// the session's supervisor costs no second, unfiltered registry load.
+fn resume_brief_sender(
+    caller: Option<&cas_types::Agent>,
+    live_agents: &[cas_types::Agent],
+    factory_session: Option<&str>,
+) -> String {
+    // The caller's own name when it has an agent record.
+    if let Some(agent) = caller {
+        return agent.name.clone();
     }
-
-    let Some((key, raw_json)) = line.split_once('=') else {
-        return line.chars().take(GC_REPORT_MACHINE_STATUS_MAX_BYTES).collect();
+    // Otherwise the factory session's supervisor, the identity it acts for.
+    let Some(session) = factory_session else {
+        return "supervisor".to_string();
     };
-    let original_bytes = line.len();
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(raw_json) else {
-        return format!(
-            "{key}={{\"summary_truncated\":true,\"summary_original_bytes\":{original_bytes}}}"
-        );
-    };
-    let original_counts = ["caches", "lane_previews"]
-        .into_iter()
-        .map(|field| {
-            (
-                field,
-                value
-                    .get(field)
-                    .and_then(serde_json::Value::as_array)
-                    .map_or(0, Vec::len),
-            )
+    live_agents
+        .iter()
+        .filter(|agent| {
+            agent.role == cas_types::AgentRole::Supervisor
+                && agent.factory_session.as_deref() == Some(session)
         })
-        .collect::<Vec<_>>();
-    for (field, count) in &original_counts {
-        if let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut) {
-            items.truncate(GC_REPORT_SAMPLE_ITEMS);
-        }
-        let omitted = count.saturating_sub(GC_REPORT_SAMPLE_ITEMS);
-        if omitted > 0
-            && let Some(object) = value.as_object_mut()
-        {
-            object.insert(format!("{field}_omitted"), serde_json::json!(omitted));
-        }
-    }
-    if let Some(object) = value.as_object_mut() {
-        object.insert("summary_truncated".into(), serde_json::Value::Bool(true));
-        object.insert(
-            "summary_original_bytes".into(),
-            serde_json::json!(original_bytes),
+        .max_by_key(|agent| agent.last_heartbeat)
+        .map(|agent| agent.name.clone())
+        .unwrap_or_else(|| format!("supervisor (factory session {session})"))
+}
+
+#[cfg(test)]
+mod resume_brief_sender_tests {
+    use super::resume_brief_sender;
+
+    /// cas-d1e0: a caller with no agent record is not "unknown": the brief
+    /// names its factory session's supervisor, or at least the session.
+    #[test]
+    fn a_caller_without_a_record_sends_as_the_session_supervisor_cas_d1e0() {
+        let mut lead = cas_types::Agent::new_with_role(
+            "lead-id".into(),
+            "swift-octopus-83".into(),
+            cas_types::AgentRole::Supervisor,
         );
-    }
+        lead.factory_session = Some("session-a".into());
+        let live = vec![lead.clone()];
 
-    loop {
-        let encoded = serde_json::to_string(&value).unwrap_or_else(|_| "{}".into());
-        let candidate = format!("{key}={encoded}");
-        if candidate.len() <= GC_REPORT_MACHINE_STATUS_MAX_BYTES {
-            return candidate;
-        }
-
-        let mut removed = false;
-        for field in ["caches", "lane_previews"] {
-            let Some(items) = value.get_mut(field).and_then(serde_json::Value::as_array_mut)
-            else {
-                continue;
-            };
-            if items.pop().is_none() {
-                continue;
-            }
-            let omitted_key = format!("{field}_omitted");
-            let omitted = value
-                .get(&omitted_key)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-                .saturating_add(1);
-            if let Some(object) = value.as_object_mut() {
-                object.insert(omitted_key, serde_json::json!(omitted));
-            }
-            removed = true;
-            break;
-        }
-        if !removed {
-            let count_for = |field: &str| {
-                original_counts
-                    .iter()
-                    .find(|(name, _)| *name == field)
-                    .map_or(0, |(_, count)| *count)
-            };
-            let compact = serde_json::json!({
-                "schema_version": value.get("schema_version"),
-                "filesystem": value.get("filesystem"),
-                "candidate_bytes": value.get("candidate_bytes"),
-                "selected_bytes": value.get("selected_bytes"),
-                "reclaimed_bytes": value.get("reclaimed_bytes"),
-                "dry_run": value.get("dry_run"),
-                "cache_count": count_for("caches"),
-                "lane_preview_count": count_for("lane_previews"),
-                "summary_truncated": true,
-                "summary_original_bytes": original_bytes,
-            });
-            return format!("{key}={compact}");
-        }
+        assert_eq!(resume_brief_sender(Some(&lead), &live, Some("session-a")), "swift-octopus-83");
+        assert_eq!(resume_brief_sender(None, &live, Some("session-a")), "swift-octopus-83");
+        // cas-e13c: the exact fallbacks, so another session's supervisor
+        // can never stand in for this one.
+        assert_eq!(
+            resume_brief_sender(None, &live, Some("session-b")),
+            "supervisor (factory session session-b)"
+        );
+        assert_eq!(resume_brief_sender(None, &live, None), "supervisor");
     }
 }
 
@@ -7852,7 +8204,7 @@ mod gc_report_render_tests {
     use super::*;
 
     #[test]
-    fn large_machine_status_is_bounded_and_records_omitted_cache_details() {
+    fn summary_bounds_inventory_and_preserves_opt_in_machine_status() {
         let caches = (0..1_000)
             .map(|index| {
                 serde_json::json!({
@@ -7878,35 +8230,62 @@ mod gc_report_render_tests {
             "Factory GC Report\n=================\n\nStale agents: 0\n\nCargo target cache pressure:\n  - /tmp/factory/cache-0 bytes=0\nTARGET_CACHE_STATUS_JSON={status}\n"
         );
 
-        let summary = render_gc_report_response(&report, None, None);
-        let line = summary
-            .lines()
-            .find(|line| line.starts_with("TARGET_CACHE_STATUS_JSON="))
-            .expect("bounded machine-readable status line");
-        assert!(line.len() <= 8 * 1024, "{} bytes", line.len());
-        let value: serde_json::Value = serde_json::from_str(
-            line.strip_prefix("TARGET_CACHE_STATUS_JSON=").unwrap(),
-        )
-        .expect("status remains valid JSON");
-        assert_eq!(value["summary_truncated"], true);
-        assert_eq!(value["caches"].as_array().unwrap().len(), 3);
-        assert_eq!(value["caches_omitted"], 997);
-        let category = summary
-            .lines()
-            .find(|line| line.starts_with("- Cargo target cache pressure:"))
-            .unwrap();
-        assert!(category.starts_with("- Cargo target cache pressure: 1 items, "));
-        let category_bytes = category
-            .split(" items, ")
-            .nth(1)
-            .unwrap()
-            .split(" bytes")
-            .next()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        assert!(category_bytes < 1_000, "{category}");
-        assert!(!summary.contains("Sample: TARGET_CACHE_STATUS_JSON="));
+        let report = format!("{report}\nPaths \u{00e9}:\n  - /{}\n\nNote: these are not auto-deleted. Inspect, then commit/salvage/discard.\n", "a".repeat(200));
+        let summary = render_gc_report_response(&report, GcReportView::Summary);
+        assert!(
+            summary.is_ascii(),
+            "shared human output has an ASCII fallback"
+        );
+        assert!(
+            summary.lines().all(|line| line.len() <= 79),
+            "human report overflows an 80-column terminal: {summary}"
+        );
+        assert!(
+            !summary
+                .lines()
+                .any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")),
+            "raw status belongs behind the explicit machine/full view"
+        );
+        assert!(summary.starts_with("[INFO] GC review: 2 inventory categories\nReview cleanup tiers: cas factory gc cleanup --help\n"), "verdict and accurate next action come first: {summary}");
+        assert!(summary.contains("- Cargo target cache pressure: 1 items"));
+        assert!(summary.contains("Note: these are not auto-deleted."));
+        let note_start = summary.find("Note: these are not auto-deleted.").unwrap();
+        assert!(
+            summary[..note_start].ends_with("\n\n"),
+            "the WIP note needs a blank line after inventory samples: {summary}"
+        );
+        assert!(!summary.contains("- Note:"), "notes are not inventory categories");
+        assert!(summary.contains("--full"));
+        assert_eq!(
+            render_gc_report_response(&report, GcReportView::Full),
+            report
+        );
+        let machine: serde_json::Value =
+            serde_json::from_str(&render_gc_report_response(&report, GcReportView::Json)).unwrap();
+        assert_eq!(machine["report_text"], summary);
+        assert_eq!(machine["full_report"], report);
+        assert_eq!(
+            machine["machine_status"]["TARGET_CACHE_STATUS_JSON"],
+            status
+        );
+        assert_eq!(
+            machine["machine_status"]["TARGET_CACHE_STATUS_JSON"]["caches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1_000
+        );
+        for (flags, valid) in [
+            (serde_json::json!({"json": true, "full": true}), true),
+            (serde_json::json!({"json": true, "offset": 0}), false),
+            (serde_json::json!({"full": true, "limit": 1}), false),
+            (serde_json::json!({"limit": 0}), false),
+        ] {
+            let mut request = flags;
+            request["action"] = serde_json::json!("gc_report");
+            let request = serde_json::from_value(request).unwrap();
+            assert_eq!(GcReportView::from_request(&request).is_ok(), valid);
+        }
     }
 }
 
@@ -7980,6 +8359,10 @@ impl FactoryArtifactInventory {
     /// Sibling project keys (including pre-rename keys), bare task IDs and
     /// shared builds have no project-task deletion authority. Inventory only.
     fn include_review_roots(&mut self) {
+        self.include_review_roots_until(None)
+    }
+
+    fn include_review_roots_until(&mut self, deadline: Option<std::time::Instant>) {
         let Some(base) = self.root.parent() else {
             return;
         };
@@ -7996,7 +8379,7 @@ impl FactoryArtifactInventory {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| {
                 let path = entry.path();
-                let usage = crate::artifacts::retention::artifact_root_usage(&path);
+                let usage = crate::artifacts::retention::artifact_root_usage_until(&path, deadline);
                 (path, usage)
             })
             .collect();
@@ -8425,6 +8808,9 @@ pub(crate) fn retire_dead_worker_for_shutdown(
     let mut recipients = std::collections::BTreeSet::from([name.to_string()]);
     for agent in &matching {
         let held_task_ids = agents.graceful_shutdown(&agent.id)?;
+        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
+            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
+        }
         if agent.status != cas_types::AgentStatus::Shutdown {
             // cas-b06f: requested, so reported by the shutdown receipt.
             super::orphan_recovery::recover_worker_retired_on_request(
@@ -8434,9 +8820,6 @@ pub(crate) fn retire_dead_worker_for_shutdown(
                 &held_task_ids,
                 "dead worker retired by shutdown request",
             );
-        }
-        if let Err(error) = crate::factory_target_cache::retirement::retire_worker(cas_root, agent) {
-            tracing::warn!(%error, worker = name, "dead worker target evidence/reclamation deferred");
         }
         recipients.insert(agent.id.clone());
         if let Some(session_id) = &agent.cc_session_id {
@@ -9287,12 +9670,20 @@ impl SyncFailure {
 ///   reason the pop failed. Saying only "run apply" would send the operator
 ///   into the same wall, so the caveat and its way out are part of the text.
 pub(crate) fn stash_recovery_command(stash_ref: &str) -> String {
+    let [show, apply, list] = match crate::worktree::GitOperations::git_remedies([
+        &["stash", "show", "-p", "--include-untracked", stash_ref],
+        &["stash", "apply", stash_ref],
+        &["stash", "list"],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return refusal,
+    };
     format!(
-        "git stash show -p --include-untracked {stash_ref}   # what is in it\n    \
-         git stash apply {stash_ref}                          # restore it\n    \
+        "{show}   # what is in it\n    \
+         {apply}                          # restore it\n    \
          # if apply says \"already exists, no checkout\", move that file aside \
          (that collision is why the restore failed) and re-run apply; the stash \
-         entry stays until you drop it by its `git stash list` index"
+         entry stays until you drop it by its `{list}` index"
     )
 }
 
@@ -10576,12 +10967,74 @@ pub(crate) fn worker_auth_failure_evidence(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
 ) -> crate::factory_auth_health::AuthFailureEvidence {
-    use crate::factory_auth_health::AuthFailureEvidence;
-    let cli = worker_cli_from_agent(agent);
-    let Some(transcript) = worker_transcript_path_for_agent(cas_root, agent) else {
-        return AuthFailureEvidence::Unavailable;
+    auth_failure_evidence_at(
+        worker_transcript_path_for_agent(cas_root, agent).as_deref(),
+        worker_cli_from_agent(agent),
+    )
+}
+
+/// GH #1319: account health of a supervisor's own harness, read from its
+/// transcript. A logged-out supervisor heartbeats like a healthy one while
+/// every turn it is given ends in "Login expired · Please run /login".
+pub(crate) fn supervisor_auth_failure_evidence(
+    cas_root: &std::path::Path,
+    agent: &cas_types::Agent,
+) -> crate::factory_auth_health::AuthFailureEvidence {
+    let cli = agent
+        .metadata
+        .get("supervisor_cli")
+        .and_then(|value| value.parse::<cas_mux::SupervisorCli>().ok())
+        .unwrap_or(cas_mux::SupervisorCli::Claude);
+    let project = agent
+        .metadata
+        .get("clone_path")
+        .filter(|path| !path.trim().is_empty())
+        .cloned()
+        .or_else(|| cas_root.parent().map(|path| path.to_string_lossy().into_owned()));
+    let transcript = resolve_worker_transcript_path_for_account(
+        project.as_deref(),
+        agent.cc_session_id.as_deref().unwrap_or(&agent.id),
+        cli,
+        agent.metadata.get("supervisor_account_dir").map(String::as_str),
+    );
+    // cas-2db0: this runs on every presence heartbeat. Re-read the tail only
+    // when the transcript's mtime or size moved since the last beat.
+    type Seen = (std::time::SystemTime, u64, crate::factory_auth_health::AuthFailureEvidence);
+    static SCANS: std::sync::LazyLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Seen>>,
+    > = std::sync::LazyLock::new(Default::default);
+    let Some(path) = transcript else {
+        return auth_failure_evidence_at(None, cli);
     };
-    let Some(tail) = read_transcript_tail(&transcript) else {
+    let stamp = std::fs::metadata(&path)
+        .ok()
+        .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+    if let Some((modified, len)) = stamp
+        && let Some((seen_modified, seen_len, evidence)) =
+            SCANS.lock().ok().and_then(|scans| scans.get(&path).cloned())
+        && (seen_modified, seen_len) == (modified, len)
+    {
+        return evidence;
+    }
+    let evidence = auth_failure_evidence_at(Some(&path), cli);
+    if let (Some((modified, len)), Ok(mut scans)) = (stamp, SCANS.lock()) {
+        // cas-ceeb: one entry per supervisor transcript this process has
+        // seen; a session churn past the bound starts the cache afresh.
+        const MAX_SCANS: usize = 64;
+        if scans.len() >= MAX_SCANS && !scans.contains_key(&path) {
+            scans.clear();
+        }
+        scans.insert(path, (modified, len, evidence.clone()));
+    }
+    evidence
+}
+
+fn auth_failure_evidence_at(
+    transcript: Option<&std::path::Path>,
+    cli: cas_mux::SupervisorCli,
+) -> crate::factory_auth_health::AuthFailureEvidence {
+    use crate::factory_auth_health::AuthFailureEvidence;
+    let Some(tail) = transcript.and_then(read_transcript_tail) else {
         return AuthFailureEvidence::Unavailable;
     };
     match cli {
@@ -10610,15 +11063,7 @@ pub(crate) fn worker_account_dir(agent: &cas_types::Agent) -> Option<String> {
 /// Bounded tail read shared by the transcript scanners. A transcript can grow
 /// without limit; the terminal records that matter are always at its end.
 fn read_transcript_tail(path: &std::path::Path) -> Option<String> {
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let metadata = std::fs::metadata(path).ok()?;
-    let start = metadata.len().saturating_sub(TAIL_BYTES);
-    let mut file = std::fs::File::open(path).ok()?;
-    use std::io::{Read, Seek, SeekFrom};
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut tail = String::new();
-    file.read_to_string(&mut tail).ok()?;
-    Some(tail)
+    super::worker_liveness::read_jsonl_tail(path, 256 * 1024).map(|(_, tail)| tail)
 }
 
 fn codex_rollout_reports_usage_limit(
@@ -10641,26 +11086,16 @@ fn codex_rollout_usage_limit_evidence(
     let Some(rollout) = rollout else {
         return UsageLimitEvidence::Unavailable;
     };
-    let Ok(metadata) = std::fs::metadata(rollout) else {
+    // cas-b76b: the shared bounded reader survives a mid-character seek.
+    let Some((start, tail)) = super::worker_liveness::read_jsonl_tail(rollout, 256 * 1024) else {
         return UsageLimitEvidence::Unavailable;
     };
-    const TAIL_BYTES: u64 = 256 * 1024;
-    let start = metadata.len().saturating_sub(TAIL_BYTES);
-    let Ok(mut file) = std::fs::File::open(rollout) else {
-        return UsageLimitEvidence::Unavailable;
-    };
-    use std::io::{Read, Seek, SeekFrom};
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return UsageLimitEvidence::Unavailable;
-    }
-    let mut tail = String::new();
-    if file.read_to_string(&mut tail).is_err() {
-        return UsageLimitEvidence::Unavailable;
-    }
     // Rollouts are append-only JSONL.  A limit line that is followed by a
     // successful terminal turn is historical rollout text, not a live outage.
-    // Keep the record timestamp (or its byte offset as a legacy fallback) as
-    // the durable episode identity used by daemon restarts and retry keys.
+    // Keep the record timestamp as the durable episode identity used by daemon
+    // restarts and retry keys. A legacy record without one falls back to
+    // `tail-<window start + line index>`: a position within the read window,
+    // not a byte offset, counting from the first whole line after the cut.
     let mut latest_terminal = None;
     for (line_index, line) in tail.lines().enumerate() {
         let limited = line.contains("You've hit your usage limit")
@@ -11576,17 +12011,8 @@ fn transcript_path_fast_in(
 /// Returns `None` when the file can't be opened, the tail has no parseable
 /// assistant entry with a `usage` field, or any I/O error occurs.
 pub(crate) fn read_context_usage_from_tail(path: &std::path::Path) -> Option<u64> {
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-
-    const TAIL_BYTES: u64 = 8192;
-    let start = file_len.saturating_sub(TAIL_BYTES);
-    file.seek(SeekFrom::Start(start)).ok()?;
-
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).ok()?;
+    // cas-b76b: the shared bounded reader survives a mid-character seek.
+    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     // Scan in reverse: the last assistant entry with usage is the freshest.
     for line in buf.lines().rev() {
@@ -11634,23 +12060,9 @@ fn read_context_usage_from_tail_for_cli(
         });
     }
 
-    use std::io::{Read, Seek, SeekFrom};
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
-    const TAIL_BYTES: u64 = 8192;
-    file.seek(SeekFrom::Start(file_len.saturating_sub(TAIL_BYTES)))
-        .ok()?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes).ok()?;
-    // A bounded seek can land on one of the at most three continuation
-    // bytes of a UTF-8 code point. Drop only that incomplete leading scalar;
-    // invalid UTF-8 anywhere else still fails closed as a malformed rollout.
-    let buf = (0..=3).find_map(|offset| {
-        bytes
-            .get(offset..)
-            .and_then(|tail| std::str::from_utf8(tail).ok())
-    })?;
+    // cas-189b: the shared bounded reader drops the line the seek cut, so a
+    // split code point there cannot hide usage.
+    let (_, buf) = super::worker_liveness::read_jsonl_tail(path, 8192)?;
 
     for line in buf.lines().rev() {
         if !line.contains("\"type\":\"token_count\"") {
@@ -11966,13 +12378,24 @@ pub(crate) fn shared_checkout_parked_warning(
         .filter(|s| !s.is_empty())
         .unwrap_or("main");
 
+    let [push, switch, ff, add] = match crate::worktree::GitOperations::git_remedies([
+        &["push", "origin", trunk],
+        &["switch", trunk],
+        &["merge", "--ff-only"],
+        &["worktree", "add"],
+    ]) {
+        Ok(commands) => commands,
+        Err(refusal) => return Some(refusal),
+    };
+    let branch = crate::worktree::GitOperations::visible_git_label(branch);
+    let trunk = crate::worktree::GitOperations::visible_git_label(trunk);
     Some(format!(
         "\n    ⚠️ SHARED CHECKOUT PARKED ON '{branch}': this is the shared primary checkout, \
          not an isolated worktree, and its HEAD is '{branch}' instead of '{trunk}'. \
-         Any `git merge --ff-only`, `git push origin {trunk}` or release tag run in this \
+         Any `{ff}`, `{push}` or release tag run in this \
          directory targets '{branch}' and reports success while landing nothing on \
          '{trunk}' (GH #120). Remedy: once that work is pushed, restore trunk here with \
-         `git switch {trunk}`, and give the worker `git worktree add` instead of a branch \
+         `{switch}`, and give the worker `{add}` instead of a branch \
          created in place."
     ))
 }
@@ -12107,10 +12530,48 @@ mod spawn_lifecycle_tests {
         ).unwrap();
         let error = preflight_account_auth_with(&specs, |_, _| {
             evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        }).expect_err("the target ChatGPT account cannot run this lane recipe");
+        }, || None).expect_err("the target ChatGPT account cannot run this lane recipe");
         assert!(error.contains(specs[0].model.as_deref().unwrap()), "{recipe}: {error}");
         assert!(error.contains(home.path().to_str().unwrap()), "{error}");
         assert!(error.contains("No worktree was created"), "{error}");
+    }
+
+    /// cas-c8de: at the spawn preflight, a catalogue cached by an older codex
+    /// client (prowl's ChatGPT.app 0.146) cannot refuse a model the installed
+    /// codex (0.163, printed with a trailing build token) runs. The version
+    /// probe runs once, and not at all when the catalogue lists the model.
+    #[test]
+    fn an_older_client_cache_does_not_refuse_the_spawn_cas_c8de() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#).unwrap();
+        let (specs, _, _) = build_lane_spawn_specs(
+            1, "standard", Some(home.path().to_str().unwrap()), None,
+            &cas_factory::CapabilitySnapshot::default(),
+        ).unwrap();
+        let model = specs[0].model.clone().unwrap();
+        let cache = |client: &str, slug: &str| {
+            std::fs::write(home.path().join("models_cache.json"), serde_json::json!({
+                "fetched_at": chrono::Utc::now(), "client_version": client, "models": [{"slug": slug}]
+            }).to_string()).unwrap();
+        };
+        let probes = std::cell::Cell::new(0);
+        let logged_in = |_: cas_mux::SupervisorCli, _: Option<&str>| {
+            evidence(cas_factory::CapabilityAvailability::Available, "logged in")
+        };
+        let installed = || {
+            probes.set(probes.get() + 1);
+            Some("codex-cli 0.163.0 (abc1234)".to_string())
+        };
+
+        cache("0.146.0", "gpt-5.6-sol");
+        preflight_account_auth_with(&specs, logged_in, installed).expect("an older client's cache cannot refuse");
+        assert_eq!(probes.get(), 1);
+        cache("0.146.0", "gpt-5.6-sol");
+        assert!(preflight_account_auth_with(&specs, logged_in, || None).is_err(), "unknown installed codex keeps the verdict");
+        probes.set(0);
+        cache("0.146.0", &model);
+        preflight_account_auth_with(&specs, logged_in, installed).unwrap();
+        assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
     }
 
     #[test]
@@ -12121,7 +12582,7 @@ mod spawn_lifecycle_tests {
                 cas_factory::CapabilityAvailability::Unavailable,
                 "Codex login status reports no authenticated account",
             )
-        })
+        }, || None)
         .expect_err("a logged-out account must refuse the spawn");
         assert!(error.contains("~/.codex-alt"), "{error}");
         assert!(error.contains("codex login"), "{error}");
@@ -12140,7 +12601,7 @@ mod spawn_lifecycle_tests {
                 cas_factory::CapabilityAvailability::Unavailable,
                 "logged out",
             )
-        })
+        }, || None)
         .expect_err("refusal expected");
         assert!(error.contains("~/.codex"), "{error}");
     }
@@ -12157,13 +12618,13 @@ mod spawn_lifecycle_tests {
                     cas_factory::CapabilityAvailability::Unknown,
                     "Codex login status probe timed out",
                 )
-            })
+            }, || None)
             .is_ok()
         );
         assert!(
             preflight_account_auth_with(&specs, |_, _| {
                 evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-            })
+            }, || None)
             .is_ok()
         );
     }
@@ -12187,7 +12648,7 @@ mod spawn_lifecycle_tests {
             );
             calls.fetch_add(1, Ordering::SeqCst);
             evidence(cas_factory::CapabilityAvailability::Available, "logged in")
-        })
+        }, || None)
         .expect("healthy accounts pass");
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -13082,6 +13543,382 @@ mod tests {
         // is the case that would fail.
         agent.status = cas_types::AgentStatus::Idle;
         agent
+    }
+
+    // GH #1362: fresh registry heartbeats can outlive the owning daemon.
+    fn adopted_fleet_gh1362(
+        caller: &str,
+    ) -> (
+        crate::test_support::TestEnvGuard,
+        CasService,
+        cas_types::Agent,
+    ) {
+        use cas_types::{Dependency, DependencyType, Task, TaskType};
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "adopter-session");
+        env.set("CAS_AGENT_NAME", "adopter");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_SUPERVISOR_NAME", "old-supervisor");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (name, session) in [
+            ("old-supervisor", "dead-session"),
+            ("adopter", "adopter-session"),
+        ] {
+            let mut supervisor = worker_named(name, &format!("id-{name}"));
+            supervisor.role = AgentRole::Supervisor;
+            supervisor.factory_session = Some(session.into());
+            agents.register(&supervisor).unwrap();
+        }
+        let mut worker = worker_named("orphan-worker", "orphan-id");
+        worker.factory_session = Some("dead-session".into());
+        worker.metadata.insert("worker_cli".into(), "claude".into());
+        agents.register(&worker).unwrap();
+        let tasks = crate::store::open_task_store(&root).unwrap();
+        let mut epic = Task::new("cas-adopted-epic".into(), "Adopted epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.epic_verification_owner = Some("adopter".into());
+        tasks.add(&epic).unwrap();
+        let mut task = Task::new("cas-orphan-work".into(), "Orphan work".into());
+        task.assignee = Some(worker.name.clone());
+        task.status = cas_types::TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        agents.add_working_epic(&worker.id, &epic.id).unwrap();
+        tasks
+            .add_dependency(&Dependency::new(
+                task.id,
+                epic.id,
+                DependencyType::ParentChild,
+            ))
+            .unwrap();
+        let mut metadata = crate::ui::factory::create_metadata(
+            "dead-session",
+            i32::MAX as u32,
+            "old-supervisor",
+            &[worker.name.clone()],
+            None,
+            env.home().to_str(),
+            None,
+        );
+        metadata.daemon_pid_starttime = Some(1);
+        std::fs::create_dir_all(crate::ui::factory::sessions_dir()).unwrap();
+        std::fs::write(
+            crate::ui::factory::metadata_path("dead-session"),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .unwrap();
+        crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session")
+            .init_team_config(
+                &[worker.name.clone()],
+                env.home(),
+                &std::collections::HashMap::new(),
+                "old-supervisor",
+            )
+            .unwrap();
+        let core = CasCore::with_daemon(root, None, None);
+        core.set_agent_id_for_testing(if caller == "orphan-id" {
+            caller.into()
+        } else {
+            format!("id-{caller}")
+        });
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        (env, service, worker)
+    }
+
+    #[tokio::test]
+    async fn adopted_worker_routes_and_replies_to_current_supervisor_gh1362() {
+        let (_env, service, _) = adopted_fleet_gh1362("orphan-id");
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "kind": "status",
+            "summary": "adopted worker status", "message": "Ready for recovery"
+        }))
+        .unwrap();
+        service.message_send(request).await.unwrap();
+        let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
+        let rows = queue.poll_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "adopter");
+        assert_eq!(rows[0].factory_session.as_deref(), Some("adopter-session"));
+    }
+
+    #[tokio::test]
+    async fn adopter_can_reset_only_after_original_daemon_dies_gh1362() {
+        let (_env, service, _) = adopted_fleet_gh1362("adopter");
+        let other_project = tempfile::tempdir().unwrap();
+        let path = crate::ui::factory::metadata_path("dead-session");
+        let mut metadata: crate::ui::factory::SessionMetadata =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        metadata.daemon_pid = std::process::id();
+        metadata.daemon_pid_starttime = crate::mcp::daemon::read_pid_starttime(metadata.daemon_pid);
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let request = || {
+            rmcp::handler::server::wrapper::Parameters(crate::mcp::tools::TaskReleaseRequest {
+                task_id: "cas-orphan-work".into(),
+                force: Some(true),
+            })
+        };
+        assert!(
+            service.inner.cas_task_reset(request()).await.is_err(),
+            "live daemon retains ownership even after epic transfer"
+        );
+        metadata.daemon_pid = i32::MAX as u32;
+        metadata.daemon_pid_starttime = Some(1);
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        let agents = crate::store::open_agent_store(&service.inner.cas_root).unwrap();
+        let tasks = crate::store::open_task_store(&service.inner.cas_root).unwrap();
+        // Authorization identities and evidence combinations share the real reset path.
+        for refusal in [
+            "missing fingerprint",
+            "wrong epic owner",
+            "worker caller",
+            "stale adopter",
+            "project directory mismatch",
+        ] {
+            let mut evidence = metadata.clone();
+            let mut epic = tasks.get("cas-adopted-epic").unwrap();
+            let mut caller = agents.get("id-adopter").unwrap();
+            match refusal {
+                "missing fingerprint" => evidence.daemon_pid_starttime = None,
+                "wrong epic owner" => epic.epic_verification_owner = Some("old-supervisor".into()),
+                "worker caller" => caller.role = AgentRole::Worker,
+                "stale adopter" => caller.last_heartbeat -= chrono::Duration::seconds(600),
+                "project directory mismatch" => {
+                    evidence.project_dir = Some(other_project.path().to_string_lossy().into_owned())
+                }
+                _ => unreachable!(),
+            }
+            std::fs::write(&path, serde_json::to_vec(&evidence).unwrap()).unwrap();
+            tasks.update(&epic).unwrap();
+            agents.update(&caller).unwrap();
+            assert!(
+                service.inner.cas_task_reset(request()).await.is_err(),
+                "{refusal} must not authorize recovery"
+            );
+            assert!(tasks.get("cas-orphan-work").unwrap().assignee.is_some());
+            epic.epic_verification_owner = Some("id-adopter".into());
+            caller.role = AgentRole::Supervisor;
+            caller.last_heartbeat = chrono::Utc::now();
+            tasks.update(&epic).unwrap();
+            agents.update(&caller).unwrap();
+        }
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        service
+            .inner
+            .cas_task_reset(request())
+            .await
+            .expect("adopter resets orphan task");
+        let worker = agents.get("orphan-id").unwrap();
+        assert_eq!(
+            crate::factory_session_scope::adopted_worker_supervisor(
+                &service.inner.cas_root,
+                &worker
+            )
+            .unwrap()
+            .id,
+            "id-adopter",
+            "reset must preserve the worker's epic association for later shutdown"
+        );
+        let task = crate::store::open_task_store(&service.inner.cas_root)
+            .unwrap()
+            .get("cas-orphan-work")
+            .unwrap();
+        assert_eq!(task.status, cas_types::TaskStatus::Open);
+        assert!(task.assignee.is_none());
+    }
+
+    #[tokio::test]
+    async fn adopter_delivers_to_original_claude_inbox_gh1362() {
+        let (mut env, service, worker) = adopted_fleet_gh1362("adopter");
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": worker.name,
+            "summary": "recovery", "message": "Preserve your committed work"
+        }))
+        .unwrap();
+        service.message_send(request).await.unwrap();
+        let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new("dead-session");
+        let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
+        let row = queue
+            .latest_session_activity("dead-session")
+            .unwrap()
+            .unwrap();
+        let body =
+            crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
+        assert!(
+            teams.inbox_has_unread_copy(&worker.name, "supervisor", &body),
+            "orphan Claude must receive its body in the original team inbox"
+        );
+        env.set("CAS_AGENT_NAME", &worker.name);
+        env.set("CAS_FACTORY_SESSION", "dead-session");
+        env.set("CAS_AGENT_ROLE", "worker");
+        let input = cas_core::hooks::types::HookInput {
+            hook_event_name: "PostToolUse".into(),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        };
+        let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+        let context =
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
+                Some(&service.inner.cas_root), &input, None, &mut budget,
+            )
+            .and_then(|outcome| outcome.text)
+            .expect("the next actual tool boundary renders the recovery body");
+        assert!(context.contains("Preserve your committed work"));
+        let queue = crate::store::open_prompt_queue_store(&service.inner.cas_root).unwrap();
+        let report = queue.message_delivery_report(row.id).unwrap().unwrap();
+        assert_eq!(
+            report.recipient_receipt,
+            Some(cas_store::SurfacingSource::HookSurfaced)
+        );
+        let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+        assert!(
+            crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox_after_tool_result(
+                Some(&service.inner.cas_root), &input, None, &mut budget,
+            )
+            .and_then(|outcome| outcome.text).is_none(),
+            "a second hook cannot render the same recovery body again"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn adopter_shutdown_stops_original_worker_process_gh1362() {
+        use std::os::unix::process::CommandExt;
+        let (_env, service, worker) = adopted_fleet_gh1362("adopter");
+        use tokio::io::AsyncBufReadExt;
+        let mut command = std::process::Command::new("python3");
+        command.args(["-c", "import subprocess; p = subprocess.Popen(['sleep', '300'], start_new_session=True); print(p.pid, flush=True); p.wait()"])
+            .stdout(std::process::Stdio::piped()).process_group(0);
+        let mut command = tokio::process::Command::from(command);
+        command.kill_on_drop(true);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let mut ready = String::new();
+        tokio::io::BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .await
+            .unwrap();
+        let escaped_pid: u32 = ready.trim().parse().unwrap();
+        let escaped_start = crate::mcp::daemon::read_pid_starttime(escaped_pid).unwrap();
+        struct EscapedChild(u32, u64);
+        impl Drop for EscapedChild {
+            fn drop(&mut self) {
+                if crate::mcp::daemon::pid_matches_fingerprint(self.0, self.1) {
+                    // SAFETY: this fixture captured and rechecked its disposable child identity.
+                    unsafe {
+                        libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+                    }
+                }
+            }
+        }
+        let escaped = EscapedChild(escaped_pid, escaped_start);
+        let mut record = crate::ui::factory::process_groups::track(
+            &service.inner.cas_root,
+            &worker.name,
+            "dead-session",
+            pid,
+        )
+        .unwrap();
+        let original_start = record.pid_starttime.unwrap();
+        record.pid_starttime = Some(original_start.wrapping_add(1));
+        let record_path = service
+            .inner
+            .cas_root
+            .join("factory-process-groups")
+            .join(format!("{pid}.json"));
+        std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "id": worker.id, "force": true
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect_err("a live PID with a mismatched fingerprint must refuse shutdown");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "fingerprint refusal must preserve the live process"
+        );
+        crate::ui::factory::process_groups::track(
+            &service.inner.cas_root,
+            &worker.name,
+            "dead-session",
+            pid,
+        )
+        .unwrap();
+        let agents = crate::store::open_agent_store(&service.inner.cas_root).unwrap();
+        // The daemon marks Shutdown before killing. If it dies in that window,
+        // adoption must still stop the live, fingerprinted group.
+        agents.graceful_shutdown(&worker.id).unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        let mut unrecorded = worker_named("unrecorded-orphan", "unrecorded-id");
+        unrecorded.factory_session = worker.factory_session.clone();
+        agents.register(&unrecorded).unwrap();
+        agents
+            .add_working_epic(&unrecorded.id, "cas-adopted-epic")
+            .unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": ([worker.name.clone(), unrecorded.name.clone()].join(",")), "force": true
+        }))
+        .unwrap();
+        let partial = service
+            .factory_shutdown_workers(request)
+            .await
+            .expect_err("a later unrecorded orphan refuses after the earlier worker stopped");
+        let status = tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+            .await
+            .expect("Shutdown status must not skip the live recorded process")
+            .unwrap();
+        assert!(!status.success());
+        let state = std::process::Command::new("ps")
+            .args(["-p", &escaped.0.to_string(), "-o", "stat="])
+            .output().unwrap();
+        assert!(
+            !crate::mcp::daemon::pid_matches_fingerprint(escaped.0, escaped.1)
+                || String::from_utf8_lossy(&state.stdout).trim_start().starts_with('Z'),
+            "worker shutdown must also stop a child that started its own session"
+        );
+        assert_eq!(
+            crate::store::open_agent_store(&service.inner.cas_root)
+                .unwrap()
+                .get(&worker.id)
+                .unwrap()
+                .status,
+            cas_types::AgentStatus::Shutdown
+        );
+        // Model GC dropping the stopped parent's record after its handle is reaped.
+        crate::ui::factory::process_groups::untrack(&service.inner.cas_root, pid).unwrap();
+        agents.graceful_shutdown(&unrecorded.id).unwrap();
+        let mut own = worker_named("local-worker", "local-id");
+        own.factory_session = Some("adopter-session".into());
+        agents.register(&own).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "worker_names": ([worker.name, unrecorded.name].join(",")), "force": true
+        })).unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("naming retired adopted workers succeeds without a process-group record");
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "shutdown_workers", "force": true
+        }))
+        .unwrap();
+        service
+            .factory_shutdown_workers(request)
+            .await
+            .expect("retired adopted rows cannot block local-worker shutdown");
+        let queued = crate::store::open_spawn_queue_store(&service.inner.cas_root)
+            .unwrap()
+            .poll("adopter-session", 10)
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].worker_names, vec![own.name]);
+        assert!(
+            !partial.message.contains("nothing was signalled"),
+            "the earlier adopted worker did stop: {partial:?}"
+        );
     }
 
     #[test]
@@ -17033,10 +17870,56 @@ effort = "high"
         assert_eq!(got, TranscriptResolution::Resolved(expected));
     }
 
-    /// Characterization for cas-fa69: worker_status resolves its live
-    /// activity/context/in-flight path through `transcript_path_fast`.
-    /// A real Codex rollout exists and is discoverable by the established
-    /// cwd-aware resolver, so that production path must return it too.
+    #[tokio::test]
+    async fn cas_3963_worker_status_flags_old_mcp_against_installed_binary() {
+        use cas_store::{AgentStore, HistoryStore, SqliteHistoryStore};
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let cas = bin.join("cas");
+        std::fs::write(&cas, "#!/bin/sh\necho 'cas 9.99.2'\n").unwrap();
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cas, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[
+            ("PATH", &path), ("CAS_FACTORY_SESSION", "release-session"),
+        ]);
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let daemon = Child(std::process::Command::new("sleep").arg("30").spawn().unwrap());
+        let mut epoch = crate::history::epochs::current_daemon_epoch(&chrono::Utc::now().to_rfc3339());
+        epoch.pid = Some(daemon.0.id().into());
+        epoch.version = Some("9.99.1".into());
+        SqliteHistoryStore::open(&root).unwrap().record_epoch(&epoch).unwrap();
+        let mut worker = cas_types::Agent::new_with_role(
+            "release-worker-id".into(), "release-worker".into(), cas_types::AgentRole::Worker,
+        );
+        worker.factory_session = Some("release-session".into());
+        worker.pid = Some(std::process::id());
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut worker, std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        assert_ne!(worker.pid, Some(daemon.0.id()));
+        let banner = crate::factory_binary_skew::supervisor_banner(&root, Some("release-session")).unwrap();
+        assert!(banner.contains("release-worker") && banner.contains("9.99.1 [STALE"), "{banner}");
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action":"worker_status","summary":true})).unwrap();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        assert!(output.contains("Factory MCP versions (installed 9.99.2)"), "{output}");
+        assert!(output.contains("release-worker (Worker") && output.contains("9.99.1 [STALE"), "{output}");
+    }
+
     #[tokio::test]
     async fn worker_liveness_summary_five_workers_under_one_second() {
         let proof_dir = std::env::var("CAS_LIVENESS_PROOF_DIR");
@@ -17121,10 +18004,10 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 7, "{output}");
+        assert_eq!(lines.len(), 8, "{output}");
         assert!(
-            lines[6].starts_with("Peer mailbox: not receiving:")
-                && lines[6].contains("has not reported a mailbox poll"),
+            lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
+                && line.contains("has not reported a mailbox poll")),
             "summary must retain a visible mailbox health footer: {output}"
         );
         assert!(
@@ -17159,6 +18042,10 @@ effort = "high"
         }
     }
 
+    /// Characterization for cas-fa69: worker_status resolves its live
+    /// activity/context/in-flight path through `transcript_path_fast`.
+    /// A real Codex rollout exists and is discoverable by the established
+    /// cwd-aware resolver, so that production path must return it too.
     #[test]
     fn worker_status_transcript_path_resolves_codex_rollout_by_cwd() {
         let _lock = crate::hooks::test_env_lock();
@@ -17951,6 +18838,47 @@ effort = "high"
         assert!(ambiguous_output.contains(&first_rel));
         assert!(ambiguous_output.contains(&second_rel));
         assert!(ambiguous_output.contains("Likely synthesized:"));
+    }
+
+    /// cas-ceeb, cas-b76b: a transcript over 256 KiB whose tail starts in the
+    /// middle of a UTF-8 character still reads. A Claude transcript ending in
+    /// the real "Login expired" refusal classifies as an account failure; a
+    /// Codex rollout ending in an out-of-credit turn classifies as limited.
+    #[test]
+    fn a_long_transcript_cut_mid_character_still_detects_the_logout() {
+        const TAIL: usize = 256 * 1024;
+        let dir = tempfile::tempdir().unwrap();
+        // A '界' run whose 256 KiB tail starts one byte into a character.
+        let long = |name: &str, record: &str| {
+            let run = "界".repeat(100_000);
+            let pad = (0..3)
+                .find(|pad| (run.len() + pad + 1 + record.len() + 1 - TAIL) % 3 == 1)
+                .unwrap();
+            let body = format!("{run}{}\n{record}\n", "x".repeat(pad));
+            assert!(!body.is_char_boundary(body.len() - TAIL), "the fixture must cut a character");
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let claude = long(
+            "session.jsonl",
+            r#"{"type":"assistant","timestamp":"2026-10-20T16:42:04.720Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#,
+        );
+        assert!(
+            auth_failure_evidence_at(Some(&claude), cas_mux::SupervisorCli::Claude).failed(),
+            "a logged-out supervisor with a long transcript must be detected"
+        );
+        let codex = long(
+            "rollout.jsonl",
+            r#"{"timestamp":"2026-10-20T19:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","rate_limits":{"credits":{"has_credits":false}}}}"#,
+        );
+        assert!(
+            matches!(
+                codex_rollout_usage_limit_evidence(Some(&codex), cas_mux::SupervisorCli::Codex),
+                UsageLimitEvidence::Limited { .. }
+            ),
+            "an out-of-credit worker with a long rollout must be detected"
+        );
     }
 
     #[test]
@@ -18969,7 +19897,7 @@ effort = "high"
             head_sha: "0bd4a26".to_string(),
             ahead: 1,
             behind: 0,
-            base_branch: "origin/main".to_string(),
+            base_branch: "origin/main{a,b}!e".to_string(),
             dirty: false,
             pushed_ref: "none".to_string(),
             pr_url: WorkerPrUrl::None,
@@ -18985,11 +19913,11 @@ effort = "high"
             "the callout must name the parked branch: {out}"
         );
         assert!(
-            out.contains("'main'"),
+            out.contains("'main{a,b}!e'"),
             "the callout must name the trunk it is not on: {out}"
         );
         assert!(
-            out.contains("git switch main"),
+            out.contains("git switch 'main{a,b}!e'"),
             "the callout must state the remedy: {out}"
         );
         assert!(
@@ -19890,6 +20818,8 @@ mod sync_safety_tests {
         );
 
         let line = failure.report_line();
+        // pin: the disambiguating ^0 stash suffix requires shell quoting.
+        assert!(line.contains(&format!("git stash apply '{stash_ref}'")), "{line}");
         assert!(
             line.contains("WIP IS NOT LOST") && line.contains(stash_ref),
             "report line must carry recovery instructions with the ref: {line}"
@@ -20228,5 +21158,11 @@ mod artifact_project_scope_tests {
         );
         assert!(renamed.join("build").is_file());
         assert!(shared.join("build").is_file());
+        let mut bounded = factory_artifact_inventory(a_root.clone(), &closed);
+        bounded.include_review_roots_until(Some(std::time::Instant::now()));
+        assert!(!bounded.review_roots.is_empty());
+        assert!(bounded.review_roots.iter().all(|(_, usage)|
+            usage.bytes == 0 && usage.error.as_deref().is_some_and(|error| error.contains("budget exhausted"))));
+        assert!(b_root.join("cas-a4b1/proof.md").is_file());
     }
 }

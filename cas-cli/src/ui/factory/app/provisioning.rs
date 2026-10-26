@@ -435,6 +435,31 @@ pub(crate) fn launch(
     tokio::task::JoinHandle<anyhow::Result<ProvisionedWorker>>,
     Arc<ProvisioningCancellation>,
 ) {
+    launch_with_executable(context, timeout, None)
+}
+
+/// Integration support: exercise launch's typed decode and build handshake
+/// using Cargo's real CLI binary instead of the integration harness executable.
+#[doc(hidden)]
+pub async fn launch_provisioner_for_test(
+    executable: PathBuf,
+    context: serde_json::Value,
+) -> anyhow::Result<(WorkerSpawnResult, String)> {
+    let (handle, _) = launch_with_executable(
+        serde_json::from_value(context)?, Duration::from_secs(30), Some(executable),
+    );
+    let worker = handle.await??;
+    Ok((worker.result, worker.receipt))
+}
+
+fn launch_with_executable(
+    context: WorkerSpawnContext,
+    timeout: Duration,
+    executable: Option<PathBuf>,
+) -> (
+    tokio::task::JoinHandle<anyhow::Result<ProvisionedWorker>>,
+    Arc<ProvisioningCancellation>,
+) {
     let cancellation = Arc::new(ProvisioningCancellation::default());
     let stop = cancellation.clone();
     let task = tokio::task::spawn_blocking(move || {
@@ -483,7 +508,10 @@ pub(crate) fn launch(
             context: serde_json::to_value(context)?,
         };
         serde_json::to_writer(std::fs::File::create(&input)?, &envelope)?;
-        let executable = provisioner_executable()?;
+        let executable = match executable {
+            Some(executable) => executable,
+            None => provisioner_executable()?,
+        };
         let mut command = Command::new(executable);
         command
             .current_dir(project_path)

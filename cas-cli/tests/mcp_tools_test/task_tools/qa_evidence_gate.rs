@@ -51,6 +51,7 @@ fn commit_file(repo: &Path, path: &str, body: &str) -> String {
 
 fn close_req(id: &str) -> TaskCloseRequest {
     TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("delivered".to_string()),
@@ -199,6 +200,119 @@ impl Fx {
         );
         tasks.update(&task).unwrap();
         path
+    }
+}
+
+#[tokio::test]
+async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_daa6() {
+    for changed_diff in [true, false] {
+        let mut env = TestEnvGuard::temp_home();
+        let fx = fixture(&mut env, &[], "Open the composer");
+        let cas_dir = fx.repo.join(".cas");
+        let config = cas_dir.join("config.toml");
+        let body = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                "{}\n[project]\ncanonical_id = \"receipt-fixture\"\n",
+                body.replace("independent_pass = false", "independent_pass = true"),
+            ),
+        )
+        .unwrap();
+        std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+        // Local managed setup is deliberately absent from the landed history.
+        let base = commit_file(&fx.repo, ".claude/settings.json", "{}\n");
+        let first = commit_file(&fx.repo, "web/composer.css", ".composer{gap:4px}\n");
+        let second = commit_file(&fx.repo, "web/composer.js", "export const ready = true;\n");
+        let reviewed = commit_file(&fx.repo, "web/composer.css", ".composer{gap:8px}\n");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        let target = cas::types::WorkTarget {
+            repo_selector: "project:receipt-fixture".into(),
+            target_branch: "main".into(),
+        };
+        task.deliverables.work_target = Some(target.clone());
+        task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+            work_target: target,
+            assignee: "test-agent".into(),
+            branch: "factory/test-agent".into(),
+            base_sha: base,
+        });
+        task.deliverables.factory_branch_anchor = Some(reviewed.clone());
+        task.deliverables.parked_branch = Some("factory/test-agent".into());
+        let round = fx.artifacts.join(TASK).join("independent-qa/round-1");
+        std::fs::create_dir_all(&round).unwrap();
+        let ledger = round.join("LEDGER.md");
+        std::fs::write(&ledger, "# Independent real-build QA\n").unwrap();
+        let bundle = round.join("bundle.json");
+        std::fs::write(
+            &bundle,
+            serde_json::json!({
+                "schema": 1, "producer": "independent-qa", "task_id": TASK,
+                "head_sha": reviewed,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-bundle: {}", bundle.display());
+        tasks.update(&task).unwrap();
+        let now = chrono::Utc::now();
+        cas_store::open_qa_pass(
+            &cas_dir,
+            &cas_store::NewQaPass {
+                task_id: TASK,
+                implementer_agent_id: "test-agent",
+                branch: "factory/test-agent",
+                bound_head: &reviewed,
+                deadline_at: now + chrono::Duration::minutes(30),
+                max_rounds: 3,
+            },
+            now,
+        )
+        .unwrap();
+        cas_store::claim_qa_pass(&cas_dir, TASK, "independent-reviewer", now).unwrap();
+        cas_store::resolve_qa_pass(
+            &cas_dir,
+            TASK,
+            "independent-reviewer",
+            cas::types::QaVerdict::Approved,
+            "Reviewed delivery",
+            None,
+            ledger.to_str().unwrap(),
+            now,
+        )
+        .unwrap();
+        git(&fx.repo, &["checkout", "-q", "main"]);
+        commit_file(&fx.repo, "unrelated.txt", "another task\n");
+        git(&fx.repo, &["cherry-pick", &format!("{first}^..{second}")]);
+        if changed_diff {
+            // The final CSS patch still matches; an earlier unreviewed
+            // change must fail the aggregate comparison.
+            std::fs::write(fx.repo.join("web/composer.js"), "export const ready = false;\n").unwrap();
+            git(&fx.repo, &["add", "web/composer.js"]);
+            git(&fx.repo, &["commit", "-q", "--amend", "--no-edit"]);
+        }
+        git(&fx.repo, &["cherry-pick", &reviewed]);
+        let receipt = git(&fx.repo, &["rev-parse", "HEAD"]);
+        assert_ne!(reviewed, receipt);
+        git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+        let mut request = close_req(TASK);
+        request.commit_receipt = Some(receipt);
+        let output = match fx.core.cas_task_close(Parameters(request)).await {
+            Ok(result) => extract_text(result),
+            Err(error) => error.message.to_string(),
+        };
+        if changed_diff {
+            assert_ne!(fx.status(), TaskStatus::Closed, "{output}");
+            assert!(
+                output.contains("QA evidence") || output.contains("INDEPENDENT QA"),
+                "{output}"
+            );
+        } else {
+            assert_eq!(fx.status(), TaskStatus::Closed, "{output}");
+            assert!(fx.notes().contains(bundle.to_str().unwrap()));
+            assert_eq!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().len(), 1);
+        }
     }
 }
 
@@ -405,39 +519,177 @@ async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() 
 
 #[tokio::test]
 async fn valid_bundle_lets_the_delivery_park_and_a_later_commit_makes_it_stale() {
-    let mut test_env = TestEnvGuard::temp_home();
-    let fx = fixture(&mut test_env,
-        &[("web/composer.css", ".composer{gap:8px}\n")],
-        "Open the composer; spacing is even",
-    );
-    let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
-    let bundle = fx.write_bundle(&head);
+    for case in [
+        "new live owner",
+        "changed status",
+        "changed invariant",
+        "changed evidence requirement",
+        "changed kind",
+        "changed safety policy",
+        "neutral bug metadata",
+    ] {
+        let mut test_env = TestEnvGuard::temp_home();
+        let fx = fixture(
+            &mut test_env,
+            &[("web/composer.css", ".composer{gap:8px}\n")],
+            "Open the composer; spacing is even",
+        );
+        let registry = r#"version: 1
+updated: "2026-10-23"
+invariants:
+  INV-COMPOSER:
+    statement: The composer remains visible
+    check: Read the composer after opening it
+journeys:
+  - id: COMPOSE
+    name: Open the composer
+    status: live
+    entry: {url: /compose, trigger: Open}
+    steps: [open, compose]
+    owners: [web/composer.css]
+    invariants: [INV-COMPOSER]
+    traffic: {share_pct: 100, basis: messages}
+"#;
+        if case != "new live owner" {
+            commit_file(&fx.repo, "docs/qa/journeys.yaml", registry);
+        }
+        let head = git(&fx.repo, &["rev-parse", "factory/test-agent"]);
+        let bundle = fx.write_bundle(&head);
+        let parked = close_text(&fx.core, TASK).await;
+        assert!(parked.contains("MERGE REQUIRED"), "{case}: {parked}");
+        assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
 
-    let parked = close_text(&fx.core, TASK).await;
-    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
-    assert_eq!(fx.status(), TaskStatus::AwaitingMerge);
-    assert!(
-        fx.notes().contains(&format!(
-            "QA evidence bundle accepted: {}",
-            bundle.canonicalize().unwrap().display()
-        )),
-        "{}",
-        fx.notes()
-    );
+        let paths = [
+            "docs/qa/journeys.yaml",
+            "docs/qa/LEDGER.md",
+            ".claude/CODEMAP.md",
+            "docs/PRODUCT_OVERVIEW.md",
+        ];
+        let after = match case {
+            "new live owner" => registry.to_string(),
+            "changed status" => registry.replace(
+                "status: live",
+                "status: dark\n    status_reason: feature disabled",
+            ),
+            "changed invariant" => registry.replace(
+                "The composer remains visible",
+                "The sent message remains visible",
+            ),
+            "changed evidence requirement" => registry.replace(
+                "steps: [open, compose]",
+                "steps: [open, compose]\n    spec: e2e/composer.spec.ts\n    spec_status: planned",
+            ),
+            "changed kind" => registry.replace(
+                "status: live",
+                "status: live\n    kind: browser",
+            ),
+            "changed safety policy" => registry.replace(
+                "journeys:\n",
+                "safety: {mode: staging, protected_credentials: [DATABASE_PASSWORD]}\njourneys:\n",
+            ),
+            _ => registry.replace(
+                "check: Read the composer after opening it",
+                "check: Read the composer after opening it\n    bug: {task: cas-56bf}",
+            ),
+        };
+        for path in paths {
+            commit_file(
+                &fx.repo,
+                path,
+                if path.ends_with(".yaml") {
+                    &after
+                } else {
+                    "QA documentation upkeep\n"
+                },
+            );
+        }
+        // The reused artifacts predate B: SHA acceptance alone is insufficient.
+        let date = format!("@{} +0000", chrono::Utc::now().timestamp() + 60);
+        let amended = Command::new("git")
+            .args([
+                "-c",
+                "user.name=CAS Test",
+                "-c",
+                "user.email=cas@example.test",
+                "commit",
+                "--amend",
+                "--no-edit",
+                "-q",
+            ])
+            .current_dir(&fx.repo)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .unwrap();
+        assert!(amended.status.success(), "{amended:?}");
+        let rebound = git(&fx.repo, &["rev-parse", "HEAD"]);
+        let result = close_text(&fx.core, TASK).await;
+        if case != "neutral bug metadata" {
+            assert!(
+                result.contains("QA evidence bundle is") && result.contains("coverage changed"),
+                "{case}: {result}"
+            );
+            assert!(
+                result.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing ("),
+                "{case}: {result}"
+            );
+            assert!(result.contains("COMPOSE"), "{case}: {result}");
+            if case == "changed invariant" {
+                assert!(result.contains("INV-COMPOSER"), "{result}");
+            }
+            assert!(
+                !fx.notes().contains("QA evidence rebind"),
+                "no rebind decision on refusal"
+            );
+            continue;
+        }
+        assert!(result.contains("MERGE REQUIRED"), "{case}: {result}");
+        let notes = fx.notes();
+        assert!(notes.contains("QA evidence bundle accepted"), "{notes}");
+        let rebind = notes
+            .lines()
+            .find(|line| line.contains("QA evidence rebind"))
+            .expect("close records why the earlier trace still covers this delivery");
+        assert!(rebind.contains(&head) && rebind.contains(&rebound), "{rebind}");
+        for path in paths {
+            assert!(rebind.contains(path), "missing {path}: {rebind}");
+        }
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&bundle).unwrap()).unwrap();
+        assert_eq!(
+            manifest["head_sha"], head,
+            "close preserves the original execution manifest"
+        );
+        let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
+        let stale = close_text(&fx.core, TASK).await;
+        assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
+        assert!(stale.contains(&later[..8]), "{stale}");
+    }
+}
 
-    // The implementer pushes a fix after recording evidence: the bundle no
-    // longer describes the delivery.
-    let later = commit_file(&fx.repo, "web/composer.css", ".composer{gap:12px}\n");
-    let stale = close_text(&fx.core, TASK).await;
-    assert!(
-        stale.starts_with("TASK CLOSE REJECTED: cas-ev01 is user-facing"),
-        "{stale}"
-    );
-    assert!(stale.contains("QA evidence bundle is stale"), "{stale}");
-    assert!(
-        stale.contains(&later[..8]),
-        "the refusal names the new head: {stale}"
-    );
+/// With no recorded work boundary, the receipt owns only its own delta.
+/// A nearby target commit's skipped test must not block this docs delivery.
+#[tokio::test]
+async fn close_ignores_pre_task_skip_without_recorded_base_cas_be50() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(&mut env, &[
+        ("tests/unrelated.spec.ts", "test.skip('unrelated', () => {});\n"),
+        ("docs/guide.md", "# This delivery\n"),
+    ], "");
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.created_at = chrono::DateTime::parse_from_rfc3339(
+        &git(&fx.repo, &["show", "-s", "--format=%cI", "HEAD^"])
+    ).unwrap().with_timezone(&chrono::Utc);
+    tasks.update(&task).unwrap();
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--ff-only", &head]);
+    let mut request = close_req(TASK);
+    request.commit_receipt = Some(head);
+    let result = fx.core.cas_task_close(Parameters(request)).await.unwrap();
+    let text = extract_text(result);
+    assert!(!text.contains("adds test skip/focus markers"), "{text}");
+    assert_eq!(fx.status(), TaskStatus::Closed, "{text}");
 }
 
 #[tokio::test]
@@ -1039,6 +1291,110 @@ async fn cas_6f10_waiver_does_not_cover_another_tip() {
     );
     assert_eq!(fx.status(), TaskStatus::InProgress);
     assert!(!fx.notes().contains("QA evidence ledger waived"));
+}
+
+/// cas-1377c: a per-task branch re-parked after more commits keeps its first
+/// anchor. Once merged, the delivered head is the branch tip the supervisor
+/// waived, not that stale anchor: a waiver at the anchor does not cover the
+/// close, and a waiver at the tip does (cas-d47f: anchor e4e803eda, waiver and
+/// tip e506020d3).
+#[tokio::test]
+async fn cas_1377c_waiver_binds_the_merged_per_task_tip_not_a_stale_anchor() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint",
+    );
+    let lane = format!("factory/test-agent-{TASK}");
+    git(&fx.repo, &["checkout", "-q", "-b", &lane]);
+    let anchor = git(&fx.repo, &["rev-parse", "HEAD"]);
+    std::fs::write(fx.repo.join("src/more.rs"), "pub fn more() {}\n").unwrap();
+    git(&fx.repo, &["add", "src/more.rs"]);
+    git(&fx.repo, &["commit", "-q", "-m", &format!("fix: review round ({TASK})")]);
+    let tip = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    task.deliverables.parked_branch = Some(lane.clone());
+    // Parked: the worker lease is released, as on cas-d47f's close.
+    task.assignee = None;
+    tasks.update(&task).unwrap();
+    merge_into_main(&fx, &tip);
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let supervisor_id = format!("cas-6f10-supervisor-{}", std::process::id());
+    let waive = |head: &str, reason: &str| {
+        cas_store::waive_qa_pass(
+            &fx.repo.join(".cas"),
+            TASK,
+            &supervisor_id,
+            "test-agent",
+            &lane,
+            head,
+            reason,
+            chrono::Utc::now(),
+        )
+        .unwrap();
+    };
+    waive(&anchor, "Only the stale anchor is waived");
+    let refused = close_text(&fx.core, TASK).await;
+    assert!(refused.contains("QA evidence ledger is missing"), "{refused}");
+    assert!(!fx.notes().contains("QA evidence ledger waived"));
+    waive(&tip, "Delivered tip waived");
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(!closed.contains("QA evidence ledger is missing"), "{closed}");
+    let notes = fx.notes();
+    assert!(
+        notes.contains(&format!("QA evidence ledger waived: head={tip}"))
+            && notes.contains("reason=Delivered tip waived"),
+        "{notes}"
+    );
+}
+
+/// cas-4575: a released task parked on the worker's shared `factory/<worker>`
+/// branch keeps its recorded head. A later untagged commit from the worker's
+/// next task on that branch is not this delivery, so the waiver bound to the
+/// recorded head still covers the close.
+#[tokio::test]
+async fn cas_4575_released_shared_branch_keeps_its_recorded_head() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("src/feature.rs", "pub fn feature() {}\n")],
+        "Verify deployed endpoint",
+    );
+    let anchor = git(&fx.repo, &["rev-parse", "HEAD"]);
+    commit_file(&fx.repo, "src/next_task.rs", "pub fn next() {}\n");
+    let tasks = open_task_store(&fx.repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(anchor.clone());
+    task.deliverables.parked_branch = Some("factory/test-agent".into());
+    task.assignee = None;
+    tasks.update(&task).unwrap();
+    merge_into_main(&fx, &anchor);
+    let _supervisor = cas_6f10_supervisor(&fx);
+    let supervisor_id = format!("cas-6f10-supervisor-{}", std::process::id());
+    cas_store::waive_qa_pass(
+        &fx.repo.join(".cas"),
+        TASK,
+        &supervisor_id,
+        "test-agent",
+        "factory/test-agent",
+        &anchor,
+        "Recorded head waived",
+        chrono::Utc::now(),
+    )
+    .unwrap();
+    let closed = close_text(&fx.core, TASK).await;
+    assert!(!closed.contains("QA evidence ledger is missing"), "{closed}");
+    assert!(
+        fx.notes()
+            .contains(&format!("QA evidence ledger waived: head={anchor}")),
+        "{}",
+        fx.notes()
+    );
 }
 
 /// GH #1199: qa_waive promises the worker may close this exact tip, including

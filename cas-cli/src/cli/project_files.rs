@@ -77,6 +77,34 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     Ok(out.stdout)
 }
 
+fn may_commit_managed_files(root: &Path, cas_root: &Path) -> Result<bool> {
+    let Some(branch) = git(root, &["symbolic-ref", "--quiet", "HEAD"])
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|reference| reference.trim().strip_prefix("refs/heads/").map(str::to_string))
+        .filter(|branch| !branch.is_empty())
+    else {
+        // Detached or unreadable HEAD is not permission to create history.
+        return Ok(false);
+    };
+    if matches!(branch.as_str(), "main" | "master" | "staging" | "develop" | "trunk")
+        || branch.starts_with("epic/")
+        || branch == crate::worktree::GitOperations::new(root.to_path_buf()).detect_default_branch()
+    {
+        return Ok(false);
+    }
+    let config = crate::config::Config::load(cas_root)?;
+    let configured_base = config.factory().epic_base_branch;
+    Ok(!configured_base.as_deref().is_some_and(|base| {
+        let normalized = base
+            .strip_prefix("refs/heads/")
+            .or_else(|| base.strip_prefix("refs/remotes/origin/"))
+            .or_else(|| base.strip_prefix("origin/"))
+            .unwrap_or(base);
+        base == branch || normalized == branch
+    }))
+}
+
 // Read the effective rules (including nested/global ignores) without touching
 // the index. A project exception is a conflict, not permission to override it.
 fn ignore_conflicts(root: &Path, paths: &[String]) -> Result<Vec<String>> {
@@ -265,6 +293,9 @@ pub(crate) struct Report {
     /// An attempted Git commit failed; this is not a file-body conflict.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit_error: Option<String>,
+    /// Commit policy could not be read; the repair remains safely staged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_warning: Option<String>,
     pub conflicts: Vec<String>,
 }
 
@@ -505,7 +536,7 @@ impl Reconcile {
         !self.report.conflicts.is_empty()
     }
 
-    pub(crate) fn finish(mut self, harnesses: &[SupervisorCli]) -> Result<Report> {
+    pub(crate) fn finish(mut self, harnesses: &[SupervisorCli], cas_root: &Path) -> Result<Report> {
         let root = &self.root;
         if git(root, &["ls-files", "--stage", "-z"])? != self.index_signature {
             self.report.outcome = "staged";
@@ -593,7 +624,15 @@ impl Reconcile {
             } else {
                 "current"
             }
-        } else if self.staged_before || pending.iter().any(|p| !changed.contains(p)) {
+        } else if self.staged_before
+            || pending.iter().any(|p| !changed.contains(p))
+            || !may_commit_managed_files(root, cas_root).unwrap_or_else(|_| {
+                self.report.commit_warning = Some(
+                    "Commit guard config unreadable; repair staged. Fix config, then retry.".into(),
+                );
+                false
+            })
+        {
             "staged"
         } else {
             // No repository configuration is changed. Normal Git hooks still
@@ -607,7 +646,7 @@ impl Reconcile {
                     "user.email=cassy@localhost",
                     "commit",
                     "-m",
-                    "chore(cassy): reconcile managed project files",
+                    crate::worktree::git::MANAGED_RECONCILE_SUBJECT,
                 ],
             ) {
                 Ok(_) => {

@@ -24,7 +24,7 @@ Cloud         ✓ supervisor relay  ✓ delivery retries  ✓ canonical id
       purge-foreign --dry-run`; repeat the push until this count reaches 0. The
       cloud refused 175 parked row(s): project_mismatch ×175 — another project …
   ⚠ cross-project rows       10 foreign task row(s) from 6 other project(s)
-                             (/home/pippenz/Richards LLC/Accounting,
+                             (<home>/Richards LLC/Accounting,
                              gabber-studio, ozer, pantheon, petra-stella-cloud,…
     → run `cas doctor --fix --yes` to quarantine open rows (the focused form is
       `cas doctor --fix-cloud-rows --yes`, and reverse it with `cas doctor

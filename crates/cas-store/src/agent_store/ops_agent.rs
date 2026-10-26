@@ -66,6 +66,11 @@ fn reconcile_restarted_factory_supervisor(
         return Ok(());
     }
 
+    let mut prior = conn.prepare("SELECT id FROM agents WHERE id<>?1 AND name=?2 AND role=?3 AND status IN ('active','idle')")?;
+    let prior_ids = prior.query_map(params![agent.id,agent.name,role], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(prior);
+    for id in prior_ids { super::continuity::capture(conn, &id, Some("supervisor_restart"))?; }
+
     let rehomed_at = Utc::now().to_rfc3339();
     for prior_session in prior_sessions
         .iter()
@@ -289,6 +294,9 @@ impl SqliteAgentStore {
             let conn = self.lock_conn()?;
             let tx = ImmediateTx::new(&conn)?;
 
+            super::continuity::capture(&tx, id, None)?;
+            let end_reason = super::continuity::end_reason(&tx, id)?;
+
             // Keep only routing identity in the retirement event: SessionEnd
             // deletes the registry row, but peer mail may still name this ID.
             let identity: Option<serde_json::Value> = tx.query_row(
@@ -307,6 +315,8 @@ impl SqliteAgentStore {
                 "UPDATE task_leases SET status = 'released' WHERE agent_id = ?",
                 params![id],
             )?;
+
+            crate::qa_pass_store::release_qa_claims_for_agent_with_conn(&tx, id)?;
 
             let rows = tx.execute("DELETE FROM agents WHERE id = ?", params![id])?;
             if rows == 0 {
@@ -329,7 +339,7 @@ impl SqliteAgentStore {
                 id,
                 format!("Agent unregistered: {display_name}"),
             )
-            .with_metadata(serde_json::json!({"retired_agent": identity}));
+            .with_metadata(serde_json::json!({"retired_agent": identity, "end_reason": end_reason}));
             let _ = record_event_with_conn(&tx, &event);
 
             // Capture event for recording playback
@@ -435,7 +445,7 @@ impl SqliteAgentStore {
                 }
             }
 
-            // cas-85d9: renew this agent's active task AND worktree leases
+            // Renew only still-assigned running task leases, plus worktree leases
             // in the SAME transaction as the heartbeat itself. Root-cause
             // fix for the "leases are never renewed" gap (cas-d165
             // finding).
@@ -496,14 +506,16 @@ impl SqliteAgentStore {
             // continuously fresh; a worker that stops heartbeating for
             // longer than the window still lets the lease expire
             // naturally (defense in depth alongside `mark_stale`).
-            let renewed_until =
-                (now_dt + chrono::Duration::seconds(TASK_LEASE_HEARTBEAT_RENEWAL_SECS))
-                    .to_rfc3339();
-            tx.execute(
-                "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
-                 WHERE agent_id = ? AND status = 'active'",
-                params![renewed_until, now, id],
-            )?;
+            let renewed_until = (now_dt
+                + chrono::Duration::seconds(TASK_LEASE_HEARTBEAT_RENEWAL_SECS))
+            .to_rfc3339();
+            for lease in Self::renewable_task_leases(&tx, id)? {
+                tx.execute(
+                    "UPDATE task_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
+                     WHERE task_id = ? AND agent_id = ? AND status = 'active' AND epoch = ?",
+                    params![renewed_until, now, lease.task_id, id, lease.epoch as i64],
+                )?;
+            }
             tx.execute(
                 "UPDATE worktree_leases SET expires_at = ?, renewed_at = ?, renewal_count = renewal_count + 1
                  WHERE agent_id = ? AND status = 'active'",

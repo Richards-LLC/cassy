@@ -21,6 +21,19 @@ abandons only pending prompts older than one day and preserves the rows for fore
 Run `gc_report` first. `force=true` without `older_than_secs` retains the legacy,
 destructive whole-queue clear and should not be used for targeted recovery.
 
+## Disposable verification and walk checkouts
+
+Create review scratch with `cas factory scratch-checkout --cas-root <root>
+--task-id <task-id> --head <full SHA>`; add `--dispatch-id` for a dispatch.
+Use the printed path instead of creating an ad-hoc clone on the scratch drive.
+Run named Rust tests with `cas factory verifier-test` using the same owner
+arguments so Zig, the private target and capped admission stay consistent.
+Publish durable evidence to task artifacts. `gc_report` shows managed review
+state and large unmanaged leftovers; `gc_cleanup force=true dry_run=false`
+removes two-hour-old idle checkouts after task termination or dispatch resolution,
+including their Git worktree registrations. Live leases and process users retain
+the checkout. Unmanaged leftovers remain operator review items.
+
 ## Is the worker actually dead?
 
 Before you shut down a pane that *looks* broken, spend 60 seconds on triage. The supervisor TUI is not ground truth for worker liveness — the most common false positive is a worker mid-way through a long tool call or showing Claude Code's Bun/React-Ink crash screen (process alive, UI unresponsive). Destructive recovery on a live worker rips its worktree out from under itself and turns a recoverable hang into a real crash.
@@ -93,16 +106,20 @@ Run `factory action=worker_status`, then the `is-wedged` / `debug` / `kill` tria
 **Signature:** Heartbeat is fresh, worktree is clean, and there is zero activity for 10+ minutes after a supervisor message. Delivery and acceptance are separate: inspect transport receipts, task state, and execution evidence before concluding the worker is stuck.
 
 **Diagnosis:**
+
 1. Confirm a fresh heartbeat with `factory action=worker_status`
 2. Read `task action=show id=<task-id>`: a successful start is authoritative assignment acceptance. A clean `git -C .cas/worktrees/<worker> status --short` alone does not prove inactivity.
 3. Check prompt delivery state with `coordination action=message_status notification_id=<id>` (the id the `message` call returned). It reports transport handoff, wake observations and confirmation separately; the queue columns behind it are `processed_at, acked_at`. A set `processed_at` records transport processing; `acked_at` records queue acknowledgement. Neither is assignment acceptance or execution proof. Use `queue_ack` for durable supervisor notifications and `message_ack` for prompt-message receipts; lifecycle relay acknowledgements reconcile linked rows. Neither replaces `task action=start`. Missing prose ACK alone is not a recovery trigger.
 
 **Recovery:**
+
 1. Ensure the work exists as an assigned task with full spec and acceptance criteria.
 2. Send a short urgent wake that points only at the task:
-   ```
+
+   ```text
    coordination action=message target=<worker> urgent=true summary="Task <id> assigned" message="Task <id> is assigned. Run task action=show id=<id>."
    ```
+
 3. Do not kill or respawn. There is no evidence of a dead process or dirty worktree; the fix is a durable task plus a short wake.
 
 ### Stalled Spawn Queue
@@ -120,7 +137,7 @@ file a CAS bug quoting the phase and wait channel that `worker_status` names.
 
 `factory action=worker_status` prints a `context:` line per worker, banded by the share of the model's context window in use:
 
-```
+```text
   • bright-leopard-9 (heartbeat: 8s ago)
     context: approaching (~112k / 200k tk; ~44% headroom)
 ```
@@ -134,10 +151,11 @@ file a CAS bug quoting the phase and wait channel that `worker_status` names.
 An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED` line naming the command.
 
 **Pre-compaction recovery (context: near-limit):**
+
 1. Send: `coordination action=message target=<worker> summary="Context near limit — commit now" message="Your context is near the limit. Commit any in-progress work immediately (git add / git commit), then report what you committed."`
 2. Wait for the commit confirmation (watch `factory action=worker_activity`).
 3. If the worker is mid-task and not responding: check the worktree manually: `git -C .cas/worktrees/<worker> log --oneline HEAD~5..HEAD`
-4. Once work is committed and the worker is idle: `factory action=recycle_worker target=<worker>`. It restarts the same name with its recorded recipe and keeps the worktree.
+4. Once work is committed, its `HANDOFF.md` written and the worker is idle: `factory action=recycle_worker target=<worker>`. It restarts the same name with its recorded recipe and keeps the worktree.
 
 **Why the indicator may be absent:** The context line is read from the tail of the worker's session transcript. A newly spawned worker that hasn't produced an assistant message yet will show no `context:` line — this is expected. The line appears after the worker's first response.
 
@@ -148,6 +166,7 @@ An idle Codex worker past the recycle threshold also gets a `RECYCLE RECOMMENDED
 **Triggering conditions:** Long iterative fix-test-rerun loops, heavy stack trace volume in tool results, extended sessions with rapid context churn (20+ file edits in a short window). The `context: near-limit` indicator in `worker_status` fires before this stage — if you act on `near-limit`, you typically avoid reaching the garbled-output stage.
 
 **Recovery:**
+
 1. Do not send revision instructions. The worker's context is poisoned — any further messages make it worse, not better.
 2. Shut down the affected worker immediately: `factory action=shutdown_workers worker_names=<worker>`. Do not attempt to salvage the session.
 3. Check the worker's worktree for any commits made before degradation: `git -C .cas/worktrees/<worker> log --oneline <epic-branch>..HEAD`
@@ -178,6 +197,7 @@ nice_cargo = true
 Shell-level overrides (win over config): `CAS_FACTORY_CARGO_BUILD_JOBS=<N>`, `CAS_FACTORY_NICE_WORKER=1`, `CAS_FACTORY_NICE_LEVEL=<N>`.
 
 **When the defaults are wrong:**
+
 - Running more than 4 workers on a 16-thread host → set `cargo_build_jobs = "2"` (÷4 assumption no longer holds).
 - Host has 4–8 cores → the auto-cap floors at 2, which is still `workers × 2` rustc threads; on a 4-worker factory with 4 cores consider `cargo_build_jobs = "1"` manually.
 - Host has 32+ threads → `"auto"` is fine; can push higher if wall-time matters.

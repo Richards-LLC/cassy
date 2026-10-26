@@ -44,14 +44,33 @@ expect() {
     fi
 }
 
-stub="$(make_stub green-nextest 0 <<'EOF'
-    Starting 2 tests across 1 binary (0 skipped)
-------------
-     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped
+stub="${tmpdir}/green-nextest"
+cat >"${stub}" <<'EOF'
+#!/usr/bin/env bash
+echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
+echo '    Starting 2 tests across 1 binary (0 skipped)'
+sleep 0.4
+echo '------------'
+echo '     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped'
 EOF
-)"
+chmod +x "${stub}"
 expect pass 'PASS: 2 test(s) passed' 'nextest green receipt passes' \
-    env CARGO="${stub}" "${guard}" nextest run -p cas --lib module
+    env CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib module
+
+fallback_dir="${tmpdir}/without-waitid"
+mkdir -p "${fallback_dir}"
+cat >"${fallback_dir}/sitecustomize.py" <<'EOF'
+import os
+import select
+if hasattr(os, 'waitid'):
+    del os.waitid
+if hasattr(select, 'kqueue'):
+    del select.kqueue
+EOF
+expect pass 'PASS: 2 test(s) passed' 'nextest discovery works without os.waitid' \
+    env PYTHONPATH="${fallback_dir}" CARGO="${stub}" CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib module
 
 count_file="${tmpdir}/count"
 expect pass 'PASS: 2 test(s) passed' 'embedded guard exports count in supplied worktree' \
@@ -82,6 +101,35 @@ expect fail '0 tests passed' 'zero-match retry clears stale exported count' \
     env CARGO="${stub}" VERIFIED_TEST_COUNT_FILE="${count_file}" "${guard}" nextest run -p cas --lib -E 'test(stale)'
 expect pass - 'failed guard leaves no exported count' test ! -e "${count_file}"
 
+# cas-7cb0: nextest may stall while a libtest child writes its --list output.
+# The capped wrapper must diagnose and stop discovery before tests start.
+cat >"${tmpdir}/stalled-nextest" <<'EOF'
+#!/usr/bin/env bash
+echo '    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s'
+trap 'echo TERM > "${CAS_TEST_TERM_MARKER}"' TERM
+# Closing the output pipe must not bypass the discovery deadline.
+exec 1>&- 2>&-
+sleep 2 &
+wait
+EOF
+chmod +x "${tmpdir}/stalled-nextest"
+cat >"${tmpdir}/sample" <<'EOF'
+#!/usr/bin/env bash
+echo 'fake libtest stack: StdoutLock::write'
+EOF
+chmod +x "${tmpdir}/sample"
+expect fail 'nextest discovery timeout' 'stalled nextest lister has a bounded, named failure' \
+    env PATH="${tmpdir}:${PATH}" CARGO="${tmpdir}/stalled-nextest" \
+    VERIFIED_TEST_LOG="${tmpdir}/stalled.log" CAS_TEST_TERM_MARKER="${tmpdir}/terminated" \
+    CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS=0.2 \
+    "${guard}" nextest run -p cas --lib -E 'test(stalled)'
+expect pass 'TERM' 'stalled discovery kills its process group' \
+    cat "${tmpdir}/terminated"
+expect pass 'phase=--list PID=' 'stalled discovery names phase and child PID' \
+    grep -F 'phase=--list PID=' "${tmpdir}/stalled.log"
+expect pass 'fake libtest stack: StdoutLock::write' 'stalled discovery logs a child sample' \
+    grep -F 'fake libtest stack: StdoutLock::write' "${tmpdir}/stalled.log"
+
 stub="$(make_stub no-harness 0 <<'EOF'
 Finished `test` profile after a swallowed build failure
 EOF
@@ -95,6 +143,140 @@ EOF
 )"
 expect fail 'the test run exited 42' 'real Cargo failure propagates' \
     env CARGO="${stub}" "${guard}" test -p cas --doc
+
+# cas-aee36: simulate termination of the capped foreground process group.
+# Every PID/group below belongs to this fixture; never signal a host process.
+cat >"${tmpdir}/kill-discovery.py" <<'PYKILL'
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+guard, temporary = sys.argv[1:]
+root = Path(temporary)
+fake = root / 'discovery-cargo.py'
+fake.write_text('''#!/usr/bin/env python3
+import json, os, subprocess, sys, time
+from pathlib import Path
+leave_child = os.environ.get('LEAVE_CHILD') == '1'
+marker = Path(os.environ['PID_FILE'])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', str(marker)],
+                         stdout=subprocess.DEVNULL if leave_child else None,
+                         stderr=subprocess.DEVNULL if leave_child else None)
+ready = marker.with_suffix('.ready')
+ready.write_text(json.dumps([os.getpid(), child.pid]))
+ready.replace(marker)
+print('    Finished `test` profile in 0.01s', flush=True)
+if leave_child:
+    print('    Starting 2 tests across 1 binary (0 skipped)', flush=True)
+    print('     Summary [   0.012s] 2 tests run: 2 passed, 0 skipped', flush=True)
+    sys.exit(0)
+child.wait()
+''')
+fake.chmod(0o755)
+
+def live(pid):
+    result = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                            capture_output=True, text=True, timeout=2)
+    return bool(result.stdout.strip()) and not result.stdout.strip().startswith('Z')
+
+def exited_without_reaping(process, timeout):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if hasattr(os, 'waitid'):
+            if os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+                return True
+        elif not live(process.pid):
+            return True
+        time.sleep(0.02)
+    raise AssertionError(f'wrapper PID {process.pid} did not exit')
+
+def cleanup(wrapper, pids, failed):
+    # The wrapper is still unreaped, so its group id cannot be reused.
+    try:
+        os.killpg(wrapper.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    # Only failure cleanup kills Cargo, and only when the recorded PID still
+    # names this fixture. Fake Cargo is not our child; never target its PGID.
+    for index, pid in enumerate(pids if failed else []):
+        command = subprocess.run(['ps', '-ww', '-p', str(pid), '-o', 'command='],
+                                 capture_output=True, text=True, timeout=2).stdout
+        owned = str(fake) in command if index == 0 else str(root) in command and 'time.sleep(60)' in command
+        if owned and live(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+    return wrapper.wait(timeout=3)
+
+pid_file = root / 'pids-normal-exit'
+env = dict(os.environ, CARGO=str(fake), PID_FILE=str(pid_file), LEAVE_CHILD='1',
+           CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
+pids = []
+with (root / 'normal-exit.log').open('wb') as log:
+    wrapper = subprocess.Popen([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
+                               env=env, stdout=log, stderr=subprocess.STDOUT,
+                               start_new_session=True)
+    passed = False
+    try:
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pid_file.exists(), 'normal-exit fixture did not start'
+        pids = json.loads(pid_file.read_text())
+        assert exited_without_reaping(wrapper, 5), 'normal nextest exit must finish'
+        deadline = time.monotonic() + 5
+        while live(pids[1]) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not live(pids[1]), f'normal-exit Cargo descendant survived: {pids}'
+        passed = True
+    finally:
+        status = cleanup(wrapper, pids, not passed)
+    assert status == 0, 'normal nextest exit must pass'
+
+for interrupted, target in [
+    (signal.SIGTERM, 'group'),
+    (signal.SIGINT, 'group'),
+    (signal.SIGHUP, 'group'),
+    (signal.SIGTERM, 'wrapper'),
+]:
+    pid_file = root / f'pids-{interrupted}-{target}'
+    env = dict(os.environ, CARGO=str(fake), PID_FILE=str(pid_file),
+               CAS_WORKER_NEXTEST_DISCOVERY_TIMEOUT_SECS='60')
+    pids = []
+    with (root / f'signal-{interrupted}-{target}.log').open('wb') as log:
+        wrapper = subprocess.Popen([guard, 'nextest', 'run', '-p', 'cas', '--lib'],
+                                   env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
+        passed = False
+        try:
+            deadline = time.monotonic() + 5
+            while not pid_file.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert pid_file.exists(), 'fixture did not reach discovery'
+            pids = json.loads(pid_file.read_text())
+            assert all(live(pid) for pid in pids), 'fixture children must be alive before signal'
+            if target == 'group':
+                os.killpg(wrapper.pid, interrupted)
+            else:
+                os.kill(wrapper.pid, interrupted)
+            assert exited_without_reaping(wrapper, 5), 'interrupted run must finish'
+            deadline = time.monotonic() + 5
+            while any(live(pid) for pid in pids) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert not any(live(pid) for pid in pids), f'{interrupted}: discovery children survived: {pids}'
+            passed = True
+        finally:
+            status = cleanup(wrapper, pids, not passed)
+        assert status != 0, 'interrupted run must not report success'
+print('signal cleanup passed: normal exit, TERM, INT, HUP and wrapper TERM; no live discovery children')
+PYKILL
+expect pass 'signal cleanup passed' 'terminated discovery wrapper leaves no live children' \
+    python3 "${tmpdir}/kill-discovery.py" "${guard}" "${tmpdir}"
 
 if [[ "${fail}" -ne 0 ]]; then
     echo "FAIL: ${fail} verified-test guard self-test(s) failed" >&2

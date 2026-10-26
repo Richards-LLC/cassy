@@ -113,6 +113,7 @@ async fn legacy_repository_proof_rejects_drift(test_env: &mut TestEnvGuard, isol
     let other_id = extract_task_id(&extract_text(other)).unwrap().to_string();
 
     let close = |reason: &str| TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: task_id.clone(),
         reason: Some(reason.to_string()),
@@ -329,6 +330,7 @@ async fn delivered_worktree_fixture(
 
 fn close_request(task_id: &str, reason: &str) -> TaskCloseRequest {
     TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: task_id.to_string(),
         reason: Some(reason.to_string()),
@@ -349,6 +351,92 @@ async fn registered_supervisor(cas_dir: &std::path::Path, name: &str) -> cas::mc
     let core = cas::mcp::CasCore::with_daemon(cas_dir.to_path_buf(), None, None);
     core.set_agent_id_for_testing(name.to_string());
     core
+}
+
+#[tokio::test]
+async fn orphaned_parked_task_records_verdict_without_a_close_attempt_cas_9060() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, _worker, root, task_id, worker_dir) =
+        delivered_worktree_fixture(&mut env, "factory/orphaned-review").await;
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(worker_dir.path())
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    assert!(head.status.success());
+    let head = String::from_utf8(head.stdout).unwrap().trim().to_string();
+    let tasks = open_task_store(&root).unwrap();
+    let mut task = tasks.get(&task_id).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some("factory/orphaned-review".into());
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    tasks.update(&task).unwrap();
+    assert!(
+        cas_store::get_latest_verification_dispatch(&root, &task_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let supervisor = registered_supervisor(&root, "restarted-review-owner").await;
+    let request = || VerificationAddRequest {
+        task_id: task_id.clone(),
+        status: "approved".into(),
+        summary: "Reviewed the immutable parked delivery after restart".into(),
+        confidence: Some(0.9),
+        issues: None,
+        files_reviewed: Some("delivered.txt".into()),
+        duration_ms: None,
+        verification_type: None,
+        verifier_capability: None,
+        dispatch_id: None,
+    };
+    let parent = Command::new("git")
+        .arg("-C")
+        .arg(worker_dir.path())
+        .args(["rev-parse", "HEAD^"])
+        .output()
+        .unwrap();
+    assert!(parent.status.success());
+    task.deliverables.factory_branch_anchor =
+        Some(String::from_utf8(parent.stdout).unwrap().trim().into());
+    tasks.update(&task).unwrap();
+    supervisor
+        .cas_verification_add(Parameters(request()))
+        .await
+        .expect_err("a parked branch that differs from its recorded tip cannot mint proof");
+    assert!(
+        cas_store::get_latest_verification_dispatch(&root, &task_id)
+            .unwrap()
+            .is_none()
+    );
+    task.deliverables.factory_branch_anchor = Some(head.clone());
+    tasks.update(&task).unwrap();
+    supervisor
+        .cas_verification_add(Parameters(request()))
+        .await
+        .expect("parked review must mint its exact boundary without task close");
+    let dispatch = cas_store::get_latest_verification_dispatch(&root, &task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        dispatch.state,
+        cas::types::VerificationDispatchState::Resolved
+    );
+    assert_eq!(dispatch.owner_agent_id, "restarted-review-owner");
+    let proof = dispatch.repository.unwrap();
+    assert_eq!(proof.head_commit, head);
+    assert_eq!(proof.anchor_commits, vec![head]);
+    let verdict = open_verification_store(&root)
+        .unwrap()
+        .get_latest_for_task(&task_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(verdict.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
+    assert_eq!(
+        verdict.provenance,
+        cas::types::VerificationProvenance::SupervisorDirect
+    );
 }
 
 /// cas-5c7a closed external ops while the supervisor checkout carried other
@@ -1514,10 +1602,23 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
         .output()
         .expect("resolve target head");
     assert!(target_head.status.success());
-    let target_head = String::from_utf8_lossy(&target_head.stdout).trim().to_string();
+    let target_head = String::from_utf8_lossy(&target_head.stdout)
+        .trim()
+        .to_string();
+
+    // cas-3792: the merge close runs as the supervisor before the worker
+    // retries. Both callers must target the same owner and repository proof.
+    let supervisor_id = "post-merge-target-supervisor";
+    let supervisor = registered_supervisor(&cas_dir, supervisor_id).await;
+    let agents = open_agent_store(&cas_dir).unwrap();
+    let worker_id = format!("test-session-{}", std::process::id());
+    let mut worker = agents.get(&worker_id).unwrap();
+    worker.role = AgentRole::Worker;
+    worker.factory_session = Some("post-merge-factory".into());
+    agents.update(&worker).unwrap();
 
     let post_merge = extract_text(
-        service
+        supervisor
             .cas_task_close(Parameters(close_request(&task_id, "merged delivered work")))
             .await
             .expect("post-merge close"),
@@ -1535,7 +1636,30 @@ async fn test_post_merge_close_dispatch_binds_the_published_target_head() {
         target_head,
         "post-merge proof must bind the published target checkout"
     );
-    let supervisor = registered_supervisor(&cas_dir, "post-merge-target-supervisor").await;
+    assert_eq!(dispatch.requester_agent_id, supervisor_id);
+    assert_eq!(dispatch.owner_agent_id, supervisor_id);
+    let before = dispatch.clone();
+    let worker_env = FactoryWorkerEnv::enter(&mut test_env);
+    let retry = extract_text(
+        service
+            .cas_task_close(Parameters(close_request(
+                &task_id,
+                "worker re-close after merge",
+            )))
+            .await
+            .expect("worker re-close must return verification guidance, not INTERNAL_ERROR"),
+    );
+    drop(worker_env);
+    assert!(
+        retry.contains("VERIFICATION REQUIRED") && retry.contains(&dispatch.id),
+        "{retry}"
+    );
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, &task_id)
+            .unwrap()
+            .unwrap(),
+        before
+    );
     supervisor
         .cas_verification_add(Parameters(VerificationAddRequest {
             task_id: task_id.clone(),
@@ -2859,6 +2983,7 @@ async fn test_task_close_blocked_without_verification() {
 
     // Try to close task without verification - should be blocked
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
@@ -2967,6 +3092,7 @@ require_merge_on_epic_close = true
     task_store.update(&task).expect("should update task");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: task.id.clone(),
         reason: Some("Done".to_string()),
@@ -3144,6 +3270,7 @@ async fn test_normal_close_records_and_renders_lease_history_reason_cas_7aef() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("implementation complete".to_string()),
@@ -3259,6 +3386,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
         service
             .cas_task_close_with_completion(
                 Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     stranded_branch_override: None,
                     id: task_id.to_string(),
                     reason: Some("worker tries to discard its own delivery".to_string()),
@@ -3290,6 +3418,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
     let ordinary = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: task_id.to_string(),
                 reason: Some("measurement complete".to_string()),
@@ -3313,6 +3442,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
         service
             .cas_task_close_with_completion(
                 Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     stranded_branch_override: None,
                     id: task_id.to_string(),
                     reason: None,
@@ -3354,6 +3484,7 @@ async fn test_supervisor_negative_result_closes_unmerged_experiment_with_receipt
         service
             .cas_task_close_with_completion(
                 Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     stranded_branch_override: None,
                     id: task_id.to_string(),
                     reason: Some("experiment regressed the dominant path; do not ship".to_string()),
@@ -3503,6 +3634,7 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -3617,6 +3749,7 @@ async fn test_merge_required_close_parks_awaiting_merge_and_releases_gate_cas_8d
     let close_after_merge = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
@@ -3759,6 +3892,7 @@ async fn test_a844_merge_conflict_flags_task_and_names_alternative() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -3931,6 +4065,7 @@ async fn test_a844_clean_divergence_not_flagged_as_conflict() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -4072,6 +4207,7 @@ async fn test_repeated_merge_required_close_does_not_duplicate_park_audit_cas_62
     }
 
     let close_req = || TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id_a.clone(),
         reason: Some("ready for merge".to_string()),
@@ -4336,6 +4472,7 @@ async fn test_merge_before_first_close_uses_commit_hook_anchor_cas_3d37() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: task_id.clone(),
                 reason: Some("work was merged before first close".to_string()),
@@ -4482,6 +4619,7 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
     let first_close = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -4553,6 +4691,7 @@ async fn test_serial_second_task_on_same_branch_does_not_restrand_first_close_ca
     let second_close = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
@@ -4738,6 +4877,7 @@ async fn test_stale_local_epic_ref_falls_back_to_origin_cas_38e2() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and pushed to origin".to_string()),
@@ -4884,6 +5024,7 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
     let first_close = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -4922,6 +5063,7 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
     let second_close = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged, closing".to_string()),
@@ -4986,6 +5128,7 @@ async fn test_reopened_task_does_not_reuse_stale_anchor_cas_cf64() {
     let third_close = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("reworked, claiming done".to_string()),
@@ -5101,6 +5244,7 @@ async fn test_nonepic_task_resolves_default_branch_and_proceeds_when_merged_cas_
     task_store.update(&task).expect("update task");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done, merged onto main".to_string()),
@@ -5211,6 +5355,7 @@ async fn test_nonepic_task_with_unmerged_code_is_rejected_not_skipped_cas_cf64()
     task_store.update(&task).expect("update task");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
@@ -5323,6 +5468,7 @@ async fn test_chore_type_task_with_unmerged_code_is_no_longer_exempt_cas_cf64() 
     task_store.update(&task).expect("update task");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claiming done but never merged".to_string()),
@@ -5406,6 +5552,7 @@ async fn test_chore_type_task_with_zero_commits_still_closes_on_notes_cas_cf64()
     task_store.update(&task).expect("update task");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("resolved via notes, no code needed".to_string()),
@@ -5545,6 +5692,7 @@ enabled = false
     // committed. Closing must fail with UNCOMMITTED WORK.
     std::fs::write(worktree_path.join("seed.txt"), "worker edit\n").unwrap();
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
@@ -5579,6 +5727,7 @@ enabled = false
     std::fs::write(worktree_path.join("new.rs"), "fn main() {}\n").unwrap();
     git(&["add", "new.rs"]);
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("claims to be done".to_string()),
@@ -5606,6 +5755,7 @@ enabled = false
     // succeed (verification is disabled in this test's config).
     git(&["commit", "-q", "-m", "feat: add new.rs"]);
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("Committed and ready".to_string()),
@@ -5740,6 +5890,7 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
     .unwrap();
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done".to_string()),
@@ -5775,6 +5926,7 @@ async fn test_task_close_blocks_on_uncommitted_system_b_worker_worktree_cas_4b3f
     git(&["add", "seed.txt"]);
     git(&["commit", "-q", "-m", "fix: commit the work"]);
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("actually done now".to_string()),
@@ -5888,6 +6040,7 @@ async fn test_task_close_resolves_configured_staging_system_b_target_cas_113f() 
     let resp = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("staging work is committed".to_string()),
@@ -6057,6 +6210,7 @@ enabled = false
     let resp_a = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("committed and additive".to_string()),
@@ -6104,6 +6258,7 @@ enabled = false
     let resp_b = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_b.clone(),
                 reason: Some("claims to be additive".to_string()),
@@ -6162,6 +6317,7 @@ enabled = false
     let resp_c = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_c.clone(),
                 reason: Some("localized existing value".to_string()),
@@ -6311,6 +6467,7 @@ enabled = false
         .expect("start");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("non-isolated direct CLI flow".to_string()),
@@ -6385,6 +6542,7 @@ enabled = false
         .expect("start");
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: additive_id.clone(),
         reason: Some("additive-only non-isolated".to_string()),
@@ -6470,6 +6628,7 @@ enabled = false
     // cas_root.parent() for the test is the temp dir which is not a
     // git repo → check_uncommitted_work returns empty → close passes.
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
@@ -6578,6 +6737,7 @@ enabled = false
     );
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("done, no files touched".to_string()),
@@ -6667,6 +6827,7 @@ async fn test_a699_halted_approved_delivery_recloses() {
     let response = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("approved review re-close".to_string()),
@@ -6819,6 +6980,7 @@ async fn test_0447_halted_inprogress_with_merged_receipt_closes_without_restart(
     let merged = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: task_id.clone(),
                 reason: Some("finished and merged".to_string()),
@@ -6877,6 +7039,7 @@ enabled = false
     }
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("trying to close someone else's task".to_string()),
@@ -6946,6 +7109,7 @@ async fn test_epic_close_requires_epic_verification_type() {
 
     // Close without verification should be blocked
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
@@ -6976,6 +7140,7 @@ async fn test_epic_close_requires_epic_verification_type() {
     add_exact_supervisor_fixture_verdict(&cas_dir, task_ver, Some(&task_dispatch.id));
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
@@ -7008,6 +7173,7 @@ async fn test_epic_close_requires_epic_verification_type() {
     add_exact_supervisor_fixture_verdict(&cas_dir, epic_ver, Some(&epic_dispatch.id));
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
@@ -7048,6 +7214,7 @@ async fn test_branchless_no_code_epic_closes_without_checkout_snapshot_cas_04c6(
     let _supervisor = ScopedSupervisorEnv::new(&mut env);
     let id = epic.id.clone();
     let close_request = || TaskCloseRequest {
+        no_delivery: None,
         id: id.clone(),
         reason: Some("Planning complete".into()),
         stranded_branch_override: None,
@@ -7142,6 +7309,7 @@ async fn test_epic_close_derives_anchor_from_epic_branch_gh_892() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: epic.id.clone(),
                 reason: Some("merged epic branch is ready to close".to_string()),
@@ -7253,6 +7421,7 @@ async fn test_epic_close_accepts_target_receipt_when_epic_branch_lags_gh_892() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: epic.id.clone(),
                 reason: Some("target merge receipt proves the epic delivery".to_string()),
@@ -7337,6 +7506,7 @@ async fn test_task_lifecycle_with_verification() {
 
     // Close task - should succeed now with verification
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed successfully".to_string()),
@@ -7425,6 +7595,7 @@ async fn test_task_close_reopens_after_rejected_verification() {
     // Retry close after rejection: the old dispatch is terminal, so this must
     // open a fresh verification cycle instead of replaying D1's failure.
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.to_string(),
         reason: Some("Completed".to_string()),
@@ -7513,6 +7684,7 @@ async fn test_task_close_runs_verifier_or_skips_cleanly() {
     // handler is supposed to dispatch a verifier (or record a skip), not just
     // print a warning and leave the task open.
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("Completed all acceptance criteria. Deployed to prod.".to_string()),
@@ -7610,6 +7782,7 @@ async fn test_supervisor_override_rejects_worker_with_supervisor_env_only() {
     let _guard = ScopedSupervisorEnv::new(&mut test_env);
     let result = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id,
             reason: Some("historical record".into()),
@@ -7654,6 +7827,7 @@ async fn test_close_supervisor_owned_epic_requires_dispatch_unless_overridden() 
         let response_text = extract_text(
             service
                 .cas_task_close(Parameters(TaskCloseRequest {
+                    no_delivery: None,
                     stranded_branch_override: None,
                     id: id.clone(),
                     reason: Some("all child tasks complete".into()),
@@ -7751,6 +7925,7 @@ async fn test_close_supervisor_bypass_orphaned_task() {
     let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive".to_string()),
@@ -7869,6 +8044,7 @@ async fn test_close_supervisor_bypass_ghost_assignee() {
     let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("verification skipped — assignee inactive (ghost agent)".to_string()),
@@ -7994,6 +8170,7 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
     //     bypass branch. Pre-fix this path falsely reported the worker as
     //     inactive and closed the task.
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("worker finished, asking supervisor to close".to_string()),
@@ -8029,6 +8206,7 @@ async fn test_close_supervisor_active_worker_assignee_by_name() {
     // --- Attempt 2: review bypass cannot erase the exact dispatch created by
     //     attempt 1. Supervisor-direct recovery must name and resolve it.
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         reason: Some("supervisor forced close after alignment".to_string()),
@@ -8124,6 +8302,7 @@ async fn test_close_supervisor_no_bypass_when_assignee_alive() {
     let _guard = ScopedSupervisorEnv::new(&mut test_env);
 
     let close_req = TaskCloseRequest {
+        no_delivery: None,
         stranded_branch_override: None,
         id: id.clone(),
         // Intentionally still use the "verification skipped" phrase to prove
@@ -9622,6 +9801,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
     // First close — sets pending_verification and writes dispatch-request row.
     let _ = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Completed".to_string()),
@@ -9678,6 +9858,7 @@ async fn test_close_auto_escalates_stale_verification_dispatch() {
     // Second close — should auto-escalate instead of looping.
     let result = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Completed".to_string()),
@@ -10436,6 +10617,7 @@ async fn test_pending_dispatch_close_gate_prints_supervisor_recovery_cas_9fd4() 
     let text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("Ready for supervisor verification".to_string()),
@@ -10783,6 +10965,7 @@ async fn supervisor_self_assignee_close_guidance(
     let response = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("Self-implemented; ready to self-verify".to_string()),
@@ -10884,6 +11067,7 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
     // First close arms pending_verification + writes the dispatch-request row.
     let _ = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id.clone(),
             reason: Some("Completed".to_string()),
@@ -10912,6 +11096,7 @@ async fn test_timeout_escalation_uses_codex_supervisor_verification_alias_cas_79
     let text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("Completed".to_string()),
@@ -11006,6 +11191,7 @@ async fn test_062d_close_lifecycle_push_to_owning_supervisor() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id.clone(),
                 reason: Some("062d close proof".to_string()),
@@ -11159,6 +11345,7 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -11214,6 +11401,7 @@ async fn test_60393_owned_awaiting_merge_recloses_despite_preexisting_halt() {
     let close_after_merge = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("merged and ready to close".to_string()),
@@ -11358,6 +11546,7 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
     let close_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("ready for merge".to_string()),
@@ -11389,6 +11578,7 @@ async fn test_60393_unmerged_awaiting_merge_still_bounces_merge_required_under_h
     let retry_text = extract_text(
         service
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 stranded_branch_override: None,
                 id: id_a.clone(),
                 reason: Some("retry before merge".to_string()),
@@ -11497,6 +11687,7 @@ async fn test_3894_halt_no_longer_blocks_close_of_own_inprogress_task() {
     // must succeed instead of erroring — the inverse of the old assertion.
     let close_result = service
         .cas_task_close(Parameters(TaskCloseRequest {
+            no_delivery: None,
             stranded_branch_override: None,
             id: id_b.clone(),
             reason: Some("done".to_string()),
@@ -11872,7 +12063,7 @@ async fn cas_e205_supervisor_cannot_discard_source_as_evidence() {
 }
 
 #[tokio::test]
-async fn cas_e205_reverted_source_is_not_evidence_only() {
+async fn cas_0774_reverted_source_is_evidence_only() {
     cas_e205_evidence_close(AgentRole::Supervisor, "reverted").await;
 }
 
@@ -11900,13 +12091,19 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
     proof_boundary_git(root, &["init", "-q", "-b", "main"]);
     std::fs::write(root.join(".gitignore"), ".cas/\ndurable-artifacts/\n").unwrap();
     proof_boundary_git(root, &["add", ".gitignore"]);
+    if mutation == "renamed" {
+        // A source-to-docs rename still deletes source in the net delivery.
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/product.rs"), "pub fn changed() {}\n").unwrap();
+        proof_boundary_git(root, &["add", "src"]);
+    }
     proof_boundary_git(root, &["commit", "-q", "-m", "seed"]);
     proof_boundary_git(root, &["checkout", "-q", "-b", "factory/report-worker"]);
     std::fs::create_dir_all(root.join("docs/qa/reports")).unwrap();
     std::fs::write(root.join("docs/qa/reports/audit.md"), "QA completed successfully\n").unwrap();
     proof_boundary_git(root, &["add", "docs"]);
     proof_boundary_git(root, &["commit", "-q", "-m", "docs: deployed QA evidence (cas-e205)"]);
-    if matches!(mutation, "source" | "reverted" | "renamed") {
+    if matches!(mutation, "source" | "reverted") {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/product.rs"), "pub fn changed() {}\n").unwrap();
         proof_boundary_git(root, &["add", "src"]);
@@ -11914,10 +12111,11 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         if mutation == "reverted" {
             proof_boundary_git(root, &["rm", "src/product.rs"]);
             proof_boundary_git(root, &["commit", "-q", "-m", "revert source (cas-e205)"]);
-        } else if mutation == "renamed" {
-            proof_boundary_git(root, &["mv", "src/product.rs", "docs/qa/reports/disguised.md"]);
-            proof_boundary_git(root, &["commit", "-q", "-m", "rename source (cas-e205)"]);
         }
+    }
+    if mutation == "renamed" {
+        proof_boundary_git(root, &["mv", "src/product.rs", "docs/qa/reports/disguised.md"]);
+        proof_boundary_git(root, &["commit", "-q", "-m", "rename source (cas-e205)"]);
     }
     #[cfg(unix)]
     if mutation == "symlink" {
@@ -11941,6 +12139,9 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         let parked = extract_text(service.task(Parameters(ordinary)).await.unwrap());
         assert!(parked.contains("MERGE REQUIRED"), "{parked}");
         assert!(parked.contains("evidence_only=true"), "{parked}");
+        if mutation == "report" {
+            assert!(parked.contains("net base..tip diff"), "{parked}");
+        }
         assert_eq!(store.get("cas-e205").unwrap().status, TaskStatus::AwaitingMerge);
         let missing: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close", "id": "cas-e205", "evidence_only": true
@@ -11967,7 +12168,7 @@ async fn cas_e205_evidence_close(role: AgentRole, mutation: &str) {
         assert!(response.contains("EVIDENCE ONLY CLOSE REJECTED"), "{response}");
         assert!(response.contains("live registered supervisor"), "{response}");
         assert_eq!(persisted.status, TaskStatus::InProgress);
-    } else if mutation != "report" {
+    } else if !matches!(mutation, "report" | "reverted") {
         assert!(response.contains("EVIDENCE ONLY CLOSE REJECTED"), "{response}");
         assert!(response.contains("non-evidence path") || response.contains("symlink"), "{response}");
         assert_eq!(persisted.status, TaskStatus::AwaitingMerge);

@@ -62,6 +62,7 @@ impl ReceiptScope {
 /// The task the blast-radius gate judges at this close, and the decision
 /// note to record, when the worker's test receipts at the delivered head
 /// cover modules its declared targets miss. `None` leaves the gate as it was.
+#[cfg(test)]
 pub(super) fn for_close(
     cas_root: &Path,
     proof_repo: &Path,
@@ -69,12 +70,24 @@ pub(super) fn for_close(
     changed_paths: &[String],
     delivered_tip: Option<&str>,
 ) -> Option<(Task, String)> {
+    let head = delivered_tip?;
+    let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
+    for_tested_packages(proof_repo, task, changed_paths, head, &tested)
+}
+
+/// Derive scope from the same receipt view used for this close's audit or
+/// changed-crate gate, without rereading or reclassifying its proof inputs.
+pub(super) fn for_tested_packages(
+    proof_repo: &Path,
+    task: &Task,
+    changed_paths: &[String],
+    head: &str,
+    tested: &[String],
+) -> Option<(Task, String)> {
     if !task.risk.contains(&TaskRisk::BlastRadius) {
         return None;
     }
-    let head = delivered_tip?;
-    let tested = crate::factory_worker_check::passing_test_packages(cas_root, proof_repo, head);
-    let scope = derive(proof_repo, changed_paths, &task.proof_targets, &tested);
+    let scope = derive(proof_repo, changed_paths, &task.proof_targets, tested);
     (!scope.is_empty()).then(|| (scope.widen(task), scope.note(head)))
 }
 
@@ -114,9 +127,9 @@ pub(super) fn park_refusal(
     if !task.risk.contains(&TaskRisk::BlastRadius) {
         return None;
     }
-    let judged = for_close(cas_root, proof_repo, task, changed_paths, Some(head));
+    let judged = for_tested_packages(proof_repo, task, changed_paths, head, &tested);
     let targets = judged.as_ref().map_or(&task.proof_targets, |(judged, _)| &judged.proof_targets);
-    let uncovered = super::uncovered_blast_radius_modules(changed_paths, targets);
+    let uncovered = super::uncovered_blast_radius_modules(proof_repo, changed_paths, targets);
     if uncovered.is_empty() {
         return None;
     }
@@ -173,7 +186,7 @@ fn fast_rows_refusal(repo: &Path, task_id: &str, head: &str, target: &str) -> Op
 /// cas-d6eb: the tested packages that cover every target a proof-scope
 /// widening adds, when each target is crate-qualified (`<crate>::<path>`) and
 /// its crate has a passing worker test receipt at `head`. Such a widening only
-/// names what the close gate already accepts at that head ([`for_close`]), so
+/// names what the close gate already accepts at that head ([`for_tested_packages`]), so
 /// it need not invalidate the reviewed proof cycle. `None` otherwise.
 pub(super) fn receipts_cover_targets(
     cas_root: &Path,
@@ -199,7 +212,7 @@ pub(super) fn receipts_cover_targets(
         } else {
             package_dirs.get(first)?.clone()
         };
-        let module = SourceModule { crate_dir, segments: rest.to_vec() };
+        let module = SourceModule { crate_dir, segments: rest.to_vec(), test_parent: None, ambiguous_test_parents: Vec::new() };
         let package = tested
             .iter()
             .find(|package| package_covers(package, &module, &package_dirs))?;
@@ -225,7 +238,7 @@ pub(super) fn derive(
     let declared = cas_types::normalize_proof_targets(proof_targets);
     let package_dirs = workspace_package_dirs(repo);
     let mut scope = ReceiptScope::default();
-    for module in changed_source_modules(changed_paths) {
+    for module in changed_source_modules(repo, changed_paths) {
         if declared
             .iter()
             .any(|target| proof_target_matches_module(target, &module))
@@ -278,10 +291,10 @@ fn untested_changed_crates(repo: &Path, changed_paths: &[String], tested: &[Stri
     let tests = changed_paths.iter().filter_map(|path| {
         let (krate, _) = path.split_once("/tests/").filter(|_| path.ends_with(".rs"))?;
         let crate_dir = krate.rsplit('/').next()?.to_ascii_lowercase();
-        Some(SourceModule { crate_dir, segments: Vec::new() })
+        Some(SourceModule { crate_dir, segments: Vec::new(), test_parent: None, ambiguous_test_parents: Vec::new() })
     });
     let mut untested = Vec::new();
-    for module in changed_source_modules(changed_paths).into_iter().chain(tests) {
+    for module in changed_source_modules(repo, changed_paths).into_iter().chain(tests) {
         let Some((package, _)) = package_dirs.iter().find(|(_, dir)| **dir == module.crate_dir) else {
             continue;
         };

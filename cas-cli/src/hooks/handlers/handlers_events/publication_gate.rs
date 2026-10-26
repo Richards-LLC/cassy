@@ -19,6 +19,12 @@ const OVERRIDE_WINDOW_HOURS: i64 = 6;
 pub(super) const OVERRIDE_MARKER: &str = "PUBLICATION OVERRIDE:";
 
 pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>) -> Option<String> {
+    let posts = violet_posts(tool, input);
+    if let Some(root) = cas_root
+        && let Some(reason) = post_release_denial(&posts, root)
+    {
+        return Some(reason);
+    }
     let gated: Vec<Value> = violet_posts(tool, input)
         .into_iter()
         .filter(is_deliverable_post)
@@ -44,7 +50,10 @@ pub(crate) fn denial(tool: &str, input: Option<&Value>, cas_root: Option<&Path>)
         .map(|task| format!("{} ({}): {}", task.id, task.status, task.title))
         .collect();
     if epic.pending_verification {
-        open.push(format!("{}: the epic's own verification is pending", epic.id));
+        open.push(format!(
+            "{}: the epic's own verification is pending",
+            epic.id
+        ));
     }
     if open.is_empty() {
         return None;
@@ -96,6 +105,17 @@ fn violet_posts(tool: &str, input: Option<&Value>) -> Vec<Value> {
             .filter(|input| input.get("action").and_then(Value::as_str) == Some("post"))
             .map(|input| {
                 let mut post = serde_json::json!({ "kind": "file" });
+                for key in [
+                    "channel",
+                    "epic_id",
+                    "task_id",
+                    "release_notes",
+                    "initial_comment",
+                ] {
+                    if let Some(value) = input.get(key) {
+                        post[key] = value.clone();
+                    }
+                }
                 if let Some(id) = input.get("id").and_then(Value::as_str) {
                     post["artifact_id"] = Value::from(id);
                 }
@@ -118,7 +138,10 @@ fn collect_dispatch(code: &Value, posts: &mut Vec<Value>) {
     match code {
         Value::Array(calls) => calls.iter().for_each(|call| collect_dispatch(call, posts)),
         Value::Object(call) => {
-            let server = call.get("server").and_then(Value::as_str).unwrap_or_default();
+            let server = call
+                .get("server")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let tool = call.get("tool").and_then(Value::as_str).unwrap_or_default();
             if server.eq_ignore_ascii_case("violet") && tool.eq_ignore_ascii_case("violet_post") {
                 let args = ["arguments", "args", "input", "params"]
@@ -204,7 +227,11 @@ fn explicit_epic(post: &Value, store: &dyn cas_store::TaskStore) -> Option<Strin
     if task.task_type == TaskType::Epic {
         return Some(task.id);
     }
-    store.get_parent_epic(task_id).ok().flatten().map(|epic| epic.id)
+    store
+        .get_parent_epic(task_id)
+        .ok()
+        .flatten()
+        .map(|epic| epic.id)
 }
 
 /// A verification-type task: a gate, or a task whose labels or title say it
@@ -236,4 +263,69 @@ fn recent_override(notes: &str, now: chrono::DateTime<chrono::Utc>) -> Option<St
             && age <= chrono::Duration::hours(OVERRIDE_WINDOW_HOURS))
         .then(|| line[at..].trim().chars().take(200).collect())
     })
+}
+
+/// Release-note announcements have a separate gate from deliverable verification.
+fn post_release_denial(posts: &[Value], root: &Path) -> Option<String> {
+    if !posts.iter().any(release_notes_post) {
+        return None;
+    }
+    crate::qa_post_release::configured(root)?;
+    let store = crate::store::open_task_store(root).ok()?;
+    for post in with_artifact_tasks(posts.to_vec(), root) {
+        if !release_notes_post(&post) {
+            continue;
+        }
+        let epic = explicit_epic(&post, store.as_ref())
+            .or_else(crate::ui::factory::preferred_epic_id_from_session_metadata);
+        let Some(epic) = epic.and_then(|id| store.get(&id).ok()) else {
+            return Some("RELEASE NOTES BLOCKED (post_release_pending): name epic_id (or task_id) so Cassy can check its post-release receipt.".into());
+        };
+        if let Some(reason) = crate::qa_post_release::gate(root, &epic, true) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Rubric headings identify announcements; a shared channel alone never does.
+pub(crate) fn release_notes_post(post: &Value) -> bool {
+    if post.get("release_notes").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    let text = post
+        .get("text")
+        .or_else(|| post.get("initial_comment"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let heading = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default()
+        .replace(['*', '_', '`', '[', ']', '#'], "")
+        .to_ascii_lowercase();
+    let heading = heading.trim();
+    let Some(rest) = heading
+        .strip_prefix("live on production")
+        .or_else(|| heading.strip_prefix("staging"))
+    else {
+        return false;
+    };
+    if rest.chars().next().is_none_or(|c| c.is_alphanumeric()) {
+        return false;
+    }
+    let label = rest
+        .trim_start_matches(|c: char| {
+            c.is_whitespace() || matches!(c, ':' | '|' | '·' | '—' | '–' | '-')
+        })
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .trim_matches(|c: char| !c.is_alphanumeric());
+    matches!(label, "user" | "dev")
+}
+
+/// CLI text announcements run only this family; deliverable checks stay exempt.
+pub(crate) fn post_release_post_denial(post: &Value, root: Option<&Path>) -> Option<String> {
+    post_release_denial(std::slice::from_ref(post), root?)
 }

@@ -230,6 +230,7 @@ async fn close_output(fixture: &Recovery) -> String {
         fixture
             .core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some("Recovered final pushed tip".into()),
                 commit_receipt: Some(fixture.final_tip.clone()),
@@ -252,6 +253,96 @@ async fn close(fixture: &Recovery) -> Task {
         .unwrap();
     assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
     parked
+}
+
+/// cas-2bec: spawn assigns a plain lane. The commit hook records the RED
+/// commit, but only the pushed GREEN tip has a passing fast-rows receipt.
+#[tokio::test]
+async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture_with_surface(&mut env, "note.txt", false);
+    let repo = f.dir.path();
+    git(&f.worker_path, &["reset", "--hard", "main"]);
+    std::fs::create_dir_all(f.worker_path.join("scripts")).unwrap();
+    std::fs::write(
+        f.worker_path.join("scripts/fast-rows-pre-push.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
+    std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
+    git(&f.worker_path, &["add", "scripts", "regression.txt"]);
+    git(
+        &f.worker_path,
+        &["commit", "-qm", &format!("test({TASK}): RED regression")],
+    );
+    let red = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
+    git(&f.worker_path, &["add", "fix.txt"]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-qm",
+            &format!("fix({TASK}): GREEN implementation"),
+        ],
+    );
+    let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(
+        repo,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{BRANCH}"),
+            &green,
+        ],
+    );
+
+    let common = git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    let receipts = Path::new(&common).join("cas/fast-rows");
+    std::fs::create_dir_all(&receipts).unwrap();
+    std::fs::write(
+        receipts.join(format!("{green}.pass")),
+        format!("fast-rows: PASS {green} fixture\n"),
+    )
+    .unwrap();
+    let tasks = open_task_store(&repo.join(".cas")).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.demo_statement.clear();
+    task.deliverables.parked_branch = None;
+    task.deliverables.factory_branch_anchor = Some(red.clone());
+    task.deliverables.historical_factory_branch_anchors.clear();
+    tasks.update(&task).unwrap();
+
+    let output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: TASK.into(),
+                reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
+                commit_receipt: None,
+                no_delivery: None,
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(output.contains("MERGE REQUIRED"), "{output}");
+    let parked = tasks.get(TASK).unwrap();
+    assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    assert_eq!(
+        parked.deliverables.factory_branch_anchor.as_deref(),
+        Some(green.as_str()),
+        "{output}"
+    );
+    assert!(
+        parked.notes.contains(&red),
+        "the original RED boundary stays audited"
+    );
 }
 
 #[tokio::test]
@@ -287,6 +378,92 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds.len(), 1);
     assert_eq!(rounds[0].bound_head, f.final_tip);
     assert_eq!(rounds[0].branch, BRANCH);
+}
+
+/// GH #1355: a pushed target-sync merge is the new park boundary, even
+/// when the saved start base arrived through that merge rather than B.
+#[tokio::test]
+async fn repark_target_sync_advances_anchor_qa_and_merge_request_gh1355() {
+    let mut env = TestEnvGuard::temp_home();
+    for (target_first, receipt, rewrite) in [(false, true, false), (true, false, false), (false, true, true)] {
+        let f = fixture(&mut env);
+        let repo = f.dir.path();
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.parked_branch = Some(BRANCH.into());
+        let target_base = git(repo, &["rev-parse", "main"]);
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(),
+            branch: BRANCH.into(),
+            base_sha: target_base.clone(),
+        });
+        tasks.update(&task).unwrap();
+        cas_store::open_qa_pass(&cas_dir, &cas_store::NewQaPass {
+            task_id: TASK,
+            implementer_agent_id: "recovery-session",
+            branch: BRANCH,
+            bound_head: &f.predecessor,
+            deadline_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            max_rounds: 3,
+        }, chrono::Utc::now()).unwrap();
+        if target_first || rewrite {
+            git(&f.worker_path, &["reset", "--hard", "main"]);
+            if rewrite {
+                std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 99px; }\n").unwrap();
+                git(&f.worker_path, &["add", "footer.css"]);
+                git(&f.worker_path, &["commit", "-qm", "fix(cas-c6e1-fixture): rewritten delivery"]);
+            } else {
+                git(&f.worker_path, &["merge", "--no-ff", &f.predecessor, "-m", "merge target sync for cas-c6e1-fixture"]);
+            }
+        }
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        assert!(git_commit_is_ancestor(repo, &target_base, &tip));
+        assert_eq!(git_commit_is_ancestor(repo, &f.predecessor, &tip), !rewrite);
+        let origin = cas_dir.join("origin.git");
+        git(repo, &["init", "--bare", origin.to_str().unwrap()]);
+        git(repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(repo, &["push", "-q", "origin", "main", BRANCH]);
+        let result = f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some("Re-park current pushed merge tip".into()),
+            commit_receipt: receipt.then(|| tip.clone()),
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+        })).await.unwrap();
+        let output = text(result);
+        let parked = tasks.get(TASK).unwrap();
+        if rewrite {
+            assert!(output.contains("rewrit") && !output.contains("base is no longer an ancestor"), "{output}");
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.predecessor.as_str()));
+            continue;
+        }
+        assert!(output.contains("MERGE REQUIRED"), "{output}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(tip.as_str()), "{output}");
+        let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(rounds.len(), 2);
+        assert_eq!(rounds.iter().find(|round| round.bound_head == f.predecessor).unwrap().state,
+            cas_types::QaPassState::Superseded);
+        assert_eq!(rounds[0].bound_head, tip);
+        let service = crate::mcp::CasService::new(f.core, None);
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "supervisor", "task_id": TASK,
+            "summary": "Merge current delivery", "message": "Merge the re-parked tip",
+            "merge_request": true,
+        })).unwrap();
+        let output = text(service.coordination(Parameters(request)).await.unwrap());
+        assert!(!output.contains("RE-PARK"), "{output}");
+        let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().poll_all(50).unwrap();
+        assert!(rows.iter().any(|row| {
+            crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+                .is_some_and(|envelope| envelope.task_id == TASK && envelope.branch_tip == tip)
+        }), "{output}");
+    }
 }
 
 #[tokio::test]
@@ -388,10 +565,10 @@ async fn recovery_close_rejects_foreign_checkout_before_rebinding_cas_c6e1() {
     );
 }
 
-/// The supported audited recovery also exists in installed 520cd74: retire
-/// both stale active fields, keep their audit trail, then start a new cycle.
+/// A fresh review cycle must park the actual delivery after conflict resolution
+/// rewrites the commit-time anchor, without requiring an explicit receipt.
 #[tokio::test]
-async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
+async fn recovery_request_changes_rebase_close_binds_current_tip_without_receipt_cas_4fcb() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
     let cas_dir = f.dir.path().join(".cas");
@@ -405,7 +582,7 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
     let verdict = text(supervisor.cas_task_request_changes(Parameters(
         crate::mcp::tools::TaskRequestChangesRequest {
             id: TASK.into(),
-            reason: "Preserve prior source work; correct stale branch/QA binding by re-delivering the reviewed final tip, with no source amendment".into(),
+            reason: "Rebase the reviewed correction onto the current target and deliver the resolved content".into(),
         }
     )).await.unwrap());
     let reopened = tasks.get(TASK).unwrap();
@@ -436,18 +613,150 @@ async fn recovery_request_changes_start_close_binds_final_tip_cas_c6e1() {
         TaskStatus::InProgress,
         "{started}"
     );
-    let recovered = close(&f).await;
+    // A new review cycle records its commit through the real PostToolUse hook.
+    // Rebase conflict resolution then rewrites that patch without a git commit
+    // hook, leaving the recorded anchor at the pre-rebase object.
+    std::fs::write(f.worker_path.join("review.txt"), "worker correction\n").unwrap();
+    git(&f.worker_path, &["add", "review.txt"]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "fix(cas-c6e1-fixture): review correction",
+        ],
+    );
+    let before_rebase = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::hooks::handlers::handlers_events::detect_and_link_git_commit(
+        &cas_dir,
+        &crate::hooks::HookInput {
+            session_id: "recovery-session".into(),
+            cwd: f.worker_path.display().to_string(),
+            hook_event_name: "PostToolUse".into(),
+            tool_name: Some("Bash".into()),
+            tool_input: Some(
+                serde_json::json!({"command": "git commit -q -m 'fix(cas-c6e1-fixture): review correction'"}),
+            ),
+            tool_response: Some(serde_json::json!({"exitCode": 0, "stdout": ""})),
+            agent_role: Some("worker".into()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(
+        tasks
+            .get(TASK)
+            .unwrap()
+            .deliverables
+            .factory_branch_anchor
+            .as_deref(),
+        Some(before_rebase.as_str())
+    );
+    std::fs::write(f.dir.path().join("review.txt"), "target update\n").unwrap();
+    git(f.dir.path(), &["add", "review.txt"]);
+    git(
+        f.dir.path(),
+        &["commit", "-q", "-m", "chore(cas-abcd): target update"],
+    );
+    git(
+        f.dir.path(),
+        &["update-ref", "refs/remotes/origin/main", "main"],
+    );
+    let conflict = std::process::Command::new("git")
+        .args(["rebase", "main"])
+        .current_dir(&f.worker_path)
+        .env("GIT_COMMITTER_NAME", "CAS Test")
+        .env("GIT_COMMITTER_EMAIL", "cas@example.test")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success(), "fixture must conflict");
+    assert!(
+        String::from_utf8_lossy(&conflict.stdout)
+            .contains("CONFLICT (add/add): Merge conflict in review.txt"),
+        "unexpected rebase stop: {conflict:?}"
+    );
+    std::fs::write(
+        f.worker_path.join("review.txt"),
+        "target update plus reviewed correction\n",
+    )
+    .unwrap();
+    git(&f.worker_path, &["add", "review.txt"]);
+    git(
+        &f.worker_path,
+        &["-c", "core.editor=true", "rebase", "--continue"],
+    );
+    let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    assert_ne!(rebased, before_rebase);
+    // Context in the body cannot turn a sibling's subject into our delivery.
+    // Keep the task-owned row last so the real close below delivers that tip.
+    let active = tasks.get(TASK).unwrap();
+    for (message, advances) in [
+        (
+            format!("fix(cas-abcd): sibling change\n\nContext: {TASK} (cas-4fcb regression)"),
+            false,
+        ),
+        (format!("fix({TASK}): reviewed correction"), true),
+    ] {
+        git(&f.worker_path, &["commit", "-q", "--amend", "-m", &message]);
+        let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        let parking = f.core.advance_commit_time_anchor_before_park(
+            tasks.as_ref(),
+            &active,
+            f.dir.path(),
+            "main",
+            Some(BRANCH),
+            Some(&tip),
+        );
+        assert_eq!(
+            parking.deliverables.factory_branch_anchor.as_deref(),
+            Some(if advances {
+                tip.as_str()
+            } else {
+                before_rebase.as_str()
+            }),
+            "delivery ownership for {message:?}",
+        );
+    }
+    let rebased = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(
+        f.dir.path(),
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{BRANCH}"),
+            &rebased,
+        ],
+    );
+    let output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
+                id: TASK.into(),
+                reason: Some(format!("PASS {rebased}: reviewed rebased correction")),
+                commit_receipt: None,
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
+    assert!(output.contains("MERGE REQUIRED"), "{output}");
+    let recovered = tasks.get(TASK).unwrap();
+    assert_eq!(recovered.status, TaskStatus::AwaitingMerge, "{output}");
     assert_eq!(
         recovered.deliverables.parked_branch.as_deref(),
         Some(BRANCH)
     );
     assert_eq!(
         recovered.deliverables.factory_branch_anchor.as_deref(),
-        Some(f.final_tip.as_str())
+        Some(rebased.as_str())
     );
     let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
     assert_eq!(rounds.len(), 1);
-    assert_eq!(rounds[0].bound_head, f.final_tip);
+    assert_eq!(rounds[0].bound_head, rebased);
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
@@ -525,6 +834,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
         "main"
     ));
     let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+        no_delivery: None,
         id: TASK.into(),
         reason: Some(format!("Lane CI passed for {final_tip}: https://github.com/example/cassy/actions/runs/39049693968 . Re-parking for epic merge.")),
         commit_receipt: None,
@@ -567,6 +877,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let qa_output = text(
         f.core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some("Delivery integrated; review still required".into()),
                 commit_receipt: Some(final_tip.clone()),
@@ -586,6 +897,7 @@ async fn released_request_changes_delivery_still_requires_merge_cas_915b() {
     let output = text(
         f.core
             .cas_task_close(Parameters(TaskCloseRequest {
+                no_delivery: None,
                 id: TASK.into(),
                 reason: Some("Final corrected delivery merged into target".into()),
                 commit_receipt: Some(final_tip),
@@ -785,29 +1097,349 @@ async fn terminal_surfaces_keep_receipt_gate_before_park_cas_2de9() {
 
 #[tokio::test]
 async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
+    for (surface, has_demo, complete_pairs) in [
+        ("src/cli/status.rs", true, false),
+        ("note.txt", false, false),
+        ("note.txt", false, true),
+    ] {
+        let mut env = TestEnvGuard::temp_home();
+        let f = fixture_with_surface(&mut env, surface, true);
+        let cas_dir = f.dir.path().join(".cas");
+        let task_dir = fresh_ledger(&f);
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        if !has_demo {
+            task.demo_statement.clear();
+            tasks.update(&task).unwrap();
+        }
+        let original_notes = task.notes.clone();
+        let terminal = task_dir.join("terminal-qa/report.md");
+        std::fs::create_dir_all(terminal.parent().unwrap()).unwrap();
+        std::fs::write(&terminal, "terminal-qa: PASS fixture\n").unwrap();
+        let unrelated = task_dir.join("unrelated.json");
+        std::fs::write(&unrelated, r#"{"files":{"cells":["M01.png"]}}"#).unwrap();
+        let prose = task_dir.join("prose.txt");
+        std::fs::write(&prose, "old bundle instructions, not a manifest").unwrap();
+        for cited in [
+            "not-a-path".to_string(),
+            task_dir.join("missing.json").display().to_string(),
+            unrelated.display().to_string(),
+            prose.display().to_string(),
+        ] {
+            task.notes = format!("qa-bundle: {cited}");
+            let result = super::super::qa_evidence_gate::qa_evidence_close_gate_for_paths(
+                &cas_dir,
+                &task,
+                f.dir.path(),
+                "main",
+                Some(&f.final_tip),
+                Some(&[surface.into()]),
+                None,
+            );
+            assert!(
+                result.is_ok(),
+                "{surface} without declared pairs must ignore {cited}: {result:?}"
+            );
+        }
+        task.notes = original_notes;
+        tasks.update(&task).unwrap();
+        std::fs::remove_file(terminal).unwrap();
+        std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
+        if complete_pairs {
+            std::fs::write(task_dir.join("after.png"), "current").unwrap();
+        }
+        std::fs::write(
+            task_dir.join("pairs.json"),
+            serde_json::json!({
+                "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
+                "pairs": if complete_pairs { serde_json::json!([{
+                    "id": "G3", "before": {"png": "before.png"}, "after": {"png": "after.png"},
+                }]) } else { serde_json::json!([]) },
+                "unpaired": if complete_pairs { serde_json::json!([]) }
+                    else { serde_json::json!([{"id": "G3", "before": {"png": "before.png"}}]) },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let manifest = task_dir.join("bundle.json");
+        std::fs::write(
+            &manifest,
+            serde_json::json!({
+                "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.notes
+            .push_str(&format!("\nqa-bundle: {}", manifest.display()));
+        tasks.update(&task).unwrap();
+        if !complete_pairs {
+            let refusal = close_output(&f).await;
+            assert!(refusal.contains("missing BEFORE cell(s): G3"), "{refusal}");
+        }
+        cas_store::waive_qa_pass(
+            &cas_dir,
+            TASK,
+            "supervisor-session",
+            WORKER,
+            BRANCH,
+            &f.final_tip,
+            "fixture exact-head terminal evidence waiver",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let parked = close(&f).await;
+        assert_eq!(
+            parked.deliverables.factory_branch_anchor.as_deref(),
+            Some(f.final_tip.as_str())
+        );
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+        let waiver_label = if has_demo { "ledger" } else { "pair coverage" };
+        assert_eq!(
+            parked
+                .notes
+                .contains(&format!("QA evidence {waiver_label} waived")),
+            !complete_pairs,
+            "complete coverage must not record an unused waiver: {}", parked.notes,
+        );
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(passes.len(), 1);
+        assert_eq!(passes[0].bound_head, f.final_tip);
+        assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
+    }
+}
+
+#[tokio::test]
+async fn cas_5dc0_repark_opens_next_qa_round_and_reuses_the_idle_reviewer() {
+    for busy in [false, true] {
+        let mut env = TestEnvGuard::temp_home();
+        let mut f = fixture(&mut env);
+        let cas_dir = f.dir.path().join(".cas");
+        let agents = open_agent_store(&cas_dir).unwrap();
+        env.set("CAS_FACTORY_SESSION", "qa-reround-fixture");
+        for mut agent in agents.list(None).unwrap() {
+            agent.factory_session = Some("qa-reround-fixture".into());
+            agents.update(&agent).unwrap();
+        }
+        let mut reviewer = Agent::new_with_role(
+            "qa-review-session".into(),
+            "qa-reviewer".into(),
+            AgentRole::Worker,
+        );
+        reviewer.status = cas_types::AgentStatus::Idle;
+        reviewer.factory_session = Some("qa-reround-fixture".into());
+        agents.register(&reviewer).unwrap();
+        close(&f).await;
+        let first = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now())
+            .unwrap()
+            .unwrap();
+        cas_store::claim_qa_pass(&cas_dir, TASK, &reviewer.name, chrono::Utc::now()).unwrap();
+        cas_store::resolve_qa_pass(
+            &cas_dir,
+            TASK,
+            &reviewer.name,
+            cas_types::QaVerdict::Rejected,
+            "Correct the spacing",
+            None,
+            "fixture/LEDGER.md",
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut qa_task = tasks.get(first.qa_task_id.as_deref().unwrap()).unwrap();
+        qa_task.assignee = Some(reviewer.name.clone());
+        qa_task.status = TaskStatus::Closed;
+        tasks.update(&qa_task).unwrap();
+        if busy {
+            let mut other = Task::new("cas-review-other".into(), "Other accepted review".into());
+            other.status = TaskStatus::InProgress;
+            other.assignee = Some(reviewer.name.clone());
+            tasks.add(&other).unwrap();
+            agents
+                .try_claim(&other.id, &reviewer.id, 1800, Some("unrelated review"))
+                .unwrap();
+        }
+        let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-session".into());
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        supervisor
+            .cas_task_request_changes(Parameters(crate::mcp::tools::TaskRequestChangesRequest {
+                id: TASK.into(),
+                reason: "Address the independent QA rejection".into(),
+            }))
+            .await
+            .unwrap();
+        std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+        git(&f.worker_path, &["add", "footer.css"]);
+        git(
+            &f.worker_path,
+            &[
+                "commit",
+                "-qm",
+                "fix(cas-c6e1-fixture): address independent QA",
+            ],
+        );
+        f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(
+            f.dir.path(),
+            &[
+                "update-ref",
+                &format!("refs/remotes/origin/{BRANCH}"),
+                &f.final_tip,
+            ],
+        );
+        env.set("CAS_AGENT_ROLE", "worker");
+        f.core
+            .cas_task_start_with_options(Parameters(crate::mcp::tools::TaskStartRequest {
+                id: TASK.into(),
+                brief: Some(true),
+                force: None,
+            }))
+            .await
+            .unwrap();
+        close(&f).await;
+        let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+        assert_eq!(
+            passes.len(),
+            2,
+            "re-park must open round2 without manual qa_request"
+        );
+        let next = passes.iter().find(|pass| pass.round == 2).unwrap();
+        assert_eq!(next.bound_head, f.final_tip);
+        let assigned = tasks.get(next.qa_task_id.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            assigned.assignee.as_deref(),
+            (!busy).then_some(reviewer.name.as_str()),
+            "reuse only an available independent reviewer"
+        );
+        assert_eq!(
+            next.state,
+            cas_types::QaPassState::Pending,
+            "reviewer must still accept and claim the new round"
+        );
+        let queued = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .poll_for_target_with_session(&reviewer.name, Some("qa-reround-fixture"), 100)
+            .unwrap();
+        assert_eq!(
+            queued.iter().any(|row| row.prompt.contains(&assigned.id)),
+            !busy,
+            "only the idle reused reviewer receives the new assignment"
+        );
+        let prompts = crate::store::open_prompt_queue_store(&cas_dir)
+            .unwrap()
+            .poll_for_target_with_session("supervisor", Some("qa-reround-fixture"), 100)
+            .unwrap();
+        let handoff = prompts
+            .iter()
+            .find(|row| row.source == format!("qa-dispatch:{}", next.id))
+            .unwrap();
+        // pin: assigned-reviewer handoffs must not instruct a duplicate reviewer spawn.
+        let instructs_spawn = handoff.prompt.contains("Spawn a reviewer");
+        assert_eq!(
+            instructs_spawn, busy,
+            "handoff must match actual reviewer assignment"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_close() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture_with_surface(&mut env, "src/cli/status.rs", true);
+    let f = fixture(&mut env);
     let cas_dir = f.dir.path().join(".cas");
-    cas_store::waive_qa_pass(
+    let mut config = crate::config::Config::load(&cas_dir).unwrap();
+    config.set("verification.enabled", "true").unwrap();
+    config.save(&cas_dir).unwrap();
+    // CasCore caches config for its lifetime: enable verification before
+    // the first close, so the merged close exercises dispatch preparation.
+    assert!(f.core.load_config().verification_enabled());
+    close(&f).await;
+    let old = cas_store::create_verification_dispatch_bound(
         &cas_dir,
         TASK,
+        "recovery-session",
         "supervisor-session",
-        WORKER,
-        BRANCH,
-        &f.final_tip,
-        "fixture exact-head terminal evidence waiver",
-        chrono::Utc::now(),
+        &cas_types::VerificationProofBoundary::task(),
+        chrono::Utc::now() + chrono::Duration::minutes(10),
+        false,
     )
     .unwrap();
-    let parked = close(&f).await;
+    let conn = rusqlite::Connection::open(cas_dir.join("cas.db")).unwrap();
+    cas_store::resolve_verification_dispatch_with_conn(
+        &conn,
+        &old.id,
+        "supervisor-session",
+        None,
+        true,
+    )
+    .unwrap();
+    let invalidated = cas_store::invalidate_verification_dispatch_for_new_cycle(&cas_dir, TASK)
+        .unwrap()
+        .unwrap();
+    assert_eq!(invalidated.id, old.id);
     assert_eq!(
-        parked.deliverables.factory_branch_anchor.as_deref(),
-        Some(f.final_tip.as_str())
+        invalidated.state,
+        cas_types::VerificationDispatchState::Invalidated
     );
-    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    assert!(parked.notes.contains("QA evidence ledger waived"));
-    let passes = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
-    assert_eq!(passes.len(), 1);
-    assert_eq!(passes[0].bound_head, f.final_tip);
-    assert_eq!(passes[0].state, cas_types::QaPassState::Waived);
+    // A merge fact is retained even when its tree discarded the delivery.
+    // The integration gate must still refuse; a verifier must still be able to report.
+    git(
+        f.dir.path(),
+        &[
+            "merge",
+            "--no-ff",
+            "-s",
+            "ours",
+            BRANCH,
+            "-m",
+            "merge redelivery with missing source",
+        ],
+    );
+    let output = close_output(&f).await;
+    assert!(output.contains("DELIVERY CONTENT DROPPED"), "{output}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        dispatch.id, old.id,
+        "merged re-delivery needs a new exact boundary before content refusal"
+    );
+    assert_eq!(
+        dispatch.state,
+        cas_types::VerificationDispatchState::Pending
+    );
+    let proof = dispatch
+        .repository
+        .as_ref()
+        .expect("bind the merged target, never infer an unbound pass");
+    assert_eq!(proof.head_commit, git(f.dir.path(), &["rev-parse", "main"]));
+    assert_eq!(proof.target_branch.as_deref(), Some("main"));
+    let repeated = close_output(&f).await;
+    assert!(repeated.contains("DELIVERY CONTENT DROPPED"), "{repeated}");
+    assert_eq!(
+        cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
+            .unwrap()
+            .unwrap()
+            .id,
+        dispatch.id,
+        "retry must keep the same exact dispatch"
+    );
+    assert!(proof.anchor_commits.contains(&f.final_tip));
+    let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    supervisor.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
+        "task_id":TASK,"dispatch_id":dispatch.id,"status":"approved","summary":"Independent review recorded; integration proof remains a separate close obligation"
+    })).unwrap())).await.expect("the legitimate independent verdict must be recordable");
+    let after_verdict = close_output(&f).await;
+    assert!(
+        after_verdict.contains("DELIVERY CONTENT DROPPED"),
+        "{after_verdict}"
+    );
+    assert_ne!(
+        open_task_store(&cas_dir).unwrap().get(TASK).unwrap().status,
+        TaskStatus::Closed,
+        "a dispatch never waives the content gate"
+    );
 }

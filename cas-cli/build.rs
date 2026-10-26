@@ -11,6 +11,7 @@ use std::{
 
 fn main() {
     generate_archive_fixture_sources();
+    generate_init_design_captures();
     println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
     println!("cargo:rerun-if-changed=../hub-web/dist/app.js");
     println!("cargo:rerun-if-changed=../hub-web/dist/app.css");
@@ -58,6 +59,58 @@ fn main() {
     // Rebuild if .env changes
     watch_optional_path(Path::new("../.env"));
     watch_optional_path(Path::new(".env"));
+}
+
+/// Embed every init capture so the portability test covers new captures while
+/// remaining runnable from the archived test suite without a checkout read.
+fn generate_init_design_captures() {
+    let manifest_dir = PathBuf::from(
+        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets CARGO_MANIFEST_DIR"),
+    );
+    let capture_dir = manifest_dir.join("../docs/design/cli");
+    // Match init-*.capture.txt, and watch both the directory (new captures)
+    // and each matched file (capture content changes).
+    let mut captures: Vec<_> = fs::read_dir(&capture_dir)
+        .unwrap_or_else(|error| {
+            panic!(
+                "read init capture directory {}: {error}",
+                capture_dir.display()
+            )
+        })
+        .map(|entry| entry.unwrap_or_else(|error| panic!("read init capture entry: {error}")))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with("init-") && name.ends_with(".capture.txt"))
+        })
+        .collect();
+    captures.sort();
+
+    let mut generated = String::from("&[\n");
+    for path in captures {
+        println!("cargo:rerun-if-changed={}", path.display());
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| panic!("init capture path is not valid UTF-8: {}", path.display()));
+        let relative = path
+            .strip_prefix(&manifest_dir)
+            .expect("init captures are beneath the package parent")
+            .to_string_lossy();
+        generated.push_str(&format!(
+            "    ({name:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {:?}))),\n",
+            format!("/{relative}")
+        ));
+    }
+    generated.push_str("]\n");
+
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
+    fs::write(out_dir.join("init_design_captures.rs"), generated)
+        .expect("write generated init capture fixture manifest");
+    println!("cargo:rerun-if-changed=../docs/design/cli");
 }
 
 /// Generate the archive test's embedded source manifest from the test tree.

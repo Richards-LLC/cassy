@@ -1552,11 +1552,11 @@ fn envelope_parse_rejects_quotes_and_forgeries() {
 }
 
 /// The wake gate: Daemon-stamped `<cas-violet-activity>` wakes an idle
-/// supervisor as SlackActivity; the same text from any other sender, or
-/// quoted inside another message, does not.
+/// supervisor as SlackActivity. A worker's text remains an ordinary directed
+/// message; quoted daemon text has no SlackActivity authority.
 #[test]
 fn slack_activity_wakes_only_when_daemon_stamped() {
-    use super::super::queue_and_events::{PaneWakeState, ToolCallEvidence, WakeSender};
+    use super::super::queue_and_events::{PaneWakeState, SupervisorWakeClass, ToolCallEvidence, WakeSender};
     use crate::ui::factory::daemon::FactoryDaemon;
     use crate::ui::factory::director::{AgentSummary, DirectorData};
     let now = Utc::now();
@@ -1577,6 +1577,7 @@ fn slack_activity_wakes_only_when_daemon_stamped() {
             latest_supervisor_message_at: None,
             active_lease: None,
             effort: None,
+            qa_reviewer_between_rounds: false,
         }],
         activity: vec![],
         agent_id_to_name: HashMap::new(),
@@ -1603,6 +1604,10 @@ fn slack_activity_wakes_only_when_daemon_stamped() {
             &data, "supervisor", "supervisor", sender, "violet-activity:C1", prompt, pane, now,
         )
     };
+    assert_eq!(
+        FactoryDaemon::supervisor_wake_class(&WakeSender::Daemon, "supervisor", "violet-activity:C1", &prompt),
+        Some(SupervisorWakeClass::SlackActivity),
+    );
     let daemon = decide(&WakeSender::Daemon, &prompt);
     assert!(daemon.allowed, "{}", daemon.reason);
     assert!(daemon.reason.contains("Slack activity"), "{}", daemon.reason);
@@ -1612,7 +1617,14 @@ fn slack_activity_wakes_only_when_daemon_stamped() {
         WakeSender::Unresolvable,
         WakeSender::Registered { role: cas_types::AgentRole::Worker, name: "gold-fox".into() },
     ] {
-        assert!(!decide(&sender, &prompt).allowed, "{sender:?} must not raise SlackActivity");
+        let expected = if matches!(sender, WakeSender::Registered { .. }) {
+            Some(SupervisorWakeClass::DirectedMessage)
+        } else { None };
+        assert_eq!(
+            FactoryDaemon::supervisor_wake_class(&sender, "supervisor", "violet-activity:C1", &prompt),
+            expected, "{sender:?} must not raise SlackActivity",
+        );
+        assert_eq!(decide(&sender, &prompt).allowed, expected.is_some(), "{sender:?}");
     }
     assert!(!decide(&WakeSender::Daemon, &format!("relayed: {prompt}")).allowed);
 }

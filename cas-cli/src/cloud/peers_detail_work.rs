@@ -163,6 +163,20 @@ pub(crate) fn presence_agent(root: &Path, agent: &crate::types::Agent) -> crate:
     agent
         .metadata
         .insert(PR_META.into(), read_snapshot(root).unwrap_or_default());
+    // GH #1319: a supervisor whose harness is logged out still heartbeats,
+    // so peers would read it as live and their mail as delivered. Publish the
+    // harness's own refusal; its next answered turn clears it.
+    let auth_failure =
+        match crate::mcp::tools::service::factory_ops::supervisor_auth_failure_evidence(
+            root, &agent,
+        ) {
+            crate::factory_auth_health::AuthFailureEvidence::Failed { message, .. } => message,
+            _ => String::new(),
+        };
+    agent.metadata.insert(
+        crate::cloud::peers::META_HARNESS_AUTH_FAILED.into(),
+        auth_failure,
+    );
     // Split records are existing repository collaboration records, never
     // private task lock payloads or titles. An unreadable inventory clears
     // old metadata rather than publishing a fresh empty section.
@@ -437,11 +451,22 @@ pub(super) fn inventory(
     }
     for task in records.into_values().filter(|t| !t.is_terminal()) {
         let claim = detail.claims.iter().find(|c| c.task_id == task.id).cloned();
+        // cas-47a2: before its first commit, a claimed task's branch is the
+        // one its live claimant has checked out.
         let branch = task
             .deliverables
             .parked_branch
             .clone()
-            .or_else(|| task.branch.clone());
+            .or_else(|| task.branch.clone())
+            .or_else(|| {
+                let claim = claim.as_ref()?;
+                detail
+                    .workers
+                    .iter()
+                    .find(|worker| worker.agent_id == claim.agent_id)?
+                    .branch
+                    .clone()
+            });
         let pr = branch
             .as_ref()
             .and_then(|b| work.prs.iter().find(|p| &p.branch == b))

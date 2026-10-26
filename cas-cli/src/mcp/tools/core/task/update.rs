@@ -1,3 +1,4 @@
+use super::audit;
 use crate::mcp::tools::core::imports::*;
 
 use crate::cloud::{CloudConfig, TeamRegistration};
@@ -374,7 +375,8 @@ pub(crate) fn resolve_assignment_freshness_branch(
 /// GH #1006 item 3: a worker whose checkout sits on a delivery parked for
 /// merge reads as far behind any other epic, but rebasing it would destroy
 /// the tip under review. Assignment proceeds with this note instead; `task
-/// start` keeps the parked tip and moves the branch onto the new target.
+/// start` can move the reusable base lane while preserving its old tip. An
+/// unmerged per-task delivery branch itself stays frozen.
 fn parked_assignment_note(
     task_store: &dyn cas_store::TaskStore,
     worker: &cas_types::Agent,
@@ -382,6 +384,18 @@ fn parked_assignment_note(
     let clone_path = worker.metadata.get("clone_path")?;
     let head = crate::mcp::tools::worktree_head(std::path::Path::new(clone_path))?;
     let parked = crate::mcp::tools::parked_delivery_at_tip(task_store, &worker.name, &head)?;
+    if let Some(branch) = crate::factory_isolation::branch_at(std::path::Path::new(clone_path))
+        .filter(|branch| {
+            crate::factory_isolation::own_task_branch_task_id(&worker.name, branch).is_some()
+        })
+    {
+        return Some(format!(
+            "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge) on {branch}, so it is not checked for staleness. While its tip remains unmerged, `task start` preserves that delivery branch and refuses starting another task there. Switch to the new task's own branch from its target before starting.",
+            name = worker.name,
+            tip8 = &parked.tip[..parked.tip.len().min(8)],
+            task = parked.task_id,
+        ));
+    }
     Some(format!(
         "ℹ️ Worker '{name}' is parked at {tip8} for {task} (awaiting merge), so it is not \
          checked for staleness. `task start` keeps that tip on origin and as local branch \
@@ -390,6 +404,87 @@ fn parked_assignment_note(
         tip8 = &parked.tip[..parked.tip.len().min(8)],
         task = parked.task_id,
         branch = crate::factory_isolation::expected_worker_branch(&worker.name),
+    ))
+}
+
+/// `task start` can reset an idle worker's clean, ancestor factory branch to
+/// the declared target. Apply the same preconditions before waiving assignment
+/// staleness; start checks them again before it changes the branch.
+fn clean_idle_assignment_note(
+    task_store: &dyn cas_store::TaskStore,
+    worker: &cas_types::Agent,
+    task: &Task,
+    status: TaskStatus,
+) -> Option<String> {
+    let target = super::lifecycle::initial_factory_branch_reset_target(task, status)?;
+    let target_branch = target.target_branch.trim();
+    if worker.role != cas_types::AgentRole::Worker
+        || !matches!(
+            worker.status,
+            cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+        )
+    {
+        return None;
+    }
+    let active = task_store
+        .ids_by_assignees_and_statuses(
+            &[&worker.name, &worker.id],
+            &[
+                TaskStatus::Open,
+                TaskStatus::InProgress,
+                TaskStatus::Blocked,
+            ],
+        )
+        .ok()?;
+    if !active.is_empty() {
+        return None;
+    }
+
+    let clone_path = worker.metadata.get("clone_path")?;
+    let path = std::path::Path::new(clone_path);
+    let (repo_root, _) = super::repo_context::git_layout(path).ok()?;
+    if !super::repo_context::repo_answers_to(&repo_root, &target.repo_selector) {
+        return None;
+    }
+    let branch = crate::factory_isolation::branch_at(path)?;
+    if crate::factory_isolation::classify_worker_binding(&worker.name, Some(&branch))
+        != crate::factory_isolation::WorkerBinding::Own
+    {
+        return None;
+    }
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(path)
+        .output()
+        .ok()?;
+    if !status.status.success() || !status.stdout.is_empty() {
+        return None;
+    }
+    let git = crate::worktree::GitOperations::new(path.to_path_buf());
+    let tip = git.ref_sha("HEAD").ok()?;
+    let target = git.ref_sha(target_branch).ok()?;
+    if !git.is_ancestor(&tip, &target) {
+        return None;
+    }
+    // cas-ff6c: start refuses another task's per-task branch rather than
+    // resetting it, so promise the cut start will ask for.
+    if let Some(owner_task) =
+        crate::factory_isolation::own_task_branch_task_id(&worker.name, &branch).filter(|owner_task| {
+            *owner_task != task.id && !owner_task.starts_with(&format!("{}-", task.id))
+        })
+    {
+        return Some(format!(
+            "ℹ️ Worker '{name}' has no active task and its clean {branch} branch is behind \
+             {target_branch}. That branch belongs to {owner_task}, so `task start` will ask the \
+             worker to cut factory/{name}-{task_id} from the target first.",
+            name = worker.name,
+            task_id = task.id,
+        ));
+    }
+    Some(format!(
+        "ℹ️ Worker '{}' has no active task and its clean {} branch is behind {}. \
+         `task start` will reset that branch to the target before work begins.",
+        worker.name, branch, target_branch
     ))
 }
 
@@ -406,6 +501,172 @@ fn set_execution_state_patch_field(
 }
 
 impl CasCore {
+    /// Shared pre-persistence assignment policy for create and update. Keep
+    /// identity normalization and freshness together so dispatch cannot accept
+    /// an assignment that the supervisor's update path would refuse.
+    pub(crate) fn validate_task_assignee(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        assignee: &str,
+        assignment_status: TaskStatus,
+        supervisor_override: bool,
+        supervisor_override_reason: Option<&str>,
+        override_audit: &mut Option<String>,
+        warnings: &mut Vec<String>,
+    ) -> Result<String, String> {
+        if std::env::var("CAS_FACTORY_MODE").is_err() {
+            return Ok(assignee.to_string());
+        }
+        let Ok(agent_store) = self.open_agent_store() else {
+            return Ok(assignee.to_string());
+        };
+        let Ok(agents) = agent_store.list(None) else {
+            return Ok(assignee.to_string());
+        };
+        // Prefer display names, then normalize session IDs just as task mine
+        // resolves worker identity. Unknown names remain valid for pre-spawn use.
+        let by_name = agents
+            .iter()
+            .find(|agent| agent.name.eq_ignore_ascii_case(assignee));
+        let worker = by_name.or_else(|| {
+            agents.iter().find(|agent| agent.id.eq_ignore_ascii_case(assignee))
+        });
+        let Some(worker) = worker else {
+            warnings.push(format!(
+                "⚠️ No registered factory agent found for assignee \
+                 '{assignee}'. Verify the worker name with \
+                 `{tool_prefix}factory action=worker_status`. Use the \
+                 worker's display name (e.g. 'codex-jester'), not \
+                 their session UUID, for reliable `task mine` dispatch.",
+                tool_prefix = crate::mcp::tools::core::guidance::caller_prefix(),
+            ));
+            return Ok(assignee.to_string());
+        };
+        let worker_name = &worker.name;
+        if by_name.is_none() {
+            warnings.push(format!(
+                "⚠️ Assignee '{assignee}' is a session ID. \
+                 Normalized to display name '{worker_name}' so \
+                 `task mine` can find this task. \
+                 Use '{worker_name}' directly to avoid this warning."
+            ));
+        }
+        if let Some(note) = parked_assignment_note(task_store, worker) {
+            warnings.push(note);
+        } else {
+            let factory_config = self.load_config().factory();
+            let preferred_sync = resolve_assignment_freshness_branch(task_store, task);
+            if (factory_config.warn_stale_assignment || factory_config.block_stale_assignment)
+                && let Some(clone_path) = worker.metadata.get("clone_path")
+                && let Some((behind_count, branch)) =
+                    check_worktree_staleness(clone_path, preferred_sync.as_deref())
+                && behind_count > 0
+            {
+                if let Some(note) =
+                    clean_idle_assignment_note(task_store, worker, task, assignment_status)
+                {
+                    warnings.push(note);
+                } else {
+                    let mut assignment_override_applied = false;
+                    if factory_config.block_stale_assignment
+                        && behind_count >= factory_config.stale_threshold_commits
+                    {
+                        if supervisor_override {
+                            let supervisor = self.resolve_live_supervisor_authority().map_err(
+                                |error| format!(
+                                    "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a live registered supervisor ({error:?})."
+                                ),
+                            )?;
+                            let reason = supervisor_override_reason
+                                .map(str::trim)
+                                .filter(|reason| !reason.is_empty())
+                                .ok_or_else(|| {
+                                    "SUPERVISOR OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason.".to_string()
+                                })?;
+                            if worker.role != cas_types::AgentRole::Worker
+                                || !matches!(
+                                    worker.status,
+                                    cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle
+                                )
+                            {
+                                return Err(format!(
+                                    "SUPERVISOR OVERRIDE REJECTED: assignee '{}' is not an active worker.",
+                                    worker.name
+                                ));
+                            }
+                            let active = task_store
+                                .ids_by_assignees_and_statuses(
+                                    &[&worker.name, &worker.id],
+                                    &[
+                                        TaskStatus::Open,
+                                        TaskStatus::InProgress,
+                                        TaskStatus::Blocked,
+                                    ],
+                                )
+                                .map_err(|error| {
+                                    format!(
+                                        "SUPERVISOR OVERRIDE REJECTED: cannot verify active tasks for '{}': {error}",
+                                        worker.name
+                                    )
+                                })?;
+                            if active.iter().any(|id| id != &task.id) {
+                                return Err(format!(
+                                    "SUPERVISOR OVERRIDE REJECTED: worker '{}' already has active task(s): {}.",
+                                    worker.name,
+                                    active
+                                        .iter()
+                                        .filter(|id| *id != &task.id)
+                                        .cloned()
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ));
+                            }
+                            let reason = reason.replace(['\n', '\r'], " ");
+                            let visible_branch =
+                                crate::worktree::GitOperations::visible_git_label(&branch);
+                            warnings.push(format!(
+                                "⚠️ SUPERVISOR OVERRIDE: {} accepted assignment to worker '{}' despite {behind_count} commits behind {visible_branch} (threshold: {}). The worktree was not changed. Inspect dirty or unpushed work before starting. For an Open task with a declared work target, `task start` runs reuse checks only on another owned factory branch. Other starts do not provide that check. Reason: {reason}",
+                                supervisor.name,
+                                worker.name,
+                                factory_config.stale_threshold_commits,
+                            ));
+                            *override_audit = Some(format!(
+                                "[{}] DECISION: supervisor_override=true accepted stale assignment task={} worker={} supervisor={} behind={} target={} reason={}",
+                                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                                task.id,
+                                worker.name,
+                                supervisor.id,
+                                behind_count,
+                                visible_branch,
+                                reason,
+                            ));
+                            assignment_override_applied = true;
+                        } else {
+                            let [rebase] = crate::worktree::GitOperations::git_remedies([
+                                &["rebase", &branch],
+                            ])?;
+                            let branch =
+                                crate::worktree::GitOperations::visible_git_label(&branch);
+                            let worker_name =
+                                crate::worktree::GitOperations::visible_git_label(worker_name);
+                            return Err(format!(
+                                "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `{rebase}`",
+                                factory_config.stale_threshold_commits,
+                            ));
+                        }
+                    }
+                    if !assignment_override_applied {
+                        warnings.push(format!(
+                            "⚠️ Worker '{worker_name}' is {behind_count} commit(s) behind {branch}. Consider syncing first."
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(worker_name.clone())
+    }
+
     pub async fn cas_task_update(
         &self,
         Parameters(req): Parameters<TaskUpdateRequest>,
@@ -432,6 +693,7 @@ impl CasCore {
             state_patch,
             None,
             None,
+            false,
         )
         .await
     }
@@ -446,7 +708,19 @@ impl CasCore {
         state_patch: Option<serde_json::Value>,
         delivery_mode: Option<&str>,
         merged_into: Option<&str>,
+        supervisor_override: bool,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(message) = [req.notes.as_deref(), proof_scope_fix_reason]
+            .into_iter()
+            .flatten()
+            .find_map(super::caller_note_marker_rejection)
+        {
+            return Err(McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(message),
+                data: None,
+            });
+        }
         let task_store = self.open_task_store()?;
         let mut requested_fields =
             requested_update_fields(&req, target_repo.is_some(), target_branch.is_some());
@@ -457,6 +731,51 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+        // Check before any ordinary fields or side effects: a rejected batch
+        // must not change a peer's child. Only this authenticated assignment
+        // path can mint the one-start, worker-bound takeover receipt.
+        let split_takeover = if let Some(assignee) = req.assignee.as_deref()
+            .and_then(normalize_assignee_update_value)
+        {
+            if let Some(hold) = crate::cloud::epic_split::split_hold_for(&self.cas_root, &req.id) {
+                if !supervisor_override {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        hold.refusal(&req.id, &crate::mcp::tools::core::guidance::caller_prefix()),
+                    ));
+                }
+                let supervisor = self.resolve_live_supervisor_authority().map_err(|_| {
+                    Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "SPLIT OVERRIDE REJECTED: requires a live registered supervisor",
+                    )
+                })?;
+                let reason = proof_scope_fix_reason
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                    .ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "SPLIT OVERRIDE REJECTED: supervisor_override=true requires a non-empty reason",
+                    ))?;
+                let agents = self.open_agent_store()?;
+                let worker = super::resolve_agent_identity(agents.as_ref(), &assignee)
+                    .filter(|agent| agent.role == cas_types::AgentRole::Worker && agent.is_alive())
+                    .ok_or_else(|| Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "SPLIT OVERRIDE REJECTED: assignee must resolve to a live registered worker",
+                    ))?;
+                Some(cas_types::SplitTakeoverAuthorization {
+                    split_id: hold.split_id,
+                    worker_id: worker.id,
+                    supervisor_id: supervisor.id,
+                    reason: reason.to_string(),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let explicit_block_status = req
             .status
             .as_deref()
@@ -553,6 +872,13 @@ impl CasCore {
         // this validation while holding its write lock, so a malformed patch
         // cannot corrupt an existing state even if another writer races us.
         if let Some(patch) = state_patch.as_ref() {
+            if patch.as_object().is_some_and(|object| object.contains_key("qa_impact")) {
+                return Err(McpError {
+                    code: ErrorCode::INVALID_PARAMS,
+                    message: Cow::from("TASK EXECUTION STATE REJECTED: qa_impact is managed by delivery park and QA dispatch; record journey dispositions in the QA ledger."),
+                    data: None,
+                });
+            }
             if patch
                 .as_object()
                 .and_then(|object| object.get("blocked_hold"))
@@ -902,13 +1228,8 @@ impl CasCore {
                     })
                     .unwrap_or_else(|| "The stale code work target was cleared for this no-code task.".to_string())
             };
-            let note = format!(
-                "[{}] DECISION: proof scope corrected by supervisor {} ({}): {} {} The prior exact proof cycle was invalidated; no failed-review verdict was recorded.",
-                task.updated_at.format("%Y-%m-%d %H:%M"),
-                supervisor.name,
-                supervisor.id,
-                reason,
-                target_description,
+            let note = audit::proof_scope_fix_note(
+                task.updated_at, &supervisor, reason, &target_description,
             );
             task.notes = if task.notes.is_empty() {
                 note
@@ -1161,6 +1482,49 @@ impl CasCore {
                 data: None,
             });
         }
+        // Immutable proof-scope refusals above do not depend on caller
+        // authority. For ordinary updates, only a normalized priority change
+        // needs the worker restriction; notes and idempotent priority values
+        // must not require a registered session or readable agent store.
+        let requested_priority = req.priority.map(|priority| Priority(priority.min(4) as i32));
+        let priority_changes = requested_priority.is_some_and(|priority| priority != task.priority);
+        let requested_status_is_nonterminal = req
+            .status
+            .as_deref()
+            .and_then(|status| status.parse::<TaskStatus>().ok())
+            .is_some_and(|status| !matches!(status, TaskStatus::Closed | TaskStatus::Cancelled));
+        if priority_changes && (!task.is_terminal() || requested_status_is_nonterminal) {
+            // Priority controls shared build admission. A worker cannot evade
+            // this guard by reopening its task, and unavailable authority must
+            // refuse the entire update before ordinary fields are changed.
+            let caller_id = self.get_registered_agent_id_read_only().map_err(|error| {
+                let reason = if error.code == ErrorCode::INVALID_REQUEST {
+                    "priority changes require an already registered authenticated Cassy session"
+                        .to_string()
+                } else {
+                    format!(
+                        "could not verify an already registered authenticated Cassy session: {}",
+                        error.message
+                    )
+                };
+                Self::error(
+                    error.code,
+                    format!("TASK PRIORITY UPDATE REJECTED: {reason}"),
+                )
+            })?;
+            let caller = self.open_agent_store()?.get(&caller_id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("TASK PRIORITY UPDATE REJECTED: cannot read caller authority: {error}"),
+                )
+            })?;
+            if caller.role == cas_types::AgentRole::Worker {
+                return Err(Self::error(
+                    ErrorCode::INVALID_PARAMS,
+                    "TASK PRIORITY UPDATE REJECTED: workers cannot change priority on non-terminal tasks; a live registered supervisor must change it.",
+                ));
+            }
+        }
         // Resolving an existing work target is necessary only when this call
         // changes its branch. Unrelated task fields (notably the first
         // external_ref proof on a parked no-code task) must not be rejected
@@ -1219,8 +1583,8 @@ impl CasCore {
             changes.push("notes");
         }
 
-        if let Some(priority) = req.priority {
-            task.priority = Priority(priority.min(4) as i32);
+        if let Some(priority) = requested_priority {
+            task.priority = priority;
             changes.push("priority");
         }
 
@@ -1340,6 +1704,7 @@ impl CasCore {
 
         // Track warnings to include in response
         let mut warnings: Vec<String> = Vec::new();
+        let mut assignee_override_audit = None;
 
         if let Some(ref assignee_raw) = req.assignee {
             // cas-bf98: empty/whitespace = explicit clear (unassign). Must run
@@ -1348,173 +1713,29 @@ impl CasCore {
             match normalize_assignee_update_value(assignee_raw) {
                 None => {
                     task.assignee = None;
+                    task.deliverables.split_takeover = None;
                     changes.push("assignee");
                 }
                 Some(assignee) => {
-                    // In factory mode: normalize and validate the assignee value.
-                    //
-                    // cas-dbbb: `task mine` matches assignees against agent_name (the
-                    // display name) and CAS_AGENT_NAME env var. Assigning by session UUID /
-                    // agent ID is silently accepted but the task never appears in the target
-                    // worker's `task mine` list — observed in the 2026-06-30 smoke test
-                    // where director-provided session IDs left tasks in Ready/Open with no
-                    // visible assignee, while worker names dispatched correctly.
-                    //
-                    // Resolution order:
-                    //   1. Assignee matches agent.name → canonical, store as-is.
-                    //   2. Assignee matches agent.id  → normalize to agent.name, warn.
-                    //   3. No match                   → warn; store as-is (agent may not yet
-                    //                                   be registered, e.g. pre-spawn).
-                    let mut canonical_assignee = assignee.clone();
-                    if std::env::var("CAS_FACTORY_MODE").is_ok() {
-                        let config = self.load_config();
-                        let factory_config = config.factory();
-                        // cas-44e9: scope freshness to this task's parent epic (or focus pin),
-                        // never an unrelated concurrent epic branch.
-                        let preferred_sync =
-                            resolve_assignment_freshness_branch(task_store.as_ref(), &task);
-
-                        if let Ok(agent_store) = self.open_agent_store() {
-                            if let Ok(agents) = agent_store.list(None) {
-                                // Find by name first (canonical path).
-                                // cas-dbbb P2: use case-insensitive compare to match
-                                // `task mine`'s own identity matching logic.
-                                let by_name = agents
-                                    .iter()
-                                    .find(|a| a.name.eq_ignore_ascii_case(&assignee));
-                                // Fall back to ID lookup (supervisor may have copy-pasted
-                                // session UUID).
-                                let by_id = if by_name.is_none() {
-                                    agents.iter().find(|a| a.id.eq_ignore_ascii_case(&assignee))
-                                } else {
-                                    None
-                                };
-
-                                if let Some(worker) = by_name {
-                                    // Canonical — no normalization needed.
-                                    // Worktree staleness check, except for a
-                                    // branch parked for merge (GH #1006 item 3).
-                                    if let Some(note) =
-                                        parked_assignment_note(task_store.as_ref(), worker)
-                                    {
-                                        warnings.push(note);
-                                    } else if factory_config.warn_stale_assignment
-                                        || factory_config.block_stale_assignment
-                                    {
-                                        if let Some(clone_path) = worker.metadata.get("clone_path")
-                                        {
-                                            if let Some((behind_count, branch)) =
-                                                check_worktree_staleness(
-                                                    clone_path,
-                                                    preferred_sync.as_deref(),
-                                                )
-                                            {
-                                                if behind_count > 0 {
-                                                    let warning_msg = format!(
-                                                        "⚠️ Worker '{assignee}' is {behind_count} \
-                                                         commit(s) behind {branch}. Consider \
-                                                         syncing first."
-                                                    );
-                                                    if factory_config.block_stale_assignment
-                                                        && behind_count
-                                                            >= factory_config
-                                                                .stale_threshold_commits
-                                                    {
-                                                        return Err(McpError {
-                                                            code: ErrorCode::INVALID_PARAMS,
-                                                            message: Cow::from(assignee_batch_abort(
-                                                                &requested_fields,
-                                                                format!(
-                                                                    "Cannot assign to worker '{}': {} commits behind {} (threshold: {}). Ask the worker to rebase: `git rebase {}`",
-                                                                    assignee,
-                                                                    behind_count,
-                                                                    branch,
-                                                                    factory_config.stale_threshold_commits,
-                                                                    branch
-                                                                ),
-                                                            )),
-                                                            data: None,
-                                                        });
-                                                    }
-                                                    warnings.push(warning_msg);
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else if let Some(worker) = by_id {
-                                    // Assignee is a session UUID — normalize to display name
-                                    // so `task mine` can find it.
-                                    let worker_name = worker.name.clone();
-                                    warnings.push(format!(
-                                        "⚠️ Assignee '{assignee}' is a session ID. \
-                                         Normalized to display name '{worker_name}' so \
-                                         `task mine` can find this task. \
-                                         Use '{worker_name}' directly to avoid this warning."
-                                    ));
-                                    canonical_assignee = worker_name.clone();
-                                    // cas-dbbb P1: run the same staleness check as the by_name
-                                    // branch. The original code skipped this after
-                                    // normalization, leaving stale-worktree blocking disabled
-                                    // for UUID assignees.
-                                    if let Some(note) =
-                                        parked_assignment_note(task_store.as_ref(), worker)
-                                    {
-                                        warnings.push(note);
-                                    } else if factory_config.warn_stale_assignment
-                                        || factory_config.block_stale_assignment
-                                    {
-                                        if let Some(clone_path) = worker.metadata.get("clone_path")
-                                        {
-                                            if let Some((behind_count, branch)) =
-                                                check_worktree_staleness(
-                                                    clone_path,
-                                                    preferred_sync.as_deref(),
-                                                )
-                                            {
-                                                if behind_count > 0 {
-                                                    let staleness_msg = format!(
-                                                        "⚠️ Worker '{worker_name}' is \
-                                                         {behind_count} commit(s) behind \
-                                                         {branch}. Consider syncing first."
-                                                    );
-                                                    if factory_config.block_stale_assignment
-                                                        && behind_count
-                                                            >= factory_config
-                                                                .stale_threshold_commits
-                                                    {
-                                                        return Err(McpError {
-                                                            code: ErrorCode::INVALID_PARAMS,
-                                                            message: Cow::from(assignee_batch_abort(
-                                                                &requested_fields,
-                                                                format!(
-                                                                    "Cannot assign to worker '{worker_name}': {behind_count} commits behind {branch} (threshold: {}). Ask the worker to rebase: `git rebase {branch}`",
-                                                                    factory_config.stale_threshold_commits,
-                                                                ),
-                                                            )),
-                                                            data: None,
-                                                        });
-                                                    }
-                                                    warnings.push(staleness_msg);
-                                                }
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // No agent found by name or ID — warn but allow (agent
-                                    // may not yet be registered, e.g. spawning in progress).
-                                    warnings.push(format!(
-                                        "⚠️ No registered factory agent found for assignee \
-                                         '{assignee}'. Verify the worker name with \
-                                         `{tool_prefix}factory action=worker_status`. Use the \
-                                         worker's display name (e.g. 'codex-jester'), not \
-                                         their session UUID, for reliable `task mine` dispatch.",
-                                        tool_prefix =
-                                            crate::mcp::tools::core::guidance::caller_prefix()
-                                    ));
-                                }
-                            }
-                        }
-                    }
+                    let assignment_status = req.status.as_deref()
+                        .and_then(|status| status.parse::<TaskStatus>().ok())
+                        .unwrap_or(task.status);
+                    let canonical_assignee = self
+                        .validate_task_assignee(
+                            task_store.as_ref(),
+                            &task,
+                            &assignee,
+                            assignment_status,
+                            supervisor_override,
+                            proof_scope_fix_reason,
+                            &mut assignee_override_audit,
+                            &mut warnings,
+                        )
+                        .map_err(|message| McpError {
+                            code: ErrorCode::INVALID_PARAMS,
+                            message: Cow::from(assignee_batch_abort(&requested_fields, message)),
+                            data: None,
+                        })?;
 
                     // cas-e33f (GH #1004): a reassignment leaves the prior
                     // assignee's commits on their factory branch.
@@ -1527,6 +1748,22 @@ impl CasCore {
                             .record_handoff_branch(&format!("factory/{prior}"));
                     }
                     task.assignee = Some(canonical_assignee);
+                    task.deliverables.split_takeover = split_takeover.clone();
+                    if let Some(audit) = assignee_override_audit.take() {
+                        if !task.notes.is_empty() {
+                            task.notes.push_str("\n\n");
+                        }
+                        task.notes.push_str(&audit);
+                        changes.push("notes");
+                    }
+                    if let Some(authorization) = &split_takeover {
+                        task.notes.push_str(&format!(
+                            "\n[{}] DECISION: SPLIT OVERRIDE split={} worker={} supervisor={} reason={}",
+                            chrono::Utc::now().format("%Y-%m-%d %H:%M"), authorization.split_id,
+                            authorization.worker_id, authorization.supervisor_id,
+                            authorization.reason.replace(['\n', '\r'], " "),
+                        ));
+                    }
                     changes.push("assignee");
 
                     // Gates are supervisor-owned decisions. Keep assignment
@@ -1814,6 +2051,7 @@ impl CasCore {
 
         // Captured before `req.epic` is consumed below — the blocked_by guard
         // (cas-d45f) needs to know the epic this same call is establishing.
+        let epic_update_supplied = req.epic.is_some();
         let req_epic_for_blocker_guard: Option<String> = req
             .epic
             .as_deref()
@@ -1872,7 +2110,7 @@ impl CasCore {
                     to_id: epic_id.to_string(),
                     dep_type: DependencyType::ParentChild,
                     created_at: chrono::Utc::now(),
-                    created_by: Some("mcp".to_string()),
+                    created_by: self.get_agent_id().ok(),
                 })
             };
             // cas-c85e / cas-6fb6: the delivery target a move into this
@@ -2205,6 +2443,18 @@ impl CasCore {
                 })
                 .unwrap_or_else(|| "unknown".into())
         });
+        // Snapshot before persisting ownership changes. A concurrent claim
+        // must never turn this update into permission to revoke a new epoch.
+        let lease_snapshot = if req.assignee.is_some() || explicit_block_status {
+            let agents = self.open_agent_store()?;
+            let lease = agents.get_lease(&req.id).map_err(|error| Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Cannot inspect task lease before update: {error}"),
+            ))?;
+            lease.map(|lease| (agents, lease))
+        } else {
+            None
+        };
         // cas-ec74: adopt the store-owned stamp so the lifecycle occurrence
         // pushed below matches the persisted row.
         task.updated_at = task_store.update(&task).map_err(|e| McpError {
@@ -2213,11 +2463,21 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.assignee.is_some() && task.assignee != prior_assignee {
-            if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
-                warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
+        if epic_update_supplied {
+            match crate::cloud::epic_split::release_obsolete_claims_for_task(
+                &self.cas_root,
+                &req.id,
+            ) {
+                Ok(released) if released > 0 => warnings.push(format!(
+                    "Released {released} obsolete split-derived Cloud claim(s) after retargeting."
+                )),
+                Ok(_) => {}
+                Err(error) => warnings.push(format!(
+                    "Task fields were updated, but split Cloud claim cleanup failed: {error}. Check the Cloud claim before starting the task."
+                )),
             }
         }
+
 
         // cas-ea9c (GH #1005): an assignment attaches the GitHub issues the
         // task cites, so a worker without GitHub credentials reads them from
@@ -2274,6 +2534,60 @@ impl CasCore {
                     )),
                     data: None,
                 })?;
+        }
+
+        if let Some((agents, lease)) = lease_snapshot {
+            let holder = agents.get(&lease.agent_id).ok();
+            let holder_label = holder.as_ref()
+                .map(|agent| format!("{} ({})", agent.name, lease.agent_id))
+                .unwrap_or_else(|| lease.agent_id.clone());
+            let same_holder = task.assignee.as_deref()
+                .is_some_and(|assignee| assignee.eq_ignore_ascii_case(&lease.agent_id))
+                || holder.as_ref().is_some_and(|holder| {
+                    super::task_assignee_matches_agent(agents.as_ref(), task.assignee.as_deref(), holder)
+                });
+            let reassigned = req.assignee.is_some() && !same_holder;
+            let yielding = explicit_block_status && task.status == TaskStatus::Blocked
+                && self.get_registered_agent_id_read_only().ok().as_deref() == Some(lease.agent_id.as_str())
+                && holder.as_ref().is_some_and(|holder| holder.role == cas_types::AgentRole::Worker);
+            let supervisor_reassigned = reassigned && self.resolve_live_supervisor_authority().is_ok();
+            if yielding || supervisor_reassigned {
+                let reason = if yielding { "Worker yielded on blocked hold" } else { "Supervisor reassigned task" };
+                match agents.release_lease_if_owner_epoch(&req.id, &lease.agent_id, lease.epoch, reason) {
+                    Ok(true) => {
+                        warnings.push(format!("Lease released from {holder_label}: {reason}."));
+                        // Release only this holder's peer claim, never a receiver's
+                        // claim established after the local lease was released.
+                        if let Some(claims) = crate::cloud::peer_claims::PeerClaims::for_project(&self.cas_root) {
+                            if let Err(error) = claims.release_own(&req.id, &lease.agent_id) {
+                                warnings.push(format!("Previous holder's Cloud claim could not be released: {error}. Check the claim before the new assignee starts."));
+                            }
+                        }
+                    }
+                    Ok(false) => match agents.get_lease(&req.id) {
+                        Ok(Some(current)) => warnings.push(format!(
+                            "Lease retained by {} until {}: its generation changed during update; no replacement lease was revoked. Check ownership before starting.",
+                            current.agent_id, current.expires_at.to_rfc3339(),
+                        )),
+                        Ok(None) => {},
+                        Err(error) => warnings.push(format!("Lease generation changed during update; current holder could not be read: {error}. Check ownership before starting.")),
+                    },
+                    Err(error) => warnings.push(format!(
+                        "Lease release from {holder_label} failed: {error}. Task fields were updated; check the lease before starting.",
+                    )),
+                }
+            } else if reassigned || explicit_block_status {
+                warnings.push(format!(
+                    "Lease retained by {holder_label} until {}. Assignment/status changes did not release it; ask a live supervisor to reassign or transfer the task, or have the holder yield with status=blocked before starting.",
+                    lease.expires_at.to_rfc3339(),
+                ));
+            }
+        }
+
+        if task.assignee.is_some() && task.assignee != prior_assignee {
+            if let Err(error) = crate::task_assignment::enqueue(&self.cas_root, &task) {
+                warnings.push(format!("Assignment persisted but dispatch could not be queued: {error}. Send the worker a coordination message."));
+            }
         }
 
         // cas-062d: push blocked / ready-reopened transitions.
@@ -2393,7 +2707,7 @@ mod status_transition_tests {
     use crate::mcp::tools::core::task::lifecycle::close_ops::{
         EpicCloseGateOutcome, run_epic_close_merge_gate,
     };
-    use cas_types::{Agent, Task, TaskStatus, TaskType};
+    use cas_types::{Agent, AgentRole, Priority, Task, TaskStatus, TaskType};
     use tempfile::TempDir;
 
     fn git(repo: &std::path::Path, args: &[&str]) -> String {
@@ -2409,6 +2723,307 @@ mod status_transition_tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_raise_priority_of_own_in_progress_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+
+        let mut worker = Agent::new_with_role(
+            "priority-worker-id".into(),
+            "priority-worker".into(),
+            AgentRole::Worker,
+        );
+        worker.factory_session = Some("priority-session".into());
+        agents.register(&worker).unwrap();
+        let mut task = Task::new("cas-priority-worker".into(), "worker task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(&task.id, &worker.id, 3600, Some("working"))
+            .unwrap();
+        core.set_agent_id_for_testing(worker.id);
+
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        let error = core
+            .cas_task_update(Parameters(request))
+            .await
+            .expect_err("a worker must not promote its active task");
+
+        assert!(
+            error.message.contains("priority") && error.message.contains("supervisor"),
+            "{}",
+            error.message
+        );
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
+
+        // Taking the real update path back to Open must not unlock a P0
+        // promotion before the worker starts its task again.
+        let reopen: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id, "status": "open",
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(reopen)).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Open);
+        let promotion: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id, "priority": 0,
+        }))
+        .unwrap();
+        let result = core.cas_task_update(Parameters(promotion)).await;
+        assert!(result.is_err(), "reopen -> P0 must be refused: {result:?}");
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::MEDIUM);
+    }
+
+    #[tokio::test]
+    async fn worker_cannot_promote_priority_when_starting_or_blocked() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        let mut worker = Agent::new_with_role(
+            "priority-transition-worker-id".into(),
+            "priority-transition-worker".into(),
+            AgentRole::Worker,
+        );
+        worker.factory_session = Some("priority-transition-session".into());
+        agents.register(&worker).unwrap();
+        core.set_agent_id_for_testing(worker.id);
+
+        let mut starting = Task::new("cas-priority-starting".into(), "starting task".into());
+        starting.assignee = Some("priority-transition-worker".into());
+        starting.priority = Priority::MEDIUM;
+        tasks.add(&starting).unwrap();
+        let start_request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": starting.id,
+            "status": "in_progress",
+            "priority": 0,
+        }))
+        .unwrap();
+        let start_error = core
+            .cas_task_update(Parameters(start_request))
+            .await
+            .expect_err("a worker cannot combine task start with a priority promotion");
+        assert!(
+            start_error.message.contains("TASK PRIORITY UPDATE REJECTED"),
+            "{}",
+            start_error.message
+        );
+        let unchanged = tasks.get(&starting.id).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::Open);
+        assert_eq!(unchanged.priority, Priority::MEDIUM);
+
+        let mut blocked = Task::new("cas-priority-blocked".into(), "blocked task".into());
+        blocked.status = TaskStatus::Blocked;
+        blocked.assignee = Some("priority-transition-worker".into());
+        blocked.priority = Priority::MEDIUM;
+        tasks.add(&blocked).unwrap();
+        let blocked_request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": blocked.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        let blocked_error = core
+            .cas_task_update(Parameters(blocked_request))
+            .await
+            .expect_err("a worker cannot promote priority while its task is blocked");
+        assert!(
+            blocked_error.message.contains("TASK PRIORITY UPDATE REJECTED"),
+            "{}",
+            blocked_error.message
+        );
+        let unchanged = tasks.get(&blocked.id).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::Blocked);
+        assert_eq!(unchanged.priority, Priority::MEDIUM);
+
+        // Cover every other non-terminal state without a combined status
+        // update; those states were previously outside the priority guard.
+        let mut failures = Vec::new();
+        for status in [TaskStatus::Open, TaskStatus::AwaitingMerge] {
+            let mut task = Task::new(format!("cas-priority-{status}"), "parked task".into());
+            task.status = status;
+            task.assignee = Some("priority-transition-worker".into());
+            task.priority = Priority::MEDIUM;
+            tasks.add(&task).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": 0, "title": "must not change",
+            })).unwrap();
+            let result = core.cas_task_update(Parameters(request)).await;
+            let stored = tasks.get(&task.id).unwrap();
+            if result.is_ok() || stored.priority != Priority::MEDIUM || stored.title != task.title {
+                failures.push(format!("{status}: result={result:?}, priority={}, title={}", stored.priority.0, stored.title));
+            }
+        }
+        assert!(failures.is_empty(), "non-terminal priority bypass: {}", failures.join("; "));
+    }
+
+    #[tokio::test]
+    async fn unregistered_priority_reopen_refusal_names_priority_and_preserves_task() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        core.open_agent_store().unwrap().init().unwrap();
+
+        let mut failures = Vec::new();
+        for (status, status_name, refusal) in [
+            (
+                TaskStatus::Blocked,
+                "blocked",
+                "TASK PRIORITY UPDATE REJECTED",
+            ),
+            (
+                TaskStatus::Closed,
+                "closed",
+                "TASK UPDATE REJECTED: terminal task",
+            ),
+        ] {
+            let mut task = Task::new(
+                format!("cas-priority-reopen-{status_name}"),
+                "reopen with priority".into(),
+            );
+            task.status = status;
+            task.priority = Priority::MEDIUM;
+            tasks.add(&task).unwrap();
+
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id,
+                "status": "open",
+                "priority": 0,
+            }))
+            .unwrap();
+            let result = core.cas_task_update(Parameters(request)).await;
+            let stored = tasks.get(&task.id).unwrap();
+            match result {
+                Err(error)
+                    if error.message.contains(refusal)
+                        && stored.status == status
+                        && stored.priority == Priority::MEDIUM => {}
+                Err(error) => failures.push(format!("{status_name}: {}", error.message)),
+                Ok(response) => failures.push(format!(
+                    "{status_name}: unexpectedly accepted {response:?}"
+                )),
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "priority reopen refusals: {}",
+            failures.join("; ")
+        );
+    }
+
+    #[tokio::test]
+    async fn priority_update_refuses_unreadable_agent_store_before_mutating_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+        let worker = Agent::new_with_role(
+            "unreadable-priority-worker".into(), "unreadable-worker".into(), AgentRole::Worker,
+        );
+        agents.register(&worker).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let mut task = Task::new("cas-priority-unreadable".into(), "original title".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name);
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+
+        // A real SQLite read failure at the existing cached store boundary,
+        // while the task store remains usable. No mock authority can grant it.
+        rusqlite::Connection::open(temp.path().join("cas.db")).unwrap()
+            .execute("ALTER TABLE agents RENAME TO unavailable_agents", []).unwrap();
+        assert!(agents.get(&worker.id).is_err());
+        let request = serde_json::from_value(serde_json::json!({
+            "id": task.id, "priority": 0, "title": "must not change",
+        })).unwrap();
+        let result = core.cas_task_update(Parameters(request)).await;
+        let stored = tasks.get(&task.id).unwrap();
+        assert!(result.is_err(), "unreadable authority must refuse: {result:?}");
+        assert_eq!(stored.priority, Priority::MEDIUM, "refusal must precede task writes");
+        assert_eq!(stored.title, task.title);
+
+        // Notes do not acquire priority authority just because a client sends
+        // its current priority too. Compare the persisted, normalized value;
+        // an out-of-range input still writes BACKLOG, not a new priority.
+        for (priority, requested) in [
+            (Priority::MEDIUM, None),
+            (Priority::MEDIUM, Some(2_u8)),
+            (Priority::BACKLOG, Some(u8::MAX)),
+        ] {
+            let mut current = tasks.get(&task.id).unwrap();
+            current.priority = priority;
+            tasks.update(&current).unwrap();
+            let note = format!("progress with unchanged priority {requested:?}");
+            let request = serde_json::from_value(serde_json::json!({
+                "id": task.id, "priority": requested, "notes": note,
+            }))
+            .unwrap();
+            core.cas_task_update(Parameters(request))
+                .await
+                .expect("an unchanged priority must not require readable authority");
+            let stored = tasks.get(&task.id).unwrap();
+            assert_eq!(stored.priority, priority);
+            assert_eq!(stored.title, task.title);
+            assert!(stored.notes.contains(&note));
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_can_change_priority_of_in_progress_task() {
+        let temp = TempDir::new().unwrap();
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let agents = core.open_agent_store().unwrap();
+        agents.init().unwrap();
+
+        let worker = Agent::new_with_role(
+            "priority-managed-worker-id".into(),
+            "priority-managed-worker".into(),
+            AgentRole::Worker,
+        );
+        agents.register(&worker).unwrap();
+        let supervisor = Agent::new_with_role(
+            "priority-supervisor-id".into(),
+            "priority-supervisor".into(),
+            AgentRole::Supervisor,
+        );
+        agents.register(&supervisor).unwrap();
+        let mut task = Task::new("cas-priority-managed".into(), "managed task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.name.clone());
+        task.priority = Priority::MEDIUM;
+        tasks.add(&task).unwrap();
+        agents
+            .try_claim(&task.id, &worker.id, 3600, Some("working"))
+            .unwrap();
+        core.set_agent_id_for_testing(supervisor.id);
+
+        let request: TaskUpdateRequest = serde_json::from_value(serde_json::json!({
+            "id": task.id,
+            "priority": 0,
+        }))
+        .unwrap();
+        core.cas_task_update(Parameters(request))
+            .await
+            .expect("a live supervisor can reprioritize active work");
+        assert_eq!(tasks.get(&task.id).unwrap().priority, Priority::CRITICAL);
     }
 
     #[tokio::test]

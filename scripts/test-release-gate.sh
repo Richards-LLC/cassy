@@ -136,7 +136,7 @@ EOF_OPERATOR_LAUNCH
         cp "$script_dir/$helper.sh" "$repo/scripts/$helper.sh"
     done
     # Real defects in the new rows are covered by test-fast-release-rows.py.
-    for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-builtin-contract-phrases \
+    for helper in cas-test-targets check-changed-markdown check-test-shape check-test-env check-builtin-doc-hygiene check-design-paths check-builtin-contract-phrases \
         journeys-for-diff check-builtin-skill-limits check-doctor-snapshot check-migration-registry ci-script-tests-for-diff \
         check-call-shapes; do
         printf '#!/usr/bin/env python3\n' >"$repo/scripts/$helper.py"
@@ -859,6 +859,9 @@ run_scenario() {
 }
 
 section_release_binary_isa() {
+# Default-target assertions must not inherit the factory worker build cache.
+# The custom-target scenario below supplies its own explicit override.
+unset CARGO_TARGET_DIR CAS_RELEASE_BINARY_TARGET_DIR
 # The new row must audit the staged executable, including code introduced by
 # dependencies, before the train can authorize pr-body/pipeline.
 repo="$(new_fixture release-binary-isa)"

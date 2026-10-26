@@ -25,8 +25,17 @@ pub struct ArtifactRootUsage {
 
 /// Measure `root` without following links.
 pub fn artifact_root_usage(root: &Path) -> ArtifactRootUsage {
+    artifact_root_usage_until(root, None)
+}
+
+pub(crate) fn artifact_root_usage_until(root: &Path,
+    deadline: Option<std::time::Instant>) -> ArtifactRootUsage {
     let mut usage = ArtifactRootUsage::default();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            usage.error = Some("report scan budget exhausted; byte inventory incomplete".into());
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -238,13 +247,7 @@ fn plan_legacy(
         .filter(|entry| crate::task_ownership::is_task_id(&entry.file_name().to_string_lossy()))
         .collect();
     dirs.sort_by_key(|entry| entry.file_name());
-    // One read of each other store's write-ahead log for every candidate.
-    let candidates: Vec<String> = dirs
-        .iter()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| tasks.iter().any(|task| &task.id == name && task.status == cas_types::TaskStatus::Closed))
-        .collect();
-    others.prefetch(&candidates);
+    // Other projects' stores are read once, at the first ownership lookup.
     for entry in dirs {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(task) = tasks

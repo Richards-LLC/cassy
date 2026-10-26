@@ -223,11 +223,21 @@ fn reviewed_tip_carried_by(repo: &Path, reviewed: &str, integrated: &str, target
     }
 }
 
-/// Whether a delivery is already carried by the target, including squash tips.
-/// Integration alone does not satisfy QA: dispatch suppression also needs a
-/// passed or waived verdict for this exact delivery.
-fn delivery_tip_on_target(repo: &Path, head: &str, target: &str) -> bool {
-    is_ancestor(repo, head, target) || reviewed_tip_carried_by(repo, head, target, target)
+/// Trunk and landed batches suppress late dispatch. Epic-only integration
+/// still owes the GH #1026 review backstop.
+fn integrated_dispatch_boundary(task: &Task, repo: &Path, head: &str, target: &str) -> Option<String> {
+    for trunk in ["main", "staging"] {
+        let reference = freshest_target_ref(repo, trunk);
+        if is_ancestor(repo, head, &reference) || reviewed_tip_carried_by(repo, head, &reference, &reference) {
+            return Some(format!("trunk {trunk}"));
+        }
+    }
+    task.deliverables.integration_batch.as_ref().filter(|batch| {
+            resolve_commit(repo, head).as_deref() == Some(batch.delivered_head.as_str())
+                && super::super::integration_batch::landed_batch_squash(
+                    task, repo, target, None,
+                ).is_some()
+        }).map(|_| format!("landed integration batch on {target}"))
 }
 
 /// cas-624f: rejected (failed) rounds on record for a delivery.
@@ -386,9 +396,6 @@ impl CasCore {
     ) -> Option<crate::qa_pass::preflight::PreflightReport> {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
-        if !crate::qa_pass::preflight::is_configured(&qa) {
-            return None;
-        }
         let repo_root = super::close_ops::resolve_close_gate_repo_root(&self.cas_root)
             .unwrap_or_else(|_| {
                 self.cas_root
@@ -444,17 +451,7 @@ impl CasCore {
         // worker's older lane may contain unrelated UI changes (GH #1040).
         let delivery_ref = head.unwrap_or(&branch);
         let target = freshest_target_ref(repo, parent_branch);
-        if delivery_tip_on_target(repo, delivery_ref, &target)
-            && resolve_commit(repo, delivery_ref).is_some_and(|delivered| {
-                cas_store::list_qa_passes(&self.cas_root, &task.id)
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|pass| {
-                        pass.state.satisfies_gate()
-                            && resolve_commit(repo, &pass.bound_head).as_deref() == Some(delivered.as_str())
-                    })
-            })
-        {
+        if integrated_dispatch_boundary(task, repo, delivery_ref, &target).is_some() {
             return None;
         }
         let changed = match changed_paths_for_delivery(
@@ -695,11 +692,27 @@ impl CasCore {
                     .ok()
             })
         });
+        // Explicit QA requests may precede park. Compute the same committed,
+        // attributed impact, so registry-owned API/CLI journeys dispatch too.
+        let impact = head.and_then(|head| match self.attach_delivery_qa_impact(task, repo, parent_branch, head) {
+            Ok(report) => Some(report),
+            Err(error) => {
+                tracing::warn!(task_id = %task.id, %error, "QA impact unavailable; dispatch keeps existing eligibility");
+                None
+            }
+        });
         let journeys = changed
             .as_deref()
             .map(|paths| crate::qa_pass::catalog_journeys_for(repo, head, paths))
             .unwrap_or_default();
         let mut eligibility = delivery_eligibility(task, &qa, changed.as_deref(), &journeys);
+        if let Some(journeys) = impact.as_ref().and_then(|report| report["journeys"].as_array()) {
+            for journey in journeys {
+                if let Some(id) = journey["id"].as_str() {
+                    eligibility.reasons.push(format!("journey:{id}"));
+                }
+            }
+        }
         if let Some(reason) = requested.map(str::trim).filter(|reason| !reason.is_empty()) {
             // cas-74284: the supervisor's request is the reason on record,
             // whatever the diff alone would have said.
@@ -1257,6 +1270,11 @@ impl CasCore {
                 }
             }
         }
+        if super::qa_evidence_gate::approved_receipt_bundle(
+            &self.cas_root, task, repo, target_branch, commit_receipt,
+        ).is_some() {
+            return QaCloseGate::Clear;
+        }
         if passes.iter().any(|pass| {
             qa_pass_covers_integrated_delivery(
                 repo,
@@ -1265,15 +1283,45 @@ impl CasCore {
                 commit_receipt,
                 target_branch,
             )
+                || (pass.state.satisfies_gate()
+                    && task.deliverables.integration_batch.is_some()
+                    && head.as_deref() == Some(pass.bound_head.as_str())
+                    && integrated_dispatch_boundary(task, repo, &pass.bound_head, target_branch).is_some())
         }) {
             return QaCloseGate::Clear;
         }
         // Judge from what the delivery actually integrated, so a
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
-        let changed = head
-            .as_deref()
-            .and_then(|head| crate::qa_pass::integrated_paths(repo, head, &classification_target));
+        let changed = head.as_deref().and_then(|head| {
+            // Match the close's durable task boundary: once a multi-commit
+            // FF/rebase reaches the target, merge-base collapses onto its last
+            // commit. A task-creation timestamp alone is not a delivery base;
+            // its clock-skew allowance can pull a just-preceding target commit
+            // (for example an unrelated template update) into a squash's QA
+            // diff. Without recorded start/lease/park evidence, the integrated
+            // single-parent receipt's own parent is the safe boundary.
+            let history = self
+                .open_agent_store()
+                .ok()
+                .and_then(|store| store.get_lease_history(&task.id, None).ok())
+                .unwrap_or_default();
+            let has_recorded_boundary =
+                super::close_ops::task_attribution::has_recorded_delivery_boundary(task, &history);
+            let base = if has_recorded_boundary {
+                let window = super::close_ops::resolve_task_commit_receipt_window(
+                    task.created_at,
+                    &history,
+                    super::close_ops::task_commit_identity(task, Some(head.to_owned())),
+                );
+                super::close_ops::task_attribution::delivery_base(
+                    repo, &classification_target, &window, Some(head),
+                )
+            } else {
+                None
+            };
+            crate::qa_pass::integrated_paths(repo, head, &classification_target, base.as_deref())
+        });
         // cas-2387: a no-code task owes no review only while it delivered no
         // user-facing code. Then any round an earlier close opened for it is
         // withdrawn, so it cannot hold the close.
@@ -1377,11 +1425,21 @@ impl CasCore {
                 remedy,
             ));
         };
-        if let Some(trunk) = trunk_containing(repo, &head) {
+        let integrated_target = trunk_containing(repo, &head)
+            .map(|trunk| format!("trunk {trunk}"))
+            .or_else(|| integrated_dispatch_boundary(task, repo, &head, target_branch));
+        if let Some(trunk) = integrated_target {
+            if let Some(pass) = passes.iter().find(|pass| pass.state.is_active() && pass.bound_head == head) {
+                let prefix = crate::mcp::tools::core::guidance::supervisor_prefix();
+                return QaCloseGate::Refuse(format!(
+                    "INDEPENDENT QA REQUIRED: {} is already on {trunk}; the close waits for the pending verdict for pass {} at @{}. No new QA round was opened. Track the existing review with {prefix}verification action=qa_status task_id={}; a live supervisor can use {prefix}verification action=qa_request task_id={} if the round needs recovery. {remedy}.",
+                    task.id, pass.id, pass.head8(), task.id, task.id,
+                ));
+            }
             return QaCloseGate::Refuse(format!(
-                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on trunk \
+                "INDEPENDENT QA REQUIRED: {} is user-facing and its delivery @{} is already on \
                  {trunk} with no passed or waived QA round. Cassy does not dispatch a review of code \
-                 that is already on trunk, so no QA pass was opened. {remedy}.",
+                 that is already integrated, so no QA pass was opened. {remedy}.",
                 task.id,
                 &head[..head.len().min(8)],
             ));
@@ -1431,6 +1489,54 @@ impl CasCore {
         ))
     }
 
+    /// Reuse a prior independent reviewer only while its current registration
+    /// is live, in this factory, and has neither assigned work nor a lease.
+    fn reusable_qa_reviewer(&self, task: &Task, pass: &QaPass) -> Option<String> {
+        let previous = cas_store::list_qa_passes(&self.cas_root, &task.id)
+            .ok()?
+            .into_iter()
+            .filter(|prior| prior.round < pass.round)
+            .find_map(|prior| prior.reviewer_agent_id)?;
+        let agents = self.open_agent_store().ok()?;
+        let reviewer = agents
+            .list(None)
+            .ok()?
+            .into_iter()
+            .filter(|agent| agent.id == previous || agent.name == previous)
+            .max_by_key(|agent| agent.registered_at)?;
+        let session = std::env::var("CAS_FACTORY_SESSION").ok();
+        if reviewer.role != cas_types::AgentRole::Worker
+            || !reviewer.is_alive()
+            || reviewer.is_heartbeat_expired(cas_types::DEFAULT_HEARTBEAT_TIMEOUT_SECS)
+            || reviewer.active_tasks != 0
+            || reviewer.factory_session != session
+            || [reviewer.id.as_str(), reviewer.name.as_str()]
+                .iter()
+                .any(|identity| {
+                    task.assignee.as_deref() == Some(*identity)
+                        || pass.implementer_agent_id == *identity
+                })
+            || !agents.list_agent_leases(&reviewer.id).ok()?.is_empty()
+        {
+            return None;
+        }
+        let tasks = self.open_task_store().ok()?;
+        for status in [
+            TaskStatus::Open,
+            TaskStatus::InProgress,
+            TaskStatus::Blocked,
+        ] {
+            if tasks.list(Some(status)).ok()?.iter().any(|task| {
+                task.assignee
+                    .as_deref()
+                    .is_some_and(|id| id == reviewer.id || id == reviewer.name)
+            }) {
+                return None;
+            }
+        }
+        Some(reviewer.name)
+    }
+
     fn materialize_qa_round(
         &self,
         task: &Task,
@@ -1440,10 +1546,22 @@ impl CasCore {
         config: &crate::config::Config,
         location: QaDeliveryLocation<'_>,
     ) -> String {
-        let artifacts_root =
-            crate::config::project_factory_artifacts_root(&self.cas_root, &crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref()));
+        let artifacts_root = crate::config::project_factory_artifacts_root(
+            &self.cas_root,
+            &crate::config::resolved_factory_artifacts_root(
+                config.factory().artifacts_root.as_deref(),
+            ),
+        );
         let ledger_dir = round_dir(&artifacts_root, &pass);
-        let qa_task_id = match self.create_qa_task(task, &pass, reasons, &ledger_dir, parent_branch) {
+        let reviewer = self.reusable_qa_reviewer(task, &pass);
+        let qa_task_id = match self.create_qa_task(
+            task,
+            &pass,
+            reasons,
+            &ledger_dir,
+            parent_branch,
+            reviewer.as_deref(),
+        ) {
             Ok(id) => id,
             Err(error) => {
                 tracing::error!(task_id = %task.id, pass_id = %pass.id, error = %error, "cas-619f: QA task not created");
@@ -1458,6 +1576,27 @@ impl CasCore {
         if let Err(error) = cas_store::set_qa_task(&self.cas_root, &pass.id, &qa_task_id) {
             tracing::error!(task_id = %task.id, pass_id = %pass.id, error = %error, "cas-619f: QA task not linked to its pass");
         }
+        let assignment = if let Some(reviewer) = reviewer.as_deref() {
+            let queued = self
+                .open_task_store()
+                .ok()
+                .and_then(|store| store.get(&qa_task_id).ok())
+                .and_then(|task| {
+                    crate::task_assignment::enqueue(&self.cas_root, &task)
+                        .ok()
+                        .flatten()
+                });
+            Some(format!(
+                "Reviewer {reviewer} reused; {}",
+                if queued.is_some() {
+                    "assignment queued"
+                } else {
+                    "assignment not queued; notify the reviewer"
+                }
+            ))
+        } else {
+            None
+        };
         let mut handoff = "queued for the supervisor".to_string();
         match crate::store::open_prompt_queue_store(&self.cas_root) {
             Ok(queue) => {
@@ -1472,6 +1611,7 @@ impl CasCore {
                     &pass.implementer_agent_id,
                     reasons,
                     location,
+                    reviewer.as_deref(),
                 ) {
                     tracing::warn!(task_id = %task.id, error = %error, "cas-619f: QA handoff not queued");
                     handoff = "NOT queued — message the supervisor".to_string();
@@ -1483,12 +1623,13 @@ impl CasCore {
             }
         }
         format!(
-            "\n\nINDEPENDENT QA DISPATCHED ({reasons}): pass {} round {} for {}; QA task {qa_task_id} ({handoff}). \
+            "\n\nINDEPENDENT QA DISPATCHED ({reasons}): pass {} round {} for {}; QA task {qa_task_id} ({handoff}). {} \
              A different agent reviews the running build; the {} waits for its verdict, and a rejection \
              returns this task to you with the ledger at {}/LEDGER.md.",
             pass.id,
             pass.round,
             pass.head8(),
+            assignment.as_deref().unwrap_or(""),
             location.gate(),
             ledger_dir.display(),
         )
@@ -1501,6 +1642,7 @@ impl CasCore {
         reasons: &str,
         ledger_dir: &Path,
         parent_branch: &str,
+        reviewer: Option<&str>,
     ) -> Result<String, String> {
         let task_store = self
             .open_task_store()
@@ -1515,9 +1657,19 @@ impl CasCore {
         let reasons_list: Vec<String> = reasons.split(", ").map(ToOwned::to_owned).collect();
         let mut qa_task = Task::new(id.clone(), qa_task_title(delivery, pass));
         qa_task.scope = crate::types::Scope::Project;
+        qa_task.assignee = reviewer.map(str::to_owned);
         qa_task.origin_project = delivery.origin_project.clone();
         qa_task.description =
             qa_task_description(delivery, pass, &reasons_list, ledger_dir, parent_branch);
+        if let Ok(Some(state)) = task_store.get_execution_state(&delivery.id)
+            && let Some(impact) = state.get("qa_impact")
+            && impact["head_sha"].as_str() == Some(pass.bound_head.as_str())
+        {
+            qa_task.description.push_str("\n\nJourney impact at the reviewed delivery:\n");
+            qa_task.description.push_str(&super::qa_impact::render(impact));
+        } else {
+            qa_task.description.push_str("\n\nWARNING: journey impact is unavailable for this head; inspect the attributed diff and configured catalog. Existing QA evidence requirements still apply.\n");
+        }
         qa_task.acceptance_criteria = "LEDGER.md with journeys, correctness and polish sections; \
              every finding cites a trace action and a screenshot; desktop+phone, light+dark \
              captures; visual-qa.mjs --strict output; verdict recorded with verification action=qa_record."
@@ -1946,17 +2098,53 @@ mod squash_close_tests {
     }
 
     #[test]
-    fn cas_b591_unreviewed_squash_still_dispatches_a_round() {
+    fn cas_d8b4_unreviewed_landed_squash_never_dispatches_a_round() {
         let mut env = TestEnvGuard::temp_home();
-        let (dir, core, task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
-        let outcome = core.independent_qa_close_gate(&task, dir.path(), "main", None, None);
-        let QaCloseGate::Refuse(text) = outcome else {
-            panic!("an integrated delivery without a verdict still requires QA");
-        };
-        assert!(text.contains("INDEPENDENT QA DISPATCHED"), "{text}");
-        let passes = cas_store::list_qa_passes(&dir.path().join(".cas"), &task.id).unwrap();
-        assert_eq!(passes.len(), 1);
-        assert_eq!(passes[0].state, QaPassState::Pending);
+        for (evolved_batch, pending) in [(false, false), (true, false), (false, true)] {
+            let (dir, core, mut task, _squash) = squash_fixture(&mut env, QaPassState::Pending);
+            let repo = dir.path();
+            let head = task.deliverables.factory_branch_anchor.clone().unwrap();
+            if evolved_batch {
+                task.deliverables.integration_batch = Some(cas_types::IntegrationBatchEvidence {
+                    branch: "batch/X".into(),
+                    tip: head.clone(),
+                    base: git(repo, &["merge-base", &head, "main"]),
+                    delivered_head: head.clone(),
+                    supervisor_id: "supervisor".into(),
+                    recorded_at: chrono::Utc::now(),
+                });
+                git(repo, &["checkout", "-q", "main"]);
+                std::fs::write(repo.join("web/composer.css"), ".composer{gap:16px}\n").unwrap();
+                git(repo, &["add", "web/composer.css"]);
+                git(repo, &["commit", "-q", "-m", "later spacing change"]);
+                git(repo, &["checkout", "-q", "factory/worker"]);
+            }
+            if pending {
+                let now = chrono::Utc::now();
+                cas_store::open_qa_pass(&repo.join(".cas"), &NewQaPass {
+                    task_id: &task.id,
+                    implementer_agent_id: "worker",
+                    branch: "factory/worker",
+                    bound_head: &head,
+                    deadline_at: now + chrono::Duration::minutes(30),
+                    max_rounds: 3,
+                }, now).unwrap();
+            }
+            assert!(core.dispatch_independent_qa(&task, repo, "main", Some(&head)).is_none());
+            let outcome = core.independent_qa_close_gate(&task, repo, "main", None, None);
+            let QaCloseGate::Refuse(text) = outcome else {
+                panic!("an integrated delivery without a verdict still requires QA");
+            };
+            let passes = cas_store::list_qa_passes(&repo.join(".cas"), &task.id).unwrap();
+            if pending {
+                assert_eq!(passes.len(), 1);
+                assert!(text.contains(&passes[0].id) && text.contains("pending verdict"), "{text}");
+                assert!(!text.contains("no QA pass was opened"), "{text}");
+            } else {
+                assert!(text.contains("no QA pass was opened"), "{text}");
+                assert!(passes.is_empty(), "already merged work must not create a QA task");
+            }
+        }
     }
 
     #[test]
@@ -1990,6 +2178,7 @@ mod squash_close_tests {
         let mut env = TestEnvGuard::temp_home();
         let (dir, core, task, squash) = squash_fixture(&mut env, state);
         let request = TaskCloseRequest {
+            no_delivery: None,
             id: task.id.clone(),
             reason: Some("Squash delivery landed".into()),
             commit_receipt: Some(squash),
@@ -2786,6 +2975,13 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let f = fixture(&mut env, TaskStatus::InProgress);
         let repo = f.dir.path();
         git(repo, &["branch", "factory/worker", &f.tip]);
+        // A task mention in the body cannot claim an unnamed next task's
+        // subject for this delivery. Named continuations are covered by
+        // shared_lane_red_green_close_checks_pushed_tip_cas_2bec.
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["commit", "-q", "--amend", "-m", "wip\n\nContext: cas-ui02"]);
+        let unnamed = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
         let parking = f.core.advance_commit_time_anchor_before_park(
             tasks.as_ref(),
@@ -2793,7 +2989,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
             repo,
             "main",
             Some("factory/worker"),
-            Some(&f.tip),
+            Some(&unnamed),
         );
         assert_eq!(
             parking.deliverables.factory_branch_anchor.as_deref(),

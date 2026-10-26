@@ -1,9 +1,12 @@
 //! cas-4736: `factory action=epic_split`, splitting an epic's children with
 //! a peer supervisor of this repository on another machine or clone.
 //!
-//! - propose: `id=<epic> target=<peer> mine=<ids> theirs=<ids> [ttl_secs]`
+//! - propose: `id=<epic> target=<peer> [mine=<ids>] [theirs=<ids>] [ttl_secs]`
+//!   At least one share is required; omit the other for a request or grant.
 //! - answer: `id=<split> decision=accept|reject [reason]`
 //! - cancel: `id=<split> decision=cancel [reason]`
+//! - release: `id=<split> decision=release task_id=<moved child>` (owner only)
+//! - status: `id=<split> [decision=status]`
 //! - list: no arguments
 //!
 //! A registered supervisor may cancel its own split. A live supervisor may
@@ -46,6 +49,7 @@ impl CasService {
         let decision = trimmed(&req.decision).map(|d| d.to_ascii_lowercase());
         let target = trimmed(&req.target);
         let reason = trimmed(&req.reason);
+        let task_id = trimmed(&req.task_id);
         let (mine, theirs) = (
             req.mine.as_deref().map(epic_split::parse_ids),
             req.theirs.as_deref().map(epic_split::parse_ids),
@@ -58,15 +62,23 @@ impl CasService {
                     "accept" => epic_split::answer(&cas_root, &caller, &id, true, reason.as_deref()),
                     "reject" => epic_split::answer(&cas_root, &caller, &id, false, reason.as_deref()),
                     "cancel" => epic_split::cancel(&cas_root, &caller, &id, reason.as_deref()),
+                    "release" => match task_id.as_deref() {
+                        Some(task_id) => epic_split::release_moved_child(&cas_root, &caller, &id, task_id),
+                        None => Err("decision=release needs task_id=<moved child>".to_string()),
+                    },
+                    "status" => epic_split::status(&cas_root, &id),
                     other => Err(format!(
-                        "decision must be accept, reject or cancel (got '{other}')"
+                        "decision must be accept, reject, cancel or release, or status (got '{other}')"
                     )),
                 },
                 (Some(_), None) => Err("decision needs id=<split id>".to_string()),
                 (None, Some(epic)) => {
+                    if target.is_none() && epic.starts_with("split-") {
+                        return epic_split::status(&cas_root, &epic);
+                    }
                     let peer = target.ok_or(
                         "propose an epic split with id=<epic> target=<peer supervisor> \
-                         mine=<ids> theirs=<ids>",
+                         mine=<ids> or theirs=<ids> (or both)",
                     )?;
                     epic_split::propose(
                         &cas_root,
@@ -82,7 +94,7 @@ impl CasService {
                     let splits = epic_split::render_splits(&cas_root);
                     Ok(if splits.is_empty() {
                         "No epic splits recorded. Propose one with factory action=epic_split \
-                         id=<epic> target=<peer> mine=<ids> theirs=<ids>."
+                         id=<epic> target=<peer> mine=<ids> or theirs=<ids> (or both)."
                             .to_string()
                     } else {
                         splits

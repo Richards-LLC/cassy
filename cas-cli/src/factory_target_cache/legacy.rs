@@ -71,7 +71,7 @@ pub(super) struct Guard {
     external_locks: Vec<(PathBuf, fs::File)>,
     snapshot: Snapshot,
     worktree: PathBuf,
-    worktree_identity: (u64, u64),
+    worktree_identity: Option<(u64, u64)>,
     target_identity: (u64, u64),
     #[cfg(unix)]
     lease: Option<owner::Lease>,
@@ -99,7 +99,11 @@ impl Guard {
         {
             use std::os::unix::fs::MetadataExt;
             if identity(cache).ok() != Some(self.target_identity)
-                || identity(&self.worktree).ok() != Some(self.worktree_identity)
+                || match self.worktree_identity {
+                    Some(expected) => identity(&self.worktree).ok() != Some(expected),
+                    None => !fs::symlink_metadata(&self.worktree)
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound),
+                }
             {
                 return false;
             }
@@ -192,7 +196,13 @@ fn registry(cas_root: &Path, worktree: &Path) -> io::Result<bool> {
             agent
                 .metadata
                 .get("clone_path")
-                .and_then(|path| Path::new(path).canonicalize().ok())
+                .and_then(|path| {
+                    Path::new(path).canonicalize().ok().or_else(|| {
+                        (Path::new(path) == worktree
+                            && crate::factory_scratch::removed_worker(cas_root, worktree))
+                        .then(|| worktree.to_path_buf())
+                    })
+                })
                 .is_some_and(|path| path == worktree)
         })
         .collect();
@@ -309,9 +319,11 @@ pub(crate) fn lane_target(cas_root: &Path, worktree: &Path, cache: &Path) -> boo
     let workers = cas_root.join("worktrees");
     // Equality to canonical paths rejects symlinked intermediate components too.
     workers.canonicalize().ok().as_ref() == Some(&workers)
-        && worktree.canonicalize().ok().as_deref() == Some(worktree)
+        && (worktree.canonicalize().ok().as_deref() == Some(worktree)
+            || crate::factory_scratch::removed_worker(cas_root, worktree)
+                && relocated_target(worktree, cache))
         && worktree.parent() == Some(workers.as_path())
-        && cache == worktree.join("target")
+        && (cache == worktree.join("target") || relocated_target(worktree, cache))
         && cache.canonicalize().ok().as_deref() == Some(cache)
         && !lane::is_preview_path(cas_root, worktree)
 }
@@ -364,11 +376,24 @@ fn acquire_scanned(
     #[cfg(unix)]
     let lease = if cache.join(owner::MARKER).exists() {
         Some(
-            owner::for_retirement(cas_root, worktree)?
+            owner::for_gc(cas_root, worktree, cache)?
                 .ok_or_else(|| io::Error::other("missing target lease"))?,
         )
     } else {
         None
+    };
+    let worktree_identity = match identity(worktree) {
+        Ok(identity) => Some(identity),
+        Err(error) => {
+            #[cfg(unix)]
+            if lease.is_some() && crate::factory_scratch::removed_worker(cas_root, worktree) {
+                None
+            } else {
+                return Err(error);
+            }
+            #[cfg(not(unix))]
+            return Err(error);
+        }
     };
     let mut guard = Guard {
         _lane: lane,
@@ -376,7 +401,7 @@ fn acquire_scanned(
         external_locks: Vec::new(),
         snapshot: snapshot.clone(),
         worktree: worktree.to_path_buf(),
-        worktree_identity: identity(worktree)?,
+        worktree_identity,
         target_identity: identity(cache)?,
         #[cfg(unix)]
         lease,
@@ -385,10 +410,15 @@ fn acquire_scanned(
         let path = cache.with_file_name("assembly-target.lock");
         let mut options = OpenOptions::new();
         options.create(true).truncate(false).read(true).write(true);
-        #[cfg(unix)] {
-            use std::os::unix::fs::{OpenOptionsExt, MetadataExt};
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-            if fs::symlink_metadata(&path).is_ok_and(|md| !md.is_file() || md.uid() != unsafe { libc::geteuid() }) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+            if fs::symlink_metadata(&path)
+                .is_ok_and(|md| !md.is_file() || md.uid() != unsafe { libc::geteuid() })
+            {
                 return Err(io::Error::other("unsafe assembly target lease"));
             }
         }
@@ -399,7 +429,15 @@ fn acquire_scanned(
                 return Err(io::Error::other("assembly target lease belongs to another user"));
             }
         }
-        file.try_lock_exclusive().map_err(|error| io::Error::new(error.kind(), format!("assembly target lease {} unavailable: {error}", path.display())))?;
+        file.try_lock_exclusive().map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "assembly target lease {} unavailable: {error}",
+                    path.display()
+                ),
+            )
+        })?;
         guard.external_locks.push((path, file));
     }
     for relative in &snapshot.locks {

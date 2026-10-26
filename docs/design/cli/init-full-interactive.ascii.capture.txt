@@ -1,0 +1,70 @@
+
+  +------------------------------------------------------+
+  |                                                      |
+  |  Cassy                                               |
+  |                                                      |
+  +------------------------------------------------------+
+
+  | Multi-agent coding factory with persistent memory and task coordination.
+
+
+  Cassy is already initialized at <project>/.cas
+
+What would you like to do:
+  1. Reconfigure settings
+  2. Keep existing and exit
+Select (1-2): 1
+
+  Reconfiguring Cassy...
+
+  * Confirmation
+  --------------------------------------------------
+
+  Create:
+    .cas/config.toml                Configuration
+    .gitignore                      Add .cas/ exclusion
+    .mcp.json                       MCP server config
+    .claude/settings.json           Claude Code hooks
+    .claude/skills/cas/SKILL.md     Cassy skill
+    .claude/agents/                 Built-in agents
+    .claude/commands/               Built-in commands
+
+  Factory tooling:
+    .env.worktree.template          Worktree env template
+    scripts/worktree-boot.sh        Boot script
+
+  Proceed [Y/n]: y
+
+  [OK] Saving configuration                    .cas/config.toml
+  [OK] Updating .gitignore                     .gitignore (created)
+  [OK] Configuring editor hooks                .claude/settings.json
+  [OK] Configuring MCP server                  .mcp.json
+  [OK] Updating agent instructions             CLAUDE.md
+  [OK] Generating Cassy guidance skill         .claude/skills/cas/SKILL.md
+  [OK] Syncing built-in files                  173 files
+  [OK] Updating AGENTS.md                      AGENTS.md
+  [OK] Setting up factory tooling              .env.worktree.template, scripts/worktree-boot.sh, .gitignore updated
+  Integrations: skipped (--no-integrations)
+
+  [OK] Cassy initialized at <project>/.cas
+
+
+  +-------------------------+--------------------------------+
+  | Command                 | Description                    |
+  +-------------------------+--------------------------------+
+  | cas                     | Launch multi-agent factory     |
+  | cas attach              | Attach to running session      |
+  | cas serve               | Start MCP server               |
+  | cas hub service install | Start persistent Commander hub |
+  | cas doctor              | Run diagnostics                |
+  +-------------------------+--------------------------------+
+
+  +- Next steps --------------------------------------------+
+  |                                                         |
+  |  Commit Cassy config so factory workers can access it:  |
+  |                                                         |
+  |    git add .claude/ CLAUDE.md .mcp.json .gitignore      |
+  |    git commit -m "Configure Cassy"                      |
+  |                                                         |
+  +---------------------------------------------------------+
+

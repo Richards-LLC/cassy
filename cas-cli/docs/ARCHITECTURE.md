@@ -126,6 +126,16 @@ Rules that keep that boundary honest:
 - Normalizing (lowercasing, trimming, stripping a trailing `/`) would not be a convenience — it would **merge two distinct projects** permanently and unattributably. The server deliberately refused to normalize for the same reason.
 - The client-side check is the **second** line of defence. The server filters on the id the client *sends* and echoes the stored column, so an id divergence never presents as a rejected row: the client gets an **empty envelope, indefinitely, with no warning on either side**. Silent starvation, not contamination. When sync "returns nothing", suspect an id mismatch upstream rather than assuming the row filter is eating data.
 
+Personal and team pulls repeat a skipped remote-close warning while the local
+task remains awaiting merge under the same recorded lifecycle guard. Three
+policy skips are excluded on both first and later pulls: configured `LocalWins`
+honors the operator's choice; a remote row that does not supersede the local
+revision has no newer authority; owner-wins rejects a non-owner replica. They
+remain ordinary conflict counts and journal evidence where recorded, without
+the repeated lifecycle-guard warning. Reading those advisory warnings happens
+after data and cursor application; a read failure is listed in the pull's
+errors and leaves the pull successful (cas-963f).
+
 **What page sync does NOT cover** (boundaries by construction, not gaps to paper over):
 
 - **Knowledge-page delete uses tombstones, never the generic DELETE route.** A local or provenance-cascade delete writes a durable ledger row and emits `{ id, deleted_at }` under `knowledge_tombstones` in the normal push envelope. Pull applies tombstones before page records, retains the guard after delivery, and therefore refuses any stale page record with the same id rather than resurrecting it. Every pulled tombstone is project-scoped before it can touch disk. A locally locked page is preserved with its body; only explicit local operator action may delete it. The generic `DELETE /api/sync/{type}/{id}` path remains unsuitable for `knowledge_page` because it cannot provide those retention, scope, lock, or no-resurrection guarantees.
@@ -276,9 +286,55 @@ probes remain unknown; unrelated Git processes conservatively count as busy.
 Update never removes a lock. Recheck writers before manually removing the exact
 stale lock and retrying; recent/live locks require waiting, unknown ownership
 requires inspection.
-With no other staged work, it makes one dedicated
+With no other staged work on a work branch, it makes one dedicated
 `chore(cassy): reconcile managed project files` commit, using a command-scoped
-Cassy author identity. It never pushes. A second update is a no-op.
+Cassy author identity. It never auto-commits on `main`, `master`, `staging`,
+`develop`, `trunk`, the detected repository default, the configured
+`factory.epic_base_branch`, or an `epic/*` branch. Detached or unreadable HEAD
+also leaves the repair staged. The guard reads configuration from the CAS root
+passed to sync, including
+shared stores outside a worktree. If that configuration cannot be loaded, the
+repair stays staged with `commit_warning` and update succeeds. Fix the config
+before retrying. If default-branch detection has no origin HEAD, configured
+initial branch or common trunk, it falls back to the current branch; this also
+keeps the repair staged rather than granting permission to create history.
+These safe refusals report `outcome: "staged"` with no commit; review with
+`git diff --cached` and move the repair to a dedicated work
+branch before committing through the project's normal review process. It never
+pushes. A committed repair prints a local-only next step: push it to origin and
+open a normal PR. Doctor checks the default branch against its configured
+upstream and warns about unpublished Cassy-authored reconcile commits, including
+when invoked from a worker branch. Spawn/lane divergence refusals name these
+commits only when every local-only commit on the implicated side is a Cassy
+repair; their existing ancestry and preservation rules remain unchanged.
+A second update does not create another commit.
+
+### Recovering an already-diverged trunk
+
+The operator owns recovery; update never resets, rewrites or fast-forwards a
+diverged trunk. Stop older Cassy update processes first, inspect
+`git status --short`, and preserve any staged or unstaged project work before
+switching branches. Do not assume that every local-only commit is generated:
+fetch the intended remote, inspect `git rev-list --left-right --count
+staging...origin/staging` and `git log --oneline origin/staging..staging`, and
+review the local-only diffs.
+
+After confirming a clean worktree and deciding that local `staging` should
+follow the fetched `origin/staging`, preserve its existing history by renaming
+it to a unique recovery branch, then recreate the tracking branch. For example,
+with a recovery name that does not already exist:
+
+```sh
+git branch -m staging recovery/cassy-managed-files-2026-10-21
+git switch -c staging --track origin/staging
+```
+
+This retains every old local commit on the recovery ref and uses no force or
+hard reset. Substitute the actual trunk, remote and a unique recovery name.
+Review any useful managed-file changes on a fresh work branch based on current
+trunk and submit them normally; do not merge the stale recovery branch merely
+to clear the divergence. Run the patched update only after the operator's
+branch recovery decision; its repair remains staged on trunk.
 
 Normal Git hooks remain authoritative. An attempted managed commit that fails
 returns `outcome: "commit_failed"` and an additive `commit_error` containing Git's

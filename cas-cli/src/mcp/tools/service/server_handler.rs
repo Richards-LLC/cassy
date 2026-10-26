@@ -230,6 +230,8 @@ impl ServerHandler for CasService {
             // from an unknown write when the response deadline wins the race.
             // `ToolCallContext` consumes `request` below.
             let timeout_arguments = request.arguments.clone();
+            let caller_tool_use =
+                claude_tool_use_id(request.meta.as_ref()).or_else(|| claude_tool_use_id(Some(&context.meta)));
             info!(method = "tools/call", tool = %tool_name, id = %request_id, "MCP call_tool START");
             // cas-b1dd: the handler owns its service clone so it can outlive an
             // early answer; a deadline never drops work past its commit.
@@ -255,13 +257,62 @@ impl ServerHandler for CasService {
                 )
                 .await;
             let remaining = budget.saturating_sub(start.elapsed());
-            self.append_factory_context_with_budget(
+            self.append_factory_context_for_caller(
                 result,
                 remaining.min(std::time::Duration::from_millis(500)),
+                caller_tool_use,
             )
             .await
         }
     }
+}
+
+/// cas-badb (GH #1302): Claude Code tags every MCP call with the id of the
+/// `tool_use` that issued it. Subagents share the parent's MCP server, so this
+/// id is the only per-call evidence of who is calling.
+fn claude_tool_use_id(meta: Option<&rmcp::model::Meta>) -> Option<String> {
+    meta?
+        .get("claudecode/toolUseId")?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+}
+
+/// Whether `tool_use_id` was issued by the session's own top-level turn: a
+/// non-sidechain assistant record in its main transcript. A subagent's calls
+/// are written to `<session>/subagents/` (or, in older builds, as sidechain
+/// records), so they never match. Claude flushes the record about 50-100 ms
+/// after the call starts; wait up to `wait` for it.
+fn top_level_tool_use(transcript: &std::path::Path, tool_use_id: &str, wait: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if transcript_tail_has_top_level_tool_use(transcript, tool_use_id) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn transcript_tail_has_top_level_tool_use(transcript: &std::path::Path, tool_use_id: &str) -> bool {
+    const TAIL: u64 = 512 * 1024;
+    let Some((_, tail)) = super::worker_liveness::read_jsonl_tail(transcript, TAIL) else {
+        return false;
+    };
+    tail.lines()
+        .filter(|line| line.contains(tool_use_id))
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .any(|record| {
+            record["type"] == "assistant"
+                && record["isSidechain"] != true
+                && record["message"]["content"].as_array().is_some_and(|content| {
+                    content
+                        .iter()
+                        .any(|block| block["type"] == "tool_use" && block["id"] == tool_use_id)
+                })
+        })
 }
 
 /// This MCP process belongs to the caller's cwd/account. A supervisor has no
@@ -299,6 +350,9 @@ type ToolResult = Result<rmcp::model::CallToolResult, rmcp::ErrorData>;
 
 /// cas-3b81: the note label carrying a late close's final outcome.
 const LATE_CLOSE_NOTE_MARKER: &str = "CLOSE_OUTCOME";
+/// cas-3937: marks a task note recording work that finished after a
+/// COMMITTED early answer.
+const POST_COMMIT_NOTE_MARKER: &str = "POST_COMMIT_OUTCOME";
 
 /// First line of a late close's answer, bounded for a task note.
 fn late_close_summary(joined: &Result<ToolResult, tokio::task::JoinError>) -> String {
@@ -345,6 +399,34 @@ fn log_post_commit(tool: &str, receipt: &super::mutation_receipt::Receipt, how: 
 }
 
 impl CasService {
+    /// cas-3937: a coordination request run through the MCP response budget
+    /// and post-commit grace, as a real tool call is, so integration tests
+    /// can drive slow post-commit work through the real handler.
+    #[doc(hidden)]
+    pub async fn coordination_with_budget_for_testing(
+        &self,
+        req: cas_mcp::types::CoordinationRequest,
+        budget: std::time::Duration,
+        grace: std::time::Duration,
+    ) -> ToolResult {
+        let arguments = serde_json::to_value(&req)
+            .ok()
+            .and_then(|value| value.as_object().cloned());
+        let service = self.clone();
+        self.call_with_deadline_and_grace(
+            "coordination",
+            arguments.as_ref(),
+            budget,
+            grace,
+            async move {
+                service
+                    .coordination(rmcp::handler::server::wrapper::Parameters(req))
+                    .await
+            },
+        )
+        .await
+    }
+
     /// The deadline alone, with no early post-commit answer.
     #[cfg(test)]
     async fn call_with_deadline<F>(
@@ -452,12 +534,30 @@ impl CasService {
                     .map(|commit| commit.description.clone())
                     .unwrap_or_else(|| "write committed".to_string());
                 warn!(tool = tool_name, action = receipt.action(), task_id = receipt.task_id().unwrap_or_default(), elapsed_ms = elapsed.as_millis() as u64, grace_ms = grace.as_millis() as u64, "MCP answered after commit; post-commit work continues");
-                let watcher_receipt = receipt.clone();
-                let tool = tool_name.to_string();
-                tokio::spawn(async move {
-                    let _ = handle.await;
-                    log_post_commit(&tool, &watcher_receipt, "finished in the background");
-                });
+                if receipt.action() != "worktree_merge" {
+                    let watcher_receipt = receipt.clone();
+                    let tool = tool_name.to_string();
+                    tokio::spawn(async move {
+                        let _ = handle.await;
+                        log_post_commit(&tool, &watcher_receipt, "finished in the background");
+                    });
+                } else {
+                    // cas-3937 review: the work after the early answer (a
+                    // merge's close) must not finish where nobody sees it.
+                    self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
+                }
+                // cas-3937: a factory merge is not a task mutation; name the
+                // call itself, and its committed merge, instead.
+                if tool_name != "task" {
+                    return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
+                        "COMMITTED: `{tool_name} action={action}` is done ({description}). Its \
+                         remaining work was still running {grace_s:.1}s after the commit and \
+                         finishes in the background. Do not retry it; read the task's notes \
+                         for the rest.",
+                        action = receipt.action(),
+                        grace_s = grace.as_secs_f64(),
+                    ))]));
+                }
                 let task = receipt.task_id().map(|id| format!(" `{id}`")).unwrap_or_default();
                 Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::Content::text(format!(
                     "COMMITTED: task{task} {action} is done ({description}). Its post-commit work \
@@ -488,6 +588,9 @@ impl CasService {
                     && receipt.task_id().is_some();
                 if close_unfinished {
                     self.record_late_close_outcome(handle, receipt.clone(), start, budget);
+                } else if commit.is_some() && receipt.action() == "worktree_merge" {
+                    // cas-3937 review: committed, still running; keep its result.
+                    self.record_post_commit_outcome(handle, receipt.clone(), arguments, start);
                 } else if commit.is_none() {
                     // Nothing committed: cancel as before, so an UNKNOWN answer
                     // is not followed by a late write the caller never sees.
@@ -530,6 +633,62 @@ impl CasService {
             .await
     }
 
+    /// The registered agent this MCP process speaks for, when it is the
+    /// factory identity in this process's environment.
+    fn registered_factory_agent(&self) -> Option<crate::types::Agent> {
+        let id = self.inner.get_registered_agent_id_read_only().ok()?;
+        let agent = self.inner.open_agent_store().ok()?.get(&id).ok()?;
+        let name = std::env::var("CAS_AGENT_NAME").ok()?;
+        (agent.name == name).then_some(agent)
+    }
+
+    /// cas-badb (GH #1302): the response fallback reads and acknowledges the
+    /// registered session's own mail, so it runs only when the call came from
+    /// that session's top-level turn. A Claude call tagged with a tool-use id
+    /// that its top-level transcript does not show (a subagent, such as a
+    /// task-verifier, sharing this server) neither surfaces nor consumes mail,
+    /// and never receives mail deferred from an earlier response.
+    async fn append_factory_context_for_caller(
+        &self,
+        result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+        mut budget: std::time::Duration,
+        caller_tool_use: Option<String>,
+    ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
+        if result.is_ok() {
+            if budget.is_zero() || crate::internal_llm::is_internal_invocation() {
+                return result;
+            }
+            let started = std::time::Instant::now();
+            let wait = (budget / 2).min(std::time::Duration::from_millis(300));
+            let this = self.clone();
+            let proven = tokio::task::spawn_blocking(move || {
+                let Some(agent) = this.registered_factory_agent() else {
+                    return false;
+                };
+                let Some(tool_use) = caller_tool_use else {
+                    // A shared Claude server cannot attribute an untagged call
+                    // to the parent. Leave its mail for a proven call or hook.
+                    let claude = super::factory_ops::worker_cli_from_agent(&agent)
+                        == cas_mux::SupervisorCli::Claude;
+                    if claude {
+                        tracing::debug!(agent_id = %agent.id, "untagged Claude call skipped parent mailbox");
+                    }
+                    return !claude;
+                };
+                caller_transcript_path(&agent)
+                    .is_some_and(|path| top_level_tool_use(&path, &tool_use, wait))
+            })
+            .await
+            .unwrap_or(false);
+            if !proven {
+                return result;
+            }
+            budget = budget.saturating_sub(started.elapsed());
+        }
+        self.append_factory_context_with_budget(result, budget)
+            .await
+    }
+
     async fn append_factory_context_with_budget(
         &self,
         result: Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
@@ -551,12 +710,7 @@ impl CasService {
                 if crate::internal_llm::is_internal_invocation() {
                     return None;
                 }
-                let id = this.inner.get_registered_agent_id_read_only().ok()?;
-                let agent = this.inner.open_agent_store().ok()?.get(&id).ok()?;
-                let name = std::env::var("CAS_AGENT_NAME").ok()?;
-                if agent.name != name {
-                    return None;
-                }
+                let agent = this.registered_factory_agent()?;
                 let role = match agent.role {
                     crate::types::AgentRole::Supervisor => "supervisor",
                     crate::types::AgentRole::Worker => "worker",
@@ -599,6 +753,76 @@ impl CasService {
     /// happened with `task action=show` instead of guessing from "UNKNOWN".
     /// Appending is an atomic SQL append, so it cannot clobber the close's
     /// own row write.
+    /// cas-3937 review: a non-task call that answered COMMITTED (a merge,
+    /// after its push) keeps running. When it finishes, its result is
+    /// appended to the task named by its `task_id` argument, so a close that
+    /// a gate refused, or that failed, after the early answer is visible.
+    fn record_post_commit_outcome(
+        &self,
+        handle: tokio::task::JoinHandle<ToolResult>,
+        receipt: std::sync::Arc<super::mutation_receipt::Receipt>,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+        start: std::time::Instant,
+    ) {
+        let task_id = arguments
+            .and_then(|args| args.get("task_id"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_string);
+        let service = self.clone();
+        tokio::spawn(async move {
+            let joined = handle.await;
+            log_post_commit("factory", &receipt, "finished in the background");
+            let Some(task_id) = task_id else {
+                return;
+            };
+            // cas-3937 review: the close's own outcome, not the merge
+            // answer's first line (always its CI block).
+            let recorded_close = receipt
+                .followup
+                .lock()
+                .ok()
+                .and_then(|followup| followup.clone())
+                .map(|text| {
+                    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                    crate::mcp::tools::truncate_str(&text, 400).to_string()
+                });
+            // cas-3fc8: a merge that fails after its close was recorded keeps
+            // both: the close's outcome and the merge's own failure.
+            let merge_failed = !matches!(&joined, Ok(Ok(result)) if result.is_error != Some(true));
+            let followup = match recorded_close {
+                Some(close) if merge_failed => {
+                    format!("{close}. The merge itself then failed: {}", late_close_summary(&joined))
+                }
+                Some(close) => close,
+                None => late_close_summary(&joined),
+            };
+            let action = receipt.action().to_string();
+            let elapsed = start.elapsed();
+            let recorded = tokio::task::spawn_blocking(move || {
+                let store = service.inner.open_task_store().map_err(|error| error.message.to_string())?;
+                let status = store
+                    .get(&task_id)
+                    .map(|task| task.status.to_string())
+                    .unwrap_or_else(|error| format!("unreadable ({error})"));
+                let note = format!(
+                    "[{}] 📝 PROGRESS {POST_COMMIT_NOTE_MARKER}: `{action}` answered COMMITTED before its remaining work finished; that work finished after {:.1}s; task status now `{status}`. Close outcome: {followup}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                    elapsed.as_secs_f64(),
+                );
+                store
+                    .append_note(&task_id, &note)
+                    .map_err(|error| format!("{task_id}: {error}"))
+            })
+            .await;
+            match recorded {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => warn!(error = %error, "MCP post-commit outcome not recorded"),
+                Err(error) => warn!(error = %error, "MCP post-commit outcome recorder ended abnormally"),
+            }
+        });
+    }
+
     fn record_late_close_outcome(
         &self,
         handle: tokio::task::JoinHandle<ToolResult>,
@@ -1153,6 +1377,57 @@ mod tests {
         );
     }
 
+    /// cas-3937: a worktree_merge whose merge and push committed, followed
+    /// by a slow phase (the close gate and verifier dispatch), reports the
+    /// merged commit and push state: COMMITTED at the deadline, and an early
+    /// success once the post-commit grace runs out. Never UNKNOWN.
+    #[tokio::test]
+    async fn a_committed_merge_with_a_slow_close_reports_its_outcome_cas_3937() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        let temp = tempfile::tempdir().unwrap();
+        let service = CasService::new(
+            CasCore::with_daemon(temp.path().to_path_buf(), None, None),
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments =
+            serde_json::json!({"action": "worktree_merge", "id": "sharp-cobra-83", "task_id": "cas-3fb4"});
+        let merge_then_slow_close = || async {
+            super::super::mutation_receipt::merge_committed("4dd898a71", "epic/v57", "pushed to origin");
+            std::future::pending().await
+        };
+
+        let error = service
+            .call_with_deadline(
+                "factory",
+                arguments.as_object(),
+                std::time::Duration::from_millis(50),
+                merge_then_slow_close(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.data.as_ref().unwrap()["mutation_outcome"], "COMMITTED", "{error:?}");
+        assert!(
+            error.message.contains("4dd898a71") && error.message.contains("pushed to origin"),
+            "{error:?}"
+        );
+
+        let answered = service
+            .call_with_deadline_and_grace(
+                "factory",
+                arguments.as_object(),
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_millis(50),
+                merge_then_slow_close(),
+            )
+            .await
+            .expect("a committed merge answers once its grace runs out");
+        let text = format!("{answered:?}");
+        assert!(text.contains("COMMITTED") && text.contains("4dd898a71"), "{text}");
+        assert!(!text.contains("task `"), "a merge is not described as a task mutation: {text}");
+    }
+
     /// cas-24d8: a close that committed only an intermediate write (a gate
     /// note, a parked anchor) before the deadline has not closed anything.
     /// It must not be reported as COMMITTED.
@@ -1183,6 +1458,64 @@ mod tests {
         assert!(error.message.contains("IN_PROGRESS"), "{error:?}");
         assert!(!error.message.contains("COMMITTED ("), "{error:?}");
         assert_eq!(error.data.unwrap()["mutation_outcome"], "IN_PROGRESS");
+    }
+
+    /// cas-3fc8: after a merge's early COMMITTED answer, the task note says
+    /// what its close concluded ("not eligible" rather than a blank) and,
+    /// when the merge itself then fails, that failure too.
+    #[tokio::test]
+    async fn post_commit_note_names_an_ineligible_close_and_a_later_merge_failure_cas_3fc8() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        let _env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        std::fs::create_dir_all(&core.cas_root).unwrap();
+        let tasks = core.open_task_store().unwrap();
+        tasks.add(&crate::types::Task::new("cas-merged".into(), "merged".into())).unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let arguments = serde_json::json!({"action": "worktree_merge", "id": "wt", "task_id": "cas-merged"});
+        let merge = async {
+            super::super::mutation_receipt::merge_committed("abc123", "epic/x", "pushed to origin");
+            // Cassy's close found the task not eligible: its receipt is empty.
+            super::super::mutation_receipt::merge_followup(
+                &crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose::NotEligible
+                    .followup("cas-merged"),
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            Err(rmcp::ErrorData {
+                code: rmcp::model::ErrorCode::INTERNAL_ERROR,
+                message: "Failed to mark worker delivery complete: disk full".into(),
+                data: None,
+            })
+        };
+        let answered = service
+            .call_with_deadline_and_grace(
+                "factory",
+                arguments.as_object(),
+                std::time::Duration::from_secs(30),
+                std::time::Duration::ZERO,
+                merge,
+            )
+            .await
+            .expect("the committed merge answers early");
+        assert!(format!("{answered:?}").contains("COMMITTED"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let notes = loop {
+            let notes = tasks.get("cas-merged").unwrap().notes;
+            if notes.contains("POST_COMMIT_OUTCOME") || std::time::Instant::now() > deadline {
+                break notes;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        // pin: the note's wording for an ineligible close and a later failure (cas-3fc8).
+        assert!(notes.contains("not eligible for Cassy's close"), "{notes}");
+        assert!(notes.contains("disk full"), "{notes}");
     }
 
     /// cas-3b81 (GH #1142): a close still running at the deadline with
@@ -1421,6 +1754,217 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(repeated.content.len(), 1);
+    }
+
+    /// cas-badb (GH #1302): a subagent (here a task-verifier) shares its
+    /// parent's MCP server. Its CAS tool calls must neither show nor consume
+    /// the parent's mail; the parent's own next call still receives it.
+    #[tokio::test]
+    async fn subagent_mcp_call_does_not_consume_parent_mail_cas_badb() {
+        use crate::mcp::server::CasCore;
+        use crate::mcp::tools::service::CasService;
+        use crate::test_support::TestEnvGuard;
+        use cas_store::{DeliveryStage, PromptQueueStore, SqlitePromptQueueStore, SurfacingSource};
+        let temp = tempfile::tempdir().unwrap();
+        let _env = TestEnvGuard::with_optional_vars(&[
+            ("CAS_AGENT_NAME", Some("parent-supervisor")),
+            ("CAS_AGENT_ROLE", Some("supervisor")),
+            ("CAS_FACTORY_SESSION", Some("badb-factory")),
+            (crate::internal_llm::INTERNAL_LLM_ENV, None),
+        ]);
+        let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
+        core.register_agent("parent-session".into(), "parent-supervisor".into(), None)
+            .unwrap();
+        let service = CasService::new(
+            core,
+            #[cfg(feature = "mcp-proxy")]
+            None,
+        );
+        let account = temp.path().join("account");
+        let slug: String = std::env::current_dir()
+            .unwrap()
+            .to_string_lossy()
+            .chars()
+            .map(|c| if matches!(c, '/' | '.') { '-' } else { c })
+            .collect();
+        let transcripts = account.join("projects").join(slug);
+        let subagents = transcripts.join("parent-session").join("subagents");
+        std::fs::create_dir_all(&subagents).unwrap();
+        let tool_use = |id: &str, sidechain: bool| {
+            serde_json::json!({
+                "type": "assistant",
+                "isSidechain": sidechain,
+                "message": {"content": [{"type": "tool_use", "id": id, "name": "mcp__cas__task"}]},
+            })
+            .to_string()
+        };
+        // The parent's transcript names the verifier's call only inside a
+        // sidechain record and a tool result, never as its own tool_use.
+        let parent = [
+            serde_json::json!({"type":"user", "promptId":"parent-turn",
+                "timestamp": (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(),
+                "message":{"content":"continue"}})
+            .to_string(),
+            tool_use("toolu_parent", false),
+            tool_use("toolu_sidechain", true),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_verifier"}]}})
+            .to_string(),
+        ]
+        .join("\n");
+        std::fs::write(transcripts.join("parent-session.jsonl"), &parent).unwrap();
+        std::fs::write(
+            subagents.join("agent-verifier.jsonl"),
+            tool_use("toolu_verifier", false),
+        )
+        .unwrap();
+        let store = service.inner.open_agent_store().unwrap();
+        let mut agent = store.get("parent-session").unwrap();
+        agent.metadata.insert(
+            "worker_account_dir".into(),
+            account.to_string_lossy().into_owned(),
+        );
+        agent.metadata.insert("worker_cli".into(), "claude".into());
+        store.update(&agent).unwrap();
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let first_body = "peer ask for the parent ".to_owned() + &"a".repeat(2_600);
+        let first = queue
+            .enqueue_with_summary(
+                "worker-a",
+                "parent-supervisor",
+                &first_body,
+                Some("badb-factory"),
+                Some("review the pending branch"),
+            )
+            .unwrap();
+        // The harness accepted the transport, but no recipient turn carried the body.
+        queue.mark_transport_delivered(first).unwrap();
+        queue
+            .record_recipient_surfaced(
+                first,
+                "parent-supervisor",
+                SurfacingSource::TransportDelivered,
+            )
+            .unwrap();
+        let second_body = "next pending request ".to_owned() + &"b".repeat(2_600);
+        let second = queue
+            .enqueue_with_summary(
+                "worker-b",
+                "parent-supervisor",
+                &second_body,
+                Some("badb-factory"),
+                Some("second pending decision"),
+            )
+            .unwrap();
+        let before = queue.message_delivery_report(first).unwrap().unwrap();
+        assert_eq!(before.stage, DeliveryStage::Delivered);
+        assert!(before.confirmed_at.is_none());
+        // pin: the existing message_status JSON field must distinguish handoff from rendering.
+        assert_eq!(
+            serde_json::to_value(&before).unwrap()["recipient_receipt"],
+            "transport_delivered"
+        );
+        let budget = std::time::Duration::from_millis(500);
+
+        for caller in [
+            Some("toolu_verifier"),
+            Some("toolu_sidechain"),
+            Some("toolu_unknown"),
+            None,
+        ] {
+            let output = service
+                .append_factory_context_for_caller(
+                    Ok(CasCore::success("verifier result")),
+                    budget,
+                    caller.map(str::to_owned),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                output.content.len(),
+                1,
+                "{caller:?} must not see the parent's mail"
+            );
+            assert_eq!(
+                queue.recipient_receipt(first, "parent-supervisor").unwrap(),
+                Some(SurfacingSource::TransportDelivered)
+            );
+            assert!(
+                queue
+                    .message_delivery_report(first)
+                    .unwrap()
+                    .unwrap()
+                    .confirmed_at
+                    .is_none()
+            );
+        }
+        // The next real parent turn automatically takes the provisional handoff.
+        let next = serde_json::json!({"type":"user", "promptId":"parent-next-turn",
+            "timestamp": chrono::Utc::now().to_rfc3339(), "message":{"content":"continue again"}});
+        let transcript = transcripts.join("parent-session.jsonl");
+        std::fs::write(
+            &transcript,
+            format!("{parent}\n{next}\n{}", tool_use("toolu_parent_next", false)),
+        )
+        .unwrap();
+        let hook = crate::hooks::HookInput {
+            session_id: "parent-session".into(),
+            agent_role: Some("supervisor".into()),
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let block = crate::hooks::handlers::handlers_middle::factory_inbox::surface_factory_inbox(
+            Some(temp.path()),
+            &hook,
+        )
+        .unwrap();
+        assert!(block.contains(&first_body));
+        assert!(!block.contains(&second_body), "overflow must remain unread");
+        assert!(block.contains(&format!("Message #{second} did not fit")));
+        // pin: overflow is actionable by id and original summary, not an anonymous count.
+        assert!(block.contains("second pending decision"), "{block}");
+        let rendered = queue.message_delivery_report(first).unwrap().unwrap();
+        assert_eq!(
+            rendered.recipient_receipt,
+            Some(SurfacingSource::HookSurfaced)
+        );
+        assert!(rendered.confirmed_at.is_some());
+        assert!(
+            queue
+                .message_delivery_report(second)
+                .unwrap()
+                .unwrap()
+                .confirmed_at
+                .is_none()
+        );
+        // The parent's next tool boundary recovers overflow without an explicit inbox poll.
+        let output = service
+            .append_factory_context_for_caller(
+                Ok(CasCore::success("parent result")),
+                budget,
+                Some("toolu_parent_next".into()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.content.len(), 2);
+        assert!(result_text(&output).contains(&second_body));
+        assert_eq!(
+            queue
+                .recipient_receipt(second, "parent-supervisor")
+                .unwrap(),
+            Some(SurfacingSource::HookSurfaced)
+        );
+    }
+
+    #[test]
+    fn claude_tool_use_id_reads_call_meta_cas_badb() {
+        let meta: rmcp::model::Meta =
+            serde_json::from_value(serde_json::json!({"claudecode/toolUseId": "toolu_1"})).unwrap();
+        assert_eq!(super::claude_tool_use_id(Some(&meta)).as_deref(), Some("toolu_1"));
+        assert_eq!(super::claude_tool_use_id(None), None);
+        let empty: rmcp::model::Meta = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(super::claude_tool_use_id(Some(&empty)), None);
     }
 
     #[tokio::test]

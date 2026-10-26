@@ -1,10 +1,114 @@
 //! Factory worker MCP configuration and explicit resource denials.
 
-use std::collections::BTreeSet;
-use std::io::Write;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use cas_types::factory_worker_policy::FactoryWorkerPolicy;
+
+pub(crate) const CLAUDE_CONNECTOR_NOTICE_ENV: &str = "CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE";
+const CLAUDE_CONNECTOR_MANIFEST: &str = "cassy-worker-connectors.json";
+const MAX_CONNECTOR_MANIFEST_BYTES: u64 = 64 * 1024;
+
+pub(crate) struct ClaudeAccountConnectors {
+    pub servers: serde_json::Map<String, serde_json::Value>,
+    pub notice: Option<String>,
+}
+
+/// Only an operator-provisioned manifest in the explicitly selected account
+/// grants connectors. Never scrape profile state, fetch descriptors or copy
+/// credentials. Native Claude still authenticates and applies managed policy.
+pub(crate) fn claude_account_connectors(
+    account_dir: &Path,
+    policy: &FactoryWorkerPolicy,
+) -> ClaudeAccountConnectors {
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "lowercase")]
+    enum ToolPermission { Allow, Ask, Blocked }
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Descriptor {
+        #[serde(rename = "type")]
+        transport: String,
+        url: String,
+        id: String,
+        #[serde(rename = "toolPermissions", skip_serializing_if = "Option::is_none")]
+        tool_permissions: Option<BTreeMap<String, ToolPermission>>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Manifest {
+        #[serde(rename = "mcpServers")]
+        servers: BTreeMap<String, Descriptor>,
+    }
+    let read = || -> Result<_, &'static str> {
+        if !account_dir.is_absolute() {
+            return Err("requires an absolute account directory");
+        }
+        let path = account_dir.join(CLAUDE_CONNECTOR_MANIFEST);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound { "missing" } else { "unreadable" }
+        })?;
+        if !metadata.is_file() || metadata.len() > MAX_CONNECTOR_MANIFEST_BYTES {
+            return Err("must be a regular file of at most 64 KiB");
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path).map_err(|_| "unreadable")?
+            .take(MAX_CONNECTOR_MANIFEST_BYTES + 1).read_to_end(&mut bytes).map_err(|_| "unreadable")?;
+        if bytes.len() as u64 > MAX_CONNECTOR_MANIFEST_BYTES {
+            return Err("exceeds 64 KiB");
+        }
+        let manifest: Manifest = serde_json::from_slice(&bytes).map_err(|_| "invalid descriptor format")?;
+        let mut servers = serde_json::Map::new();
+        let mut denied = false;
+        for (name, descriptor) in manifest.servers {
+            let provider = name.strip_prefix("claude.ai ").filter(|provider| {
+                !provider.is_empty() && provider.trim() == *provider
+                    && provider.chars().all(|c| c.is_ascii_alphanumeric() || " ._-()".contains(c))
+            }).ok_or("requires exact claude.ai connector names")?;
+            let url = url::Url::parse(&descriptor.url).map_err(|_| "invalid connector URL")?;
+            if descriptor.transport != "claudeai-proxy" || descriptor.id.is_empty()
+                || !descriptor.id.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                || url.scheme() != "https" || url.host_str().is_none()
+                || descriptor.url.chars().any(char::is_whitespace)
+                || !url.username().is_empty() || url.password().is_some()
+                || url.query().is_some() || url.fragment().is_some()
+            {
+                return Err("requires claudeai-proxy with a nonsecret HTTPS URL and connector ID");
+            }
+            // Native additional installs append " (2)" etc. to display names.
+            // Deployment providers remain supervisor-only even under a grant.
+            let provider = provider.split(" (").next().unwrap_or(provider);
+            let is_denied = ["vercel", "neon"].into_iter()
+                .chain(policy.supervisor_only_mcp.iter().map(String::as_str))
+                .any(|entry| {
+                    let entry = entry.strip_prefix("claude.ai ").unwrap_or(entry);
+                    entry.eq_ignore_ascii_case(provider)
+                        || url.host_str().is_some_and(|host| host.split('.').any(|part| part.eq_ignore_ascii_case(entry)))
+                });
+            if is_denied {
+                denied = true;
+                continue;
+            }
+            servers.insert(name, serde_json::to_value(descriptor).map_err(|_| "invalid descriptor format")?);
+        }
+        Ok((servers, denied))
+    };
+    match read() {
+        Ok((servers, denied)) => ClaudeAccountConnectors {
+            servers,
+            notice: denied.then(|| "cassy-worker-connectors.json: denied connectors omitted; strict MCP retained".into()),
+        },
+        Err(reason) => {
+            // Never include parse errors or file contents: a malformed input
+            // might contain a credential despite the manifest's narrow schema.
+            ClaudeAccountConnectors {
+                servers: Default::default(),
+                notice: Some(format!("{CLAUDE_CONNECTOR_MANIFEST}: {reason}; continuing with strict CAS-only MCP")),
+            }
+        }
+    }
+}
 
 /// Read native Codex configuration without starting MCP discovery. A literal
 /// denied key disables that server, even if another layer changes its value:
@@ -155,6 +259,7 @@ fn filtered_project_mcp(
     cas_root: &Path,
     policy: &FactoryWorkerPolicy,
     scope: McpScope,
+    connectors: Option<&ClaudeAccountConnectors>,
 ) -> std::io::Result<Vec<u8>> {
     let mut document: serde_json::Value = match std::fs::read(repo.join(".mcp.json")) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -185,6 +290,9 @@ fn filtered_project_mcp(
             "command": "cas", "args": ["serve"], "env": {"CAS_ROOT": cas_root}
         })
     });
+    if let Some(connectors) = connectors {
+        servers.extend(connectors.servers.clone());
+    }
     // Apply denials after synthesizing CAS too; defaults cannot regrant env.
     for server in servers.values_mut() {
         if let Some(env) = server
@@ -235,7 +343,7 @@ pub fn provision_project_mcp(repo: &Path, worker_name: &str) -> std::io::Result<
     if policy.is_empty() {
         return Ok(false);
     }
-    prepare_worker_mcp(&cas_root, worker_name, &policy, McpScope::AllowedProject)?;
+    prepare_worker_mcp(&cas_root, worker_name, &policy, McpScope::AllowedProject, None)?;
     Ok(true)
 }
 
@@ -252,6 +360,7 @@ pub(crate) fn prepare_worker_mcp(
     name: &str,
     policy: &FactoryWorkerPolicy,
     scope: McpScope,
+    connectors: Option<&ClaudeAccountConnectors>,
 ) -> std::io::Result<PathBuf> {
     let repo = cas_root
         .parent()
@@ -268,7 +377,7 @@ pub(crate) fn prepare_worker_mcp(
     let destination = cas_root.join("worker-mcp").join(format!("{name}.json"));
     write_private(
         &destination,
-        &filtered_project_mcp(repo, cas_root, policy, scope)?,
+        &filtered_project_mcp(repo, cas_root, policy, scope, connectors)?,
     )?;
     Ok(destination)
 }

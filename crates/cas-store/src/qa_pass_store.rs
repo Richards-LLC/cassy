@@ -311,7 +311,7 @@ fn reject_self_review(pass: &QaPass, agent_id: &str, action: &str) -> Result<()>
 }
 
 /// The reviewer starts the round. Rejects the implementer; idempotent for
-/// the same reviewer; rejects a second, different reviewer.
+/// the same reviewer; rejects a second reviewer while the claimant is live.
 pub fn claim_qa_pass(
     cas_dir: &Path,
     task_id: &str,
@@ -322,28 +322,66 @@ pub fn claim_qa_pass(
     let conn = crate::shared_db::lock_connection(&conn)?;
     let tx = ImmediateTx::new(&conn)?;
     expire_with_conn(&tx, task_id, now)?;
-    let active = active_with_conn(&tx, task_id)?.ok_or_else(|| {
-        StoreError::NotFound(format!("open independent QA pass for {task_id}"))
-    })?;
+    let active = active_with_conn(&tx, task_id)?
+        .ok_or_else(|| StoreError::NotFound(format!("open independent QA pass for {task_id}")))?;
     reject_self_review(&active, reviewer_agent_id, "claim")?;
-    match active.reviewer_agent_id.as_deref() {
-        Some(existing) if existing == reviewer_agent_id => {}
-        Some(existing) => {
-            return Err(StoreError::Other(format!(
-                "QA pass {} is already claimed by {existing}",
-                active.id
-            )));
-        }
-        None => {
-            tx.execute(
-                "UPDATE qa_passes SET reviewer_agent_id = ?2, state = 'claimed' WHERE id = ?1",
-                params![active.id, reviewer_agent_id],
-            )?;
-        }
+    if let Some(existing) = active.reviewer_agent_id.as_deref()
+        && existing != reviewer_agent_id
+        && reviewer_is_live_with_conn(&tx, existing)?
+    {
+        return Err(StoreError::Other(format!(
+            "QA pass {} is already claimed by {existing}",
+            active.id
+        )));
     }
+    tx.execute(
+        "UPDATE qa_passes SET reviewer_agent_id = ?2, state = 'claimed' WHERE id = ?1",
+        params![active.id, reviewer_agent_id],
+    )?;
     let pass = by_id_with_conn(&tx, &active.id)?;
     tx.commit()?;
     Ok(pass)
+}
+
+// Resolve the same two identity forms accepted by task start. A registry-free
+// QA store cannot disprove ownership; with a registry, absent/retired owners
+// have no authority to keep a round. Read under the claim's write transaction.
+fn reviewer_is_live_with_conn(conn: &Connection, reviewer: &str) -> Result<bool> {
+    if !conn.table_exists(None, "agents")? {
+        return Ok(true);
+    }
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM agents WHERE id = ?1 OR name = ?1
+         ORDER BY (id = ?1) DESC, registered_at DESC LIMIT 1",
+            params![reviewer],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(matches!(status.as_deref(), Some("active" | "idle")))
+}
+
+/// Release all claims owned by a retiring registration, including claims whose
+/// task lease was already released. Call before deleting its registry row and
+/// within the retirement transaction. A live replacement with the same display
+/// name owns name-bound claims; retiring the old ID must not release those.
+pub(crate) fn release_qa_claims_for_agent_with_conn(
+    conn: &Connection,
+    agent_id: &str,
+) -> Result<()> {
+    if conn.table_exists(None, "qa_passes")? {
+        conn.execute(
+            "UPDATE qa_passes SET reviewer_agent_id = NULL, state = 'pending'
+             WHERE state = 'claimed' AND (reviewer_agent_id = ?1 OR
+                 reviewer_agent_id IN (SELECT retiring.name FROM agents retiring
+                     WHERE retiring.id = ?1 AND NOT EXISTS (
+                         SELECT 1 FROM agents replacement
+                         WHERE replacement.name = retiring.name AND replacement.id != ?1
+                           AND replacement.status IN ('active', 'idle'))))",
+            params![agent_id],
+        )?;
+    }
+    Ok(())
 }
 
 /// Return a claimed round to the reviewer queue when its QA work item is
@@ -695,6 +733,49 @@ pub fn latest_qa_pass(cas_dir: &Path, task_id: &str, now: DateTime<Utc>) -> Resu
     latest_with_conn(&conn, task_id)
 }
 
+/// Reviewer identities and round numbers for tasks whose latest QA round failed.
+/// Callers apply task-lifecycle and configured round-limit policy.
+pub fn latest_failed_qa_reviewers(
+    cas_dir: &Path,
+    task_ids: &[String],
+) -> Result<std::collections::HashMap<String, (String, u32)>> {
+    if task_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let conn = open_conn(cas_dir)?;
+    let conn = crate::shared_db::lock_connection(&conn)?;
+    let placeholders = (1..=task_ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT current.task_id, current.reviewer_agent_id, current.round
+         FROM qa_passes current
+         WHERE current.task_id IN ({placeholders})
+           AND current.state = 'failed'
+           AND current.reviewer_agent_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM qa_passes newer
+             WHERE newer.task_id = current.task_id
+               AND (newer.requested_at > current.requested_at
+                 OR (newer.requested_at = current.requested_at AND newer.round > current.round)
+                 OR (newer.requested_at = current.requested_at AND newer.round = current.round
+                     AND newer.id > current.id))
+           )"
+    ))?;
+    let rows = stmt.query_map(
+        rusqlite::params_from_iter(task_ids.iter()),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (row.get::<_, String>(1)?, row.get::<_, u32>(2)?),
+            ))
+        },
+    )?;
+    rows.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()
+        .map_err(StoreError::Database)
+}
+
 /// Passed or waived round for exactly `head`, if any.
 pub fn satisfying_qa_pass_for_head(
     cas_dir: &Path,
@@ -874,6 +955,95 @@ mod tests {
     }
 
     #[test]
+    fn retiring_reviewer_releases_claims_by_id_and_name_cas_8881() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::Agent;
+        for unregister in [false, true] {
+            for by_name in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let agents = SqliteAgentStore::open(dir.path()).unwrap();
+                agents.init().unwrap();
+                let agent = Agent::new("reviewer-id".into(), "reviewer-name".into());
+                agents.register(&agent).unwrap();
+                let now = Utc::now();
+                let opened =
+                    dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+                set_qa_task(dir.path(), &opened.id, "cas-qa1").unwrap();
+                let identity = if by_name { &agent.name } else { &agent.id };
+                claim_qa_pass(dir.path(), "cas-ui1", identity, now).unwrap();
+                // No active task lease: shutdown must release the pass itself.
+                if unregister {
+                    agents.unregister(&agent.id).unwrap();
+                } else {
+                    agents.graceful_shutdown(&agent.id).unwrap();
+                }
+                let pending = latest_qa_pass(dir.path(), "cas-ui1", now).unwrap().unwrap();
+                assert_eq!(
+                    pending.state,
+                    QaPassState::Pending,
+                    "unregister={unregister}, by_name={by_name}"
+                );
+                assert!(pending.reviewer_agent_id.is_none());
+                assert_eq!(pending.id, opened.id);
+                assert_eq!(pending.deadline_at, opened.deadline_at);
+                assert!(
+                    matches!(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap(),
+                    QaPassOpen::AlreadyOpen(pass) if pass == pending)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claim_reclaims_only_inactive_reviewers_cas_8881() {
+        use crate::{AgentStore, SqliteAgentStore};
+        use cas_types::{Agent, AgentStatus};
+        for status in [
+            Some(AgentStatus::Active),
+            Some(AgentStatus::Idle),
+            Some(AgentStatus::Stale),
+            Some(AgentStatus::Shutdown),
+            None,
+        ] {
+            for by_name in [false, true] {
+                let dir = TempDir::new().unwrap();
+                let agents = SqliteAgentStore::open(dir.path()).unwrap();
+                agents.init().unwrap();
+                let agent = Agent::new("reviewer-id".into(), "reviewer-name".into());
+                agents.register(&agent).unwrap();
+                let now = Utc::now();
+                let opened =
+                    dispatched(open_qa_pass(dir.path(), &new("aaaa1111", now), now).unwrap());
+                let identity = if by_name { &agent.name } else { &agent.id };
+                claim_qa_pass(dir.path(), "cas-ui1", identity, now).unwrap();
+                // Simulate a legacy stale claim that escaped retirement cleanup.
+                let conn = open_conn(dir.path()).unwrap();
+                let conn = crate::shared_db::lock_connection(&conn).unwrap();
+                if let Some(status) = status {
+                    conn.execute(
+                        "UPDATE agents SET status = ?1 WHERE id = ?2",
+                        params![status.to_string(), agent.id],
+                    )
+                    .unwrap();
+                } else {
+                    conn.execute("DELETE FROM agents WHERE id = ?1", params![agent.id])
+                        .unwrap();
+                }
+                drop(conn);
+                let result = claim_qa_pass(dir.path(), "cas-ui1", "replacement", now);
+                if matches!(status, Some(AgentStatus::Active | AgentStatus::Idle)) {
+                    assert!(result.unwrap_err().to_string().contains("already claimed"));
+                } else {
+                    let reclaimed = result.expect("inactive claimant cannot block replacement");
+                    assert_eq!(reclaimed.id, opened.id);
+                    assert_eq!(reclaimed.deadline_at, opened.deadline_at);
+                    assert_eq!(reclaimed.reviewer_agent_id.as_deref(), Some("replacement"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn recovery_only_releases_expected_reviewer_cas_3172() {
         let dir = TempDir::new().unwrap();
         let now = Utc::now();
@@ -984,6 +1154,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(failed.state, QaPassState::Failed);
+        assert_eq!(
+            latest_failed_qa_reviewers(dir.path(), &["cas-ui1".into()])
+                .unwrap()
+                .get("cas-ui1"),
+            Some(&("qa-worker".into(), 1)),
+            "the caller needs the failed round to apply its review limit"
+        );
         assert!(
             satisfying_qa_pass_for_head(dir.path(), "cas-ui1", "aaaa1111")
                 .unwrap()
@@ -992,6 +1169,7 @@ mod tests {
 
         let round2 = dispatched(open_qa_pass(dir.path(), &new("cccc3333", now), now).unwrap());
         assert_eq!(round2.round, 2);
+        assert!(latest_failed_qa_reviewers(dir.path(), &["cas-ui1".into()]).unwrap().is_empty());
         claim_qa_pass(dir.path(), "cas-ui1", "qa-worker", now).unwrap();
         resolve_qa_pass(
             dir.path(),
@@ -1008,6 +1186,7 @@ mod tests {
             .unwrap()
             .expect("approved head satisfies the gate");
         assert_eq!(passing.state, QaPassState::Passed);
+        assert!(latest_failed_qa_reviewers(dir.path(), &["cas-ui1".into()]).unwrap().is_empty());
         match open_qa_pass(dir.path(), &new("cccc3333", now), now).unwrap() {
             QaPassOpen::AlreadySatisfied(pass) => assert_eq!(pass.id, passing.id),
             other => panic!("a passed head must not redispatch, got {other:?}"),

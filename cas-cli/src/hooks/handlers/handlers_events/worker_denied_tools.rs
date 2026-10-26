@@ -82,17 +82,16 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
     denied_mcp_tool(&policy, tool, tool_input).map(|(name, pattern)| tool_refusal(&name, &pattern))
 }
 
-/// Refuse paths into operator-authenticated stores before auto-approval. The
-/// path resolver is shared with every supported file and shell surface.
+/// Refuse factory workers' access to operator-authenticated stores before
+/// auto-approval. The path resolver is shared with every supported file and shell surface.
 pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> Option<String> {
+    if !crate::harness_policy::is_factory_agent(input) || !crate::harness_policy::is_worker(input) {
+        return None;
+    }
     if !super::operator_credentials::references_store(input, tool) {
         return None;
     }
-    if crate::harness_policy::is_factory_agent(input) && crate::harness_policy::is_worker(input) {
-        Some(operator_credential_refusal())
-    } else {
-        Some("🚫 PROTECTED OPERATOR CREDENTIALS: operator Neon and Vercel authentication stores are not readable from agent sessions.".to_string())
-    }
+    Some(operator_credential_refusal())
 }
 
 fn operator_credential_refusal() -> String {

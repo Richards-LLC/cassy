@@ -59,13 +59,16 @@ pub(crate) use app::provisioning::{
     installed_provisioner_build_hash, pin_daemon_provisioner, pinned_provisioner_build_hash,
 };
 pub use app::provisioning::run_internal_provisioner;
+#[doc(hidden)]
+pub use app::provisioning::launch_provisioner_for_test;
+pub(crate) use app::render_and_ops::epic_workers::{enqueue_context_resume_brief, preflight_spawn_base};
 mod boot;
 mod buffer_backend;
 mod client;
 pub(crate) mod daemon;
 mod director;
 pub(crate) use director::effective_stall_threshold_secs;
-pub(crate) use director::external_response_hint;
+pub(crate) use director::{enqueue_external_message, external_response_hint};
 pub(crate) mod cgroup;
 mod input;
 mod layout;
@@ -83,7 +86,7 @@ mod status_bar;
 pub(crate) use app::{
     persist_session_metadata_delivery_mode_at, persist_session_metadata_pinned_epic_id_at,
     persist_session_metadata_worker_hold_at, record_supervisor_mcp_call,
-    seed_worker_target_from_baseline, supervisor_progress_from_session_metadata_named,
+    seed_worker_target_from_baseline, seed_review_target_from_worker, supervisor_progress_from_session_metadata_named,
     worker_holds_from_session_metadata_named,
 };
 
@@ -148,7 +151,7 @@ pub use session::{
     generate_session_name, metadata_path, panic_log_path, provisioner_pin_path, session_log_dir,
     socket_path, tui_log_path,
 };
-pub(crate) use session::daemon_identity_is_live;
+pub(crate) use session::{daemon_identity_is_live, record_daemon_lifecycle};
 use std::io;
 use std::path::Path;
 

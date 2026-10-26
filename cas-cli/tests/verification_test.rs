@@ -37,12 +37,38 @@ fn test_verification_config_toggle() {
             .success()
             .stdout(predicate::str::contains(expected));
     }
-    command()
+    let human_refusal = command()
         .env("CLAUDECODE", "1")
         .args(["config", "set", "verification.enabled", "true"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("operator"));
+        .output()
+        .expect("cas config set must run");
+    assert!(!human_refusal.status.success());
+    let stderr = String::from_utf8_lossy(&human_refusal.stderr);
+    assert!(
+        stderr.contains("Operator-only config change refused."),
+        "the CLI should show the short refusal headline; stderr: {stderr}"
+    );
+    assert!(
+        stderr.lines().skip(1).all(|line| line.starts_with("  ")),
+        "refusal details should be indented; stderr: {stderr}"
+    );
+    assert!(
+        stderr.lines().all(|line| line.chars().count() <= 80),
+        "refusal should fit 80 columns; stderr: {stderr}"
+    );
+    let json_refusal = command()
+        .env("CLAUDECODE", "1")
+        .args(["--json", "config", "set", "verification.enabled", "true"])
+        .output()
+        .expect("cas --json config set must run");
+    assert!(!json_refusal.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&json_refusal.stdout)
+        .expect("--json refusal should still be one JSON document");
+    assert_eq!(json["status"], "error");
+    assert_eq!(
+        json["message"],
+        "refused: CLAUDECODE is set, so this runs inside an agent session. verification.enabled is operator-only because it relaxes a Cassy guard; run `cas config set verification.enabled <value>` yourself from your own terminal. If this is your own terminal, it inherited CLAUDECODE from an agent pane: open a fresh terminal and run it there."
+    );
     command()
         .args(["config", "get", "verification.enabled"])
         .assert()

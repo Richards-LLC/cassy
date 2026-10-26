@@ -36,6 +36,7 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
+pub mod task_note_markers;
 pub mod shared_db;
 pub mod wait_budget;
 
@@ -64,7 +65,9 @@ pub mod markdown;
 mod prompt_queue_store;
 mod prompt_store;
 mod qa_pass_store;
+mod accepted_proposal_store;
 mod qa_batch_store;
+mod rule_candidate_store;
 mod epic_split_store;
 mod recording_store;
 mod recording_text_store;
@@ -106,7 +109,7 @@ pub use trace_archive::{
 };
 
 // Agent store for multi-agent coordination
-pub use agent_store::{AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
+pub use agent_store::{AGENT_SESSION_END_SCHEMA,AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
 
 // Event store for activity tracking (sidecar)
 pub use event_store::{
@@ -131,19 +134,30 @@ pub use delegation_receipt_store::{
     SqliteDelegationReceiptStore,
 };
 pub use epic_split_store::{
-    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection, SplitState, decide_epic_split,
-    get_epic_split, insert_epic_split, list_epic_splits, open_epic_splits,
+    EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS,
+    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
+    SplitState, decide_epic_split, decide_epic_split_by, finish_epic_split_work, get_epic_split,
+    insert_epic_split, list_epic_splits, list_epic_split_child_releases,
+    mark_epic_split_child_released, open_epic_splits, pending_epic_split_work,
 };
 pub use qa_pass_store::{
     NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
-    claim_qa_pass,
-    latest_qa_pass, list_qa_passes, open_qa_pass, open_qa_pass_reporting_superseded,
-    release_qa_claim_for_reviewer, release_qa_claim_for_task, resolve_qa_pass, satisfying_qa_pass_for_head,
+    claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
+    open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer,
+    release_qa_claim_for_task, resolve_qa_pass, satisfying_qa_pass_for_head,
     satisfying_qa_passes, set_qa_task,
     waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
 };
 pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
     list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors, defer_qa_batch_evidence, has_qa_batch_deferral};
+pub use rule_candidate_store::{
+    RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
+    list_rule_candidates, observe_rule_candidate, rule_candidate_similarity, similar_rule_candidates,
+};
+pub use accepted_proposal_store::{
+    ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS, accepted_proposal_target, accepted_proposal_targets,
+    record_accepted_proposal_target,
+};
 pub use artifact_store::{
     ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
     SqliteArtifactStore, looks_like_signed_upload_url,
@@ -152,7 +166,8 @@ pub use delivery_store::{
     DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
     create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
     get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
-    record_observed_delivery_merge,
+    clear_pending_observed_delivery_merge, has_pending_observed_delivery_merge,
+    record_observed_delivery_merge, record_pending_observed_delivery_merge,
     transition_worker_delivery, transition_worker_delivery_verification_with_conn,
     worker_delivery_transaction_id,
 };
@@ -208,10 +223,12 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
+    REQUEST_CHANGES_AUDIT_PREFIX, request_changes_audit_note,
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
     RequestChangesBoundary, RequestChangesOutcome, SqliteVerificationStore,
     TaskReopenLifecycleOutbox, VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
     VERIFICATION_SCHEMA, VerificationStore, add_system_verification, add_verification_with_conn,
+    adopt_orphaned_verification_dispatches,
     bind_server_verifier_handoff, bind_server_verifier_handoff_and_register_child,
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
@@ -219,7 +236,7 @@ pub use verification_store::{
     correct_parked_delivery_proof_targets, correct_parked_delivery_execution_note,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    get_latest_verification_dispatch,
+    get_latest_verification_dispatch, has_active_verification_dispatch,
     get_latest_verification_dispatch_with_conn, get_verification_dispatch,
     get_verification_dispatch_with_conn, get_verification_for_dispatch,
     inspect_bound_server_verifier_handoff, inspect_verifier_capability,
@@ -269,6 +286,7 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
+    QUIET_MESSAGE_MARKER,
     PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, missing_prompt_queue_columns,
     repair_legacy_prompt_queue_schema,
     AdmissionOutcome, OperatorCommandAdmission,
@@ -752,6 +770,21 @@ pub trait TaskStore: Send + Sync {
     /// read-modify-write window to concurrent callers.
     fn append_note(&self, task_id: &str, formatted_note: &str) -> Result<DateTime<Utc>>;
 
+    /// Append marker-bearing text prepared by artifact publication or the
+    /// server-attested proposal renderer. Never pass caller text here.
+    fn append_trusted_note(&self, _task_id: &str, _formatted_note: &str) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other("trusted task-note append is unsupported by this store".into()))
+    }
+
+    fn append_trusted_note_with_mutation_receipt(
+        &self,
+        _task_id: &str,
+        _formatted_note: &str,
+        _receipt_id: &str,
+    ) -> Result<DateTime<Utc>> {
+        Err(StoreError::Other("atomic trusted task-note append is unsupported by this store".into()))
+    }
+
     /// Append one note and bind a generic durable mutation receipt in the same
     /// store transaction. Syncing wrappers use this to keep the local note and
     /// its outbox intent atomic.
@@ -766,12 +799,21 @@ pub trait TaskStore: Send + Sync {
         ))
     }
 
-    /// cas-eda0: record the green merge of a parked delivery as one
-    /// conditional write: only `deliverables.green_merge_commit` changes, and
+    /// cas-eda0: legacy green merge caller; newer callers name CI admission.
+    fn record_green_merge(&self, task_id: &str, merge_commit: &str) -> Result<bool> {
+        self.record_merge_admission(task_id, merge_commit, cas_types::MergeCiAdmission::Green)
+    }
+
+    /// Record a published merge and CI admission as one conditional write,
     /// only while the task is still a clean `awaiting_merge` park. Returns
     /// `false` when it is not (for example, its worker closed it meanwhile),
     /// so a concurrent close is never overwritten by a stale row.
-    fn record_green_merge(&self, _task_id: &str, _merge_commit: &str) -> Result<bool> {
+    fn record_merge_admission(
+        &self,
+        _task_id: &str,
+        _merge_commit: &str,
+        _admission: cas_types::MergeCiAdmission,
+    ) -> Result<bool> {
         Err(StoreError::Other(
             "conditional green-merge records are unsupported by this store".to_string(),
         ))
@@ -782,6 +824,33 @@ pub trait TaskStore: Send + Sync {
 
     /// List tasks with optional status filter
     fn list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>>;
+
+    /// IDs owned by any named assignee in any supplied status. Empty filters
+    /// match nothing. Assignee names are ASCII case-insensitive, like routing.
+    /// SQLite overrides this to avoid decoding the project's task backlog.
+    fn ids_by_assignees_and_statuses(
+        &self,
+        assignees: &[&str],
+        statuses: &[TaskStatus],
+    ) -> Result<Vec<String>> {
+        let mut ids = Vec::new();
+        if assignees.is_empty() {
+            return Ok(ids);
+        }
+        for status in statuses {
+            for task in self.list(Some(*status))? {
+                if task.assignee.as_deref().is_some_and(|owner| {
+                    assignees
+                        .iter()
+                        .any(|name| owner.eq_ignore_ascii_case(name))
+                }) && !ids.contains(&task.id)
+                {
+                    ids.push(task.id);
+                }
+            }
+        }
+        Ok(ids)
+    }
 
     /// Find a lane owner through the store's visibility policy, preferring a
     /// live epic over historical terminal records.

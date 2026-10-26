@@ -9,8 +9,10 @@ proof.
 Factory startup checks filesystem capacity before spawning workers. At the
 configured high watermark it blocks new worker builds and tells the operator to
 start supervisor-only (`--workers 0`) for inspection. The same status is exposed
-by `factory action=gc_report` as both a readable list and a stable
-`TARGET_CACHE_STATUS_JSON=...` record.
+by `cas factory gc report` (`factory action=gc_report`) as a bounded readable
+summary. Use `cas factory gc report --full` (MCP `full=true`) for the complete
+inventory and stable `TARGET_CACHE_STATUS_JSON=...` record, or `--json` (MCP
+`json=true`) for one document with typed `machine_status` records.
 
 The defaults are:
 
@@ -22,19 +24,31 @@ target_cache_min_idle_secs = 7200
 target_cache_retention_count = 1
 ```
 
-Use `factory action=gc_cleanup force=true dry_run=true` to preview. The
-preview names every exact cache path, logical bytes, classification, reason,
-and selected reclaim total. Cargo cache deletion requires both `force=true`
-and the explicit `dry_run=false`; omitting `dry_run` remains preview-only.
+Review cleanup tiers with `cas factory gc cleanup --help` before running
+cleanup. Use `factory action=gc_cleanup force=true dry_run=true` to preview
+Cargo cache deletion. The cache preview names every exact cache path, logical
+bytes, classification, reason, and selected reclaim total. Cargo cache deletion
+requires both `force=true` and the explicit `dry_run=false`; omitting `dry_run`
+keeps this cache tier in preview. Baseline stale metadata cleanup still runs,
+including dead process-group records, stale agents and old skill markers;
+`dry_run=true` does not make the whole operation read-only.
 
 Cleanup is oldest-first and stops selecting caches once their projected bytes
-would reach the low watermark. It excludes registered live worktrees, any
+would reach the low watermark. With `factory.scratch_root` set, it probes the
+same scratch filesystem as build admission and includes the configured builder
+cap's 10 GiB per lane reserve when deciding pressure. The report names that
+filesystem and reserve. Each device has its own selection and retention budget. It excludes registered live worktrees, any
 worktree observed in the OS process table (cwd, command line, or open target
 file), recent writes, and the configured newest-cache retention count. It
 rechecks liveness, recency, and containment immediately before each mutation.
 
-Only an exact, non-symlink `target/` child of the repository root or a known
-factory worktree is eligible. Known roots include the default and configured
+Eligible paths are exact, non-symlink `target/` children of the repository root
+or a known factory worktree, plus the configured project's exact
+`<scratch_root>/<project-key>/targets/<worker>` paths. Scratch cleanup holds
+lane, Cargo and durable lifetime locks, validates the owner generation/inodes,
+and quarantines beside the target on the same filesystem. The warmest configured
+N eligible scratch targets remain retained. Missing-checkout scratch targets and
+unmanaged scratch directories are review-only. Known roots include the default and configured
 worktree base directories, durable worktree-store paths, and registered worker
 clone paths, so external scratch layouts are covered without scanning arbitrary
 host directories. Cassy never traverses symlinks and never deletes source, `.git`,

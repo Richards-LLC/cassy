@@ -217,7 +217,14 @@ pub(crate) fn register_session_start_agent(
 ) -> crate::store::Result<(Agent, bool)> {
     let configured_role = parse_agent_role_hint(agent_role);
     let requested_worker = configured_role == Some(AgentRole::Worker);
-    let reusable = if requested_worker {
+    // cas-ec5f (GH #1215): a supervisor's `/clear` keeps its row (see
+    // `cleanup_agent_leases_for_end`), so its post-clear SessionStart must
+    // rebind that row by live PID and name rather than mint a second identity.
+    let rebind_role = match configured_role {
+        Some(role @ (AgentRole::Worker | AgentRole::Supervisor)) => Some(role),
+        _ => None,
+    };
+    let reusable = if let Some(rebind_role) = rebind_role {
         // clear_context records the post-reset transcript id on the existing
         // worker row before Claude emits SessionEnd for the old session.  This
         // exact correlation is stronger than a name/PID hint and also works
@@ -226,7 +233,7 @@ pub(crate) fn register_session_start_agent(
             .get_by_cc_session_id(session_id)
             .ok()
             .flatten()
-            .filter(|existing| existing.role == AgentRole::Worker)
+            .filter(|existing| requested_worker && existing.role == AgentRole::Worker)
             .or_else(|| {
                 agent_name.and_then(|name| {
                     [
@@ -238,7 +245,17 @@ pub(crate) fn register_session_start_agent(
                     .find(|existing| {
                         if existing.id == session_id
                             || existing.name != name
-                            || existing.role != AgentRole::Worker
+                            || existing.role != rebind_role
+                        {
+                            return false;
+                        }
+                        // A supervisor row whose session end was recorded is a
+                        // retired predecessor awaiting cleanup: its successor
+                        // takes a new identity and the handoff (cas-9735).
+                        if rebind_role == AgentRole::Supervisor
+                            && cas_store::SqliteAgentStore::open(cas_root)
+                                .and_then(|store| store.session_end_recorded(&existing.id))
+                                .unwrap_or(true)
                         {
                             return false;
                         }
@@ -304,7 +321,58 @@ pub(crate) fn register_session_start_agent(
         persisted.registered_at = Utc::now();
         store.update(&persisted)?;
     }
+    recover_supervisor_verification_dispatches(cas_root, store, &persisted);
     Ok((persisted, reused))
+}
+
+/// Both trusted hook registration and native MCP bootstrap use this path.
+/// Public registration never grants dispatch recovery authority.
+pub(crate) fn recover_supervisor_verification_dispatches(
+    cas_root: &std::path::Path,
+    store: &dyn crate::store::AgentStore,
+    supervisor: &Agent,
+) {
+    if supervisor.role != AgentRole::Supervisor {
+        return;
+    }
+    let local_machine = Agent::get_or_generate_machine_id();
+    if supervisor.machine_id.as_deref() != Some(local_machine.as_str())
+        || supervisor
+            .factory_session
+            .as_deref()
+            .is_none_or(|session| session.trim().is_empty())
+    {
+        return;
+    }
+    let recover = || -> crate::store::Result<()> {
+        let dead_owners: Vec<_> = store
+            .list(None)?
+            .into_iter()
+            .filter(|prior| {
+                prior.id != supervisor.id
+                    && prior.role == AgentRole::Supervisor
+                    // A remote PID has no meaning in this host's process table.
+                    // Scope must be established before any liveness probe.
+                    && prior.machine_id.as_deref() == Some(local_machine.as_str())
+                    && prior.factory_session == supervisor.factory_session
+                    && (prior.status == AgentStatus::Shutdown
+                        || matches!(
+                            evaluate_liveness(prior, pid_alive, pid_matches_fingerprint),
+                            LivenessOutcome::Dead { .. }
+                        ))
+            })
+            .collect();
+        cas_store::adopt_orphaned_verification_dispatches(
+            cas_root,
+            &supervisor.id,
+            &dead_owners,
+            Utc::now() + chrono::Duration::minutes(10),
+        )?;
+        Ok(())
+    };
+    if let Err(error) = recover() {
+        tracing::warn!(supervisor_id = %supervisor.id, %error, "orphaned verification recovery failed; registration continues");
+    }
 }
 
 /// Extension trait for EmbeddedDaemonConfig to convert to DaemonConfig
@@ -2507,6 +2575,10 @@ pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
 /// equality-only fingerprint contract as Linux's clock-tick value.
 #[cfg(target_os = "macos")]
 pub(crate) fn read_pid_starttime(pid: u32) -> Option<u64> {
+    cas_store::lane_guard::note_blocking_call(
+        cas_store::lane_guard::BlockingKind::Proc,
+        "libproc PID fingerprint",
+    );
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = std::mem::size_of::<libc::proc_bsdinfo>();
     // SAFETY: proc_pidinfo initializes `size` bytes of the supplied

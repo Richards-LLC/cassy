@@ -8,7 +8,7 @@
 
 // #![allow(dead_code)] // Check unused
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 
 use crossterm::{
@@ -82,6 +82,7 @@ pub struct ConfigTuiApp {
 
     // Unsaved changes indicator
     has_unsaved: bool,
+    pending_resets: HashSet<String>,
 
     // Status message
     status_message: Option<(String, bool)>, // (message, is_error)
@@ -93,11 +94,11 @@ pub struct ConfigTuiApp {
 impl ConfigTuiApp {
     pub fn new(cas_root: &std::path::Path) -> anyhow::Result<Self> {
         let cas_root = cas_root.to_path_buf();
-        let config = Config::load(&cas_root)?;
+        let config = crate::cli::config::load_editor_config(&cas_root)?;
         let original_config = config.clone();
         let registry = registry();
 
-        let values: HashMap<String, String> = config.list().into_iter().collect();
+        let values = crate::cli::config::editor_config_values(&config);
 
         // Build section info
         let mut sections = Vec::new();
@@ -146,6 +147,7 @@ impl ConfigTuiApp {
             value_edit: None,
             show_advanced: false,
             has_unsaved: false,
+            pending_resets: HashSet::new(),
             status_message: None,
             should_quit: false,
         })
@@ -194,14 +196,25 @@ impl ConfigTuiApp {
 
     fn ui(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let footer_block = ratatui::widgets::Block::default().borders(ratatui::widgets::Borders::ALL);
+        let footer_width = footer_block.inner(area).width;
+        let footer = ratatui::widgets::Paragraph::new(self.footer_text())
+            .block(footer_block)
+            .wrap(ratatui::widgets::Wrap { trim: true });
+        let footer_height = footer
+            .line_count(footer_width)
+            .max(3)
+            .try_into()
+            .unwrap_or(u16::MAX);
+        let body_min_height = if self.status_message.is_some() { 6 } else { 10 };
 
         // Main layout: header, body, footer
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Header
-                Constraint::Min(10),   // Body
-                Constraint::Length(3), // Footer/status
+                Constraint::Min(body_min_height), // Body
+                Constraint::Length(footer_height), // Footer/status
             ])
             .split(area);
 
@@ -215,6 +228,26 @@ impl ConfigTuiApp {
             ViewMode::ResetConfirm => self.render_reset_confirm(frame, area),
             ViewMode::ValueEdit => self.render_value_edit(frame, area),
             _ => {}
+        }
+    }
+
+    fn footer_text(&self) -> String {
+        if let Some((message, _)) = &self.status_message {
+            return message.clone();
+        }
+
+        match self.mode {
+            ViewMode::SectionList => {
+                "↑↓/jk:Move │ Enter:Edit │ d:Diff │ a:Advanced │ s:Save │ q:Quit │ ?:Help"
+                    .to_string()
+            }
+            ViewMode::SectionEdit => {
+                "↑↓/jk:Navigate │ Enter:Edit │ r:Reset │ Esc:Back │ s:Save │ q:Quit".to_string()
+            }
+            ViewMode::DiffView => "Esc:Back │ r:Reset All │ q:Quit".to_string(),
+            ViewMode::Help | ViewMode::ResetConfirm | ViewMode::ValueEdit => {
+                "Esc:Cancel │ Enter:Confirm".to_string()
+            }
         }
     }
 
@@ -349,10 +382,13 @@ impl ConfigTuiApp {
 
                     // Validate
                     if let Some(meta) = self.registry.get(&key) {
-                        match meta.validate(&value) {
+                        let result = meta.validate(&value).and_then(|()| {
+                            self.config.set(&key, &value).map_err(|error| error.to_string())
+                        });
+                        match result {
                             Ok(()) => {
-                                self.config.set(&key, &value)?;
-                                self.values.insert(key, value);
+                                self.values.insert(key.clone(), value);
+                                self.pending_resets.remove(&key);
                                 self.has_unsaved = true;
                                 self.value_edit = None;
                                 self.mode = ViewMode::SectionEdit;
@@ -498,10 +534,25 @@ impl ConfigTuiApp {
         if let Some(i) = self.option_state.selected() {
             if let Some(key) = self.option_keys.get(i) {
                 if let Some(meta) = self.registry.get(key) {
-                    self.config.set(key, meta.default)?;
-                    self.values.insert(key.clone(), meta.default.to_string());
-                    self.has_unsaved = true;
-                    self.status_message = Some((format!("Reset {key} to default"), false));
+                    let current_value = self
+                        .values
+                        .get(key)
+                        .cloned()
+                        .unwrap_or_else(|| meta.default.to_string());
+                    let has_override = crate::cli::config::config_key_has_override(
+                        key,
+                        &self.cas_root,
+                    )?;
+                    if current_value != meta.default || has_override {
+                        self.config.set(key, meta.default)?;
+                        self.values.insert(key.clone(), meta.default.to_string());
+                        self.pending_resets.insert(key.clone());
+                        self.has_unsaved = true;
+                        self.status_message = Some((format!("Reset {key} to default"), false));
+                    } else {
+                        self.status_message =
+                            Some((format!("{key} is already at default"), false));
+                    }
                 }
             }
         }
@@ -523,10 +574,22 @@ impl ConfigTuiApp {
             &self.config,
             context,
         ) {
-            self.status_message = Some((refusal.to_string(), true));
+            self.status_message = Some((
+                crate::cli::human_error_message(&anyhow::anyhow!(refusal)),
+                true,
+            ));
             return Ok(());
         }
-        self.config.save(&self.cas_root)?;
+        crate::cli::config::save_editor_changes(
+            &self.original_config,
+            &self.config,
+            &self.pending_resets,
+            &self.cas_root,
+        )?;
+        if !self.pending_resets.is_empty() {
+            self.pending_resets.clear();
+            self.config = crate::cli::config::load_editor_config(&self.cas_root)?;
+        }
         self.original_config = self.config.clone();
         self.has_unsaved = false;
         self.refresh_sections();
@@ -535,7 +598,7 @@ impl ConfigTuiApp {
     }
 
     fn refresh_sections(&mut self) {
-        self.values = self.config.list().into_iter().collect();
+        self.values = crate::cli::config::editor_config_values(&self.config);
 
         // Rebuild section info
         self.sections.clear();
@@ -617,6 +680,61 @@ mod tests {
     use super::*;
     use crate::config::operator_policy::InvocationContext;
 
+    fn render_screen(app: &mut ConfigTuiApp, width: u16, height: u16) -> String {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.ui(frame)).unwrap();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
+                    .collect::<Vec<_>>()
+                    .join("")
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn config_tui_invalid_webhook_stays_inline_and_can_be_corrected() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("notifications".into());
+        app.option_keys = vec!["notifications.webhook_url".into()];
+        app.option_state.select(Some(0));
+        app.start_value_edit();
+        app.value_edit.as_mut().unwrap().input = "http://outside.example/webhook".into();
+        app.handle_value_edit_key(KeyCode::Enter).expect("URL errors must stay in the editor");
+        assert!(matches!(app.mode, ViewMode::ValueEdit));
+        let edit = app.value_edit.as_ref().unwrap();
+        assert_eq!(edit.input, "http://outside.example/webhook");
+        assert!(edit.error.as_deref().unwrap().contains("must use HTTPS"));
+        assert!(!app.has_unsaved);
+        assert_eq!(app.config.get("notifications.webhook_url").as_deref(), Some(""));
+        for width in [80, 120] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| app.ui(frame)).unwrap();
+            let screen = (0..24).map(|y| (0..width)
+                .map(|x| terminal.backend().buffer().get(x, y).symbol().to_owned())
+                .collect::<String>()).collect::<Vec<_>>().join("\n");
+            assert!(screen.contains("must use HTTPS"), "URL cause hidden at {width}:\n{screen}");
+            assert!(screen.contains("Esc: Cancel"), "editor recovery hidden at {width}:\n{screen}");
+        }
+        app.value_edit.as_mut().unwrap().input = "https://hooks.example.test/webhook".into();
+        app.handle_value_edit_key(KeyCode::Enter).unwrap();
+        assert!(matches!(app.mode, ViewMode::SectionEdit));
+        assert!(app.value_edit.is_none() && app.has_unsaved);
+        assert_eq!(app.config.get("notifications.webhook_url").as_deref(), Some("https://hooks.example.test/webhook"));
+        assert_eq!(Config::load(&root).unwrap().get("notifications.webhook_url").as_deref(), Some(""));
+    }
+
     /// cas-0d4f0: the TUI refuses to save a security-relevant key from an
     /// agent context and keeps the edit unsaved; ordinary keys save.
     #[test]
@@ -637,12 +755,240 @@ mod tests {
         let (message, is_error) = app.status_message.clone().unwrap();
         assert!(is_error && message.contains("operator"), "{message}");
         let saved = Config::load(&root).unwrap();
-        assert_eq!(saved.get("qa.evidence_gate"), app.original_config.get("qa.evidence_gate"));
+        assert_eq!(
+            saved.get("qa.evidence_gate"),
+            app.original_config.get("qa.evidence_gate")
+        );
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config
+            .set(
+                "notifications.webhook_url",
+                "https://hooks.example.test/services/secret",
+            )
+            .unwrap();
+        app.has_unsaved = true;
+        app.save_config_with(agent).unwrap();
+        assert!(
+            app.has_unsaved,
+            "operator-only webhook edit must remain unsaved"
+        );
+        let (message, is_error) = app.status_message.clone().unwrap();
+        assert!(
+            is_error
+                && message.contains("notifications.webhook_url")
+                && message.contains("operator"),
+            "{message}"
+        );
+
+        for width in [60, 80, 120] {
+            let height = 24;
+            let screen = render_screen(&mut app, width, height);
+            assert!(
+                screen.contains("Operator-only config change refused."),
+                "TUI at {width} columns hides the refusal headline:\n{screen}"
+            );
+            assert!(
+                screen.contains("Run this command yourself from your own terminal:"),
+                "TUI at {width} columns hides the remedy label:\n{screen}"
+            );
+            assert!(
+                screen.contains("cas config set notifications.webhook_url <value>"),
+                "TUI at {width} columns hides the remedy command:\n{screen}"
+            );
+            assert!(
+                screen.contains("open a fresh terminal and run it there."),
+                "TUI at {width} columns hides the fresh-terminal remedy:\n{screen}"
+            );
+        }
+        assert_eq!(
+            Config::load(&root)
+                .unwrap()
+                .get("notifications.webhook_url")
+                .as_deref(),
+            Some("")
+        );
 
         let mut app = ConfigTuiApp::new(&root).unwrap();
         app.config.set("sync.min_helpful", "5").unwrap();
         app.save_config_with(agent).unwrap();
         assert!(!app.has_unsaved);
         assert_eq!(Config::load(&root).unwrap().get("sync.min_helpful").as_deref(), Some("5"));
+    }
+
+    #[test]
+    fn config_tui_footer_keeps_help_visible_at_80_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+
+        let screen = render_screen(&mut app, 80, 24);
+
+        assert!(
+            screen.lines().any(|line| line.contains("?:Help")),
+            "TUI at 80 columns hides the help hint:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn config_tui_reset_removes_override_and_restores_hub_fallback() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let host_root = crate::config::host_config_dir();
+        std::fs::create_dir_all(&host_root).unwrap();
+        std::fs::write(
+            host_root.join("config.toml"),
+            "# preserve host comment\n[hub]\ntailscale_serve = false\ntransport_mode = \"required\"\n\n[viktor]\nenabled = false\n",
+        )
+        .unwrap();
+        let project = env.home().join("projects/config-tui-editor");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "# preserve project comment\n[sync]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        assert_eq!(
+            app.values.get("hub.transport_mode").map(String::as_str),
+            Some("required"),
+            "the editor should show the host-scoped value"
+        );
+        assert_eq!(
+            app.values.get("viktor.enabled").map(String::as_str),
+            Some("false"),
+            "the editor should show the host-scoped Viktor value"
+        );
+        app.current_section = Some("sync".into());
+        app.option_keys = vec!["sync.enabled".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Enter).unwrap();
+        for _ in 0.."true".len() {
+            app.handle_value_edit_key(KeyCode::Backspace).unwrap();
+        }
+        for character in "false".chars() {
+            app.handle_value_edit_key(KeyCode::Char(character)).unwrap();
+        }
+        app.handle_value_edit_key(KeyCode::Enter).unwrap();
+
+        app.current_section = Some("hub".into());
+        app.option_keys = vec!["hub.transport_mode".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Char('r')).unwrap();
+        app.handle_reset_confirm_key(KeyCode::Enter).unwrap();
+        app.save_config_with(|| InvocationContext::default()).unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert_eq!(document["sync"]["enabled"].as_bool(), Some(false), "{saved}");
+        assert!(saved.contains("# preserve project comment"), "{saved}");
+        assert!(document.get("hub").and_then(|hub| hub.get("transport_mode")).is_none(), "{saved}");
+        let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();
+        let host_document: toml::Value = toml::from_str(&host_saved).unwrap();
+        assert!(host_saved.contains("# preserve host comment"), "{host_saved}");
+        assert!(host_document["hub"].get("transport_mode").is_none(), "{host_saved}");
+        assert_eq!(
+            Config::load(&host_root).unwrap().hub.unwrap().transport_mode(),
+            crate::config::HubTransportMode::Loopback
+        );
+        assert_eq!(
+            app.values.get("hub.transport_mode").map(String::as_str),
+            Some("loopback"),
+            "the editor should reload the host value after reset"
+        );
+    }
+
+    #[test]
+    fn config_tui_clear_optional_value_removes_override() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let project = env.home().join("projects/config-tui-clear");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "# keep project comment\n[issues]\nrepo = \"owner/old-repo\"\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("issues".into());
+        app.option_keys = vec!["issues.repo".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Enter).unwrap();
+        for _ in 0.."owner/old-repo".len() {
+            app.handle_value_edit_key(KeyCode::Backspace).unwrap();
+        }
+        app.handle_value_edit_key(KeyCode::Enter).unwrap();
+
+        app.save_config_with(|| InvocationContext::default()).unwrap();
+
+        let saved = std::fs::read_to_string(root.join("config.toml")).unwrap();
+        let document: toml::Value = toml::from_str(&saved).unwrap();
+        assert!(
+            document
+                .get("issues")
+                .and_then(|issues| issues.get("repo"))
+                .is_none(),
+            "{saved}"
+        );
+        assert!(saved.contains("# keep project comment"), "{saved}");
+    }
+
+    #[test]
+    fn config_tui_reports_prior_host_write_when_project_save_fails() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let host_root = crate::config::host_config_dir();
+        std::fs::create_dir_all(&host_root).unwrap();
+        std::fs::write(
+            host_root.join("config.toml"),
+            "# host comment\n[hub]\ntransport_mode = \"auto\"\n",
+        )
+        .unwrap();
+        let project = env.home().join("projects/config-tui-partial-save");
+        let root = crate::store::init_cas_dir(&project).unwrap();
+        std::fs::write(
+            root.join("config.toml"),
+            "# project comment\n[sync]\nenabled = true\n",
+        )
+        .unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.config.set("hub.transport_mode", "required").unwrap();
+        app.config.set("sync.enabled", "false").unwrap();
+        app.has_unsaved = true;
+        std::fs::write(root.join("config.toml"), "[sync\n").unwrap();
+
+        let error = app
+            .save_config_with(|| InvocationContext::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("already saved")
+                && error.contains(host_root.join("config.toml").to_string_lossy().as_ref()),
+            "{error}"
+        );
+        let host_saved = std::fs::read_to_string(host_root.join("config.toml")).unwrap();
+        assert!(
+            host_saved.contains("transport_mode = \"required\""),
+            "{host_saved}"
+        );
+    }
+
+    #[test]
+    fn config_tui_reset_of_absent_default_does_not_mark_unsaved() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(dir.path()).unwrap();
+        let original = "# keep this comment\n";
+        std::fs::write(root.join("config.toml"), original).unwrap();
+
+        let mut app = ConfigTuiApp::new(&root).unwrap();
+        app.current_section = Some("hub".into());
+        app.option_keys = vec!["hub.transport_mode".into()];
+        app.option_state.select(Some(0));
+        app.handle_section_edit_key(KeyCode::Char('r')).unwrap();
+        app.handle_reset_confirm_key(KeyCode::Enter).unwrap();
+
+        assert!(!app.has_unsaved);
+        assert_eq!(std::fs::read_to_string(root.join("config.toml")).unwrap(), original);
     }
 }

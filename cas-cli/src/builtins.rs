@@ -67,6 +67,7 @@ macro_rules! task_verifier_agent {
             $prefix, "verification, ",
             $prefix, "rule, ",
             $prefix, "search, ",
+            $prefix, "artifact, ",
             $prefix, "coordination\nmetadata:\n  managed_by: cas\n---\n",
             include_str!("builtins/agents/task-verifier.body.md")
         )
@@ -89,8 +90,125 @@ pub const CODEX_BUILTIN_AGENTS: &[BuiltinFile] = &[BuiltinFile {
     content: include_str!("builtins/codex/agents/task-verifier.toml"),
 }];
 
+/// Hash of the unmodified cas-f4ea personal seed (fixture: finish-cas-f4ea.md).
+/// This recognizes the retired seed without carrying a second runtime body.
+const LEGACY_FINISH_COMMAND_HASH: &str =
+    "eeeede161e720bb59ad61f06cec534c57398744c322ffc70c1548a06957c410b";
+
+fn is_finish_entrypoint(builtin: &BuiltinFile) -> bool {
+    builtin.path == "skills/finish/SKILL.md"
+}
+
+/// A customized Claude command must keep its name: Claude skills otherwise
+/// shadow same-name commands. Inspection is read-only for preview/parity.
+fn custom_finish_command(target_dir: &Path) -> std::io::Result<bool> {
+    let command = target_dir.join("commands/finish.md");
+    if command.is_symlink() {
+        return Ok(true);
+    }
+    match std::fs::read(command) {
+        Ok(bytes) => Ok(file_bytes_hash(&bytes) != LEGACY_FINISH_COMMAND_HASH),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Remove only the exact retired personal seed. A custom command suppresses
+/// installation for this Claude profile, without changing either entrypoint.
+fn prepare_claude_finish(target_dir: &Path) -> std::io::Result<bool> {
+    if custom_finish_command(target_dir)? {
+        return Ok(false);
+    }
+    match std::fs::remove_file(target_dir.join("commands/finish.md")) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(true)
+}
+
+/// Equip a new or existing account without refreshing unrelated configuration.
+pub(crate) fn sync_finish_builtins(
+    harness: SupervisorCli,
+    target_dir: &Path,
+) -> std::io::Result<SyncResult> {
+    let (install, mut result) = prepare_finish(harness, target_dir)?;
+    if !install {
+        return Ok(result);
+    }
+    for builtin in skill_catalog_for_harness(harness)
+        .iter()
+        .filter(|file| is_finish_entrypoint(file))
+    {
+        match sync_builtin_detailed(builtin, target_dir)? {
+            SyncOutcome::Created | SyncOutcome::Updated => {
+                result.skills_updated += 1;
+                result.updated_files.push(builtin.path.to_string());
+            }
+            SyncOutcome::SkippedModifiedReference => result.modified_reference_files.push(builtin.path.to_string()),
+            SyncOutcome::SkippedNotManaged => result.skipped_files.push(builtin.path.to_string()),
+            SyncOutcome::Unchanged => {}
+        }
+    }
+    Ok(result)
+}
+
+fn personal_codex_finish() -> Option<std::path::PathBuf> {
+    let path = dirs::home_dir()?.join(".agents/skills/finish/SKILL.md");
+    (path.exists() || path.is_symlink()).then_some(path)
+}
+
+/// Personal Codex skills win. Only a content hash, never a managed marker or
+/// replacement request, authorizes removal of an earlier Cassy installation.
+fn prepare_finish(harness: SupervisorCli, target_dir: &Path) -> std::io::Result<(bool, SyncResult)> {
+    let mut result = SyncResult::default();
+    if harness == SupervisorCli::Claude {
+        let install = prepare_claude_finish(target_dir)?;
+        if !install {
+            result.skipped_files.push("commands/finish.md".to_string());
+        }
+        return Ok((install, result));
+    }
+    let Some(personal) = (harness == SupervisorCli::Codex).then(personal_codex_finish).flatten() else {
+        return Ok((true, result));
+    };
+    let relative = "skills/finish/SKILL.md";
+    let target = target_dir.join(relative);
+    match std::fs::read(&target) {
+        Ok(bytes) => {
+            let mut state = BuiltinReferenceState::load(target_dir)?;
+            let hash = file_bytes_hash(&bytes);
+            if !target.is_symlink()
+                && !target_dir.join("skills/finish").is_symlink()
+                && !target_dir.join("skills").is_symlink()
+                && (state.files.get(relative) == Some(&hash)
+                    || is_shipped_builtin_reference_version(relative, &hash))
+            {
+                std::fs::remove_file(&target)?;
+                state.files.remove(relative);
+                state.skipped_references.remove(relative);
+                state.replace_on_next_sync.remove(relative);
+                state.save(target_dir)?;
+                result.pruned_files.push(relative.to_string());
+            } else {
+                result.warnings.push(format!("Two finish skills preserved: {} and {}; review both custom entrypoints.", personal.display(), target.display()));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !target.is_symlink() => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            result.warnings.push(format!("Two finish entrypoints preserved: {} and {}; review the custom symlink.", personal.display(), target.display()));
+        }
+        Err(error) => return Err(error),
+    }
+    Ok((false, result))
+}
+
 /// All built-in skills managed by Cassy
 pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
+    BuiltinFile {
+        path: "skills/finish/SKILL.md",
+        content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
     BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
         content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
@@ -173,6 +291,46 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -775,6 +933,10 @@ pub const BUILTIN_WORKFLOWS: &[BuiltinFile] = &[
 /// `cas-codex-supervisor-checklist` and the `agents/openai.yaml` policies.
 pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
+        path: "skills/finish/SKILL.md",
+        content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-memory-management/SKILL.md",
         content: include_str!("builtins/skills/cas-memory-management/SKILL.md"),
     },
@@ -856,6 +1018,46 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1454,6 +1656,10 @@ pub const GROK_BUILTIN_AGENTS: &[BuiltinFile] = &[
 /// Grok's SessionStart hooks follow the Claude contract.
 pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
+        path: "skills/finish/SKILL.md",
+        content: include_str!("builtins/skills/finish/SKILL.md"),
+    },
+    BuiltinFile {
         path: "skills/cas-worker/SKILL.md",
         content: include_str!("builtins/skills/cas-worker.md"),
     },
@@ -1586,6 +1792,46 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/check-pdf.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/DELIVERY-template.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/DELIVERY-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/rounds.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/rounds.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/handoff.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/handoff.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
+        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -2569,7 +2815,9 @@ pub fn preview_builtin(
     let target = target_dir.join(builtin.path);
     let content = builtin.content;
 
-    if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+    if (is_native_agent(builtin) && native_agent_symlink(target_dir, builtin))
+        || (is_finish_entrypoint(builtin) && target_dir.join(builtin.path).is_symlink())
+    {
         return Ok(None);
     }
 
@@ -2577,7 +2825,7 @@ pub fn preview_builtin(
         let existing = std::fs::read_to_string(&target)?;
 
         // Only update if managed by Cassy
-        if is_native_agent(builtin) {
+        if is_native_agent(builtin) || is_finish_entrypoint(builtin) {
             let state = BuiltinReferenceState::load(target_dir)?;
             if !owned_destination_replaceable(builtin, &existing, &state) {
                 return Ok(None);
@@ -2645,7 +2893,7 @@ pub fn sync_builtin_detailed(
     builtin: &BuiltinFile,
     target_dir: &Path,
 ) -> std::io::Result<SyncOutcome> {
-    if is_native_agent(builtin) {
+    if is_native_agent(builtin) || is_finish_entrypoint(builtin) {
         let mut state = BuiltinReferenceState::load(target_dir)?;
         let outcome = sync_owned_reference(builtin, target_dir, &mut state)?;
         state.save(target_dir)?;
@@ -2932,8 +3180,12 @@ fn sync_owned_reference(
     state: &mut BuiltinReferenceState,
 ) -> std::io::Result<SyncOutcome> {
     let target = target_dir.join(builtin.path);
-    if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
-        state.skipped_references.insert(builtin.path.to_string(), "symlink".to_string());
+    if (is_native_agent(builtin) && native_agent_symlink(target_dir, builtin))
+        || (is_finish_entrypoint(builtin) && target_dir.join(builtin.path).is_symlink())
+    {
+        state
+            .skipped_references
+            .insert(builtin.path.to_string(), "symlink".to_string());
         return Ok(SyncOutcome::SkippedModifiedReference);
     }
     if let Some(parent) = target.parent() {
@@ -3041,6 +3293,15 @@ fn sync_all_builtins_inner(
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
 ) -> std::io::Result<SyncResult> {
+    sync_all_builtins_with_finish_policy(target_dir, agents, skills, true)
+}
+
+fn sync_all_builtins_with_finish_policy(
+    target_dir: &Path,
+    agents: &[BuiltinFile],
+    skills: &[BuiltinFile],
+    install_finish: bool,
+) -> std::io::Result<SyncResult> {
     let mut result = SyncResult::default();
     let mut reference_state = BuiltinReferenceState::load(target_dir)?;
 
@@ -3077,11 +3338,15 @@ fn sync_all_builtins_inner(
 
     // Sync skills
     for builtin in skills {
-        let outcome = if is_file_owned_by_managed_skill(builtin, skills) {
-            sync_owned_reference(builtin, target_dir, &mut reference_state)?
-        } else {
-            sync_builtin_detailed(builtin, target_dir)?
-        };
+        if is_finish_entrypoint(builtin) && !install_finish {
+            continue;
+        }
+        let outcome =
+            if is_file_owned_by_managed_skill(builtin, skills) || is_finish_entrypoint(builtin) {
+                sync_owned_reference(builtin, target_dir, &mut reference_state)?
+            } else {
+                sync_builtin_detailed(builtin, target_dir)?
+            };
         match outcome {
             SyncOutcome::Created | SyncOutcome::Updated => {
                 result.skills_updated += 1;
@@ -3257,7 +3522,13 @@ fn sync_workflows(
 
 /// Sync all built-in files to .claude/ directory
 pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
-    let mut result = sync_all_builtins_inner(claude_dir, BUILTIN_AGENTS, BUILTIN_SKILLS)?;
+    let install_finish = prepare_claude_finish(claude_dir)?;
+    let mut result = sync_all_builtins_with_finish_policy(
+        claude_dir,
+        BUILTIN_AGENTS,
+        BUILTIN_SKILLS,
+        install_finish,
+    )?;
     sync_workflows(claude_dir, BUILTIN_WORKFLOWS, &mut result)?;
     let keep = builtin_workflow_names(BUILTIN_WORKFLOWS);
     prune_stale_cas_workflow_files(&claude_dir.join("workflows"), &keep)?;
@@ -3266,7 +3537,11 @@ pub fn sync_all_builtins(claude_dir: &Path) -> std::io::Result<SyncResult> {
 
 /// Sync all built-in files to .codex/ directory
 pub fn sync_all_codex_builtins(codex_dir: &Path) -> std::io::Result<SyncResult> {
-    sync_all_builtins_inner(codex_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS)
+    let (install, policy) = prepare_finish(SupervisorCli::Codex, codex_dir)?;
+    let mut result = sync_all_builtins_with_finish_policy(codex_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS, install)?;
+    result.pruned_files.extend(policy.pruned_files);
+    result.warnings.extend(policy.warnings);
+    Ok(result)
 }
 
 /// Sync all built-in files to .grok/ directory (EPIC cas-8888, Phase 5).
@@ -3309,6 +3584,7 @@ pub fn sync_all_builtins_for_project(
         SupervisorCli::Claude => {
             let skills = filtered_project_skills(BUILTIN_SKILLS, project_root);
             sync_project_catalog(
+                harness,
                 &project_root.join(".claude"),
                 BUILTIN_AGENTS,
                 &skills,
@@ -3317,11 +3593,11 @@ pub fn sync_all_builtins_for_project(
         }
         SupervisorCli::Codex => {
             let skills = filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".codex"), CODEX_BUILTIN_AGENTS, &skills, None)
         }
         SupervisorCli::Grok => {
             let skills = filtered_project_skills(GROK_BUILTIN_SKILLS, project_root);
-            sync_project_catalog(&project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".grok"), GROK_BUILTIN_AGENTS, &skills, None)
         }
         // cas-6b97 (audit M40): OpenCode reads `.opencode/skills` ahead of
         // `.claude/skills`, so the `cas_` projection is written there. Agents
@@ -3329,7 +3605,7 @@ pub fn sync_all_builtins_for_project(
         // agent frontmatter does not fit it.
         SupervisorCli::OpenCode => {
             let skills = filtered_project_skills(opencode_builtin_skills(), project_root);
-            sync_project_catalog(&project_root.join(".opencode"), NO_AGENTS, &skills, None)
+            sync_project_catalog(harness, &project_root.join(".opencode"), NO_AGENTS, &skills, None)
         }
     }
 }
@@ -3379,12 +3655,17 @@ pub fn harness_installed_for_user(harness: SupervisorCli) -> bool {
 /// prune on a non-empty catalog left the retired `cas-code-review.js` in about
 /// 20 projects after every sync.
 fn sync_project_catalog(
+    harness: SupervisorCli,
     target_dir: &Path,
     agents: &[BuiltinFile],
     skills: &[BuiltinFile],
     workflows: Option<&[BuiltinFile]>,
 ) -> std::io::Result<SyncResult> {
-    let mut result = sync_all_builtins_inner(target_dir, agents, skills)?;
+    let (install_finish, policy) = prepare_finish(harness, target_dir)?;
+    let mut result =
+        sync_all_builtins_with_finish_policy(target_dir, agents, skills, install_finish)?;
+    result.pruned_files.extend(policy.pruned_files);
+    result.warnings.extend(policy.warnings);
     if let Some(workflows) = workflows {
         sync_workflows(target_dir, workflows, &mut result)?;
         let keep = builtin_workflow_names(workflows);
@@ -3750,6 +4031,7 @@ pub const SHIPPED_NON_CAS_SKILL_DIRS: &[&str] = &[
     "codemap",
     "design-spec",
     "fallow",
+    "finish",
     "mcp-integration",
     "project-overview",
     // Retired: renamed cas-release-notes (it collided with Grok's built-in
@@ -4037,9 +4319,20 @@ impl InstallParity {
 /// would write there. Read-only. OpenCode has no installed tree.
 pub fn install_parity_for_harness(harness: SupervisorCli, target_dir: &Path) -> InstallParity {
     match harness {
-        SupervisorCli::Claude => install_parity(target_dir, BUILTIN_AGENTS, BUILTIN_SKILLS),
+        SupervisorCli::Claude => {
+            let custom_command = custom_finish_command(target_dir).unwrap_or(true);
+            let skills: Vec<_> = BUILTIN_SKILLS
+                .iter()
+                .copied()
+                .filter(|file| !custom_command || !is_finish_entrypoint(file))
+                .collect();
+            install_parity(target_dir, BUILTIN_AGENTS, &skills)
+        }
         SupervisorCli::Codex => {
-            install_parity(target_dir, CODEX_BUILTIN_AGENTS, CODEX_BUILTIN_SKILLS)
+            let personal = personal_codex_finish().is_some();
+            let skills: Vec<_> = CODEX_BUILTIN_SKILLS.iter().copied()
+                .filter(|file| !personal || !is_finish_entrypoint(file)).collect();
+            install_parity(target_dir, CODEX_BUILTIN_AGENTS, &skills)
         }
         SupervisorCli::Grok => install_parity(target_dir, GROK_BUILTIN_AGENTS, GROK_BUILTIN_SKILLS),
         SupervisorCli::OpenCode => InstallParity::default(),
@@ -4051,7 +4344,9 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
     let mut parity = InstallParity::default();
     for builtin in agents.iter().chain(skills) {
         parity.checked += 1;
-        if is_native_agent(builtin) && native_agent_symlink(target_dir, builtin) {
+        if (is_native_agent(builtin) && native_agent_symlink(target_dir, builtin))
+            || (is_finish_entrypoint(builtin) && target_dir.join(builtin.path).is_symlink())
+        {
             parity.local_edits.push(builtin.path.to_string());
             continue;
         }
@@ -4064,8 +4359,12 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
         }
         // Mirror the sync decision exactly: owned files follow the baseline
         // and shipped-version ledger, everything else the managed marker.
-        let replaceable = if is_native_agent(builtin) || is_file_owned_by_managed_skill(builtin, skills) {
-            std::str::from_utf8(&existing).is_ok_and(|text| owned_destination_replaceable(builtin, text, &state))
+        let replaceable = if is_native_agent(builtin)
+            || is_finish_entrypoint(builtin)
+            || is_file_owned_by_managed_skill(builtin, skills)
+        {
+            std::str::from_utf8(&existing)
+                .is_ok_and(|text| owned_destination_replaceable(builtin, text, &state))
         } else {
             is_managed_by_cas(builtin.content)
                 || std::str::from_utf8(&existing).is_ok_and(is_managed_by_cas)
@@ -4090,6 +4389,8 @@ fn install_parity(target_dir: &Path, agents: &[BuiltinFile], skills: &[BuiltinFi
 
 #[derive(Default, Debug)]
 pub struct SyncResult {
+    /// Advisory conflicts that preserve the operator's entrypoints.
+    pub warnings: Vec<String>,
     pub agents_updated: usize,
     pub skills_updated: usize,
     pub updated_files: Vec<String>,
@@ -4141,7 +4442,11 @@ pub struct BuiltinChange {
 pub fn preview_all_builtins(claude_dir: &Path) -> std::io::Result<Vec<BuiltinChange>> {
     let mut changes = Vec::new();
 
-    let all_builtins = BUILTIN_AGENTS.iter().chain(BUILTIN_SKILLS.iter());
+    let custom_command = custom_finish_command(claude_dir)?;
+    let all_builtins = BUILTIN_AGENTS
+        .iter()
+        .chain(BUILTIN_SKILLS.iter())
+        .filter(|file| !custom_command || !is_finish_entrypoint(file));
 
     for builtin in all_builtins {
         if let Some((old, new)) = preview_builtin(builtin, claude_dir)? {
@@ -4163,7 +4468,8 @@ pub fn preview_all_codex_builtins(codex_dir: &Path) -> std::io::Result<Vec<Built
 
     let all_builtins = CODEX_BUILTIN_AGENTS
         .iter()
-        .chain(CODEX_BUILTIN_SKILLS.iter());
+        .chain(CODEX_BUILTIN_SKILLS.iter())
+        .filter(|file| personal_codex_finish().is_none() || !is_finish_entrypoint(file));
 
     for builtin in all_builtins {
         if let Some((old, new)) = preview_builtin(builtin, codex_dir)? {
@@ -4227,10 +4533,27 @@ pub fn preview_all_builtins_for_project(
         SupervisorCli::OpenCode => project_root.join(".opencode"),
     };
     let (agents, skills): (&[BuiltinFile], Vec<BuiltinFile>) = match harness {
-        SupervisorCli::Claude => (BUILTIN_AGENTS, filtered_project_skills(BUILTIN_SKILLS, project_root)),
-        SupervisorCli::Codex => (CODEX_BUILTIN_AGENTS, filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root)),
-        SupervisorCli::Grok => (GROK_BUILTIN_AGENTS, filtered_project_skills(GROK_BUILTIN_SKILLS, project_root)),
-        SupervisorCli::OpenCode => (NO_AGENTS, filtered_project_skills(opencode_builtin_skills(), project_root)),
+        SupervisorCli::Claude => {
+            let custom_command = custom_finish_command(&target_dir)?;
+            let files = filtered_project_skills(BUILTIN_SKILLS, project_root)
+                .into_iter()
+                .filter(|file| !custom_command || !is_finish_entrypoint(file))
+                .collect();
+            (BUILTIN_AGENTS, files)
+        }
+        SupervisorCli::Codex => (
+            CODEX_BUILTIN_AGENTS,
+            filtered_project_skills(CODEX_BUILTIN_SKILLS, project_root).into_iter()
+                .filter(|file| personal_codex_finish().is_none() || !is_finish_entrypoint(file)).collect(),
+        ),
+        SupervisorCli::Grok => (
+            GROK_BUILTIN_AGENTS,
+            filtered_project_skills(GROK_BUILTIN_SKILLS, project_root),
+        ),
+        SupervisorCli::OpenCode => (
+            NO_AGENTS,
+            filtered_project_skills(opencode_builtin_skills(), project_root),
+        ),
     };
     let mut changes = Vec::new();
     for builtin in agents.iter().chain(skills.iter()) {
@@ -6746,6 +7069,9 @@ This is the body content."#;
     fn install_parity_is_clean_after_sync_and_names_every_kind_of_drift() {
         use tempfile::tempdir;
 
+        // A host's personal Codex finish skill intentionally excludes its
+        // builtin from sync/parity; a clean-install fixture needs a clean HOME.
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
             let temp = tempdir().unwrap();
             let dir = temp.path().join("home");
@@ -6757,7 +7083,8 @@ This is the body content."#;
             );
             assert_eq!(
                 parity.checked,
-                agent_catalog_for_harness(harness).len() + skill_catalog_for_harness(harness).len()
+                agent_catalog_for_harness(harness).len() + skill_catalog_for_harness(harness).len(),
+                "{harness:?} clean install must compare the complete catalog"
             );
         }
 

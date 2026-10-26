@@ -65,6 +65,7 @@ fn worker(name: &str, registered_at: chrono::DateTime<Utc>) -> AgentSummary {
         latest_supervisor_message_at: None,
         active_lease: None,
         effort: None,
+        qa_reviewer_between_rounds: false,
     }
 }
 

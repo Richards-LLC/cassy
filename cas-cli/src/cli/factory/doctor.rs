@@ -24,6 +24,8 @@ use crate::cli::Cli;
 use super::FactoryArgs;
 
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const REQUIRED_BACKEND_FAILURE: &str =
+    "Missing required backend(s). Fix them; rerun `cas factory doctor`.";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DoctorRow {
@@ -95,9 +97,7 @@ pub(super) fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&Path>) ->
     }
 
     if report.has_required_failure() {
-        anyhow::bail!(
-            "factory doctor found missing required backend(s); fix the issue above and rerun `cas factory doctor`"
-        );
+        anyhow::bail!("{REQUIRED_BACKEND_FAILURE}");
     }
     Ok(())
 }
@@ -648,46 +648,22 @@ fn wrap_into(
     width: usize,
 ) -> bool {
     let available = width.saturating_sub(indent).max(12);
-    let mut shortened = false;
-    let mut current = prefix.to_string();
-    let mut current_has_word = false;
-    for word in text.split_whitespace() {
-        let word = if word.chars().count() > available {
-            shortened = true;
-            shorten_middle(word, available)
+    let wrapped = crate::ui::word_wrap::wrap_words(
+        text,
+        available,
+        |text| text.chars().count(),
+        crate::ui::word_wrap::OverlongWordPolicy::ShortenMiddle,
+    );
+    for (index, content) in wrapped.lines.into_iter().enumerate() {
+        let mut line = if index == 0 {
+            prefix.to_string()
         } else {
-            word.to_string()
+            " ".repeat(indent)
         };
-        let needed = word.chars().count() + usize::from(current_has_word);
-        if current_has_word && current.chars().count() + needed > width {
-            lines.push(std::mem::take(&mut current));
-            current = " ".repeat(indent);
-            current_has_word = false;
-        }
-        if current_has_word {
-            current.push(' ');
-        }
-        current.push_str(&word);
-        current_has_word = true;
+        line.push_str(&content);
+        lines.push(line.trim_end().to_string());
     }
-    lines.push(current.trim_end().to_string());
-    shortened
-}
-
-/// Keep a value's start and (longer) end around an ASCII `...`, so a path
-/// still shows its root and the file it names.
-fn shorten_middle(word: &str, max: usize) -> String {
-    let chars: Vec<char> = word.chars().collect();
-    if chars.len() <= max || max < 5 {
-        return chars.into_iter().take(max).collect();
-    }
-    let keep = max - 3;
-    let head = keep / 3;
-    let tail = keep - head;
-    let mut out: String = chars[..head].iter().collect();
-    out.push_str("...");
-    out.extend(&chars[chars.len() - tail..]);
-    out
+    wrapped.shortened
 }
 
 #[cfg(test)]
@@ -905,18 +881,17 @@ mod tests {
         );
         assert!(!at_120.contains("--json"), "{at_120}");
         assert_eq!(serde_json::to_string(&report).unwrap(), json_before);
-    }
-
-    #[test]
-    fn shorten_middle_keeps_both_ends_within_the_budget() {
-        let shortened = shorten_middle("/home/user/a/very/long/path/to/config.toml", 20);
-        assert_eq!(shortened.chars().count(), 20);
+        let failure = format!("[ERROR] {REQUIRED_BACKEND_FAILURE}");
         assert!(
-            shortened.starts_with("/home") && shortened.ends_with("config.toml"),
-            "{shortened}"
+            failure.chars().count() <= 80,
+            "{} cells: {failure}",
+            failure.chars().count()
         );
-        assert!(shortened.contains("..."));
-        assert_eq!(shorten_middle("short", 20), "short");
+        assert!(
+            !failure.contains("above"),
+            "footer can precede the report: {failure}"
+        );
+        assert!(failure.contains("`cas factory doctor`"));
     }
 
     #[test]

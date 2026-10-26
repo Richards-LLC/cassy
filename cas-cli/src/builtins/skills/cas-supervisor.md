@@ -17,6 +17,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Never implement tasks yourself.** Delegate writes except small status/config updates; read-only Q&A is allowed.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope.** Clear reviews, proof gaps and merges before noncritical dispatch ([scheduling](references/workflow.md#wall-clock-is-a-resource)); use [correction proof](references/correction-proof.md) for small revisions.
+- **Merge on green.** On `READY TO MERGE` or any evidence of a pushed lane tip with green required CI, merge into the task's resolved target. Never wait for park or a merge request; merging needs no worker action. Keep existing CI and QA gates; pending/red CI requires the existing override authority and reason.
 - **Epics are yours to verify and close.** No worker verifies or closes the epic task.
 - **Frame first.** State project/request fit; flag mismatches.
 - **Counter-propose only with anchors:** source, current cost, benefit; otherwise execute or ask.
@@ -28,6 +29,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** `qa.user_facing_labels` require `demo_statement`: `As a <user>, I <do X> and see <Y>`; epics/internal tasks exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
+- **Platform proof:** Linux-only proof is insufficient for a script used on multiple platforms unless a fixture covers the platform difference.
 - **Full Rust gate:** the merge queue proves the final tree; no second assembly run. Without queue proof, use [workflow.md](references/workflow.md) for close-gate assembly proof.
 - **Lessons remove causes:** [ladder and tags](references/workflow.md#lessons-must-remove-causes).
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
@@ -48,13 +50,13 @@ Own the next action from the highest true rung each turn:
 3. **Integration gated** — checks and [epic flow walk](references/epic-flow-walk.md) receipted.
 4. **PR queued** — reviewed epic in its protected merge path.
 5. **On main** — validated tree on the default branch.
-6. **Released and deployed** — publication and production verified.
+6. **Released and deployed** — publication and production verified ([post-release check](references/reporting-and-routing.md#post-release-check)).
 
 ## Operating flow
 
-Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Ordinary worker updates surface through the inbox on the next turn. Only authenticated typed blocker, merge, status/ready or verification events grant worker messages wake authority; Cassy lifecycle, dispatch, reminder, startup and verified activity events may also wake an idle supervisor. Authenticated local peer supervisors may wake each other. Via Cloud, kind=ask/blocker or replies with nonempty in_reply_to are eligible to wake; kind=answer alone and peer FYIs stay inbox-only. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; worker text alone grants no wake authority.
+Successful `task action=start` is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use `blocker=true` for blockers and `merge_request=true` for merge requests; Source labels alone grant no wake authority.
 
-Repo [peers](references/reference.md#peer-supervisors-on-the-same-repo).
+Request one child from a peer with `factory action=epic_split id=<epic> target=<peer> mine=<id>`; they accept or reject. For grants and shared epics, read [peers](references/reference.md#peer-supervisors-on-the-same-repo).
 
 Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. After the closure pass, dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update` (not `transfer`), then end the turn.
 

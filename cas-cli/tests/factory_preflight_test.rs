@@ -96,6 +96,7 @@ fn command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
         .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
         .env("GROK_HOME", cwd.join(".test-grok-home"))
         .env_remove("CAS_ROOT")
+        .env_remove("COLUMNS")
         .env_remove("CAS_SOURCE_DIR")
         .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA")
         .args(["--json", "factory", "preflight"]);
@@ -116,6 +117,108 @@ fn human_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
         .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA")
         .args(["factory", "preflight"]);
     command
+}
+
+fn gc_command_at(cwd: &std::path::Path, home: &TempDir) -> Command {
+    let mut command = Command::new(cas::test_paths::binary(
+        "cas",
+        option_env!("CARGO_BIN_EXE_cas").map(Into::into),
+    ));
+    command
+        .current_dir(cwd)
+        .env("HOME", home.path())
+        .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
+        .env("GROK_HOME", cwd.join(".test-grok-home"))
+        .env_remove("CAS_ROOT")
+        .env_remove("CAS_SOURCE_DIR")
+        .env_remove("CAS_EXPECTED_DEPLOYMENT_SHA");
+    command
+}
+
+#[test]
+fn factory_gc_cli_routes_report_and_cleanup_over_a_fake_store() {
+    let project = project(false);
+    cas::store::init_cas_dir(project.path()).expect("initialize fake store");
+    let home = TempDir::new().unwrap();
+
+    let help = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "cleanup", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let help = String::from_utf8(help)
+        .unwrap()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!help.contains("--artifacts"), "{help}");
+    // pin: CLI cleanup help documents each actual mutation tier.
+    assert!(
+        help.contains(concat!(
+            "Each run may mark stale agents and missing worktrees, purge dead ",
+            "agent records, clear gone or recycled process-group records, and ",
+            "remove stale skill markers."
+        )),
+        "{help}"
+    );
+    assert!(
+        help.contains(concat!(
+            "--force also reaps orphan worker process groups and prunes ",
+            "terminal prompt entries."
+        )),
+        "{help}"
+    );
+    assert!(
+        help.contains(concat!(
+            "Target-cache reclamation, orphan-process kills, and ",
+            "journey-recording cleanup require both --force and --no-dry-run. ",
+            "Artifact cleanup is available only through the MCP gc_cleanup action ",
+            "with artifacts=true."
+        )),
+        "{help}"
+    );
+
+    let report = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "report"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report = String::from_utf8(report).unwrap();
+    assert!(report.starts_with("[INFO] GC review:"), "{report}");
+    // pin: the real CLI report names the cleanup-tier help before inventory detail.
+    assert_eq!(
+        report.lines().nth(1),
+        Some("Review cleanup tiers: cas factory gc cleanup --help"),
+        "{report}"
+    );
+    assert!(report.is_ascii() && report.lines().all(|line| line.len() <= 79), "{report}");
+    assert!(!report.lines().any(|line| line.starts_with("TARGET_CACHE_STATUS_JSON=")), "{report}");
+    let json = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "report", "--json"])
+        .assert().success().get_output().stdout.clone();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    assert!(json["report_text"].as_str().unwrap().starts_with("[INFO] GC review:"));
+    assert!(json["machine_status"]["TARGET_CACHE_STATUS_JSON"].is_object());
+    let full = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "report", "--full"])
+        .assert().success().get_output().stdout.clone();
+    let full = String::from_utf8(full).unwrap();
+    assert!(full.starts_with("Factory GC Report\n") && full.contains("TARGET_CACHE_STATUS_JSON="), "{full}");
+
+    let cleanup = gc_command_at(project.path(), &home)
+        .args(["factory", "gc", "cleanup", "--force", "--no-dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let cleanup = String::from_utf8(cleanup).unwrap();
+    assert!(cleanup.starts_with("Factory GC cleanup complete."), "{cleanup}");
+    assert!(cleanup.contains("Cargo target caches: mode=cleanup"), "{cleanup}");
 }
 
 #[test]
@@ -251,9 +354,19 @@ fn human_cli_reports_ready_and_leaves_home_cas_state_unchanged() {
     assert!(!human.contains("(factory blocked)"), "{human}");
     assert!(human.contains("repository: ready"), "{human}");
     assert!(human.contains("cas mcp: ready configured=true"), "{human}");
+    // cas-43b3 shares one typed, credential-free Claude auth throttle record
+    // across doctor and preflight processes. Nothing else may change.
+    let mut after = file_snapshot(home.path());
+    after.retain(|(path, bytes)| {
+        let throttle = path.parent() == Some(std::path::Path::new(".cas/cache/claude-auth"));
+        if throttle {
+            let evidence: Value = serde_json::from_slice(bytes).expect("typed auth evidence");
+            assert!(evidence.get("availability").is_some(), "{evidence}");
+        }
+        !throttle
+    });
     assert_eq!(
-        file_snapshot(home.path()),
-        before,
+        after, before,
         "preflight must not mutate ambient HOME/CAS state"
     );
 }

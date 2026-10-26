@@ -1,4 +1,6 @@
 ✓ [1/2] Cassy binary  3.62.0 is current                                     1.4s
+  cas update: Tailscale Serve inactive:
+    tailscale is stopped; hub remains loopback-only
 ✗ [2/2] Projects      2 of 12 failed · user-level store failed · 4 warnin…  4.0s
 
   ✗ gabber-studio           skills git index lock stale (no writer observed):
@@ -27,14 +29,14 @@
     → cas update --sync --json
   ⚠ Documents/Accounting    skills 2 managed file conflict(s)
     → cas update --sync --json
-  ⚠ hub                     serve  Tailscale Serve inactive: tailscale is
-                                   stopped; hub remains loopback-only
+  ⚠ hub                     serve  Tailscale Serve inactive:
+      tailscale is stopped; hub remains loopback-only
     → Check `tailscale status`, then run `cas hub restart`.
   ℹ ~/scratch/old-clone            not refreshed: not a Git project root
     → cas known-repos forget <path>
   ✓ 6 projects current · 3 not cloud-linked
     cassy, pantheon, prospect_path, Penguinz, ai-toolkit, soundwave-config
-  Cassy 3.62.0 · 12 projects refreshed · 2 failed · 4.0s
+  Cassy 3.68.0 · 12 projects refreshed · 2 failed · 4.0s
   user-level store failed · 1 skipped
   cas update --verbose shows every project and phase output
 ✗ 2 of 12 projects not fully refreshed

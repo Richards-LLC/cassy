@@ -33,9 +33,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::RawContent;
 use tempfile::TempDir;
 
-#[path = "../src/test_env_guard.rs"]
-mod test_env_guard;
-use test_env_guard::TestEnvGuard;
+use crate::test_env_guard::TestEnvGuard;
 
 #[path = "fixtures/ci_check_run.rs"]
 mod ci_check_run;
@@ -198,6 +196,21 @@ struct DeliveryFixture {
 }
 
 async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> DeliveryFixture {
+    arm_delivery_with_selector(
+        slug,
+        repo_host,
+        env,
+        &format!("remote:github.com/org/{repo_host}"),
+    )
+    .await
+}
+
+async fn arm_delivery_with_selector(
+    slug: &str,
+    repo_host: &str,
+    env: &mut TestEnvGuard,
+    repo_selector: &str,
+) -> DeliveryFixture {
     let repo = GitRepo::new();
     run_git(
         &[
@@ -220,7 +233,12 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     std::fs::write(
         cas_root.join("config.toml"),
         format!(
-            "[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            "{}[worktrees]\nenabled = false\n\n[factory]\nartifacts_root = {:?}\n",
+            if repo_selector.starts_with("project:") {
+                format!("[project]\ncanonical_id = \"github.com/org/{repo_host}\"\n")
+            } else {
+                String::new()
+            },
             artifact_root.display().to_string()
         ),
     )
@@ -260,7 +278,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     task.depth = TaskDepth::Deep;
     task.assignee = Some(slug.to_string());
     task.deliverables.work_target = Some(WorkTarget {
-        repo_selector: format!("remote:github.com/org/{repo_host}"),
+        repo_selector: repo_selector.to_string(),
         target_branch: "main".to_string(),
     });
     task_store.add(&task).expect("add task");
@@ -283,7 +301,7 @@ async fn arm_delivery(slug: &str, repo_host: &str, env: &mut TestEnvGuard) -> De
     let receipt = WorkerCompletionReceiptInput {
         task_id: task.id.clone(),
         worker_agent_id: worker_id.clone(),
-        repo_selector: format!("remote:github.com/org/{repo_host}"),
+        repo_selector: repo_selector.to_string(),
         source_branch: format!("factory/{slug}"),
         commit_sha: git_stdout(&repo.root, &["rev-parse", &format!("factory/{slug}")]),
         merge_base_sha: git_stdout(
@@ -507,14 +525,22 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
 /// cas-eda0: a parked delivery that `worktree_merge` lands with green CI is
 /// closed by Cassy once its verdict approves: no worker re-close, the parked
 /// close reason and the merge SHA are recorded, and the worker hears once.
-/// A rejected verdict or a red-CI override merge never closes it.
+/// A rejected verdict or a red-CI override merge never closes it. A merge
+/// without check runs still starts the close and records its unconfirmed CI.
 #[tokio::test]
 async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
     // (row, CI conclusion, verdict recorded after merge, Cassy closes)
     for (row, conclusion, verdict, closes) in [
+        // cas-46ea: the worker tries to close after the merge and blocks.
+        ("worker-blocked", "success", Some("approved"), true),
+        // cas-46ea: merged from a pushed lane tip without a park.
+        ("unparked", "success", Some("approved"), true),
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
+        ("advisory-no-checks", "no-checks", Some("approved"), true),
+        ("advisory-pending-docs", "pending", Some("approved"), true),
         ("red-override", "failure", None, false),
+        ("fresh-branch", "success", Some("approved"), true),
     ] {
         let mut env = TestEnvGuard::temp_home();
         let repo = GitRepo::new();
@@ -523,11 +549,45 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             &["remote", "add", "origin", &format!("git@github.com:org/{slug}.git")],
             &repo.root,
         );
+        // cas-3937: a local-only target must be confirmed by an origin that
+        // answers and lacks the branch. The GitHub URL stays for CI; Git
+        // reaches it as an empty bare repository.
+        let origin_dir = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+        run_git(&["init", "-q", "--bare", origin_dir.path().to_str().unwrap()], &repo.root);
+        run_git(
+            &[
+                "config",
+                &format!("url.{}.insteadOf", origin_dir.path().display()),
+                &format!("git@github.com:org/{slug}.git"),
+            ],
+            &repo.root,
+        );
         let cas_root = init_cas_dir(&repo.root).expect("init CAS");
-        let gh = ci_check_run::ci_concluded(&cas_root, conclusion);
+        let gh = if conclusion == "no-checks" {
+            let path = cas_root.join("no-checks-ci-gh");
+            cas::test_paths::warm_stub(
+                &path,
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[]}\\n'\n",
+            );
+            path
+        } else if conclusion == "pending" {
+            let path = cas_root.join("pending-ci-gh");
+            cas::test_paths::warm_stub(
+                &path,
+                "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '{\"nameWithOwner\":\"org/cas\"}\\n'; exit 0; fi\nprintf '{\"check_runs\":[{\"name\":\"Scoped Validation (factory/PR)\",\"status\":\"in_progress\",\"conclusion\":null}]}\\n'\n",
+            );
+            path
+        } else {
+            ci_check_run::ci_concluded(&cas_root, conclusion)
+        };
         env.set(cas::github_issue_attach::GH_BIN_ENV, &gh);
-        std::fs::write(cas_root.join("config.toml"), "[worktrees]\nenabled = false\n")
-            .expect("write config");
+        // cas-3fc8: the insteadOf rewrite also changes `git remote get-url`,
+        // so pin the project identity the fixture means.
+        std::fs::write(
+            cas_root.join("config.toml"),
+            format!("[project]\ncanonical_id = \"github.com/org/{slug}\"\n[worktrees]\nenabled = false\n"),
+        )
+        .expect("write config");
         let worker = slug.clone();
         let worker_id = format!("{slug}-worker-session");
         let supervisor_id = format!("{slug}-supervisor-session");
@@ -542,10 +602,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         );
         let worker_path = cas_root.join("worktrees").join(&worker);
         repo.add_worktree(&worker_path, &format!("factory/{worker}"));
-        std::fs::write(worker_path.join("delivered.txt"), "parked delivery\n").unwrap();
-        run_git(&["add", "delivered.txt"], &worker_path);
-        run_git(&["commit", "-m", "parked delivery"], &worker_path);
-
+        let delivered_path = if conclusion == "pending" { "docs/delivery.md" } else { "delivered.txt" };
         let task_store = open_task_store(&cas_root).unwrap();
         let mut task = Task::new(format!("cas-eda0-{row}"), "Parked delivery".to_string());
         task.task_type = TaskType::Task;
@@ -553,26 +610,121 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         task.depth = TaskDepth::Deep;
         task.assignee = Some(worker.clone());
         task.risk = vec![cas::types::TaskRisk::None];
+        if row == "fresh-branch" {
+            task.status = TaskStatus::Open;
+            // Managed linked checkouts share the factory's CAS identity/store.
+            std::os::unix::fs::symlink(&cas_root, worker_path.join(".cas")).unwrap();
+            std::fs::write(repo.root.join(".git/info/exclude"), ".cas\n").unwrap();
+            task.deliverables.work_target = Some(WorkTarget {
+                repo_selector: format!("project:github.com/org/{slug}"),
+                target_branch: "main".into(),
+            });
+            let agents = open_agent_store(&cas_root).unwrap();
+            let mut registration = agents.get(&worker_id).unwrap();
+            registration.metadata.insert("clone_path".into(), worker_path.display().to_string());
+            agents.update(&registration).unwrap();
+        }
+        if row == "unparked" {
+            task.status = TaskStatus::Open;
+        }
         task_store.add(&task).unwrap();
+
+        if row == "fresh-branch" || row == "unparked" {
+            env.set("CAS_AGENT_ROLE", "worker");
+            delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
+                "action": "start", "id": task.id,
+            })))).await.expect("record the original delivery branch through real start");
+        }
+        std::fs::create_dir_all(worker_path.join("docs")).unwrap();
+        std::fs::write(worker_path.join(delivered_path), "parked delivery\n").unwrap();
+        run_git(&["add", delivered_path], &worker_path);
+        let subject = if row == "fresh-branch" {
+            format!("{}: parked delivery", task.id)
+        } else {
+            "parked delivery".to_string()
+        };
+        run_git(&["commit", "-m", &subject], &worker_path);
+
+        let mut delivery_branch = format!("factory/{worker}");
+        if row == "unparked" {
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+        }
+        if row == "fresh-branch" {
+            let original = task_store.get(&task.id).unwrap();
+            let original_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
+            assert_eq!(original.deliverables.factory_branch_start.as_ref().unwrap().branch, delivery_branch);
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+            delivery_branch = format!("factory/{worker}-{}-reviewed", task.id);
+            run_git(&["switch", "-c", &delivery_branch, "main"], &worker_path);
+            std::fs::write(worker_path.join(delivered_path), "fresh branch delivery\n").unwrap();
+            run_git(&["add", delivered_path], &worker_path);
+            run_git(&["commit", "-m", &format!("{}: fresh delivery", task.id)], &worker_path);
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+            let rebind = || task_req(serde_json::json!({
+                "action": "rebind_branch", "id": task.id, "branch": delivery_branch,
+                "reason": "Supervisor reviewed replacement branch after fresh-base recovery",
+            }));
+            let worker_denial = delivery_service(&cas_root, &worker_id)
+                .task(Parameters(rebind())).await.expect_err("workers cannot approve their own rebind");
+            assert!(worker_denial.message.contains("live registered supervisor"), "{worker_denial}");
+            assert_eq!(task_store.get(&task.id).unwrap().deliverables.factory_branch_start,
+                original.deliverables.factory_branch_start);
+            env.set("CAS_AGENT_ROLE", "supervisor");
+            let supervisor = delivery_service(&cas_root, &supervisor_id);
+            // A failed review keeps its parked delivery until request_changes.
+            let mut blocked = original.clone();
+            blocked.status = TaskStatus::Blocked;
+            blocked.deliverables.parked_branch = Some(format!("factory/{worker}"));
+            blocked.deliverables.factory_branch_anchor = Some(original_tip.clone());
+            task_store.update(&blocked).unwrap();
+            let blocked_snapshot = serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap();
+            let refused = supervisor.task(Parameters(rebind())).await
+                .expect_err("a blocked parked delivery must be declined before rebinding");
+            assert!(refused.message.contains("request_changes"), "{refused}");
+            assert_eq!(serde_json::to_value(task_store.get(&task.id).unwrap()).unwrap(), blocked_snapshot,
+                "refusing a parked delivery must not mutate its recorded evidence");
+            task_store.update(&original).unwrap();
+            run_git(&["commit", "--allow-empty", "-m", "cas-dead: foreign task work"], &worker_path);
+            let refused = supervisor.task(Parameters(rebind())).await.expect_err("foreign work cannot be hidden by a new base");
+            assert!(refused.message.contains("foreign"), "{refused}");
+            run_git(&["reset", "--hard", "HEAD^"], &worker_path);
+            supervisor.task(Parameters(rebind())).await.expect("supervisor rebinds fresh delivery");
+            let rebound = task_store.get(&task.id).unwrap();
+            let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
+            assert_eq!(start.branch, delivery_branch);
+            assert_eq!(start.base_sha, git_stdout(&repo.root, &["rev-parse", "main"]));
+            assert_eq!(rebound.assignee, original.assignee);
+            assert_eq!(rebound.deliverables.work_target, original.deliverables.work_target);
+            assert!(rebound.notes.contains(&original_tip), "old checkpoint tip must remain auditable");
+            supervisor.task(Parameters(rebind())).await.expect("same binding is idempotent");
+            assert_eq!(task_store.get(&task.id).unwrap().notes, rebound.notes);
+        }
 
         // The worker's own close parks the delivery and keeps its reason.
         let parked_reason = format!("PASS: delivered.txt for {row}");
         env.set("CAS_AGENT_ROLE", "worker");
-        let park = get_text(
+        let park = if row == "unparked" { String::new() } else { get_text(
             &delivery_service(&cas_root, &worker_id)
                 .task(Parameters(task_req(serde_json::json!({
                     "action": "close", "id": task.id, "reason": parked_reason,
                 }))))
                 .await
                 .expect("worker close"),
-        );
+        ) };
         let parked = task_store.get(&task.id).unwrap();
-        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{row}: {park}");
+        let parked_status = if row == "unparked" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        assert_eq!(parked.status, parked_status, "{row}: {park}");
+        if row == "fresh-branch" {
+            assert!(park.contains("MERGE REQUIRED"), "{park}");
+            assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(delivery_branch.as_str()));
+            assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(),
+                Some(git_stdout(&worker_path, &["rev-parse", "HEAD"]).as_str()));
+        }
 
         env.set("CAS_AGENT_ROLE", "supervisor");
         let supervisor = delivery_service(&cas_root, &supervisor_id);
         let mut merge = coord_req("worktree_merge");
-        merge.id = Some(format!("factory/{worker}"));
+        merge.id = Some(delivery_branch);
         merge.task_id = Some(task.id.clone());
         merge.allow_trunk = Some(true);
         merge.cleanup = Some(false);
@@ -580,12 +732,65 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             merge.supervisor_override = Some(true);
             merge.reason = Some("red run reviewed".to_string());
         }
-        let merged = get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"));
+        let merged = if row == "green-approved" {
+            // A close slower than the post-commit grace, deterministically.
+            env.set("CAS_TEST_POST_MERGE_DELAY_MS", "300");
+            // cas-3937: under the real response budget with no post-commit
+            // grace, the published merge answers COMMITTED with its merge
+            // and push state, and the close after it finishes in the
+            // background, recording its result on the task.
+            let answer = get_text(
+                &supervisor
+                    .coordination_with_budget_for_testing(
+                        merge,
+                        std::time::Duration::from_secs(50),
+                        std::time::Duration::ZERO,
+                    )
+                    .await
+                    .expect("merge"),
+            );
+            // pin: the early answer names the merge and its local-only target (cas-3937).
+            assert!(answer.contains("COMMITTED") && answer.contains("local-only target"), "{row}: {answer}");
+            let mut notes = String::new();
+            for _ in 0..400 {
+                notes = task_store.get(&task.id).unwrap().notes;
+                if notes.contains("POST_COMMIT_OUTCOME") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
+            // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
+            assert!(
+                notes.contains("waiting on its verification dispatch") && notes.contains("awaiting_merge"),
+                "{row}: {notes}"
+            );
+            answer
+        } else {
+            get_text(&supervisor.coordination(Parameters(merge)).await.expect("merge"))
+        };
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
+        // cas-46ea: Cassy parks an unparked pushed lane tip at its merge.
         assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
+        let admission = match conclusion {
+            "success" => "green",
+            "failure" => "override",
+            _ => "advisory",
+        };
+        let stored = serde_json::to_value(&after_merge.deliverables).unwrap();
+        assert_eq!(stored["merge_ci_admission"], admission, "{row}: {merged}");
+        let roundtrip: cas::types::TaskDeliverables = serde_json::from_value(stored).unwrap();
+        assert_eq!(serde_json::to_value(roundtrip).unwrap()["merge_ci_admission"], admission);
+        let shown = get_text(&supervisor.task(Parameters(task_req(serde_json::json!({
+            "action": "show", "id": task.id,
+        })))).await.expect("show merged task"));
+        assert!(shown.contains(&format!("CI admission: {admission}")), "{row}: {shown}");
 
         if let Some(verdict) = verdict {
+            if admission == "advisory" {
+                assert!(after_merge.notes.contains("CI unconfirmed"), "{row}: {merged}");
+            }
             assert_eq!(
                 after_merge.deliverables.green_merge_commit.as_deref(),
                 Some(merge_sha.as_str()),
@@ -594,6 +799,28 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
                 .unwrap()
                 .unwrap_or_else(|| panic!("{row}: Cassy's close dispatches verification: {merged}"));
+            assert_eq!(
+                dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()),
+                Some(merge_sha.as_str()),
+                "{row}: Cassy binds the dispatch to the merge commit"
+            );
+            if row == "worker-blocked" {
+                // The relay this task removes: a worker close after the merge
+                // is refused on the dispatch and the worker blocks on it.
+                env.set("CAS_AGENT_ROLE", "worker");
+                let worker_service = delivery_service(&cas_root, &worker_id);
+                let refused = worker_service.task(Parameters(task_req(serde_json::json!({
+                    "action": "close", "id": task.id, "commit_receipt": merge_sha, "reason": "merged task",
+                })))).await;
+                assert!(
+                    task_store.get(&task.id).unwrap().status != TaskStatus::Closed,
+                    "{row}: the close waits on the verdict: {refused:?}"
+                );
+                worker_service.task(Parameters(task_req(serde_json::json!({
+                    "action": "update", "id": task.id, "status": "blocked",
+                })))).await.expect("worker blocks on the dispatch");
+                env.set("CAS_AGENT_ROLE", "supervisor");
+            }
             let recorded = get_text(
                 &supervisor
                     .verification(Parameters(verification_req(serde_json::json!({
@@ -607,11 +834,22 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             let task = task_store.get(&task.id).unwrap();
             assert_eq!(task.status == TaskStatus::Closed, closes, "{row}: {recorded}");
             if closes {
-                assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
+                if row == "unparked" {
+                    assert!(task.close_reason.as_deref().is_some_and(|reason| reason.contains(&merge_sha)), "{row}: {:?}", task.close_reason);
+                } else {
+                    assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
+                }
                 assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
+                assert_eq!(task.assignee.as_deref(), Some(worker.as_str()), "{row}: attributed to the assignee");
+            } else if verdict == "rejected" {
+                // cas-46ea: a failed verdict hands the task back with findings.
+                assert_eq!(task.status, TaskStatus::Open, "{row}: {recorded}");
+                assert_eq!(task.assignee.as_deref(), Some(worker.as_str()));
+                assert!(task.notes.contains(&format!("{verdict} {row}")), "{row}: {}", task.notes);
             }
         } else {
-            assert_eq!(after_merge.deliverables.green_merge_commit, None, "{row}: {merged}");
+            assert_eq!(after_merge.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()), "{row}: {merged}");
+            assert!(cas_store::get_latest_verification_dispatch(&cas_root, &task.id).unwrap().is_none(), "override must not auto-close or dispatch verification");
         }
 
         let worker_prompts: Vec<String> = cas::store::open_prompt_queue_store(&cas_root)
@@ -629,15 +867,101 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             "{row}: the worker hears exactly once, only when Cassy closed: {worker_prompts:?}"
         );
         assert!(
-            !closes || !worker_prompts.iter().any(|p| p.contains("Retry task close")),
-            "{row}: no worker close retry once Cassy closed: {worker_prompts:?}"
+            !worker_prompts.iter().any(|p| p.contains("Retry task close")),
+            "{row}: Cassy closes or reopens; the worker never re-closes: {worker_prompts:?}"
         );
+        assert_eq!(
+            worker_prompts.iter().filter(|p| p.contains("Cassy parked it")).count(),
+            usize::from(row == "unparked"),
+            "{row}: a worker parked by the merge hears it once (cas-e9d6): {worker_prompts:?}"
+        );
+        if verdict == Some("rejected") {
+            assert_eq!(
+                worker_prompts.iter().filter(|p| p.contains(&format!("rejected {row}"))).count(),
+                1,
+                "{row}: the worker hears the findings once: {worker_prompts:?}"
+            );
+        }
+        if closes && admission == "advisory" {
+            assert!(worker_prompts.iter().any(|p| p.contains("CI advisory (unconfirmed)")), "{worker_prompts:?}");
+            assert!(!worker_prompts.iter().any(|p| p.contains("with green CI")), "{worker_prompts:?}");
+        }
     }
 }
 
 // =============================================================================
 // Regressions
 // =============================================================================
+
+/// cas-5a7e: the transactional path records its published merge before its
+/// internal close. Stretch that close on the real MCP response path: the
+/// caller must receive the merge receipt promptly, then find the close's
+/// actual result on the task rather than losing it with the early answer.
+#[tokio::test]
+async fn transactional_delivery_slow_close_reports_commit_and_close_outcome() {
+    let mut env = TestEnvGuard::temp_home();
+    let fixture = arm_delivery_with_selector(
+        "slowclose",
+        "slow-close",
+        &mut env,
+        "project:github.com/org/slow-close",
+    )
+    .await;
+    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "-q", "--bare", origin.path().to_str().unwrap()], &fixture.repo.root);
+    run_git(
+        &[
+            "config",
+            &format!("url.{}.insteadOf", origin.path().display()),
+            "git@github.com:org/slow-close.git",
+        ],
+        &fixture.repo.root,
+    );
+    env.set("CAS_TEST_POST_MERGE_DELAY_MS", "300");
+    let _dir = env.enter_dir(&fixture.repo.root);
+
+    let supervisor = delivery_service(&fixture.cas_root, &fixture.supervisor_id);
+    let mut merge = coord_req("worktree_merge");
+    merge.id = Some(fixture.receipt.source_branch.clone());
+    merge.task_id = Some(fixture.task_id.clone());
+    merge.allow_trunk = Some(true);
+    merge.cleanup = Some(false);
+    let answer = get_text(
+        &supervisor
+            .coordination_with_budget_for_testing(
+                merge,
+                std::time::Duration::from_secs(50),
+                std::time::Duration::ZERO,
+            )
+            .await
+            .expect("transactional merge"),
+    );
+    assert!(answer.contains("COMMITTED"), "{answer}");
+    assert!(answer.contains("local-only target"), "{answer}");
+    assert!(answer.contains(&git_stdout(&fixture.repo.root, &["rev-parse", "main"])), "{answer}");
+    assert_eq!(
+        delivery_state(&fixture),
+        WorkerDeliveryState::MergeAuthorized,
+        "early answer must precede the delivery close: {answer}",
+    );
+
+    let task_store = open_task_store(&fixture.cas_root).unwrap();
+    let mut notes = String::new();
+    for _ in 0..400 {
+        notes = task_store.get(&fixture.task_id).unwrap().notes;
+        if notes.contains("POST_COMMIT_OUTCOME") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(notes.contains("POST_COMMIT_OUTCOME"), "close outcome missing: {notes}");
+    assert!(
+        notes.contains("task status now `closed`")
+            && notes.contains("Close outcome: Closed task: cas-slowclose-target-cas"),
+        "{notes}"
+    );
+    assert_eq!(delivery_state(&fixture), WorkerDeliveryState::Delivered);
+}
 
 /// cas-96ba: transactional delivery must accept the task binding consumed by
 /// worktree target resolution. The destructive-action field guard runs before
@@ -660,7 +984,7 @@ async fn delivery_merge_accepts_task_id_and_reaches_target_resolution() {
         "close must retain its configured durable artifact as queryable receipt metadata"
     );
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     assert!(
@@ -1032,7 +1356,7 @@ async fn delivery_merge_refuses_target_drift_before_merge_as_recoverable_tip_cha
     let drifted = git_stdout(&fixture.repo.root, &["rev-parse", "main"]);
     assert_ne!(drifted, fixture.receipt.target_sha);
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     let state = delivery_state(&fixture);
@@ -1079,7 +1403,7 @@ async fn delivery_merge_refuses_target_drift_injected_between_preflight_and_merg
     );
     fixture.repo.arm_post_checkout_drift("cas0a21drift", "main");
 
-    env.set_current_dir(&fixture.repo.root);
+    let _env = env.enter_dir(&fixture.repo.root);
     let output = run_merge(&fixture).await;
 
     // The hook must actually have fired, or this regression proves nothing.
@@ -1145,9 +1469,9 @@ async fn concurrent_deliveries_in_independent_repositories_remain_independent() 
         &first.repo.root,
     );
 
-    env.set_current_dir(&first.repo.root);
+    let mut env = env.enter_dir(&first.repo.root);
     let first_output = run_merge(&first).await;
-    env.set_current_dir(&second.repo.root);
+    let _env = env.enter_dir(&second.repo.root);
     let second_output = run_merge(&second).await;
 
     assert_eq!(

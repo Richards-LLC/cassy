@@ -14,6 +14,27 @@ pub(crate) fn resolve_worker_supervisor_target(
     )
 }
 
+fn collapse_message_summary(summary: &str) -> String {
+    let mut collapsed = String::with_capacity(summary.len());
+    let mut pending_space = false;
+    for character in summary.chars() {
+        if character.is_control() {
+            pending_space |= character.is_whitespace() && !collapsed.is_empty();
+            continue;
+        }
+        if character.is_whitespace() {
+            pending_space |= !collapsed.is_empty();
+            continue;
+        }
+        if pending_space {
+            collapsed.push(' ');
+            pending_space = false;
+        }
+        collapsed.push(character);
+    }
+    collapsed
+}
+
 fn resolve_inbox_recipient(
     registered_name: Option<String>,
     environment_name: Option<String>,
@@ -657,6 +678,59 @@ pub(crate) fn wake_attempt_narrative(
     format!("{line}\n")
 }
 
+/// cas-badb (GH #1302): the sender's one-line answer to "did it arrive?".
+/// Received means the recipient's own session saw this message: a turn
+/// observed carrying it, its own hook rendering it into its turn, its own
+/// inbox_poll, or its explicit acknowledgement. A pane handoff or transport
+/// claim alone is still pending.
+pub(crate) fn recipient_verdict(
+    report: &cas_store::MessageDeliveryReport,
+    now: chrono::DateTime<chrono::Utc>,
+    escalate_after_secs: u64,
+) -> String {
+    use cas_store::{DeliveryStage, SurfacingSource};
+    let how = if report.wake == cas_store::ObservationStatus::Observed {
+        Some("its turn started with this message")
+    } else {
+        match report.recipient_receipt {
+            Some(SurfacingSource::ObservedWake) => Some("its turn started with this message"),
+            Some(SurfacingSource::HookSurfaced) => Some("this message was shown in its own turn"),
+            Some(SurfacingSource::InboxPoll) if report.recipient_poll_settled.is_none() => {
+                Some("it read this message with inbox_poll")
+            }
+            _ => (report.confirmation_source == cas_store::ConfirmationSource::ExplicitAck)
+                .then_some("it acknowledged this message"),
+        }
+    };
+    if let Some(how) = how {
+        let at = report
+            .wake_observed_at
+            .or(report.confirmed_at)
+            .map(|at| format!(" at {}", at.to_rfc3339()))
+            .unwrap_or_default();
+        return format!("recipient: RECEIVED by {}: {how}{at}.\n", report.target);
+    }
+    let waited = (now - report.enqueued_at).num_seconds().max(0);
+    if matches!(
+        report.stage,
+        DeliveryStage::Dropped | DeliveryStage::Suppressed | DeliveryStage::Abandoned
+    ) {
+        return format!(
+            "recipient: NOT RECEIVED by {}: delivery ended ({}) after {waited}s; resend or reach it another way.\n",
+            report.target, report.stage
+        );
+    }
+    let escalation = if (waited as u64) < escalate_after_secs {
+        format!("you and the operator are told at {escalate_after_secs}s")
+    } else {
+        "you and the operator have been told".to_string()
+    };
+    format!(
+        "recipient: PENDING for {}: no turn has started with this message after {waited}s          (stage {}, last wake {}, declined wakes {}). Cassy keeps re-waking it every 60s; {escalation}.\n",
+        report.target, report.stage, report.wake_attempt, report.wake_gate_declines
+    )
+}
+
 /// cas-ad92: say whether the body reached the recipient's turn or was only
 /// claimed by the daemon's transport. A Claude teams handoff is claimed when
 /// the inbox file is written, but Claude Code renders it only at a turn
@@ -901,9 +975,11 @@ impl CasService {
                 ),
             )
         })?;
+        message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
         let summary = req
             .summary
-            .filter(|summary| !summary.trim().is_empty())
+            .map(|summary| collapse_message_summary(&summary))
+            .filter(|summary| !summary.is_empty())
             .ok_or_else(|| {
                 Self::error(
                     ErrorCode::INVALID_PARAMS,
@@ -971,6 +1047,14 @@ impl CasService {
             .map(|a| a.role.to_string())
             .or_else(|| std::env::var("CAS_AGENT_ROLE").ok())
             .unwrap_or_else(|| "primary".to_string());
+        // Persist this message's classification before folding adds labels
+        // and other bodies that no longer look like a pure acknowledgement.
+        let quiet_message = req.wake == Some(false)
+            || req.kind.as_deref() == Some("receipt")
+            || crate::supervisor_message_wakes::pure_ack(&message);
+        if quiet_message && role != "worker" {
+            message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
+        }
         // Resolve cross-machine peers before applying the local inbox cap.
         // Their Cloud body must be readable on the receiving machine: spilling
         // first sent a path on the sender's disk instead of the full text
@@ -1027,13 +1111,22 @@ impl CasService {
         if role == "worker" {
             message = crate::prompt_revalidation::
                 neutralize_worker_authored_envelope_tags(&message);
+            // Add CAS's quiet marker only after neutralizing caller tags,
+            // so it remains a type marker rather than escaped body text.
+            if quiet_message {
+                message = format!("{}\n{message}", crate::supervisor_message_wakes::QUIET);
+            }
         }
         // A shared clone can have two live supervisors and a worker process
         // whose ambient environment was inherited from the wrong harness.
         // The registered caller row is the authoritative owner; the
         // environment remains a compatibility fallback for legacy callers.
-        let factory_session = agent_from_store
+        let adopted_supervisor = agent_from_store.as_ref().and_then(|worker| {
+            crate::factory_session_scope::adopted_worker_supervisor(&self.inner.cas_root, worker)
+        });
+        let factory_session = adopted_supervisor
             .as_ref()
+            .or(agent_from_store.as_ref())
             .and_then(|agent| agent.factory_session.clone())
             .filter(|session| !session.trim().is_empty())
             .or_else(|| {
@@ -1859,7 +1952,10 @@ impl CasService {
                         })?;
                     let registered_worker = agent_from_store.as_ref().is_some_and(|agent| {
                         agent.role == cas_types::AgentRole::Worker
-                            && agent.factory_session.as_deref() == Some(session)
+                            && (agent.factory_session.as_deref() == Some(session)
+                                || adopted_supervisor.as_ref().is_some_and(|owner| {
+                                    owner.factory_session.as_deref() == Some(session)
+                                }))
                     });
                     let same_session_supervisor =
                         resolved_target_agent.as_ref().is_some_and(|agent| {
@@ -1888,11 +1984,12 @@ impl CasService {
                         crate::prompt_revalidation::WorkerActionKind::Ready
                     })
                 }
+                Some("receipt" | "answer" | "ask") => None,
                 Some(other) => {
                     return Err(Self::error(
                         ErrorCode::INVALID_PARAMS,
                         format!(
-                            "worker messages support kind=status or kind=ready to the same-session supervisor, not '{other}'"
+                            "worker messages support status, ready, receipt, answer or ask; status/ready require the same-session supervisor, not '{other}'"
                         ),
                     ));
                 }
@@ -1933,21 +2030,40 @@ impl CasService {
             let requested_pr_number = extract_pull_request_number(&message)
                 .or_else(|| extract_pull_request_number(&summary));
 
-            let merge_context = open_task_store_local(&self.inner.cas_root)
-                .ok()
-                .and_then(|store| {
-                    let tasks = store.list(None).ok()?;
-                    let active_task = tasks
-                        .iter()
-                        .find(|task| {
-                            task.status == cas_types::TaskStatus::InProgress
-                                && task.assignee.as_deref().is_some_and(|name| {
-                                    name.eq_ignore_ascii_case(&display_name)
-                                })
-                        })
-                        .map(|task| task.id.clone());
-                    Some((
-                        select_merge_request_task(&tasks, &display_name, req.task_id.as_deref())
+            let merge_context =
+                open_task_store_local(&self.inner.cas_root)
+                    .ok()
+                    .and_then(|store| {
+                        let tasks = store
+                            .ids_by_assignees_and_statuses(
+                                &[&display_name],
+                                &[
+                                    cas_types::TaskStatus::Open,
+                                    cas_types::TaskStatus::InProgress,
+                                    cas_types::TaskStatus::Blocked,
+                                    cas_types::TaskStatus::AwaitingMerge,
+                                ],
+                            )
+                            .ok()?
+                            .into_iter()
+                            .map(|id| store.get(&id))
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .ok()?;
+                        let active_task = tasks
+                            .iter()
+                            .find(|task| {
+                                task.status == cas_types::TaskStatus::InProgress
+                                    && task.assignee.as_deref().is_some_and(|name| {
+                                        name.eq_ignore_ascii_case(&display_name)
+                                    })
+                            })
+                            .map(|task| task.id.clone());
+                        Some((
+                            select_merge_request_task(
+                                &tasks,
+                                &display_name,
+                                req.task_id.as_deref(),
+                            )
                             .cloned(),
                         active_task,
                     ))
@@ -2215,6 +2331,21 @@ impl CasService {
                             )));
                         }
                         MergeRequestDecision::Pending { target_tip } => {
+                            // cas-749f: composing an envelope does not advance
+                            // the durable park or prove the new tip's checks.
+                            // The merge gate reads the persisted anchor, so
+                            // require close to reconcile it before queueing.
+                            if task.status == cas_types::TaskStatus::AwaitingMerge
+                                && let Some(anchor) = recorded_anchor.as_deref()
+                                && anchor != branch_tip
+                            {
+                                return Ok(Self::success(format!(
+                                    "MERGE REQUEST REQUIRES RE-PARK: {} is parked at {anchor}, but its pushed source is {branch_tip}. No merge request was queued and no anchor was advanced. Re-run `{}task action=close id={}` at {branch_tip} with checks for that tip, then send the merge request again.",
+                                    task.id,
+                                    crate::mcp::tools::core::guidance::caller_prefix(),
+                                    task.id,
+                                )));
+                            }
                             let anchor_tip = recorded_anchor
                                 .as_deref()
                                 .filter(|anchor| *anchor != branch_tip)
@@ -2314,6 +2445,85 @@ impl CasService {
                 &display_name,
                 req.task_id.as_deref(),
             );
+        }
+
+        // Bind supervisor assignments before any halt or enqueue mutation.
+        // Prose may open with the receipt for the worker's previous task.
+        // Preserve explicit task_id first, otherwise the live assignment;
+        // every delivery path reads the same immutable binding.
+        if matches!(role.as_str(), "supervisor" | "director")
+            && !resolved_target.eq_ignore_ascii_case("all_workers")
+            && resolved_target_agent
+                .as_ref()
+                .is_none_or(|agent| agent.role == cas_types::AgentRole::Worker)
+            && crate::prompt_revalidation::is_assignment_prompt(&message)
+        {
+            let tasks = crate::store::open_task_store_local(&self.inner.cas_root).ok();
+            let binding = req
+                .task_id
+                .clone()
+                .filter(|id| !id.trim().is_empty())
+                .or_else(|| {
+                    let mut assignees = vec![resolved_target.as_str()];
+                    if let Some(agent) = resolved_target_agent.as_ref() {
+                        assignees.push(&agent.id);
+                    }
+                    let current = tasks
+                        .as_ref()
+                        .and_then(|store| {
+                            store
+                                .ids_by_assignees_and_statuses(
+                                    &assignees,
+                                    &[
+                                        cas_types::TaskStatus::Open,
+                                        cas_types::TaskStatus::InProgress,
+                                        cas_types::TaskStatus::Blocked,
+                                    ],
+                                )
+                                .ok()
+                        })
+                        .unwrap_or_default();
+                    match current.as_slice() {
+                        [id] => {
+                            let started = tasks
+                                .as_ref()
+                                .and_then(|store| store.get(id).ok())
+                                .is_some_and(|task| task.status != cas_types::TaskStatus::Open);
+                            if started {
+                                assignment_solicited_task_id(&message).or_else(|| Some(id.clone()))
+                            } else {
+                                Some(id.clone())
+                            }
+                        }
+                        [] => assignment_solicited_task_id(&message),
+                        // Multiple live assignments cannot prove which task this
+                        // message solicits. Do not let incidental prose suppress it.
+                        _ => None,
+                    }
+                });
+            message = crate::prompt_revalidation::attach_assignment_envelope(
+                &message,
+                binding.as_deref(),
+            );
+            if let Some((task_id, status)) = binding
+                .as_deref()
+                .and_then(|id| tasks.as_ref()?.get(id).ok())
+                .and_then(|task| {
+                    assignment_stale_task(
+                        &message,
+                        task.status,
+                        task.assignee.as_deref(),
+                        &resolved_target,
+                    )
+                })
+            {
+                return Err(Self::error(
+                    ErrorCode::INVALID_REQUEST,
+                    format!(
+                        "Assignment refused for {task_id}: task is {status}. No message was queued. To bind the intended assignment, pass task_id=<id>."
+                    ),
+                ));
+            }
         }
 
         // cas-6913: a message addressed to a not-yet-registered worker name
@@ -2592,6 +2802,11 @@ impl CasService {
                 .map(|agent| cas_store::QueueOrigin::RegisteredAgent {
                     agent_id: agent.id.clone(),
                 });
+        // Local cap/spill and reply framing must not discard the sender's opt-out.
+        if (req.wake == Some(false) || req.kind.as_deref()==Some("receipt"))
+            && !crate::supervisor_message_wakes::quiet(&message) {
+            message=format!("{}\n{message}",crate::supervisor_message_wakes::QUIET);
+        }
         let enqueue_started = std::time::Instant::now();
         let peer_copy_message = peer_supervisor_copy
             .as_ref()
@@ -2753,6 +2968,79 @@ impl CasService {
                         }
                     }
                 }
+            }
+        }
+
+        if let (Some(sender), Some(worker)) =
+            (agent_from_store.as_ref(), resolved_target_agent.as_ref())
+            && sender.role == cas_types::AgentRole::Supervisor
+            && crate::factory_session_scope::adopted_worker_supervisor(&self.inner.cas_root, worker)
+                .is_some_and(|owner| owner.id == sender.id)
+            && crate::mcp::tools::service::factory_ops::worker_cli_from_agent(worker)
+                == cas_mux::SupervisorCli::Claude
+            && queue
+                .recipient_receipt(message_id, &worker.name)
+                .ok()
+                .flatten()
+                .is_none()
+        {
+            // The original PTY master died with its daemon. Deliver to the
+            // surviving Claude team's actual inbox; the next hook/turn renders
+            // and receipts the body. This does not claim an idle model wake.
+            let teams = crate::ui::factory::daemon::runtime::teams::TeamsManager::new(
+                worker.factory_session.as_deref().ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        "Adopted worker has no original factory session",
+                    )
+                })?,
+            );
+            let view = teams.view_for_config_dir(
+                worker
+                    .metadata
+                    .get("worker_account_dir")
+                    .map(String::as_str),
+            );
+            let inbox = view.as_ref().unwrap_or(&teams);
+            let row = queue
+                .queued_prompt(message_id)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                .ok_or_else(|| {
+                    Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        "queued recovery message disappeared",
+                    )
+                })?;
+            if let Some(token) = queue
+                .claim_recipient_transport_token(message_id, &worker.name)
+                .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+            {
+                let body =
+                    crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
+                        &row,
+                    );
+                if let Err(error) = inbox.write_to_inbox(
+                    &worker.name,
+                    &row.source,
+                    &body,
+                    row.summary.as_deref(),
+                    None,
+                ) {
+                    let _ =
+                        queue.release_recipient_transport_claim(message_id, &worker.name, token);
+                    return Err(Self::error(
+                        ErrorCode::INTERNAL_ERROR,
+                        format!(
+                            "Recovery message #{message_id} remains queued; original Claude inbox write failed: {error}"
+                        ),
+                    ));
+                }
+                queue
+                    .record_deferred_inbox(message_id, 0)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+                queue.record_pending_reason(message_id, cas_store::PendingReason::GatedNotReady,
+                    Some("Original daemon is dead; recovery body waits for the worker's next turn or tool boundary (no idle wake)"))
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
             }
         }
 
@@ -2945,6 +3233,21 @@ impl CasService {
                 })
             })
             .unwrap_or("inspect message_status for the current delivery detail");
+        // The task can move on between preflight and the daemon's first pass.
+        // A withdrawal is a refused send, never a successful queue receipt.
+        if delivery_stage == cas_store::DeliveryStage::Suppressed
+            && send_report.as_ref().is_some_and(|report| {
+                report.pending_reason == Some(cas_store::PendingReason::SupersededStale)
+            })
+            && let Some(task_id) = assignment_solicited_task_id(&message)
+        {
+            return Err(Self::error(
+                ErrorCode::INVALID_REQUEST,
+                format!(
+                    "Assignment refused for {task_id}: {report_detail}. Message #{message_id} was withdrawn before delivery. To bind the intended assignment, pass task_id=<id>."
+                ),
+            ));
+        }
         let supervisor_copy_suffix = supervisor_copy_id
             .map(|id| format!("; supervisor copy #{id}"))
             .unwrap_or_default();
@@ -3297,7 +3600,17 @@ impl CasService {
                 ));
                 continue;
             }
-            let solicited_task = assignment_solicited_task_id(&message.prompt);
+            let solicited_task = if match queue.is_abandonment_recovery(message.id) {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    tracing::warn!(prompt_id = message.id, %error, "could not classify abandonment recovery");
+                    false
+                }
+            } {
+                None
+            } else {
+                assignment_solicited_task_id(&message.prompt)
+            };
             let stale_assignment = match (&solicited_task, task_store.as_ref()) {
                 (Some(task_id), Some(store)) => store.get(task_id).ok().and_then(|task| {
                     assignment_stale_task(
@@ -3628,27 +3941,46 @@ impl CasService {
     ) -> Result<CallToolResult, McpError> {
         use crate::store::open_prompt_queue_store;
 
-        // cas-f9c7: `id` names a message sent to a peer supervisor on another
-        // machine; its receipt lives in the Cassy Cloud peer mailbox.
-        if req.notification_id.is_none()
-            && let Some(peer_message_id) = req.id.clone().filter(|id| !id.trim().is_empty())
-        {
-            return self.peer_message_status(peer_message_id).await;
-        }
-        let notification_id = req.notification_id.ok_or_else(|| {
-            Self::error(
-                ErrorCode::INVALID_PARAMS,
-                "notification_id required for message_status (the prompt queue message ID), \
-                 or id=<peer message id> for a message sent to a peer supervisor",
-            )
-        })?;
-
         let queue = open_prompt_queue_store(&self.inner.cas_root).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to open prompt queue: {error}"),
             )
         })?;
+        let notification_id = match req.notification_id {
+            Some(id) => id,
+            None => {
+                let Some(given) = req.id.clone().filter(|id| !id.trim().is_empty()) else {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "notification_id required for message_status (the prompt queue message ID), \
+                         or id=<peer message id> for a message sent to a peer supervisor",
+                    ));
+                };
+                // cas-f9c7: `id` names a message sent to a peer supervisor on
+                // another machine; its receipt lives in the Cassy Cloud peer
+                // mailbox. cas-6021: a number this queue holds is its own
+                // message, answered here rather than as a peer 404.
+                // cas-6021 review: a local read error is reported as one,
+                // not hidden behind a peer lookup's unrelated failure.
+                let local = match given.trim().parse::<i64>() {
+                    Ok(id) => queue
+                        .message_delivery_report(id)
+                        .map_err(|error| {
+                            Self::error(
+                                ErrorCode::INTERNAL_ERROR,
+                                format!("Failed to query message status: {error}"),
+                            )
+                        })?
+                        .map(|_| id),
+                    Err(_) => None,
+                };
+                match local {
+                    Some(local) => local,
+                    None => return self.peer_message_status(given).await,
+                }
+            }
+        };
 
         // cas-2c5f: stage-based report is additive; legacy status string is
         // preserved on the first line for older clients/scripts.
@@ -3781,8 +4113,28 @@ impl CasService {
                     undelivered_after_secs,
                     handoff,
                 );
+                let factory = crate::config::Config::load(&self.inner.cas_root)
+                    .unwrap_or_default()
+                    .factory();
+                let escalate_after_secs = if r.urgent || r.priority <= 1 {
+                    factory.delivery_stalled_priority_secs
+                } else {
+                    factory.delivery_stalled_normal_secs
+                };
+                let verdict_line = recipient_verdict(&r, now, escalate_after_secs);
+                let wake_target = if r.target == "supervisor" {
+                    crate::store::open_agent_store(&self.inner.cas_root).ok()
+                        .and_then(|store| store.list(None).ok())
+                        .and_then(|agents| agents.into_iter().filter(|agent| agent.role == cas_types::AgentRole::Supervisor
+                            && agent.factory_session == r.factory_session).max_by_key(|agent| agent.registered_at))
+                        .map(|agent| agent.name).unwrap_or_else(|| r.target.clone())
+                } else { r.target.clone() };
+                let wake_cost_line = crate::supervisor_message_wakes::report(&self.inner.cas_root, &wake_target)
+                    .unwrap_or_else(|error| format!("directed_message_wake_cost: unavailable ({error})\n"));
                 Ok(Self::success(format!(
                     "Message {notification_id} status: {}\n\
+                     {verdict_line}\
+                     {wake_cost_line}\
                      stage: {}  pending_reason: {}  wake: {}  wake_attempt: {}  wake_gate_declines: {}  \
                      reaction: {}  confirmation_source: {}\n\
                      {wake_attempt_line}\
@@ -3934,6 +4286,10 @@ fn pending_deadline_narrative(
     if stage == DeliveryStage::Gated
         && pending_reason == Some(cas_store::PendingReason::AwaitingBusyRecipient)
     {
+        if let Some(detail)=pending_detail.filter(|detail|detail.starts_with("directed supervisor message ")
+            || detail.starts_with("quiet acknowledgement or wake=false")) {
+            return format!("supervisor wake policy: still pending — {detail}; readable at the next turn start or tool call\n");
+        }
         return format!(
             "busy recipient: still pending — wake retries stopped while the recipient works; \
              the message surfaces at its next turn start or tool call — {}\n",
@@ -4261,6 +4617,12 @@ mod pending_deadline_tests {
         assert!(line.contains("next turn start or tool call"), "{line}");
         assert!(!line.contains("never be delivered"), "{line}");
         assert!(!line.contains("PAST"), "{line}");
+        for detail in ["directed supervisor message burst debounce", "directed supervisor message held by sender-pair wake cap"] {
+            let policy=pending_deadline_narrative(DeliveryStage::Gated,Some(cas_store::PendingReason::AwaitingBusyRecipient),Some(detail),Some(1200),InboxHandoffState::NotHeld);
+            assert!(policy.contains("supervisor wake policy"),"{policy}");
+            assert!(!policy.contains("busy recipient"),"a policy hold is not evidence the recipient works: {policy}");
+        }
+
     }
 
     #[test]
@@ -4433,6 +4795,35 @@ mod inbox_poll_identity_tests {
         );
         assert!(line.contains("DID nudge"), "{line}");
         assert!(line.contains("#155"), "{line}");
+    }
+
+    /// cas-badb (GH #1302): the sender sees received or pending. A pane
+    /// handoff is still pending; the recipient's own session seeing the
+    /// message is received.
+    #[test]
+    fn message_status_tells_the_sender_received_or_pending_cas_badb() {
+        use cas_store::{PromptQueueStore, SurfacingSource};
+        let temp = tempfile::tempdir().unwrap();
+        let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let id = queue.enqueue_with_session("worker-a", "zen-hound", "please review", "session").unwrap();
+        let verdict = |now| {
+            let report = queue.message_delivery_report(id).unwrap().unwrap();
+            super::recipient_verdict(&report, now, 300)
+        };
+        let now = chrono::Utc::now();
+        let pending = verdict(now);
+        assert!(pending.starts_with("recipient: PENDING for zen-hound"), "{pending}");
+        assert!(pending.contains("told at 300s"), "{pending}");
+        assert!(
+            verdict(now + chrono::Duration::seconds(600)).contains("have been told"),
+            "after the escalation threshold the sender knows the alert went out"
+        );
+        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportDelivered).unwrap();
+        assert!(verdict(now).starts_with("recipient: PENDING"), "a pane handoff is not a read");
+        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::HookSurfaced).unwrap();
+        let received = verdict(now);
+        assert!(received.starts_with("recipient: RECEIVED by zen-hound"), "{received}");
     }
 
     /// cas-ad92: status must tell a body rendered into a turn from one the
@@ -4902,6 +5293,151 @@ mod cas_89e1_post_merge_message_type_tests {
     use rmcp::model::RawContent;
     use std::path::Path;
     use std::process::Command;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cas_f17b_successor_reads_abandoned_content() {
+        use crate::ui::factory::daemon::runtime::queue_and_events::read_row_facts;
+        use cas_store::{HOOK_SURFACE_BUDGET_CHARS, HookDrain, QueueOrigin};
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "new-factory");
+        env.set("CAS_AGENT_NAME", "zealous-tiger");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut old_task = Task::new("cas-0f17".into(), "Old assignment".into());
+        old_task.status = TaskStatus::Closed;
+        tasks.add(&old_task).unwrap();
+        let mut sender = Agent::new("original-sender".into(), "vivid-dolphin".into());
+        sender.role = AgentRole::Supervisor;
+        sender.factory_session = Some("old-factory".into());
+        agents.register(&sender).unwrap();
+        let bodies = [
+            "You are assigned task cas-0f17. Keep the pending branch until review finishes."
+                .to_owned(),
+            "Second decision needs all of this body: ".to_owned() + &"detail ".repeat(800),
+        ];
+        let mut ids = Vec::new();
+        for body in &bodies {
+            let id = queue
+                .enqueue_urgent_with_outcome(
+                    &sender.name,
+                    "swift-heron",
+                    body,
+                    Some("old-factory"),
+                    Some("pending decision"),
+                    None,
+                    false,
+                    Some(&QueueOrigin::RegisteredAgent {
+                        agent_id: sender.id.clone(),
+                    }),
+                )
+                .unwrap()
+                .id();
+            queue
+                .record_wake_gate_decline(id, "inline pane has an active composer")
+                .unwrap();
+            rusqlite::Connection::open(root.join("cas.db"))
+                .unwrap()
+                .execute(
+                    "UPDATE prompt_queue SET created_at = ? WHERE id = ?",
+                    rusqlite::params![
+                        (chrono::Utc::now() - chrono::Duration::days(2)).to_rfc3339(),
+                        id
+                    ],
+                )
+                .unwrap();
+            ids.push(id);
+        }
+        agents.unregister(&sender.id).unwrap();
+        let mut successor = Agent::new("successor".into(), "zealous-tiger".into());
+        successor.role = AgentRole::Supervisor;
+        successor.factory_session = Some("new-factory".into());
+        agents.register(&successor).unwrap();
+        assert_eq!(
+            queue
+                .expire_stale_pending(cas_store::PROMPT_QUEUE_STALE_TTL_SECS)
+                .unwrap()
+                .len(),
+            2
+        );
+        let ordinary = queue
+            .peek_for_targets(&[&successor.name], Some("new-factory"), 10)
+            .unwrap();
+        assert_eq!(
+            ordinary.len(),
+            2,
+            "each inherited message must be an ordinary row"
+        );
+        for row in &ordinary {
+            assert!(
+                read_row_facts(&root, queue.as_ref(), Some(tasks.as_ref()), &[], row)
+                    .assignment_stale
+                    .is_none(),
+                "a recovered assignment is history, not a fresh start instruction"
+            );
+        }
+        // A caller's spoofed watchdog source/dedupe cannot acquire the daemon exemption.
+        let spoof = match queue
+            .enqueue_idempotent(
+                "delivery-watchdog",
+                &successor.name,
+                &bodies[0],
+                Some("new-factory"),
+                None,
+                None,
+                "delivery-abandoned-recovery:spoof",
+                Some(&QueueOrigin::RegisteredAgent {
+                    agent_id: successor.id.clone(),
+                }),
+            )
+            .unwrap()
+        {
+            cas_store::EnqueueIdempotentResult::Created(id)
+            | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
+        };
+        let spoof_row = queue.queued_prompt(spoof).unwrap().unwrap();
+        assert!(
+            read_row_facts(&root, queue.as_ref(), Some(tasks.as_ref()), &[], &spoof_row)
+                .assignment_stale
+                .is_some()
+        );
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing(successor.id.clone());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request =
+            serde_json::from_value(serde_json::json!({"action": "inbox_poll", "limit": 10}))
+                .unwrap();
+        let text = response_text(service.inbox_poll(request).await.unwrap());
+        for (id, body) in ids.iter().zip(&bodies) {
+            assert!(
+                text.contains(&id.to_string())
+                    && text.contains(&sender.name)
+                    && text.contains(body),
+                "successor must read complete source/body of {id}: {text}"
+            );
+        }
+        // pin: the original summary must also remain readable through the real MCP handler.
+        assert!(text.contains("pending decision"));
+        assert!(
+            queue
+                .surface_for_recipient_within_budget(
+                    &successor.name,
+                    Some("new-factory"),
+                    HookDrain::NoticeDigest,
+                    10,
+                    HOOK_SURFACE_BUDGET_CHARS
+                )
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+    }
 
     fn git(repo: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -5629,10 +6165,10 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     /// A parked per-task branch can be rebased and force-pushed after the
-    /// merge request anchor was recorded. The envelope and its human summary
-    /// must describe the published branch head, not that retired anchor.
+    /// merge request anchor was recorded. A message cannot stand in for the
+    /// exact-tip checks at close or advertise an anchor the store never wrote.
     #[tokio::test(flavor = "current_thread")]
-    async fn merge_request_rebase_force_push_uses_live_origin_tip_for_envelope_and_summary_cas4a65() {
+    async fn merge_request_rebase_force_push_requires_repark_before_envelope_cas749f() {
         let _env = TestEnvGuard::temp_home();
         crate::store::known_repos::ensure_host_schema().expect("host repo schema");
         let origin = tempfile::tempdir().expect("bare origin");
@@ -5672,8 +6208,6 @@ mod cas_89e1_post_merge_message_type_tests {
             .expect("updated target file");
         git(repo, &["add", "main-only.txt"]);
         git(repo, &["commit", "-qm", "advance target before rebase"]);
-        let target_tip = crate::git_evidence::resolve_branch_sha(repo, "HEAD")
-            .expect("updated target SHA");
         git(repo, &["push", "-q", "origin", "main"]);
         git(repo, &["checkout", "-q", branch]);
         git(repo, &["rebase", "--onto", "main", &base]);
@@ -5715,29 +6249,17 @@ mod cas_89e1_post_merge_message_type_tests {
         let mut request = message_request(true);
         request.task_id = Some(task.id.clone());
         let response = response_text(service.message_send(request).await.expect("merge request"));
-        assert_queued_receipt(&response);
+        assert!(response.contains("RE-PARK") && response.contains(&live_tip)
+            && response.contains("task action=close id=cas-4a65"), "{response}");
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(old_anchor.as_str()));
         let rows = crate::store::open_prompt_queue_store(&cas_root)
             .expect("prompt queue")
             .poll_all(10)
             .expect("queued messages");
-        let (row, envelope) = rows
-            .iter()
-            .find_map(|row| {
-                let envelope = crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)?;
-                (envelope.task_id == task.id).then_some((row, envelope))
-            })
-            .expect("typed request carries the merge envelope");
-
-        assert_eq!(row.target, "supervisor");
-        assert_eq!(response, format!("queued #{} → supervisor (enqueued)", row.id));
-        assert_eq!(envelope.branch_tip, live_tip);
-        assert_eq!(envelope.anchor_tip.as_deref(), Some(old_anchor.as_str()));
-        assert_eq!(envelope.target_branch_tip, target_tip);
-        let summary_heads = format!("{target_tip}\n  -> {live_tip}");
-        // pin: verify the generated diff summary is bound to the live source SHA.
-        assert!(row.prompt.contains(&summary_heads), "{}", row.prompt);
-        // pin: verify the rebased task's changed file appears in the summary.
-        assert!(row.prompt.contains("A\tdelivery.txt"), "{}", row.prompt);
+        assert!(!rows.iter().any(|row| {
+            crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+                .is_some_and(|envelope| envelope.task_id == task.id)
+        }), "a mergeable envelope cannot be queued ahead of its persisted park");
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5883,6 +6405,9 @@ mod cas_89e1_post_merge_message_type_tests {
         ] {
             let mut request = message_request_to("supervisor");
             request.kind = Some(kind.to_string());
+            if kind == "status" {
+                request.summary = Some("status\nsummary\r\nline\tend".into());
+            }
             let response = response_text(
                 service
                     .message_send(request)
@@ -5895,12 +6420,32 @@ mod cas_89e1_post_merge_message_type_tests {
                 .poll_all(10)
                 .unwrap();
             let row = rows.last().expect("typed worker row");
+            if kind == "status" {
+                assert_eq!(
+                    row.summary.as_deref(),
+                    Some("status summary line end"),
+                    "message summaries remain one line and contain no controls"
+                );
+            }
             assert_eq!(row.target, "supervisor-a");
             assert_eq!(
                 crate::prompt_revalidation::parse_worker_action_envelope(&row.prompt)
                     .map(|envelope| envelope.kind),
                 Some(expected)
             );
+        }
+
+        for (kind,wake,body) in [
+            ("receipt",None,"The delivery was received."),
+            ("answer",Some(false),"A field report that can wait."),
+        ] {
+            let mut request=message_request_to("supervisor");
+            request.kind=Some(kind.into());request.wake=wake;request.message=Some(body.into());
+            service.message_send(request).await.expect("quiet message remains deliverable");
+            let rows=crate::store::open_prompt_queue_store(&cas_root).unwrap().poll_all(10).unwrap();
+            let row=rows.iter().find(|row|row.prompt.contains(body))
+                .expect("quiet body retained");
+            assert!(crate::supervisor_message_wakes::quiet(&row.prompt),"{kind}: {}",row.prompt);
         }
 
         let mut cross_session = message_request_to("supervisor-b");
@@ -5913,6 +6458,37 @@ mod cas_89e1_post_merge_message_type_tests {
             error.message.contains("same-session supervisor"),
             "{error:?}"
         );
+    }
+
+    /// cas-6920: classify each acknowledgement before its labels and other
+    /// messages become part of the queued body.
+    #[tokio::test(flavor = "current_thread")]
+    async fn folded_worker_acknowledgements_remain_inbox_only_cas_6920() {
+        let _env = TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas_root = root.path().join(".cas");
+        std::fs::create_dir_all(&cas_root).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+        let worker = register_gh_1171_fleet(&core, false);
+        let agents = core.open_agent_store().unwrap();
+        let mut supervisor = agents.get("supervisor-a-id").unwrap();
+        supervisor.factory_session = worker.factory_session.clone();
+        agents.update(&supervisor).unwrap();
+        core.set_agent_id_for_testing(worker.id.clone());
+        let service = gh_1171_service(&core);
+        for body in ["ok", "thanks"] {
+            let mut request = message_request_to("supervisor");
+            request.kind = Some("status".into());
+            request.message = Some(body.into());
+            service.message_send(request).await.unwrap();
+        }
+        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1, "acknowledgements still coalesce");
+        let prompt = &rows[0].prompt;
+        assert!(prompt.contains("ok") && prompt.contains("thanks"), "{prompt}");
+        assert!(crate::supervisor_message_wakes::quiet(prompt),
+            "folded acknowledgements must wait for the next turn: {prompt}");
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve
@@ -6058,6 +6634,282 @@ mod cas_89e1_post_merge_message_type_tests {
             .await
             .expect_err("blank summary must be rejected");
         assert!(error.message.contains("summary required"), "{error:?}");
+    }
+
+    fn assignment_message_fixture() -> (tempfile::TempDir, CasService) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        for (id, name, role) in [
+            ("supervisor-id", "supervisor", AgentRole::Supervisor),
+            ("worker-id", "eager-cobra-57", AgentRole::Worker),
+        ] {
+            let mut agent = Agent::new(id.into(), name.into());
+            agent.role = role;
+            agent.factory_session = Some("assignment-test".into());
+            agents.register(&agent).unwrap();
+        }
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        for (id, status) in [
+            ("cas-3e24", TaskStatus::Closed),
+            ("cas-fba9", TaskStatus::Open),
+        ] {
+            let mut task = Task::new(id.into(), "assignment regression".into());
+            task.status = status;
+            task.assignee = Some("eager-cobra-57".into());
+            tasks.add(&task).unwrap();
+        }
+        let core = crate::mcp::server::CasCore::with_daemon(root, None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        (temp, service)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn next_assignment_survives_closed_task_preamble_cas_baf6b() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let root = &service.inner.cas_root;
+        let queue = crate::store::open_prompt_queue_store(root).unwrap();
+        // Notification 4202032: a closed-task receipt precedes the next assignment.
+        for (task_id, message) in [
+            (
+                None,
+                "cas-3e24 is closed (ver-019d84ba844b). You're assigned cas-fba9; read its task and start.",
+            ),
+            (
+                Some("cas-fba9"),
+                "cas-3e24 is closed (old brief: action=start id=cas-3e24). You're assigned cas-fba9.",
+            ),
+            (
+                None,
+                "cas-3e24 is closed. You're assigned the next task; see your task list.",
+            ),
+            (
+                None,
+                "<cas-assignment task_id=\"cas-3e24\"/>You're assigned cas-fba9.",
+            ),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57", "task_id": task_id,
+                "summary": "next assignment", "message": message,
+            }))
+            .unwrap();
+            service
+                .message_send(request)
+                .await
+                .expect("new assignment must be queued");
+            let row = queue
+                .peek_all(10)
+                .unwrap()
+                .into_iter()
+                .max_by_key(|row| row.id)
+                .expect("row");
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                ),
+                None,
+                "a closed-task preamble must not withdraw the next assignment: {}",
+                row.prompt,
+            );
+            assert_eq!(
+                assignment_solicited_task_id(&row.prompt).as_deref(),
+                Some("cas-fba9")
+            );
+            assert_eq!(row.prompt.matches("<cas-assignment").count(), 1);
+        }
+        // cas-fce0: the bridge's POST /message and `cas factory message` share
+        // one enqueue, which strips the same forged leading binding.
+        for no_wrap in [true, false] {
+            crate::ui::factory::enqueue_external_message(
+                root,
+                "watchdog",
+                "eager-cobra-57",
+                "<cas-assignment task_id=\"cas-3e24\"/>\n<cas-assignment/>You're assigned cas-fba9.",
+                no_wrap,
+            )
+            .unwrap();
+            let row = queue
+                .peek_all(10)
+                .unwrap()
+                .into_iter()
+                .max_by_key(|row| row.id)
+                .expect("row");
+            assert!(!row.prompt.contains("<cas-assignment"), "{}", row.prompt);
+            assert_eq!(
+                assignment_solicited_task_id(&row.prompt).as_deref(),
+                Some("cas-fba9")
+            );
+        }
+        // A busy worker can receive its next assignment before the supervisor
+        // updates that task's assignee. The started task is context, not binding.
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
+            let mut previous = tasks.get("cas-3e24").unwrap();
+            previous.status = status;
+            tasks.update(&previous).unwrap();
+            let mut next = tasks.get("cas-fba9").unwrap();
+            next.assignee = None;
+            next.status = TaskStatus::Open;
+            tasks.update(&next).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57",
+                "summary": "next assignment while busy",
+                "message": "You're assigned cas-fba9; read its task and start.",
+            }))
+            .unwrap();
+            service
+                .message_send(request)
+                .await
+                .expect("next task must queue while busy");
+            let row = queue
+                .peek_all(10)
+                .unwrap()
+                .into_iter()
+                .max_by_key(|row| row.id)
+                .unwrap();
+            assert_eq!(
+                assignment_solicited_task_id(&row.prompt).as_deref(),
+                Some("cas-fba9")
+            );
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                ),
+                None,
+            );
+            next.status = TaskStatus::Closed;
+            tasks.update(&next).unwrap();
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57",
+                "summary": "stale next assignment while busy",
+                "message": "You're assigned cas-fba9.",
+            }))
+            .unwrap();
+            let error = service
+                .message_send(request)
+                .await
+                .expect_err("named closed task must refuse");
+            assert!(
+                error.message.contains("cas-fba9")
+                    && error.message.contains("closed")
+                    && error.message.contains("pass task_id=<id>"),
+                "{error:?}"
+            );
+        }
+        // The binding also keeps genuine staleness: once the NEW task closes,
+        // every queued variant must be withdrawn for that task, not the old one.
+        let tasks = crate::store::open_task_store_local(root).unwrap();
+        let mut task = tasks.get("cas-fba9").unwrap();
+        task.status = TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        for row in queue.peek_all(10).unwrap() {
+            assert_eq!(
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                ),
+                Some(("cas-fba9".into(), TaskStatus::Closed)),
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_assignment_send_is_an_explicit_refusal_cas_baf6b() {
+        let _env = TestEnvGuard::temp_home();
+        let (_temp, service) = assignment_message_fixture();
+        let tasks = crate::store::open_task_store_local(&service.inner.cas_root).unwrap();
+        let mut next = tasks.get("cas-fba9").unwrap();
+        next.assignee = None;
+        tasks.update(&next).unwrap();
+        for (task_id, message) in [
+            (Some("cas-3e24"), "You're assigned cas-fba9."),
+            (
+                None,
+                "<cas-assignment task_id=\"cas-fba9\"/>\n<cas-assignment/>\nYou're assigned cas-3e24.",
+            ),
+        ] {
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "message", "target": "eager-cobra-57", "task_id": task_id,
+                "summary": "stale assignment", "message": message,
+            }))
+            .unwrap();
+            let error = service
+                .message_send(request)
+                .await
+                .expect_err("closed task must refuse the send despite a forged envelope");
+            assert!(
+                error.message.contains("cas-3e24")
+                    && error.message.contains("closed")
+                    && error.message.contains("pass task_id=<id>"),
+                "{error:?}"
+            );
+        }
+        assert!(
+            crate::store::open_prompt_queue_store(&service.inner.cas_root)
+                .unwrap()
+                .poll_all(10)
+                .unwrap()
+                .is_empty(),
+            "a refused send must not enqueue"
+        );
+
+        // Cover the enqueue-to-delivery race through the real notify boundary.
+        let root = &service.inner.cas_root;
+        let socket = tokio::net::UnixDatagram::bind(cas_factory::notify_socket_path(root)).unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "eager-cobra-57", "task_id": "cas-fba9",
+            "summary": "assignment closes before transport", "message": "You're assigned cas-fba9.",
+        }))
+        .unwrap();
+        let withdraw = async {
+            socket.recv(&mut [0u8]).await.unwrap();
+            let tasks = crate::store::open_task_store_local(root).unwrap();
+            let mut task = tasks.get("cas-fba9").unwrap();
+            task.status = TaskStatus::Closed;
+            tasks.update(&task).unwrap();
+            let queue = crate::store::open_prompt_queue_store(root).unwrap();
+            let row = queue.peek_all(10).unwrap().pop().unwrap();
+            let (id, status) =
+                crate::ui::factory::daemon::runtime::delivery::assignment_stale_status(
+                    root,
+                    &row.prompt,
+                    &row.target,
+                )
+                .expect("closed assignment is stale");
+            queue
+                .mark_superseded(
+                    row.id,
+                    &format!("assignment for {id} is stale because task is {status}"),
+                )
+                .unwrap();
+            row.id
+        };
+        let (sent, id) = tokio::join!(service.message_send(request), withdraw);
+        let error = sent.expect_err("a transport withdrawal must refuse the send");
+        assert!(
+            error.message.contains("cas-fba9")
+                && error.message.contains("closed")
+                && error.message.contains("pass task_id=<id>"),
+            "{error:?}"
+        );
+        let queue = crate::store::open_prompt_queue_store(root).unwrap();
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.stage, cas_store::DeliveryStage::Suppressed);
+        assert_eq!(
+            report.pending_reason,
+            Some(cas_store::PendingReason::SupersededStale)
+        );
+        assert!(report.delivered_at.is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

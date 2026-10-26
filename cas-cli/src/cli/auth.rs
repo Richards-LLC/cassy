@@ -517,7 +517,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
             } else {
                 let mut err = io::stderr();
                 let theme = ActiveTheme::default();
-                let mut fmt = Formatter::stdout(&mut err, theme);
+                let mut fmt = Formatter::stderr(&mut err, theme);
                 fmt.newline()?;
                 fmt.write_raw("  ")?;
                 fmt.error("Failed to connect to Cassy Cloud")?;
@@ -733,7 +733,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                         println!(r#"{{"status":"error","message":"Connection lost"}}"#);
                     } else {
                         let mut err = io::stderr();
-                        let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                        let mut fmt = Formatter::stderr(&mut err, theme.clone());
                         fmt.newline()?;
                         fmt.write_raw("  ")?;
                         fmt.error(&format!("Connection lost: {detail}"))?;
@@ -750,7 +750,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                     println!(r#"{{"status":"denied","message":"Authorization denied"}}"#);
                 } else {
                     let mut err = io::stderr();
-                    let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                    let mut fmt = Formatter::stderr(&mut err, theme.clone());
                     fmt.newline()?;
                     fmt.write_raw("  ")?;
                     fmt.error("Authorization denied")?;
@@ -765,7 +765,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                     println!(r#"{{"status":"expired","message":"Code expired"}}"#);
                 } else {
                     let mut err = io::stderr();
-                    let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                    let mut fmt = Formatter::stderr(&mut err, theme.clone());
                     fmt.newline()?;
                     fmt.write_raw("  ")?;
                     fmt.error("Code expired. Please try again.")?;
@@ -780,7 +780,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
                     println!(r#"{{"status":"error","code":{http_status}}}"#);
                 } else {
                     let mut err = io::stderr();
-                    let mut fmt = Formatter::stdout(&mut err, theme.clone());
+                    let mut fmt = Formatter::stderr(&mut err, theme.clone());
                     fmt.newline()?;
                     fmt.write_raw("  ")?;
                     fmt.error(&format!("Server error ({http_status})"))?;
@@ -800,7 +800,7 @@ fn execute_device_flow_login(args: &LoginArgs, cli: &Cli) -> anyhow::Result<()> 
         println!(r#"{{"status":"timeout"}}"#);
     } else {
         let mut err = io::stderr();
-        let mut fmt = Formatter::stdout(&mut err, theme);
+        let mut fmt = Formatter::stderr(&mut err, theme);
         fmt.newline()?;
         fmt.write_raw("  ")?;
         fmt.error("Authorization timed out. Please try again.")?;

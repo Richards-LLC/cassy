@@ -251,21 +251,30 @@ pub(super) fn cause_and_remedy(detail: &str, output: &str) -> (String, Option<St
 /// A cloud phase's own summary line says what went wrong and what to run;
 /// its detail ("3 pushed; 2 queued") only counts rows.
 fn cloud_cause(output: &str) -> Option<(String, Option<String>)> {
+    let separators = [
+        format!(" {} ", Icons::separator_dot(true)),
+        format!(" {} ", Icons::separator_dot(false)),
+    ];
     let line = output.lines().find_map(|line| {
         let line = line
             .trim()
             .trim_start_matches("[WARN]")
             .trim_start_matches(Icons::WARNING)
             .trim_start();
-        line.strip_prefix("Push incomplete · ")
-            .map(|rest| ("push incomplete", rest))
-            .or_else(|| line.strip_prefix("Pull incomplete · ").map(|rest| ("pull incomplete", rest)))
+        [("Push incomplete", "push incomplete"), ("Pull incomplete", "pull incomplete")]
+            .into_iter()
+            .find_map(|(prefix, what)| {
+                let rest = line.strip_prefix(prefix)?;
+                separators.iter().find_map(|separator| {
+                    rest.strip_prefix(separator.as_str()).map(|rest| (what, rest, separator))
+                })
+            })
     })?;
-    let (what, rest) = line;
+    let (what, rest, separator) = line;
     let mut generic = None;
     let mut specific = None;
     let mut parts: Vec<String> = Vec::new();
-    for part in rest.split(" · ") {
+    for part in rest.split(separator.as_str()) {
         if let Some(command) = part.strip_prefix("run ") {
             generic = Some(command.trim().to_owned());
             continue;
@@ -393,11 +402,17 @@ pub(super) fn print(fmt: &mut Formatter<'_>, sweep: &SweepFindings) -> io::Resul
         }
         fmt.write_muted(&format!("{:<PHASE_CELLS$}", finding.phase))?;
         fmt.write_raw(" ")?;
-        let (lines, cut) = wrap(&finding.cause, width.saturating_sub(cause_at), unicode);
+        let (lines, cut, continuation_at) = wrap_finding_cause(
+            &finding.cause,
+            width,
+            cause_at,
+            lead + 2,
+            unicode,
+        );
         shortened |= cut;
         for (index, line) in lines.iter().enumerate() {
             if index > 0 {
-                fmt.write_raw(&" ".repeat(cause_at))?;
+                fmt.write_raw(&" ".repeat(continuation_at))?;
             }
             fmt.write_text(line)?;
             fmt.newline()?;
@@ -518,7 +533,7 @@ fn fit_path(text: &str, cells: usize, unicode: bool) -> (String, bool) {
 }
 
 /// A path under the home directory, written from `~`.
-fn home_relative(path: &Path) -> String {
+pub(crate) fn home_relative(path: &Path) -> String {
     match dirs::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_owned)) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
@@ -554,6 +569,23 @@ fn words(text: &str) -> Vec<String> {
         depth = (depth + word.matches('(').count()).saturating_sub(word.matches(')').count());
     }
     words
+}
+
+fn wrap_finding_cause(
+    cause: &str,
+    width: usize,
+    cause_at: usize,
+    continuation_at: usize,
+    unicode: bool,
+) -> (Vec<String>, bool, usize) {
+    const INACTIVE_SERVE: &str = "Tailscale Serve inactive: ";
+    let Some(reason) = cause.strip_prefix(INACTIVE_SERVE) else {
+        let (lines, shortened) = wrap(cause, width.saturating_sub(cause_at), unicode);
+        return (lines, shortened, cause_at);
+    };
+    let (mut lines, shortened) = wrap(reason, width.saturating_sub(continuation_at), unicode);
+    lines.insert(0, "Tailscale Serve inactive:".to_owned());
+    (lines, shortened, continuation_at)
 }
 
 /// Wrap prose at word boundaries; a single word wider than the column is

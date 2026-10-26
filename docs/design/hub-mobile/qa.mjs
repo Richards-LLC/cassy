@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { launchBrowser } from './browser-tools.mjs';
-const [url='http://127.0.0.1:8418',out='/home/pippenz/.cas/artifacts/cas-cc1b/qa']=process.argv.slice(2);
+const [url='http://127.0.0.1:8418',out='artifacts/cas-cc1b/qa']=process.argv.slice(2);
 await mkdir(out,{recursive:true});
 const build=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
 const digest=createHash('sha256').update(await readFile(new URL('index.html',import.meta.url))).digest('hex');

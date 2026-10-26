@@ -309,6 +309,52 @@ fn default_timeout_seconds() -> u64 {
     120
 }
 
+fn is_viktor_server_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(VIKTOR_SERVER)
+}
+
+fn canonical_viktor_server_name(name: &str) -> String {
+    if is_viktor_server_name(name) {
+        VIKTOR_SERVER.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+fn normalize_viktor_map_entries<T>(entries: &mut HashMap<String, T>) -> bool {
+    let mut aliases: Vec<String> = entries
+        .keys()
+        .filter(|name| is_viktor_server_name(name) && name.as_str() != VIKTOR_SERVER)
+        .cloned()
+        .collect();
+    if aliases.is_empty() {
+        return false;
+    }
+
+    aliases.sort();
+    if !entries.contains_key(VIKTOR_SERVER)
+        && let Some(alias) = aliases.first()
+        && let Some(value) = entries.remove(alias)
+    {
+        entries.insert(VIKTOR_SERVER.to_string(), value);
+    }
+    for alias in aliases {
+        entries.remove(&alias);
+    }
+    true
+}
+
+fn normalize_viktor_route_names(routes: &mut [ExternalToolConfig]) -> bool {
+    let mut changed = false;
+    for route in routes {
+        if is_viktor_server_name(&route.server) && route.server != VIKTOR_SERVER {
+            route.server = VIKTOR_SERVER.to_string();
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Configuration for a single upstream MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "transport", rename_all = "lowercase")]
@@ -476,12 +522,27 @@ impl Config {
 
     /// Add or replace a server configuration.
     pub fn add_server(&mut self, name: String, config: ServerConfig) {
+        self.normalize_viktor_server_names();
+        let name = canonical_viktor_server_name(&name);
         self.servers.insert(name, config);
     }
 
     /// Remove a server configuration. Returns true if it existed.
     pub fn remove_server(&mut self, name: &str) -> bool {
-        self.servers.remove(name).is_some()
+        self.normalize_viktor_server_names();
+        self.servers
+            .remove(&canonical_viktor_server_name(name))
+            .is_some()
+    }
+
+    /// Fold persisted case variants of the managed Viktor server into its
+    /// canonical lowercase name, including per-server policy and routes.
+    pub fn normalize_viktor_server_names(&mut self) -> bool {
+        let mut changed = normalize_viktor_map_entries(&mut self.servers);
+        changed |= normalize_viktor_map_entries(&mut self.worker_access);
+        changed |= normalize_viktor_route_names(&mut self.allowlist);
+        changed |= normalize_viktor_route_names(&mut self.worker_read_routes);
+        changed
     }
 
     /// An alias must inherit worker restrictions, not provide a second spelling
@@ -532,7 +593,7 @@ impl Config {
     /// policy because [`Self::load_merged`] replaces (rather than unions) the
     /// user allowlist when `.cas/proxy.toml` exists.
     pub fn ensure_viktor_managed_default(&mut self) -> bool {
-        let mut changed = false;
+        let mut changed = self.normalize_viktor_server_names();
         if !self.servers.contains_key(VIKTOR_SERVER) {
             self.servers.insert(
                 VIKTOR_SERVER.to_string(),
@@ -565,6 +626,37 @@ impl Config {
             changed = true;
         }
         changed
+    }
+
+    /// Remove every user-scoped Viktor server and route when the operator opts out.
+    pub fn disable_viktor_managed_default(&mut self) -> bool {
+        let mut changed = self.normalize_viktor_server_names();
+        changed |= self.servers.remove(VIKTOR_SERVER).is_some();
+        changed |= self.worker_access.remove(VIKTOR_SERVER).is_some();
+
+        let route_count = self.allowlist.len();
+        self.allowlist.retain(|route| route.server != VIKTOR_SERVER);
+        changed |= self.allowlist.len() != route_count;
+
+        let read_route_count = self.worker_read_routes.len();
+        self.worker_read_routes
+            .retain(|route| route.server != VIKTOR_SERVER);
+        changed |= self.worker_read_routes.len() != read_route_count;
+        changed
+    }
+
+    /// Reconcile the machine-managed Viktor entry with the persisted opt-out.
+    pub fn reconcile_viktor_managed_default(path: &Path, enabled: bool) -> Result<bool> {
+        let mut config = Self::load_from(path)?;
+        let changed = if enabled {
+            config.ensure_viktor_managed_default()
+        } else {
+            config.disable_viktor_managed_default()
+        };
+        if changed {
+            config.save_to(path)?;
+        }
+        Ok(changed)
     }
 
     /// Install (or correct) the Violet hub registration, referencing both
@@ -767,12 +859,7 @@ impl Config {
     /// Refresh the user-scoped managed Viktor default without copying a
     /// credential into configuration.
     pub fn refresh_viktor_managed_default(path: &Path) -> Result<bool> {
-        let mut config = Self::load_from(path)?;
-        let changed = config.ensure_viktor_managed_default();
-        if changed {
-            config.save_to(path)?;
-        }
-        Ok(changed)
+        Self::reconcile_viktor_managed_default(path, true)
     }
 }
 

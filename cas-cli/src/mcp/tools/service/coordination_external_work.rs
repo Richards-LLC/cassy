@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use super::{CasService, CoordinationRequest, McpError};
 use crate::coordination::external_work::{
     ExternalWorkCommand, ExternalWorkService, HttpCloudCoordinationPort, OperationContext,
-    RemoteError, SqliteRequestJournal, VioletThreadResolver, decode_violet_result,
+    RemoteError, SqliteRequestJournal, VioletThreadResolver,
 };
 
 #[cfg(feature = "mcp-proxy")]
@@ -46,22 +46,7 @@ impl VioletThreadResolver for ProxyVioletThreadResolver {
             )
             .await
         });
-        match result {
-            Ok(Ok(value)) => decode_violet_result(value),
-            Ok(Err(error)) => {
-                let detail = cmcp_core::describe_upstream_call_error(&error);
-                let message = format!("Violet could not resolve the Slack permalink: {detail}");
-                // cas-5fe0/cas-8ccd (GH #1292): a dropped upstream that the
-                // proxy is reconnecting is worth a bounded retry; the proxy
-                // classifies it structurally, not by this text.
-                Err(if cmcp_core::upstream_call_is_reconnectable(&error) {
-                    RemoteError::reconnecting(message)
-                } else {
-                    RemoteError::unavailable(message)
-                })
-            }
-            Err(_) => Err(RemoteError::timeout("Violet thread resolution timed out")),
-        }
+        crate::coordination::external_work::violet_proxy_outcome(result)
     }
 }
 

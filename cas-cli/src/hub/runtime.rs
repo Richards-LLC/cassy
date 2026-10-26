@@ -317,7 +317,10 @@ fn process_is_alive(pid: u32) -> bool {
     }
 }
 
-fn process_command(pid: u32) -> Option<String> {
+/// The command line a PID currently runs, on Linux and macOS. `cas kill
+/// --force-stale` shows it so the operator can tell the factory daemon from
+/// another program (cas-cb0b).
+pub(crate) fn process_command(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
         let bytes = fs::read(format!("/proc/{pid}/cmdline")).ok()?;

@@ -35,7 +35,8 @@ use super::close_ops::resolve_branch_sha;
 /// Without a receipt, for a factory worker: the `factory/<assignee>` tip while
 /// it still carries unmerged work; once that tip is contained in the target,
 /// the anchor the park recorded (the tip may since have moved on to the
-/// worker's next task). Otherwise the repository HEAD.
+/// worker's next task). A deleted lane still uses its durable anchor before
+/// falling back to the repository HEAD.
 pub(crate) fn delivered_head(
     task: &Task,
     repo: &Path,
@@ -73,7 +74,8 @@ pub(crate) fn delivered_head(
             .and_then(rev)
             .or(Some(tip));
     }
-    rev("HEAD")
+    task.deliverables.factory_branch_anchor.as_deref().and_then(rev)
+        .or_else(|| rev("HEAD"))
 }
 
 /// Which evidence the shared user-facing reasons demand. `terminal_render`
@@ -155,7 +157,7 @@ pub(crate) fn qa_evidence_close_gate(
     target_branch: &str,
     commit_receipt: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None)
+    qa_evidence_close_gate_for_paths(cas_root, task, repo, target_branch, commit_receipt, None, None)
 }
 
 fn task_qa_artifacts_dir(cas_root: &Path, base: &Path, task: &Task) -> PathBuf {
@@ -227,6 +229,151 @@ fn live_target_ref(repo: &Path, target_branch: &str) -> String {
     }
 }
 
+/// A landed rewrite may reuse the passed round's own cited bundle only when
+/// its complete delivery diff is identical. Ordinary PASS never replaces the
+/// implementer's evidence, and a citation alone grants no approval.
+pub(super) fn approved_receipt_bundle(
+    cas_root: &Path,
+    task: &Task,
+    repo: &Path,
+    target: &str,
+    receipt: Option<&str>,
+) -> Option<(cas_types::QaPass, PathBuf, String)> {
+    use crate::bounded_process::{Deadline, run_command};
+    use crate::git_evidence::resolve_ref_commit_sha;
+    use std::time::Duration;
+
+    let deadline = Deadline::after(Duration::from_secs(5));
+    let git = |args: &[&str]| {
+        run_command(
+            Command::new("git").current_dir(repo).args(args),
+            deadline,
+            Duration::from_secs(1),
+        )
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| output.stdout)
+    };
+    let receipt = resolve_ref_commit_sha(repo, receipt?)?;
+    let target =
+        resolve_ref_commit_sha(repo, &super::qa_dispatch::freshest_target_ref(repo, target))?;
+    git(&["merge-base", "--is-ancestor", &receipt, &target])?;
+    let start = task.deliverables.factory_branch_start.as_ref()?;
+    if task.deliverables.work_target.as_ref() != Some(&start.work_target) {
+        return None;
+    }
+    let base = resolve_ref_commit_sha(repo, &start.base_sha)?;
+    let config = crate::config::Config::load(cas_root).ok()?;
+    let paths = crate::config::resolved_factory_artifact_paths(
+        cas_root,
+        config.factory().artifacts_root.as_deref(),
+    );
+    let passes = cas_store::satisfying_qa_passes(cas_root, &task.id).ok()?;
+    let diff = |from: &str, to: &str| {
+        git(&[
+            "diff",
+            "--binary",
+            "--full-index",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-relative",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            from,
+            to,
+            "--",
+        ])
+    };
+    passes.into_iter().find_map(|pass| {
+        if pass.state != cas_types::QaPassState::Passed || pass.branch != start.branch {
+            return None;
+        }
+        let reviewed = resolve_ref_commit_sha(repo, &pass.bound_head)?;
+        if task.deliverables.factory_branch_anchor.as_deref().is_some_and(|anchor| {
+            resolve_ref_commit_sha(repo, anchor)
+                .is_none_or(|anchor| anchor != reviewed && anchor != receipt)
+        }) {
+            return None;
+        }
+        if reviewed == receipt
+            || git(&["merge-base", "--is-ancestor", &reviewed, &receipt]).is_some()
+        {
+            return None;
+        }
+        git(&["merge-base", "--is-ancestor", &base, &reviewed])?;
+        let history = String::from_utf8(git(&[
+            "rev-list",
+            "--parents",
+            &format!("{base}..{reviewed}"),
+        ])?)
+        .ok()?;
+        let count = history.lines().count();
+        if count == 0
+            || count > 200
+            || history
+                .lines()
+                .any(|line| line.split_whitespace().count() != 2)
+        {
+            return None;
+        }
+        let reviewed_diff = diff(&base, &reviewed)?;
+        if reviewed_diff.is_empty() {
+            return None;
+        }
+        let ledger = Path::new(pass.ledger_path.as_deref()?);
+        if !ledger.is_file() || std::fs::metadata(ledger).ok()?.len() == 0 {
+            return None;
+        }
+        let bundle =
+            crate::qa_pass::validate_round_bundle(ledger, &pass, cas_types::QaVerdict::Approved)
+                .ok()?
+                .canonicalize()
+                .ok()?;
+        if !paths.task_dirs(&task.id).iter().any(|dir| {
+            crate::config::canonical_factory_task_artifact_dir(&paths.base, dir)
+                .is_some_and(|root| bundle.starts_with(&root))
+        }) {
+            return None;
+        }
+        let cited = task
+            .notes
+            .lines()
+            .filter(|line| line.contains("PLATFORM_PROOF"))
+            .filter_map(|line| line.split_once(crate::qa_evidence::BUNDLE_CITATION))
+            .filter_map(|(_, rest)| rest.split_whitespace().next())
+            .any(|raw| {
+                let path = raw.trim_matches(|ch: char| "(),[]{}<>\"'`;*.".contains(ch));
+                crate::qa_evidence::expand_home(path)
+                    .canonicalize()
+                    .ok()
+                    .as_ref()
+                    == Some(&bundle)
+            });
+        if !cited {
+            return None;
+        }
+        // Match the aggregate, never just the last cherry-pick. Trying the
+        // bounded parent chain also permits a squash of those same commits.
+        let parents = String::from_utf8(git(&[
+            "rev-list",
+            "--first-parent",
+            &format!("--max-count={}", count + 1),
+            &receipt,
+        ])?)
+        .ok()?;
+        let receipt_base = parents
+            .lines()
+            .skip(1)
+            .find(|candidate| {
+                diff(candidate, &receipt).is_some_and(|patch| patch == reviewed_diff)
+            })?
+            .to_string();
+        Some((pass, bundle, receipt_base))
+    })
+}
+
 /// [`qa_evidence_close_gate`] judged on `attributed_paths`: the paths this
 /// task's own delivery commits changed, as selected by the close path's task
 /// attribution (cas-bde8, GH #978).
@@ -246,6 +393,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     target_branch: &str,
     commit_receipt: Option<&str>,
     attributed_paths: Option<&[String]>,
+    recorded_base: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let Ok(config) = crate::config::Config::load(cas_root) else {
         return Ok(Vec::new());
@@ -266,17 +414,26 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         }
         return Ok(Vec::new());
     };
-    let range = (!target_branch.is_empty())
-        .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch)))
-        .flatten();
+    let carried_bundle = approved_receipt_bundle(cas_root, task, repo, target_branch, commit_receipt);
+    let range = carried_bundle.as_ref().map(|(_, _, base)| (base.clone(), head.clone())).or_else(|| (!target_branch.is_empty())
+        .then(|| delivery_range(repo, &head, &live_target_ref(repo, target_branch), recorded_base))
+        .flatten());
     // An empty attributed set is authoritative: a merge-only or formatting-
     // only task delivered no reviewable UI, even if the branch's merge diff
     // contains UI files from the other parent (GH #1037).
-    let changed = match attributed_paths {
-        Some(paths) => Some(paths.to_vec()),
-        None => range
+    let changed = if carried_bundle.is_some() {
+        // Exact aggregate equivalence supplies the delivery boundary even
+        // when legacy attribution can recover only the final cherry-pick.
+        range
             .as_ref()
-            .and_then(|(from, to)| range_paths(repo, from, to)),
+            .and_then(|(from, to)| range_paths(repo, from, to))
+    } else {
+        match attributed_paths {
+            Some(paths) => Some(paths.to_vec()),
+            None => range
+                .as_ref()
+                .and_then(|(from, to)| range_paths(repo, from, to)),
+        }
     };
     let journeys = changed
         .as_deref()
@@ -303,8 +460,10 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         delivered_head: &head,
         notes: &notes,
         deployed_origins: &qa.deployed_origins,
+        rebind_scope: changed.as_deref().map(|files| (&qa, files)),
     };
     let tier = evidence_tier(&reasons, terminal_render);
+    let carried_bundle = carried_bundle.filter(|_| tier == EvidenceTier::Bundle);
     let batch_receipt = if batch_mode || deferred {
         crate::qa_batch::satisfying_receipt(cas_root, task, repo, target_branch, &head)
             .map_err(|e| format!("QA EVIDENCE REJECTED: cannot read batch receipts: {e}"))?
@@ -319,10 +478,18 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     }
     // Only proven unmerged code may defer. Unknown target/ancestry retains the normal gate.
     let batch_defer = batch_mode && integrated == Some(false) && !matches!(tier, EvidenceTier::None);
+    // Optional citations alone do not upgrade None/Ledger proof requirements.
+    // A declared comparison still applies when batch approval replaces a bundle.
+    let pair_coverage = if tier != EvidenceTier::Bundle || batch_receipt.is_some() || batch_defer || covering_pass.is_some() || carried_bundle.is_some() {
+        crate::qa_evidence::validate_cited_pair_coverage(&ctx)
+    } else {
+        Ok(false)
+    };
     // A supervisor waiver covers implementer evidence at this exact delivered
     // commit, including bundles (GH #1199). Independent QA PASS and ancestor
     // waivers do not do so; skip/focus markers still run below.
-    let waiver = if !matches!(tier, EvidenceTier::None) {
+    // None-tier evidence needs a waiver only when declared coverage failed.
+    let waiver = if tier != EvidenceTier::None || pair_coverage.is_err() {
         cas_store::satisfying_qa_passes(cas_root, &task.id)
             .map_err(|err| format!("QA EVIDENCE REJECTED: cannot read QA waivers: {err}"))?
             .into_iter()
@@ -330,9 +497,17 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
     } else {
         None
     };
+    // Batch deferral/approval can replace full proof, but cannot silently drop
+    // cells from a declared comparison. Only the authenticated exact-tip waiver
+    // above (or the close handler's recorded supervisor override) waives it.
+    if waiver.is_none() {
+        pair_coverage.map_err(|refusal| {
+            format!("QA EVIDENCE REJECTED: {}. Next: {}", refusal.problem, refusal.command)
+        })?;
+    }
     let mut pass = run_close_gate_with_write_dir(
         &ctx,
-        if waiver.is_some() || batch_receipt.is_some() || batch_defer || covering_pass.is_some() {
+        if waiver.is_some() || batch_receipt.is_some() || batch_defer || covering_pass.is_some() || carried_bundle.is_some() {
             EvidenceTier::None
         } else {
             tier
@@ -341,6 +516,12 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         &markers,
         &paths.task_dirs(&task.id)[0],
     )?;
+    if let Some((round, bundle, _)) = carried_bundle {
+        pass.notes.push(format!(
+            "QA evidence bundle accepted for identical landed delivery: pass={} reviewed={} receipt={} bundle={}",
+            round.id, round.bound_head, head, bundle.display()
+        ));
+    }
     if let Some(qa_pass) = covering_pass {
         pass.notes.push(format!("QA batch debt satisfied by passed independent QA: pass={} head={}", qa_pass.id, qa_pass.bound_head));
     }
@@ -355,7 +536,11 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
             receipt.task_heads.get(&task.id).map(String::as_str).unwrap_or("")));
     }
     if let Some(waiver) = waiver {
-        let evidence = if matches!(tier, EvidenceTier::Bundle) { "bundle" } else { "ledger" };
+        let evidence = match tier {
+            EvidenceTier::Bundle => "bundle",
+            EvidenceTier::Ledger { .. } => "ledger",
+            EvidenceTier::None => "pair coverage",
+        };
         pass.notes.push(format!(
             "QA evidence {evidence} waived: head={} waiver={} supervisor={} reason={}",
             head,
@@ -536,7 +721,7 @@ mod tests {
             repo: temp.path(),
             delivered_head: "",
             notes: &task.notes,
-            deployed_origins: &[],
+            deployed_origins: &[], rebind_scope: None,
         };
         let error = run_close_gate_with_write_dir(&ctx, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[], &scoped).unwrap_err();
         let (problem, next) = error.split_once("Next: ").unwrap();
@@ -577,6 +762,13 @@ mod tests {
         let refusal = qa_evidence_close_gate(&cas_root, &task, &repo, "main", None)
             .expect_err("the live tip carries a web surface");
         assert!(refusal.contains("app.css"), "{refusal}");
+
+        // A deleted lane must not replace its durable delivery with the
+        // closing checkout's unrelated HEAD (cas-420af).
+        task.deliverables.factory_branch_anchor = Some(rust_only.clone());
+        git(&repo, &["switch", "-q", "main"]);
+        git(&repo, &["branch", "-D", "factory/worker"]);
+        assert_eq!(delivered_head(&task, &repo, "main", None), Some(rust_only));
     }
 
     fn merged_receipt_fixture_gh1181(first: &str, later: Option<&str>) -> (tempfile::TempDir, String) {
@@ -610,7 +802,7 @@ mod tests {
         task.assignee = Some("worker".into());
         qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&receipt))
             .expect("the earlier backend merge must not own the later UI merge");
-        let (from, to) = delivery_range(&repo, &receipt, "main").unwrap();
+        let (from, to) = delivery_range(&repo, &receipt, "main", None).unwrap();
         assert_eq!(to, receipt);
         assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
     }
@@ -638,6 +830,7 @@ mod tests {
         commit_file(&repo, "README.md", "base\n");
         git(&repo, &["switch", "-q", "-c", "factory/worker"]);
         commit_file(&repo, "src/service.ts", "backend delivery\n");
+        let own_commit = git(&repo, &["rev-parse", "HEAD"]);
         git(&repo, &["switch", "-q", "main"]);
         commit_file(&repo, "hub-web/dist/epic.vue", "incoming epic UI\n");
         git(&repo, &["switch", "-q", "factory/worker"]);
@@ -649,11 +842,17 @@ mod tests {
         std::fs::create_dir_all(temp.path().join(".cas")).unwrap();
         let mut task = Task::new("cas-8105".into(), "Backend delivery after sync".into());
         task.assignee = Some("worker".into());
-        qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(&worker_tip))
-            .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
-        let (from, to) = delivery_range(&repo, &worker_tip, "main").unwrap();
-        assert_eq!(to, integration);
-        assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+        // cas-cca7: measured from the pre-sync anchor (the task's last own
+        // commit), the first ancestry-path merge is the lane's own target
+        // sync, whose first-parent diff is the incoming epic UI. Both heads
+        // must resolve to the integration merge and the task-only paths.
+        for head in [&worker_tip, &own_commit] {
+            qa_evidence_close_gate(&temp.path().join(".cas"), &task, &repo, "main", Some(head))
+                .expect("a worker sync merge must not adopt the epic's UI as its own delivery");
+            let (from, to) = delivery_range(&repo, head, "main", None).unwrap();
+            assert_eq!(to, integration, "head {head}");
+            assert_eq!(range_paths(&repo, &from, &to), Some(vec!["src/service.ts".into()]));
+        }
     }
 
     /// cas-bde8 (GH #978): task A's UI commits on a reused factory branch were
@@ -742,6 +941,7 @@ mod tests {
             "main",
             None,
             Some(own.as_slice()),
+            None,
         )
         .expect("only this task's backend change is judged");
         // Without attribution the branch diff still sees A's UI: this is why
@@ -758,6 +958,7 @@ mod tests {
             "main",
             None,
             Some(Vec::<String>::new().as_slice()),
+            None,
         )
         .expect("an attributed merge-only delivery has no UI change");
     }
@@ -820,7 +1021,7 @@ mod tests {
         std::fs::write(artifacts.join("LEDGER.md"), &transcript).unwrap();
         let ctx = EvidenceContext {
             task_id: &task.id, task_artifacts_dir: &artifacts, repo,
-            delivered_head: &head, notes: "", deployed_origins: &[],
+            delivered_head: &head, notes: "", deployed_origins: &[], rebind_scope: None,
         };
         let missing = run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts)
             .expect_err("the contract comparison is required, even when it has no differences");

@@ -14,6 +14,8 @@ table in step with them:
   cas-cli/src/builtins.rs test_builtin_violet_skill_body_under_12kb
 - skills/cas-cli-craft/SKILL.md: at most 80 lines (claude);
   cas-cli/src/builtins.rs cas-cli-craft catalog test
+- skills/cas-qa-craft/SKILL.md: at most 119 lines in every catalog;
+  cas-cli/src/builtins.rs test_builtin_skills_contains_cas_qa_craft
 - root AGENTS.md and CLAUDE.md: under 10,000 chars (Grok's cap);
   cas-cli/tests/builtin_flavor_drift_test.rs
 
@@ -39,6 +41,7 @@ BODY_LIMITS = {
     # path: (catalogs, max bytes or None, max lines)
     "skills/violet/SKILL.md": (("claude", "codex", "grok"), 12 * 1024, 80),
     "skills/cas-cli-craft/SKILL.md": (("claude",), None, 80),
+    "skills/cas-qa-craft/SKILL.md": (("claude", "codex", "grok"), None, 119),
 }
 ROOT_DOC_MAX_CHARS = 10_000
 ENTRY = re.compile(

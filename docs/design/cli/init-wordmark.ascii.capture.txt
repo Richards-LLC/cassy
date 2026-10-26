@@ -1,0 +1,16 @@
+
+  +------------------------------------------------------+
+  |                                                      |
+  |  Cassy                                               |
+  |                                                      |
+  +------------------------------------------------------+
+
+  | Multi-agent coding factory with persistent memory and task coordination.
+
+
+  Cassy is already initialized at <project>/.cas
+
+What would you like to do:
+  1. Reconfigure settings
+  2. Keep existing and exit
+Select (1-2): [ERROR] select: stdin closed before a selection was made

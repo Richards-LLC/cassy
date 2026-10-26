@@ -152,9 +152,13 @@ async fn a_committed_artifact_posts_by_id_and_returns_its_slack_receipt() {
     let (view, bytes) = fetch(Some(&server), "committed", HELLO_SHA256, ART)
         .await
         .expect("the bytes match the published record");
+    let mut complete = complete_reply(HELLO_SHA256, true);
+    let mut body: Value = serde_json::from_str(complete["content"][0]["text"].as_str().unwrap()).unwrap();
+    body["dispatch_warning"] = json!("shared exclusion unavailable; last 16:23 by peer; https://slack.test/root");
+    complete["content"][0]["text"] = json!(body.to_string());
     let violet = ScriptedViolet::new(vec![
         begin_reply(&server),
-        complete_reply(HELLO_SHA256, true),
+        complete,
     ]);
     let receipt = post_verified(&violet, &view, bytes, &options())
         .await
@@ -163,6 +167,7 @@ async fn a_committed_artifact_posts_by_id_and_returns_its_slack_receipt() {
     assert_eq!(
         receipt,
         PostReceipt {
+            dispatch_warning: Some("shared exclusion unavailable; last 16:23 by peer; https://slack.test/root".into()),
             artifact_id: ART.to_string(),
             channel_id: Some("C123".to_string()),
             message_id: Some("1710000000.000003".to_string()),
@@ -333,13 +338,15 @@ async fn violets_refusal_keeps_its_code_and_the_allocated_upload() {
         .unwrap();
     let refusal = wrapped(json!({
         "ok": false,
-        "error": { "code": "file_integrity_mismatch", "message": "sha256 differs", "retryable": false }
+        "error": { "code": "contact_too_recent", "message": "verbose context ".repeat(100), "retryable": false,
+            "detail":{"last_contact_at":"2026-10-20T16:23:00Z","last_poster":"peer-on-prowl","permalink":"https://example.slack.com/root","next_allowed_at":"2026-10-20T17:23:00Z"} }
     }));
     let violet = ScriptedViolet::new(vec![begin_reply(&server), refusal]);
     let error = post_verified(&violet, &view, bytes, &options())
         .await
         .unwrap_err();
-    assert_eq!(error.code, "file_integrity_mismatch");
+    assert_eq!(error.code, "contact_too_recent");
+    assert!(error.message.contains("16:23:00") && error.message.contains("peer-on-prowl") && error.message.contains("https://example.slack.com/root") && error.message.contains("17:23:00"));
     assert_eq!(error.file_id.as_deref(), Some("F1148"));
     assert!(error.to_string().contains("check the channel"), "{error}");
 }

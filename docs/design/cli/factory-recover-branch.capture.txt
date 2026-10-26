@@ -1,0 +1,8 @@
+Recovered cas-recover
+Published under successor authority.
+Actor: recovery-caller
+Source: factory/dead-worker-cas-recover
+Branch: factory/recovery-caller-cas-recover
+Commit: 0123456789012345678901234567890123456789
+Remote: origin
+Full receipt: --json

@@ -69,8 +69,7 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
         },
     )
     .unwrap();
-    daemon.app.mux.add_pane(
-        cas_mux::Pane::with_pty(
+    let mut pane = cas_mux::Pane::with_pty(
             &name,
             cas_mux::PaneKind::Supervisor,
             pty,
@@ -78,18 +77,31 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
             80,
             cli,
         )
-        .unwrap(),
-    );
+        .unwrap();
+    // This private shell has no harness startup phase to wait through.
+    pane.backdate_spawn_for_test(Duration::from_secs(6));
+    daemon.app.mux.add_pane(pane);
     daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
     teams
         .init_team_config(&[], root.path(), &Default::default(), "single-sup")
         .unwrap();
     daemon.teams = Some(teams);
-    tokio::time::sleep(Duration::from_millis(5100)).await;
-    for pane in daemon.app.mux.panes_mut() {
-        pane.drain_output();
-    }
+    let mut banner = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            for pane in daemon.app.mux.panes_mut() {
+                banner.extend(pane.drain_output().0);
+            }
+            if banner.windows(b"ready".len()).any(|bytes| bytes == b"ready")
+                && root.path().join("input").is_file()
+                && daemon.app.mux.pane_ready_for_injection(&name)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("private supervisor must emit ready and open its input file");
     let bytes = daemon.app.mux.pane_bytes_received(&name).unwrap();
     assert!(bytes > 0);
     daemon.last_pane_output_bytes.insert(name.clone(), bytes);
@@ -145,13 +157,61 @@ pub(super) async fn settle_injected_writes(daemon: &mut FactoryDaemon) {
 /// The supervisor PTY received exactly one submitted turn containing `needle`
 /// and no Teams relay was written.
 pub(super) async fn typed_once(root: &tempfile::TempDir, daemon: &mut FactoryDaemon, needle: &str) -> String {
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    daemon.process_prompt_queue().await.unwrap();
-    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
-    assert!(typed.contains(needle), "{typed:?}");
+    // cas_f265: queue admission, PTY write completion and the shell consuming
+    // those bytes happen on different turns/threads. A single pass followed by
+    // a file read can observe an empty/partial turn even after a fixed delay.
+    let mut typed = String::new();
+    let completed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+            if typed.contains(needle) && typed.ends_with('\r')
+                && !daemon.app.mux.has_pending_injects()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    assert!(completed.is_ok(), "submitted turn did not reach the consumer: {typed:?}");
     assert_eq!(typed.matches('\r').count(), 1, "one PTY submit: {typed:?}");
     assert!(teams_messages(daemon).is_empty(), "no relay copy");
     typed
+}
+
+/// A completed write to the PTY is not a completed read by the fixture's cat.
+/// Hold that consumer until the queue receipts submit, then let it run on the
+/// next Tokio turn, as a loaded host can naturally do (cas-470e1 / cas_f265).
+#[tokio::test(flavor = "current_thread")]
+async fn typed_once_waits_for_the_submitted_turn_to_reach_the_consumer() {
+    if !fixture_child("typed_once_waits_for_the_submitted_turn_to_reach_the_consumer") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let pid = daemon.app.mux.pane_process_group_id(daemon.app.supervisor_name()).unwrap();
+    struct Resume(u32);
+    impl Drop for Resume {
+        fn drop(&mut self) {
+            // This is only the private shell process created by fixture().
+            unsafe { libc::kill(self.0 as i32, libc::SIGCONT); }
+        }
+    }
+    let _resume_on_failure = Resume(pid);
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGSTOP) }, 0);
+    let id = event(&daemon, BODY);
+    daemon.process_prompt_queue().await.unwrap();
+    let queue = crate::store::open_prompt_queue_store(daemon.app.cas_dir()).unwrap();
+    let resume = tokio::spawn(async move {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGCONT) }, 0);
+        }).await.expect("physical submit must be receipted before the consumer resumes");
+    });
+    typed_once(&root, &mut daemon, BODY).await;
+    resume.await.unwrap();
 }
 
 fn nothing_typed_or_relayed(root: &tempfile::TempDir, daemon: &FactoryDaemon) {
@@ -202,6 +262,99 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     typed_once(&root, &mut daemon, needle).await;
+}
+
+/// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
+/// physical submit is not evidence that the real Codex harness accepted a turn.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b() {
+    if !fixture_child("codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b") {
+        return;
+    }
+    #[derive(Clone)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    for (source, prompt) in [
+        (None, "Reminder #266: Check the pending reply."),
+        (Some("peer:remote@soundwave"), "<cas-peer-message v=\"1\" id=\"reply\" from=\"remote\" from_agent=\"remote-id\" machine=\"soundwave\" repo=\"cloud\" in_reply_to=\"request\"/>\nActionable reply."),
+    ] {
+        let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        let name = daemon.app.supervisor_name().to_string();
+        daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+            cas.clone(), daemon.app.project_scope(),
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let id = match queue.enqueue_idempotent(
+            source.unwrap_or(&name), &name, prompt, Some(&daemon.session_name),
+            None, None, prompt, Some(&cas_store::QueueOrigin::Daemon),
+        ).unwrap() {
+            cas_store::EnqueueIdempotentResult::Created(id) => id,
+            _ => panic!("fresh reminder/reply"),
+        };
+        // Peer replies share 3.67's 20-second directed-message debounce. Set
+        // the fixture's persisted clock past it instead of waiting or bypassing
+        // the real selection path (as peer_mailbox_wake_tests does).
+        if source.is_some() {
+            rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+                "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339(), id],
+            ).unwrap();
+        }
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || Capture(sink.clone())).finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let log = || String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !daemon.queue_jobs.has_claim(id, &name) {
+            daemon.process_prompt_queue().await.unwrap();
+            assert!(Instant::now() < deadline, "claim must be submitted: {prompt}\n{}", log());
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(daemon.lifecycle_redelivery_counts.get(&id).copied().unwrap_or(0), 0,
+            "claim-only pass must not spend the wake budget (cas-979e)");
+        assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+        while daemon.urgent_injects.owners.is_empty() {
+            daemon.process_prompt_queue().await.unwrap();
+            assert!(Instant::now() < deadline, "completed claim must reach PTY: {prompt}");
+            tokio::task::yield_now().await;
+        }
+        // pin: this log stage promises physical submit, never queue admission.
+        assert!(!log().contains("pty_submit_confirmed"));
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            if queue.queued_prompt(id).unwrap().unwrap().processed_at.is_some()
+                && std::fs::read(root.path().join("input")).unwrap().ends_with(b"\r") {
+                break;
+            }
+            assert!(Instant::now() < deadline, "payload and submit must complete: {prompt}");
+            tokio::task::yield_now().await;
+        }
+        let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+        assert!(typed.contains(prompt), "original body must reach PTY: {typed:?}");
+        assert_eq!(typed.matches('\r').count(), 1, "exactly one physical submit: {typed:?}");
+        assert!(teams_messages(&daemon).is_empty(), "Codex never uses the Claude inbox");
+        let logs = log();
+        // pin: operators join dispatch to physical completion by stage, row and pane.
+        let confirmed: Vec<_> = logs.lines().filter(|line| line.contains("pty_submit_confirmed")).collect();
+        assert_eq!(confirmed.len(), 1, "one confirmed submit, not just an injection attempt: {logs}");
+        assert!(confirmed[0].contains(&format!("message_id={id}")) && confirmed[0].contains(&name), "{logs}");
+        assert!(confirmed[0].contains("unconfirmed"), "a shell PTY cannot prove a Codex turn: {logs}");
+        // pin: dispatch attempts have a distinct stage from physical completion.
+        assert!(logs.contains("prompt_inject_attempt"), "{logs}");
+        assert!(daemon.queue_jobs.drain_for_shutdown(&cas, Duration::from_secs(3)));
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -420,7 +573,260 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     crate::store::open_agent_store(daemon.app.cas_dir()).unwrap().register(&peer).unwrap();
     let body = "Please coordinate this delivery with me.";
     enqueue(&daemon, &peer.name, body, cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() });
+    rusqlite::Connection::open(daemon.app.cas_dir().join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET created_at=?1",[(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()]).unwrap();
     daemon.process_prompt_queue().await.unwrap();
     let typed = typed_once(&root, &mut daemon, body).await;
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
+}
+
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {
+    if !fixture_child("cas_bc4d_directed_batches_preserve_budget_and_legacy_guards") { return; }
+    for guard in ["budget", "codex-budget", "held-leader", "held-passenger", "memory-leader", "memory-passenger"] {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let cli = if guard == "codex-budget" { cas_mux::SupervisorCli::Codex } else { cas_mux::SupervisorCli::Claude };
+        let budget = guard.ends_with("budget");
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
+        let peer = cas_types::Agent::new_with_role(
+            "guard-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
+        let bodies = if budget {
+            vec![format!("Budget report A {}", "a".repeat(2600)), format!("Budget report B {}", "b".repeat(2600))]
+        } else { vec!["First field report".into(), "Second field report".into()] };
+        assert!(bodies.iter().all(|body| cas_store::fits_hook_surface(body)));
+        let ids: Vec<_> = bodies.iter().map(|body| enqueue(&daemon, &peer.name, body,
+            cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() })).collect();
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        let held = if guard.ends_with("leader") { 0 } else { 1 };
+        if !budget {
+            let row = queue.queued_prompt(ids[held]).unwrap().unwrap();
+            let legacy = super::delivery::claude_teams_inbox_text(
+                &format!("{}\n{}", crate::mcp::tools::service::agent_search_system::message::first_message_provenance(&row), row.prompt),
+                &row.prompt, "director", row.id,
+            );
+            daemon.teams.as_ref().unwrap().write_to_inbox("supervisor", "director", &legacy, None, None).unwrap();
+            let pane = daemon.app.supervisor_name().to_string();
+            let bytes = daemon.app.mux.pane_bytes_received(&pane).unwrap();
+            if guard.starts_with("memory") {
+                daemon.inbox_deferred_writes.insert(row.id, super::queue_and_events::InboxDeferredWrite {
+                    pane, bytes_at_write: bytes, written_at: Instant::now(), delivered_at: chrono::Utc::now(),
+                });
+            } else { queue.record_deferred_inbox(row.id, bytes).unwrap(); }
+        }
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+            [(chrono::Utc::now()-chrono::Duration::seconds(21)).to_rfc3339()],
+        ).unwrap();
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        let inbox = teams_messages(&daemon);
+        if guard == "codex-budget" {
+            let typed = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    daemon.process_prompt_queue().await.unwrap();
+                    settle_injected_writes(&mut daemon).await;
+                    let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+                    if typed.ends_with('\r') && ids.iter().all(|id|
+                        queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) { break typed; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("oversized Codex directed batch submitted");
+            assert_eq!(typed.matches('\r').count(), 1, "one Codex turn");
+            for (id, body) in ids.iter().zip(&bodies) {
+                assert_eq!(typed.matches(body).count(), 1, "full body without truncation or duplicate passenger");
+                assert!(typed.contains(&format!("[cas #{id} ")));
+            }
+            assert!(inbox.is_empty(), "Codex must not receive a duplicate Teams copy");
+        } else if budget {
+            assert_eq!(inbox.len(), 1, "oversized directed burst must use the full-body Teams path");
+            let text = inbox[0]["text"].as_str().unwrap();
+            for body in &bodies { assert!(text.contains(body), "no truncation or lost passenger"); }
+        } else {
+            let held_marker = format!("[cas #{} ", ids[held]);
+            assert_eq!(inbox.iter().filter(|message| message["text"].as_str().unwrap().contains(&held_marker)).count(), 1,
+                "{guard}: the held legacy copy must not be duplicated; headers={:?}",
+                inbox.iter().map(|message| message["text"].as_str().unwrap().lines().next()).collect::<Vec<_>>());
+            assert!(!std::fs::read_to_string(root.path().join("input")).unwrap().contains(&bodies[held]),
+                "{guard}: legacy content must not be typed again as a batch member");
+            if guard == "memory-leader" {
+                assert_ne!(queue.message_delivery_report(ids[1]).unwrap().unwrap().stage,
+                    cas_store::DeliveryStage::Delivered, "a held leader cannot consume its unsent passenger");
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_bc4d_staggered_arrivals_share_one_deadline_and_turn() {
+    if !fixture_child("cas_bc4d_staggered_arrivals_share_one_deadline_and_turn") { return; }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let peer = cas_types::Agent::new_with_role(
+        "staggered-peer".into(), "peer".into(), cas_types::AgentRole::Supervisor,
+    );
+    crate::store::open_agent_store(&cas).unwrap().register(&peer).unwrap();
+    // Move the durable clock between arrivals without waiting out the debounce.
+    let advance = |seconds| {
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+        let rows: Vec<(i64, String, String)> = conn.prepare(
+            "SELECT id,created_at,next_attempt_at FROM prompt_queue WHERE processed_at IS NULL"
+        ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap().collect::<Result<_,_>>().unwrap();
+        for (id, created, deadline) in rows {
+            let shift = |value: &str| (chrono::DateTime::parse_from_rfc3339(value).unwrap()
+                - chrono::Duration::seconds(seconds)).to_rfc3339();
+            conn.execute("UPDATE prompt_queue SET created_at=?1,next_attempt_at=?2 WHERE id=?3",
+                rusqlite::params![shift(&created),shift(&deadline),id]).unwrap();
+        }
+    };
+    let mut ids = Vec::new();
+    let bodies = ["Staggered report one", "Staggered report two", "Staggered report three"];
+    for body in bodies {
+        if !ids.is_empty() { advance(5); }
+        ids.push(enqueue(&daemon, &peer.name, body,
+            cas_store::QueueOrigin::RegisteredAgent { agent_id: peer.id.clone() }));
+        daemon.process_prompt_queue().await.unwrap();
+        nothing_typed_or_relayed(&root, &daemon);
+        let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+        let deadlines: Vec<_> = ids.iter().map(|id| {
+            let value: String = conn.query_row("SELECT next_attempt_at FROM prompt_queue WHERE id=?1",
+                [id], |row| row.get(0)).unwrap();
+            chrono::DateTime::parse_from_rfc3339(&value).unwrap()
+        }).collect();
+        assert!(deadlines.iter().all(|deadline| *deadline == deadlines[0]),
+            "arrivals within the window must keep the leader's deadline: {deadlines:?}");
+    }
+    advance(21);
+    daemon.process_prompt_queue().await.unwrap();
+    settle_injected_writes(&mut daemon).await;
+    let typed = typed_once(&root, &mut daemon, bodies[0]).await;
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    for (id, body) in ids.iter().zip(bodies) {
+        assert_eq!(typed.matches(body).count(), 1);
+        assert!(typed.contains(&format!("[cas #{id} ")));
+        assert_eq!(queue.message_delivery_report(*id).unwrap().unwrap().stage,
+            cas_store::DeliveryStage::Delivered);
+    }
+    daemon.process_prompt_queue().await.unwrap();
+    assert_eq!(std::fs::read_to_string(root.path().join("input")).unwrap(), typed,
+        "no separate turn for staggered passengers");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn cas_1e7e2_directed_burst_debounces_into_one_body_turn() {
+    if !fixture_child("cas_1e7e2_directed_burst_debounces_into_one_body_turn") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // Both harnesses use the same body, claim and completion path.
+    for cli in [
+        cas_mux::SupervisorCli::Claude,
+        cas_mux::SupervisorCli::Codex,
+    ] {
+        let (root, mut daemon) = fixture_for(cli).await;
+        let cas = daemon.app.cas_dir().to_path_buf();
+        if cli == cas_mux::SupervisorCli::Codex {
+            daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(cas.clone(), daemon.app.project_scope());
+            daemon.queue_jobs.store(&cas).unwrap();
+        }
+        let peer = cas_types::Agent::new_with_role(
+            "burst-peer".into(),
+            "peer".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas)
+            .unwrap()
+            .register(&peer)
+            .unwrap();
+        let bodies = [
+            "First field report",
+            "Second field report",
+            "Third field report",
+        ];
+        let ids: Vec<_> = bodies
+            .iter()
+            .map(|body| {
+                enqueue(
+                    &daemon,
+                    "peer",
+                    body,
+                    cas_store::QueueOrigin::RegisteredAgent {
+                        agent_id: peer.id.clone(),
+                    },
+                )
+            })
+            .collect();
+        let queue=crate::store::open_prompt_queue_store(&cas).unwrap();
+        tokio::time::timeout(Duration::from_secs(5),async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                if ids.iter().all(|id|queue.message_delivery_report(*id).unwrap().unwrap().pending_detail.as_deref()==Some("directed supervisor message burst debounce")) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("fresh burst reaches debounce without typing");
+        nothing_typed_or_relayed(&root, &daemon);
+        // Advance the durable queue clock, without sleeping for the debounce.
+        rusqlite::Connection::open(cas.join("cas.db"))
+            .unwrap()
+            .execute(
+                "UPDATE prompt_queue SET created_at=?1,next_attempt_at=?1",
+                [(chrono::Utc::now() - chrono::Duration::seconds(21)).to_rfc3339()],
+            )
+            .unwrap();
+        let typed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                daemon.process_prompt_queue().await.unwrap();
+                settle_injected_writes(&mut daemon).await;
+                let text = std::fs::read_to_string(root.path().join("input")).unwrap();
+                if text.ends_with('\r') && ids.iter().all(|id|
+                    queue.message_delivery_report(*id).unwrap().unwrap().stage == cas_store::DeliveryStage::Delivered) {
+                    break text;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("one submitted burst body");
+        assert_eq!(typed.matches('\r').count(), 1, "one turn: {typed:?}");
+        assert!(typed.contains("From: peer"),"coalesced bodies retain sender attribution: {typed:?}");
+        for body in bodies {
+            assert_eq!(typed.matches(body).count(), 1, "{typed:?}");
+        }
+        assert!(
+            teams_messages(&daemon).is_empty(),
+            "no duplicate Teams copy"
+        );
+        let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+        for id in &ids {
+            assert!(
+                typed.contains(&format!("[cas #{id} ")),
+                "each row retains its identity"
+            );
+            assert_eq!(
+                queue.message_delivery_report(*id).unwrap().unwrap().stage,
+                cas_store::DeliveryStage::Delivered
+            );
+        }
+        assert!(
+            crate::supervisor_message_wakes::report(&cas, daemon.app.supervisor_name())
+                .unwrap()
+                .contains("directed_message_wakes_last_hour: 1")
+        );
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("input")).unwrap(),
+            typed,
+            "no second turn for batch passengers"
+        );
+    }
 }

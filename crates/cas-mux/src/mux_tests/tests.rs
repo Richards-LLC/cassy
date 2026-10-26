@@ -2427,6 +2427,130 @@ fn explicit_config_dir_beats_requester_config_dir() {
 }
 
 #[test]
+fn cas_16c0_only_explicit_account_manifest_adds_connectors_under_strict_mcp() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    let selected = env.home().join("selected-account");
+    let requester = env.home().join("supervisor-account");
+    for directory in [&root, &selected, &requester] {
+        std::fs::create_dir_all(directory).unwrap();
+    }
+    let gmail = serde_json::json!({
+        "type": "claudeai-proxy", "url": "https://gmail.example.test/mcp", "id": "mcpsrv_selected"
+    });
+    std::fs::write(selected.join("cassy-worker-connectors.json"),
+        serde_json::json!({"mcpServers": {"claude.ai Gmail": gmail}}).to_string()).unwrap();
+    std::fs::write(requester.join("cassy-worker-connectors.json"),
+        serde_json::json!({"mcpServers": {"claude.ai Other Account": {
+            "type": "claudeai-proxy", "url": "https://other.example.test/mcp", "id": "mcpsrv_other"
+        }}}).to_string()).unwrap();
+    let project_mcp = serde_json::json!({"mcpServers": {
+        "vercel": {"command": "never-run-vercel"}, "neon": {"command": "never-run-neon"}
+    }}).to_string();
+    std::fs::write(project.path().join(".mcp.json"), &project_mcp).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", requester.to_str().unwrap());
+    // Reuse each worker name after the explicit grant to catch stale snapshots.
+    for source in ["explicit", "supervisor", "host"] {
+        let explicit = source == "explicit";
+        let spec = WorkerSpec {
+            name: Some("worker-1".into()),
+            config_dir: explicit.then(|| selected.display().to_string()),
+            requester_config_dir: (source != "host").then(|| requester.display().to_string()),
+            ..WorkerSpec::builtin_default()
+        };
+        let configs = Mux::factory_pane_configs(&MuxConfig {
+            cwd: project.path().into(), cas_root: Some(root.clone()), workers: 1,
+            resolved_worker_specs: vec![spec.clone()], include_director: false,
+            ..Default::default()
+        });
+        let initial = &configs.iter().find(|(name, _)| name == "worker-1").unwrap().1;
+        let dynamic = Mux::new(24, 80).build_add_worker_config(
+            "dynamic", project.path().into(), Some(&root), "supervisor", None, Some(spec));
+        for pane in [initial, &dynamic] {
+            assert!(env_value(pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+            assert!(pane.args.contains(&"--strict-mcp-config".into()));
+            let index = pane.args.iter().position(|arg| arg == "--mcp-config").unwrap();
+            let document: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(&pane.args[index + 1]).unwrap()).unwrap();
+            let servers = document["mcpServers"].as_object().unwrap();
+            assert!(servers.contains_key("cas"));
+            assert_eq!(servers.len(), if explicit { 2 } else { 1 });
+            if explicit {
+                assert_eq!(servers["claude.ai Gmail"], gmail);
+                assert_eq!(env_value(pane, "CLAUDE_CONFIG_DIR"), selected.to_str());
+            }
+        }
+    }
+    assert_eq!(std::fs::read_to_string(project.path().join(".mcp.json")).unwrap(), project_mcp);
+}
+
+#[test]
+fn cas_16c0_missing_or_invalid_manifest_keeps_strict_cas_with_notice() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    let selected = env.home().join("selected-account");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    let manifest = selected.join("cassy-worker-connectors.json");
+    for contents in [None, Some("not-json"),
+        Some(r#"{"mcpServers":{"claude.ai Gmail":{"type":"http","url":"https://gmail.example.test/mcp","id":"mcpsrv_selected"}}}"#),
+        Some(r#"{"mcpServers":{"claude.ai Gmail":{"type":"claudeai-proxy","url":"https://gmail.example.test/mcp","id":"mcpsrv_selected","env":{"PRIVATE_TOKEN":"never-copy-fixture"}}}}"#),
+    ] {
+        if let Some(contents) = contents {
+            std::fs::write(&manifest, contents).unwrap();
+        }
+        let pane = Mux::new(24, 80).build_add_worker_config(
+            "worker", project.path().into(), Some(&root), "supervisor", None,
+            Some(WorkerSpec { config_dir: Some(selected.display().to_string()), ..WorkerSpec::builtin_default() }));
+        assert!(env_value(&pane, "CAS_FACTORY_WORKER_LAUNCH_ERROR").is_none());
+        assert!(pane.args.contains(&"--strict-mcp-config".into()));
+        let document: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(root.join("worker-mcp/worker.json")).unwrap()).unwrap();
+        assert_eq!(document["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["cas"]);
+        let notice = env_value(&pane, "CAS_FACTORY_CLAUDE_CONNECTOR_NOTICE").expect("missing/invalid manifest must be visible");
+        assert!(notice.contains("cassy-worker-connectors.json") && notice.contains("strict"), "{notice}");
+        assert!(!notice.contains('\n'));
+    }
+}
+
+#[test]
+fn cas_16c0_manifest_cannot_regrant_denied_connectors_or_environment() {
+    let mut env = TestEnvGuard::temp_home();
+    env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config,--strict-mcp-config");
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path().join(".cas");
+    let selected = env.home().join("selected-account");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&selected).unwrap();
+    std::fs::write(root.join("config.toml"), "[factory]\nsupervisor_only_mcp=['calendar']\nsupervisor_only_env=['PRIVATE_TOKEN']\n").unwrap();
+    env.set("PRIVATE_TOKEN", "never-forward-fixture");
+    let mut servers = ["Gmail", "Vercel", "Neon", "Calendar"].into_iter().map(|name| (
+        format!("claude.ai {name}"), serde_json::json!({"type":"claudeai-proxy",
+            "url":format!("https://{}.example.test/mcp", name.to_lowercase()), "id":format!("mcpsrv_{name}")})
+    )).collect::<serde_json::Map<_, _>>();
+    let ceilings = serde_json::json!({"send_email": "blocked", "create_draft": "ask"});
+    servers["claude.ai Gmail"]["toolPermissions"] = ceilings.clone();
+    std::fs::write(selected.join("cassy-worker-connectors.json"),
+        serde_json::json!({"mcpServers": servers}).to_string()).unwrap();
+    let pane = Mux::new(24, 80).build_add_worker_config(
+        "worker", project.path().into(), Some(&root), "supervisor", None,
+        Some(WorkerSpec { config_dir: Some(selected.display().to_string()), ..WorkerSpec::builtin_default() }));
+    let document: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("worker-mcp/worker.json")).unwrap()).unwrap();
+    assert_eq!(document["mcpServers"].as_object().unwrap().keys().collect::<Vec<_>>(), vec!["cas", "claude.ai Gmail"]);
+    assert_eq!(document["mcpServers"]["claude.ai Gmail"]["toolPermissions"], ceilings,
+        "operator-exported native tool ceilings must reach Claude unchanged");
+    assert!(pane.args.contains(&"--strict-mcp-config".into()));
+    assert!(pane.env_remove.contains(&"PRIVATE_TOKEN".into()));
+    assert!(env_value(&pane, "PRIVATE_TOKEN").is_none());
+    assert!(!pane.args.contains(&"--managed-settings".into()), "native managed policy must stay authoritative");
+}
+
+#[test]
 fn requester_config_dir_applies_when_explicit_param_is_omitted() {
     let mux = Mux::new(24, 80);
     let config = mux.build_add_worker_config(
@@ -2990,6 +3114,71 @@ async fn graceful_kill_worker_returns_when_the_group_honors_term() {
         started.elapsed() < std::time::Duration::from_secs(1),
         "TERM-compliant groups should not consume the escalation grace window"
     );
+}
+
+/// GH #1363: a worker teardown that outlasts its deadline hands control back
+/// to the daemon loop with the stage it reached and its process group, and
+/// the off-loop thread still finishes the kill.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_worker_teardown_returns_at_its_deadline_naming_stage_and_group() {
+    let config = crate::pty::PtyConfig {
+        command: "sh".to_string(),
+        args: vec!["-c".to_string(), "trap '' TERM HUP; sleep 300 & wait".to_string()],
+        cwd: Some(PathBuf::from("/tmp")),
+        env: vec![],
+        env_remove: vec![],
+        rows: 24,
+        cols: 80,
+    };
+    let Ok(pty) = crate::pty::Pty::spawn("stalled-teardown-worker", config) else {
+        return;
+    };
+    let pane = Pane::with_pty(
+        "stalled-teardown-worker",
+        PaneKind::Worker,
+        pty,
+        24,
+        80,
+        SupervisorCli::Claude,
+    )
+    .unwrap();
+    let mut mux = Mux::new(24, 80);
+    mux.add_pane(pane);
+    let pgid = mux.pane_process_group_id("stalled-teardown-worker").unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // The TERM-ignoring group holds kill_tree in its 3 s grace window.
+    let started = std::time::Instant::now();
+    let outcome = mux
+        .kill_worker_within(
+            "stalled-teardown-worker",
+            false,
+            std::time::Duration::from_millis(300),
+        )
+        .await
+        .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(
+        outcome,
+        crate::mux::WorkerTeardown::Stalled {
+            stage: "signal and reap (Pty::kill_tree)",
+            process_group: Some(pgid),
+        }
+    );
+    assert!(mux.get("stalled-teardown-worker").is_none());
+
+    for _ in 0..200 {
+        let probe = std::process::Command::new("sh")
+            .args(["-c", &format!("kill -0 -- -{pgid} 2>/dev/null")])
+            .status()
+            .unwrap();
+        if !probe.success() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the off-loop teardown never finished killing group {pgid}");
 }
 
 #[tokio::test]

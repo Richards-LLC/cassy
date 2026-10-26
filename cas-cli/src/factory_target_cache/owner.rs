@@ -30,6 +30,7 @@ pub(crate) struct Lease {
     lock_path: PathBuf,
     record: Record,
     builder: bool,
+    removed_worktree: bool,
 }
 
 fn owned_metadata(path: &Path) -> io::Result<fs::Metadata> {
@@ -83,7 +84,9 @@ fn target_is_ignored(worktree: &Path) -> io::Result<bool> {
             return Ok(false);
         }
         if !status.success() {
-            return Err(io::Error::other("cannot verify worker target ignore policy"));
+            return Err(io::Error::other(
+                "cannot verify worker target ignore policy",
+            ));
         }
     }
     Ok(true)
@@ -167,7 +170,13 @@ fn write_record(path: &Path, record: &Record) -> io::Result<()> {
 
 fn paths(cas_root: &Path, worktree: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let cas_root = cas_root.canonicalize()?;
-    let worktree = worktree.canonicalize()?;
+    let worktree = worktree.canonicalize().or_else(|error| {
+        if crate::factory_scratch::removed_worker(&cas_root, worktree) {
+            Ok(worktree.to_path_buf())
+        } else {
+            Err(error)
+        }
+    })?;
     if worktree.parent() != Some(cas_root.join("worktrees").canonicalize()?.as_path()) {
         return Err(io::Error::other(
             "target ownership requires a private worker checkout",
@@ -191,6 +200,10 @@ fn paths(cas_root: &Path, worktree: &Path) -> io::Result<(PathBuf, PathBuf)> {
 
 /// Must precede seed data or Cargo. Existing unmarked targets remain legacy.
 pub(crate) fn acquire(cas_root: &Path, worktree: &Path) -> io::Result<Option<Lease>> {
+    // Review output is owned and collected with its entire disposable checkout.
+    if crate::factory_review_scratch::is_managed_checkout(cas_root, worktree) {
+        return Ok(None);
+    }
     let mut lease = open(cas_root, worktree, true)?;
     if let Some(lease) = lease.as_mut() {
         lease.record.pid = std::process::id();
@@ -208,10 +221,32 @@ pub(crate) fn for_retirement(cas_root: &Path, worktree: &Path) -> io::Result<Opt
     open(cas_root, worktree, false)
 }
 
+/// Caller has already validated the exact managed target/quarantine layout.
+/// The durable inode/generation record still has to match this actual target.
+pub(super) fn for_gc(cas_root: &Path, worktree: &Path, target: &Path) -> io::Result<Option<Lease>> {
+    open_target(cas_root, worktree, target, false)
+}
+
 fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lease>> {
     let worktree = worktree.canonicalize()?;
-    // cas-3f93: `[factory] scratch_root` may place the target off-checkout.
     let target = crate::factory_scratch::worker_target_dir(&worktree);
+    open_target(cas_root, &worktree, &target, create)
+}
+
+fn open_target(
+    cas_root: &Path,
+    worktree: &Path,
+    target: &Path,
+    create: bool,
+) -> io::Result<Option<Lease>> {
+    let removed_worktree = !create
+        && relocated_target(worktree, target)
+        && crate::factory_scratch::removed_worker(cas_root, worktree);
+    let worktree = if removed_worktree {
+        worktree.to_path_buf()
+    } else {
+        worktree.canonicalize()?
+    };
     let relocated = crate::factory_scratch::is_relocated(&worktree, &target);
     if fs::symlink_metadata(&target)
         .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
@@ -309,6 +344,7 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
         lock_path,
         record,
         builder: false,
+        removed_worktree,
     };
     if !lease.revalidate(&target).unwrap_or(false) {
         if target.join(MARKER).exists() {
@@ -330,7 +366,17 @@ fn open(cas_root: &Path, worktree: &Path, create: bool) -> io::Result<Option<Lea
 
 impl Lease {
     pub(crate) fn revalidate(&self, actual_target: &Path) -> io::Result<bool> {
-        let tree = worktree_metadata(&self.record.worktree)?;
+        let tree_matches = if self.removed_worktree {
+            let cas_root = self
+                .record_path
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| io::Error::other("missing ownership store"))?;
+            crate::factory_scratch::removed_worker(cas_root, &self.record.worktree)
+        } else {
+            let tree = worktree_metadata(&self.record.worktree)?;
+            (tree.dev(), tree.ino()) == (self.record.worktree_dev, self.record.worktree_ino)
+        };
         let target = private_metadata(actual_target)?;
         let lock = self.file.metadata()?;
         let current_lock = private_metadata(&self.lock_path)?;
@@ -345,10 +391,9 @@ impl Lease {
             && self.record.start != 0
             && current == self.record
             && fs::read_to_string(marker)? == self.record.generation
-            && tree.is_dir()
+            && tree_matches
             && target.is_dir()
             && current_lock.is_file()
-            && (tree.dev(), tree.ino()) == (self.record.worktree_dev, self.record.worktree_ino)
             && (target.dev(), target.ino()) == (self.record.target_dev, self.record.target_ino)
             && (lock.dev(), lock.ino()) == (self.record.lease_dev, self.record.lease_ino)
             && (current_lock.dev(), current_lock.ino()) == (lock.dev(), lock.ino()))
@@ -385,7 +430,8 @@ pub(crate) const LEASE_FD_ENV: &str = "CAS_TARGET_LEASE_FD";
 /// check. Cargo, rustc and build scripts keep the inherited output lease
 /// (cas-f96d); a test binary, and anything it leaks, must not, or a leaked
 /// fake server would lock the worktree out (EAGAIN) until killed.
-pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/sh
+pub(crate) const RELEASE_RUNNER: &str = r#"#!/bin/bash
+# Bash is required here: dash mishandles dynamically selected fds >= 10 in eval.
 # cas-4ad0: close the inherited worker target lease before a test binary runs.
 case "${CAS_TARGET_LEASE_FD:-}" in
   ''|*[!0-9]*) ;;
@@ -625,7 +671,11 @@ mod tests {
         use std::io::BufRead;
         let (_temp, root, worker) = fixture();
         let runner = write_release_runner(&root.join("worker-check-slots")).unwrap();
+        let fd_guards: Vec<_> = (0..16)
+            .map(|_| fs::File::open("/dev/null").unwrap())
+            .collect();
         let lease = acquire(&root, &worker).unwrap().unwrap();
+        assert!(lease.fd() >= 10, "fd guards must force a two-digit lease fd");
         let lock_path = lease.lock_path.clone();
         // The runner execs the "test binary", which leaks a sleeping child.
         let mut command = std::process::Command::new(&runner);
@@ -650,6 +700,7 @@ mod tests {
             "a leaked test grandchild still holds the lease"
         );
         assert!(!holders.contains(&(grandchild as u32)), "{holders:?}");
+        drop(fd_guards);
     }
 
     /// cas-4ad0: a held lease refuses with the lock path and the holder PID,

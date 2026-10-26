@@ -2,12 +2,13 @@
 
 use std::io::{self, BufRead, Write};
 
+use crate::ui::components::OutputMode;
 use crossterm::event::KeyModifiers;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyEventKind},
     execute, queue,
-    style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
+    style::{Attribute, Print, SetAttribute},
     terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode},
 };
 
@@ -162,17 +163,16 @@ pub fn confirm(message: &str, default: bool) -> io::Result<bool> {
     })
 }
 
-/// A styled column value within a picker row.
+/// A column value within a picker row, rendered in the terminal foreground.
 pub struct PickerTag {
     pub text: String,
-    pub color: Color,
 }
 
 /// An item (row) in the interactive picker.
 pub struct PickerItem {
     /// Main label (first column, highlighted when selected)
     pub label: String,
-    /// Additional columns rendered after the label, each with its own color
+    /// Additional text columns rendered after the label
     pub tags: Vec<PickerTag>,
 }
 
@@ -209,6 +209,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     let mut stdout = io::stdout();
     let mut selected: usize = 0;
     let cols = ColumnWidths::compute(items);
+    let mode = OutputMode::detect();
 
     // Reserve vertical space so the terminal scrolls enough for our content.
     let total_lines = items.len() + 3; // title + blank + items + help
@@ -223,7 +224,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     enable_raw_mode()?;
     execute!(stdout, Hide)?;
 
-    render_picker(&mut stdout, title, items, selected, origin_row, &cols)?;
+    render_picker(&mut stdout, title, items, selected, origin_row, &cols, mode)?;
 
     let result = loop {
         if !event::poll(std::time::Duration::from_millis(50))? {
@@ -256,7 +257,7 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
                 KeyCode::Esc | KeyCode::Char('q') => break None,
                 _ => continue,
             }
-            render_picker(&mut stdout, title, items, selected, origin_row, &cols)?;
+            render_picker(&mut stdout, title, items, selected, origin_row, &cols, mode)?;
         }
     };
 
@@ -273,38 +274,47 @@ pub fn pick(title: &str, items: &[PickerItem]) -> io::Result<Option<usize>> {
     }
     execute!(stdout, MoveTo(0, origin_row))?;
 
-    // Completed-form summary line
-    match result {
-        Some(idx) => {
-            execute!(
-                stdout,
-                SetForegroundColor(Color::Green),
-                Print("  ✓ "),
-                ResetColor,
-                SetAttribute(Attribute::Bold),
-                Print(title),
-                SetAttribute(Attribute::Reset),
-                SetForegroundColor(Color::DarkGrey),
-                Print(": "),
-                ResetColor,
-                Print(&items[idx].label),
-                Print("\n"),
-            )?;
+    render_completed(
+        &mut stdout,
+        title,
+        result.map(|idx| items[idx].label.as_str()),
+        mode,
+    )?;
+    Ok(result)
+}
+
+fn render_completed(
+    stdout: &mut impl Write,
+    title: &str,
+    selected: Option<&str>,
+    mode: OutputMode,
+) -> io::Result<()> {
+    let styled_glyphs = super::supports_styled_glyphs(mode);
+    let styled = mode == OutputMode::Styled && std::env::var_os("NO_COLOR").is_none();
+    // Terminal-default foreground keeps both summaries legible on every palette.
+    match selected {
+        Some(label) => {
+            queue!(stdout, Print(if styled_glyphs { "  ✓ " } else { "  + " }))?;
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Bold))?;
+            }
+            queue!(stdout, Print(title))?;
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Reset))?;
+            }
+            queue!(stdout, Print(": "), Print(label), Print("\n"))?;
         }
         None => {
-            execute!(
+            queue!(
                 stdout,
-                SetForegroundColor(Color::DarkGrey),
-                Print("  ✗ "),
+                Print(if styled_glyphs { "  ✗ " } else { "  x " }),
                 Print(title),
-                Print(": cancelled"),
-                ResetColor,
-                Print("\n"),
+                Print(": cancelled\n"),
             )?;
         }
     }
-
-    Ok(result)
+    stdout.flush()?;
+    Ok(())
 }
 
 /// Pad `s` with spaces to `width`.
@@ -317,85 +327,67 @@ fn pad(s: &str, width: usize) -> String {
 }
 
 fn render_picker(
-    stdout: &mut io::Stdout,
+    stdout: &mut impl Write,
     title: &str,
     items: &[PickerItem],
     selected: usize,
     origin_row: u16,
     cols: &ColumnWidths,
+    mode: OutputMode,
 ) -> io::Result<()> {
+    let styled_glyphs = super::supports_styled_glyphs(mode);
+    let styled = mode == OutputMode::Styled && std::env::var_os("NO_COLOR").is_none();
     let mut row = origin_row;
 
-    // Title
-    queue!(
-        stdout,
-        MoveTo(0, row),
-        Clear(ClearType::CurrentLine),
-        SetAttribute(Attribute::Bold),
-        Print(format!("  {title}")),
-        SetAttribute(Attribute::Reset),
-    )?;
+    // Emphasis is independent of glyph selection; NO_COLOR suppresses all SGR.
+    queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
+    if styled {
+        queue!(stdout, SetAttribute(Attribute::Bold))?;
+    }
+    queue!(stdout, Print(format!("  {title}")))?;
+    if styled {
+        queue!(stdout, SetAttribute(Attribute::Reset))?;
+    }
     row += 1;
 
-    // Blank line
     queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
     row += 1;
 
-    // Rows
     for (i, item) in items.iter().enumerate() {
         queue!(stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
-
         let label_padded = pad(&item.label, cols.label);
-
         if i == selected {
-            // Cursor + bold label column
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Bold))?;
+            }
             queue!(
                 stdout,
-                SetForegroundColor(Color::Magenta),
-                SetAttribute(Attribute::Bold),
-                Print("  ❯ "),
-                SetAttribute(Attribute::Reset),
-                SetAttribute(Attribute::Bold),
+                Print(if styled_glyphs { "  ❯ " } else { "  > " }),
                 Print(&label_padded),
-                SetAttribute(Attribute::Reset),
             )?;
-            // Tag columns in their own colors, padded
-            for (col, tag) in item.tags.iter().enumerate() {
-                let w = cols.tags.get(col).copied().unwrap_or(0);
-                queue!(
-                    stdout,
-                    Print("  "),
-                    SetForegroundColor(tag.color),
-                    Print(pad(&tag.text, w)),
-                    ResetColor,
-                )?;
+            if styled {
+                queue!(stdout, SetAttribute(Attribute::Reset))?;
             }
         } else {
-            // Dimmed label column
-            queue!(
-                stdout,
-                SetForegroundColor(Color::DarkGrey),
-                Print(format!("    {label_padded}")),
-            )?;
-            // Dimmed tag columns, padded
-            for (col, tag) in item.tags.iter().enumerate() {
-                let w = cols.tags.get(col).copied().unwrap_or(0);
-                queue!(stdout, Print(format!("  {}", pad(&tag.text, w))))?;
-            }
-            queue!(stdout, ResetColor)?;
+            queue!(stdout, Print(format!("    {label_padded}")))?;
         }
-
+        // Status words carry their meaning without low-contrast palette colors.
+        for (col, tag) in item.tags.iter().enumerate() {
+            let w = cols.tags.get(col).copied().unwrap_or(0);
+            queue!(stdout, Print(format!("  {}", pad(&tag.text, w))))?;
+        }
         row += 1;
     }
 
-    // Help line
     queue!(
         stdout,
         MoveTo(0, row),
         Clear(ClearType::CurrentLine),
-        SetForegroundColor(Color::DarkGrey),
-        Print("  ↑/↓ navigate • enter select • q cancel"),
-        ResetColor,
+        Print(if styled_glyphs {
+            "  ↑/↓ navigate • enter select • q cancel"
+        } else {
+            "  up/down navigate | enter select | q cancel"
+        }),
     )?;
 
     stdout.flush()?;
@@ -409,6 +401,89 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
+
+    /// pin: styled UTF-8 picker uses the approved default-foreground/bold contract;
+    /// C/plain decorations stay ASCII and NO_COLOR suppresses all SGR.
+    #[test]
+    fn picker_decorations_follow_locale_cas_ba0e() {
+        use super::{ColumnWidths, PickerItem, PickerTag, render_completed, render_picker};
+        use crate::ui::components::OutputMode;
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let _colors = crate::test_support::StyledColorGuard::new(&env);
+        let items = vec![
+            PickerItem {
+                label: "Alpha".into(),
+                tags: vec![PickerTag {
+                    text: "ready".into(),
+                }],
+            },
+            PickerItem {
+                label: "Beta".into(),
+                tags: vec![],
+            },
+        ];
+        let cols = ColumnWidths::compute(&items);
+        let utf8_snapshot: String = serde_json::from_str(include_str!(
+            "../../../docs/design/cli/interactive-picker.utf8.json"
+        ))
+        .unwrap();
+        for no_color in [None, Some("1")] {
+            match no_color {
+                Some(value) => env.set("NO_COLOR", value),
+                None => env.remove("NO_COLOR"),
+            }
+            for locale in ["C.UTF-8", "C"] {
+                env.set("LC_ALL", locale);
+                for mode in [OutputMode::Styled, OutputMode::Plain] {
+                    let mut output = Vec::new();
+                    render_picker(&mut output, "Destination", &items, 0, 0, &cols, mode).unwrap();
+                    render_completed(&mut output, "Destination", Some("Alpha"), mode).unwrap();
+                    render_completed(&mut output, "Destination", None, mode).unwrap();
+                    let text = String::from_utf8(output).unwrap();
+                    // Pin terminal-default foreground: fixed ANSI colors can disappear
+                    // on light/dark/Solarized palettes. Bold is sufficient emphasis.
+                    let sgr = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+                    for code in sgr.find_iter(&text).map(|m| m.as_str()) {
+                        assert!(
+                            no_color.is_none() && mode == OutputMode::Styled,
+                            "SGR {code:?} under {mode:?}/NO_COLOR={no_color:?}"
+                        );
+                        assert!(
+                            matches!(code, "\x1b[1m" | "\x1b[0m"),
+                            "picker must use the terminal foreground without dimming: {code:?}"
+                        );
+                    }
+                    assert!(text.contains("\x1b[1;1H"), "cursor interaction must remain");
+                    assert!(
+                        text.contains("Alpha") && text.contains("Beta") && text.contains("ready")
+                    );
+                    assert!(text.contains(": cancelled"));
+                    if locale == "C.UTF-8" && mode == OutputMode::Styled && no_color.is_none() {
+                        assert_eq!(
+                            text, utf8_snapshot,
+                            "approved styled UTF-8 default-foreground/bold bytes changed"
+                        );
+                    } else if locale == "C" || mode == OutputMode::Plain {
+                        assert!(
+                            text.is_ascii(),
+                            "non-ASCII decorations for {locale}/{mode:?}/NO_COLOR={no_color:?}: {text:?}"
+                        );
+                        for expected in [
+                            "  > ",
+                            "  + ",
+                            "  x ",
+                            "  up/down navigate | enter select | q cancel",
+                        ] {
+                            assert!(
+                                text.contains(expected),
+                                "missing {expected:?} for {locale}/{mode:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     /// EOF on stdin must NOT cause `select` to loop forever (cas-bf06).
     /// Prior to this fix, a closed stdin spun at 100% CPU writing

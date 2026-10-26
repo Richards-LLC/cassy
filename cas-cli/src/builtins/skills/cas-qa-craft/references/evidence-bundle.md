@@ -42,6 +42,7 @@ journey uses `journeys/<journey-id>/`, each with the same shape and its own
 | `visual_qa_baseline_json` | `visual-qa-baseline/visual-qa.json` (the same strict run against a local build of the base commit) | `visual_qa_status: "scoped"` |
 | `critique` | `critique.md` (the cas-ui-craft rubric table) | always |
 | `a11y` | `a11y-forced-colors.png`, `a11y-reduced-motion.png`, `a11y-contrast-more.png` | visual change |
+| `pairs` | `pairs/pairs.json` ([before/after pairs](#beforeafter-pairs)) | visual change with a pair |
 
 Use the existing `visual_change` flag for changes to rendered appearance:
 layout, colour, typography, imagery or motion. For `visual_change: false`, omit
@@ -82,14 +83,19 @@ journey evaluation scores polish for it.
   CSS class renames do not add a finding when that identity agrees. Historical
   reports without identity evidence require matching selectors; keep them
   fail-closed. The delivered run must
-  still be fresh, strict and local. List the base build's findings as
-  follow-ups in the ledger; they are not this delivery's defects.
+  still be fresh, strict and local. Classify base-build findings under
+  [independent-pass §3](independent-pass.md#3-correctness-paths): failures within
+  the delivery's stated purpose, acceptance criteria, demo statement, or a
+  journey invariant its diff adds or edits are unmet even when base shares them.
+  Only findings outside those scopes are pre-existing follow-ups in the ledger.
   Both reports must record their findings in one of two shapes: a top-level
   `findings` list (the builtin visual-qa.mjs), or per render as
   `renders[].issues` with the page in `input` (a per-source project
   visual-qa.mjs). Close compares either shape the same way.
 - `files`: the keys above, with paths relative to the bundle
 - `critique_score`: `distinctiveness`, `fit`, `hierarchy`, `craft`, and `accessibility`, each 0–5, matching `critique.md`
+- `pairs_status` (visual change only): `complete`, `partial`, or `unavailable`, as defined in
+  [before/after pairs](#beforeafter-pairs)
 - `deployed` (optional): use it only when a local build cannot
   authenticate, for example when the staging backend's CORS rejects
   localhost on its session endpoint. The run then goes against the deployed
@@ -115,6 +121,61 @@ journey evaluation scores polish for it.
   value of 8 or more characters is refused. A placeholder embedded in a real
   value does not exempt it. Saved storage-state files, session JWTs, bearer
   tokens and API tokens remain refused.
+
+## Before/after pairs
+
+Reports and release notes take their screenshots from one place per delivery
+task, so they can find them without asking:
+`~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/`. An independent round or a
+journey that captures a pair writes it there too, not under its own directory.
+Produce pairs for every `visual_change: true` bundle; omit them otherwise.
+
+1. **Capture both sides in one session.** Before comes from a local build of
+   the merge base (`git merge-base <target> <head>`), or, when that cannot be
+   served, from the deployed production origin while the change is live only
+   on staging. After comes from the delivered build. Keep viewport, scheme,
+   login, data and masks identical, so the only difference is this delivery.
+   Use real captures only; never mock, edit or reconstruct a side.
+2. **Write the files.** `<id>.before.png` and `<id>.after.png` hold the full
+   captures; `<id>.before.jpg` and `<id>.after.jpg` are the embed copies, at
+   most 1440 px wide, quality 80 and 250 KB each. `<id>` is a stable
+   kebab-case shot name; reuse it for the same surface in later deliveries.
+3. **Write `pairs.json`.** Each side records its files, the PNG's SHA-256, the
+   commit or origin it came from, its source and its capture time. A shot with
+   only one side goes in `unpaired[]`: it is kept for the record and never rendered.
+
+   ```json
+   {"schema": 1, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
+    "pairs": [{"id": "saved-filters", "surface": "/projects", "viewport": "1280x800", "scheme": "light", "masked": [".avatar"],
+      "before": {"jpg": "saved-filters.before.jpg", "png": "saved-filters.before.png", "sha256": "<hex>", "ref": "<base SHA>", "source": "merge-base", "captured_at": "<RFC 3339>"},
+      "after": {"jpg": "saved-filters.after.jpg", "png": "saved-filters.after.png", "sha256": "<hex>", "ref": "<head SHA>", "source": "delivered-build", "captured_at": "<RFC 3339>"}}],
+    "unpaired": []}
+   ```
+
+   Use each stable `id` as the cell identity on both sides. Entries in `unpaired[]`
+   use the same row shape, with just `before` or `after`; each present side must
+   name a nonempty `png` resolved relative to, and confined inside, the directory
+   containing `pairs.json`. Keep every baseline cell, including cells with no
+   AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
+   AFTER must contain every BEFORE id, and may add ids. A partial comparison that
+   drops BEFORE cells refuses and names all missing ids, even with no AFTER cells.
+   Capture the missing cells, or obtain an existing recorded exact-tip `qa_waive`
+   or `supervisor_override`; a manifest flag or ledger reason does not waive it.
+   BEFORE captures may predate the delivery; AFTER captures and `pairs.json` must
+   be fresh for the delivered build. Match `pairs.json` task and head to the bundle,
+   including when rebinding evidence after documentation-only commits.
+
+4. **Record the status.** In `bundle.json`, set `files.pairs` to
+   `pairs/pairs.json` and `pairs_status` to `complete` (every shot paired),
+   `partial` (some shots in `unpaired[]`) or `unavailable` (no pair; give the
+   reason in one sentence in `LEDGER.md`).
+
+Every consumer renders a pair the same way: only `pairs[]` entries, both
+sides labelled Before and After with Before first, from the JPG copies, one
+pair per change. With one side or none, it shows no image for that change.
+The [release-notes rubric](../../cas-release-notes/references/RUBRIC-template.md)
+and the [report contract](../../cas-html-reports/references/technical-contract.md)
+add the per-surface limits.
 
 ## Affected journeys
 

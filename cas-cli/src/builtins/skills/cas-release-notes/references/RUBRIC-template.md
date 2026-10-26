@@ -57,6 +57,13 @@ Post order: user top-level → capture `message.message_id` → user reply → d
 - **Honest reverts:** if something shipped and came back out, say so plainly.
 - **Attached files only:** never name a file, path or artifact id unless that
   file is attached to the same message. Attach it, or describe it in words.
+- **Before/after screenshots:** when a change in the User reply has a real
+  Before and a real After capture (a `pairs[]` entry in that delivery's
+  `qa/pairs/pairs.json`), attach both JPGs to that reply, Before first; their
+  file names carry the labels. Say so in words in the change's line. A change
+  with one side, an `unpaired[]` shot or no capture gets no image, and a
+  mocked or edited capture is never attached. One reply carries at most ten
+  files, so five pairs: keep the changes a user would notice most.
 - **Times in CT:** every time in a post is US Central (`9:42 AM CT`); ET is fine
   when labelled. Never UTC, GMT or a timestamp ending in `Z`.
 
@@ -97,8 +104,11 @@ Saved filters now survive a reload.
 User reply:
 
 ```text
-• *Saved filters* — Was: you re-applied your filters every time you came back to the list. Now: the list reopens exactly as you left it.
+• *Saved filters* — Was: you re-applied your filters every time you came back to the list. Now: the list reopens exactly as you left it. (Before and After screenshots attached.)
 ```
+
+Attach the pair with `--reply-file` flags placed after the reply they belong to, Before first:
+`cas violet thread --channel <name> --text "<User top-level>" --reply "<User reply>" --reply-file <pairs-dir>/saved-filters.before.jpg --reply-file <pairs-dir>/saved-filters.after.jpg --idempotency-key <key>`.
 
 Dev top-level:
 

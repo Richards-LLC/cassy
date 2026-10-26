@@ -40430,7 +40430,7 @@ mod zero_change_close_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
-        std::fs::write(cas_dir.join("config.toml"), "[verification]\nenabled = true\n").unwrap();
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"cas-b03c-fixture\"\n[verification]\nenabled = true\n").unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
         open_rule_store(&cas_dir).unwrap().init().unwrap();
         open_skill_store(&cas_dir).unwrap().init().unwrap();
@@ -40448,7 +40448,7 @@ mod zero_change_close_tests {
         epic.risk = vec![TaskRisk::None];
         epic.epic_verification_owner = Some(actor.into());
         epic.deliverables.work_target = Some(WorkTarget {
-            repo_selector: p.to_str().unwrap().into(),
+            repo_selector: "project:cas-b03c-fixture".into(),
             target_branch: "epic/released".into(),
         });
         store.add(&epic).unwrap();

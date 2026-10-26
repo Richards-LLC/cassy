@@ -333,6 +333,18 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
     BuiltinFile {
+        path: "skills/cas-feature-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-template.html",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-template.html"),
+    },
+    BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
         content: include_str!("builtins/skills/cas-cut-release/SKILL.md"),
     },
@@ -1062,6 +1074,18 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-template.html",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-template.html"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1840,6 +1864,18 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-template.html",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-template.html"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -7032,6 +7068,7 @@ This is the body content."#;
             "skills/cas-release-report/SKILL.md",
             "skills/cas-sow-delivery-report/SKILL.md",
             "skills/cas-customer-release-notes/SKILL.md",
+            "skills/cas-feature-report/SKILL.md",
             "skills/cas-dataviz/SKILL.md",
             "skills/cas-ui-craft/SKILL.md",
             "skills/design-spec/SKILL.md",

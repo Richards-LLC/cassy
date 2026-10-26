@@ -169,7 +169,8 @@ fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
     )
     .unwrap();
     fs::write(root.join("source.txt"), "delivered source").unwrap();
-    fs::write(root.join("serve.py"), "import os,time,pathlib,subprocess\npathlib.Path('source.txt').write_text('private mutation')\nchild=subprocess.Popen(['sleep','60'])\npathlib.Path(os.environ['CAPTURE_TEST_PID']).write_text(str(os.getpid())+' '+str(child.pid))\ntime.sleep(60)\n").unwrap();
+    fs::create_dir(root.join("node_modules")).unwrap();
+    fs::write(root.join("serve.py"), "import os,time,pathlib,subprocess\nassert not subprocess.check_output(['git','status','--porcelain','--','node_modules'])\npathlib.Path('source.txt').write_text('private mutation')\nchild=subprocess.Popen(['sleep','60'])\npathlib.Path(os.environ['CAPTURE_TEST_PID']).write_text(str(os.getpid())+' '+str(child.pid))\ntime.sleep(60)\n").unwrap();
     git(root, &["init", "-q", "-b", "main"]);
     git(root, &["add", "docs", "source.txt", "serve.py"]);
     git(root, &["commit", "-q", "-m", "capture fixture"]);

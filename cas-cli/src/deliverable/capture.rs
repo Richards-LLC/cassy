@@ -187,6 +187,8 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
     }
     if shots.is_empty() {
         receipt.findings.push(pairs::finding("capture-unavailable","No catalog shots match this delivery; declare their touches or affected journey receipts"));
+        manifest.findings = receipt.findings.clone();
+        pairs::write_manifest(&dir, &manifest)?;
         receipt.elapsed_ms = started.elapsed().as_millis() as u64;
         return Ok(receipt);
     }
@@ -203,6 +205,8 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
     }
     if capture.serve.is_empty() && request.side == Side::Both {
         receipt.findings.push(pairs::finding("capture-unavailable","Merge-base capture requires qa.capture.serve; collect before/after explicitly for a deployed target"));
+        manifest.findings = receipt.findings.clone();
+        pairs::write_manifest(&dir, &manifest)?;
         receipt.elapsed_ms = started.elapsed().as_millis() as u64;
         return Ok(receipt);
     }
@@ -277,7 +281,7 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
                     ],
                     deadline,
                 )?;
-                reuse_dependencies(&request.root, &root)?;
+                reuse_dependencies(&request.root, &root, deadline)?;
                 let server = Server::start(
                     &root,
                     &capture,
@@ -472,7 +476,7 @@ fn git_optional(root: &Path, args: &[&str], deadline: Deadline) -> anyhow::Resul
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().into()))
 }
-fn reuse_dependencies(source: &Path, target: &Path) -> anyhow::Result<()> {
+fn reuse_dependencies(source: &Path, target: &Path, deadline: Deadline) -> anyhow::Result<()> {
     // Only dependency directories are shared; cloned source files stay private.
     let mut entries = walkdir::WalkDir::new(source)
         .max_depth(4)
@@ -489,8 +493,11 @@ fn reuse_dependencies(source: &Path, target: &Path) -> anyhow::Result<()> {
                 .is_some_and(|p| p.components().any(|c| c.as_os_str() == "node_modules"))
         });
     while let Some(entry) = entries.next() {
+        if deadline.remaining().is_zero() {
+            anyhow::bail!("capture-timeout");
+        }
         let entry = entry?;
-        if entry.file_name() != "node_modules" || !entry.file_type().is_dir() {
+        if entry.file_name() != "node_modules" || !entry.path().is_dir() {
             continue;
         }
         let relative = entry.path().strip_prefix(source)?;
@@ -508,6 +515,14 @@ fn reuse_dependencies(source: &Path, target: &Path) -> anyhow::Result<()> {
             let _ = parent;
             #[cfg(unix)]
             std::os::unix::fs::symlink(entry.path(), &destination)?;
+            // A directory-only node_modules/ ignore does not match a symlink.
+            // Keep dependency reuse out of exact-tip producer dirty checks,
+            // without changing the evaluated checkout's tracked ignore file.
+            OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(target.join(".git/info/exclude"))?
+                .write_all(b"\nnode_modules\n")?;
             #[cfg(not(unix))]
             {
                 return Err(UsageError(

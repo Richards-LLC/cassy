@@ -155,7 +155,7 @@ fn run(
             ],
             deadline,
         )?;
-        reuse_dependencies(&request.root, &root)?;
+        reuse_dependencies(&request.root, &root, deadline)?;
         for path in INSTRUMENTATION {
             // git() trims text output; preserve committed bytes for the exact
             // overlay check rather than rewriting line endings or newlines.

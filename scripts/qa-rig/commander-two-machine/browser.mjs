@@ -24,6 +24,9 @@ const pause = (ms) => new Promise((done) => setTimeout(done, ms));
 
 await mkdir(out, { recursive: true });
 const context = await chromium.launchPersistentContext(join(rig, "browser-profile"), {
+  // chromium-headless-shell kills the renderer when Commander probes on-device
+  // speech recognition (a bad Mojo message); the full Chromium build does not.
+  channel: "chromium",
   headless: true,
   viewport: { width: 1280, height: 800 },
   permissions: ["local-network-access"],

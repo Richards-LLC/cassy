@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 use crate::config::FactoryConfig;
 
 mod lane;
+mod unknown;
 pub(crate) mod legacy;
 #[cfg(unix)]
 pub(crate) mod owner;
@@ -28,7 +29,6 @@ pub(crate) mod parked;
 mod process_probe;
 pub(crate) mod retirement;
 pub(crate) mod scratch;
-mod unknown;
 pub use lane::LanePreviewRecord;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
@@ -124,6 +124,7 @@ pub struct TargetCacheReport {
     pub candidate_bytes: u64,
     /// False when the read-only inventory exhausted its scan budget. Bytes
     /// then describe completed scans only, never an exact full-tree total.
+    #[serde(default)]
     pub inventory_complete: bool,
     pub selected_bytes: u64,
     pub reclaimed_bytes: u64,

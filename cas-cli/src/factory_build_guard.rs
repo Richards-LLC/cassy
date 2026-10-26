@@ -714,6 +714,7 @@ mod tests {
         for (name, age) in [
             ("z-old", 400),
             ("a-next", 300),
+            ("b-spare", 250),
             ("warm", 200),
             ("live", 100),
         ] {
@@ -739,10 +740,10 @@ mod tests {
             targets.push((worker, target));
         }
         // Previous factory sessions leave durable target provenance after checkout cleanup.
-        for (worker, _) in &targets[..2] {
+        for (worker, _) in &targets[..3] {
             fs::remove_dir_all(worker).unwrap();
         }
-        let _live = crate::factory_target_cache::owner::acquire(&cas, &targets[3].0)
+        let _live = crate::factory_target_cache::owner::acquire(&cas, &targets[4].0)
             .unwrap()
             .unwrap();
         let unmanaged = scratch.join("verify-unmanaged");
@@ -785,8 +786,9 @@ mod tests {
             !targets[1].1.exists(),
             "reclaim until measured usage reaches the low watermark"
         );
-        assert!(targets[2].1.exists(), "warm cache must survive");
-        assert!(targets[3].1.exists(), "live cache must survive");
+        assert!(targets[2].1.exists(), "stop deleting dead targets once the low watermark is reached");
+        assert!(targets[3].1.exists(), "warm cache must survive");
+        assert!(targets[4].1.exists(), "live cache must survive");
         assert!(unknown.exists(), "unverifiable checkout must survive");
         assert_eq!(
             fs::read_to_string(unmanaged.join("proof")).unwrap(),

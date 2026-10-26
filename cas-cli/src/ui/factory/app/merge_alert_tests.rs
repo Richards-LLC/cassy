@@ -300,6 +300,14 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::hours(1));
     f.app.revalidate_and_prompt_for_delivery(&events[..1]);
     assert_eq!(counts(&f), merged);
+    let receipts = f.app.cas_dir.join("receipts/merge-ready");
+    assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 1);
+    let mut closed = store.get("cas-9efb-test").unwrap();
+    closed.status = TaskStatus::Closed;
+    store.update(&closed).unwrap();
+    f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::hours(2));
+    f.app.revalidate_and_prompt_for_delivery(&events[..1]);
+    assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
 }
 
 #[test]

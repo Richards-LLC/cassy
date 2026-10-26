@@ -3818,6 +3818,8 @@ impl CasCore {
             if current.status != cas_types::TaskStatus::AwaitingMerge
                 || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
                 || current.deliverables.parked_branch != task.deliverables.parked_branch
+                || current.deliverables.work_target != task.deliverables.work_target
+                || current.assignee != task.assignee
             {
                 return Ok("delivery changed during the merge; no task transition attempted".into());
             }
@@ -3832,10 +3834,10 @@ impl CasCore {
                 Ok(None) => "no live assigned worker to notify".into(),
                 Err(error) => format!("worker notice failed: {error}"),
             };
-            Ok(format!("task is Open again with its assignee kept; {notice}. The worker can start task {} and resolve the conflict.", task.id))
+            Ok(format!("Cassy recorded {reason}\nTask {} is Open again with its assignee kept; {notice}. The worker can start task {} and resolve the conflict.", task.id, task.id))
         })();
         match recovery {
-            Ok(detail) => format!("\nCassy recorded {reason}\n{detail}"),
+            Ok(detail) => format!("\n{detail}"),
             Err(error) => format!("\nCassy could not return task {} to its worker ({error}); run task action=request_changes id={}.", task.id, task.id),
         }
     }

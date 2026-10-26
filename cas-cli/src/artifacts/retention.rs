@@ -25,8 +25,17 @@ pub struct ArtifactRootUsage {
 
 /// Measure `root` without following links.
 pub fn artifact_root_usage(root: &Path) -> ArtifactRootUsage {
+    artifact_root_usage_until(root, None)
+}
+
+pub(crate) fn artifact_root_usage_until(root: &Path,
+    deadline: Option<std::time::Instant>) -> ArtifactRootUsage {
     let mut usage = ArtifactRootUsage::default();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            usage.error = Some("report scan budget exhausted; byte inventory incomplete".into());
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {

@@ -228,8 +228,13 @@ fn inspect_with_probe(
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
     inspect_scoped_with_probe(
-        cas_root, policy, known_worktree_roots, live_worktree_roots, dry_run, false, probe,
+        cas_root, policy, known_worktree_roots, live_worktree_roots, dry_run, false, probe, None,
     )
+}
+
+pub(crate) fn inspect_until(cas_root: &Path, policy: TargetCachePolicy,
+    known: &[PathBuf], live: &[PathBuf], deadline: Instant) -> io::Result<TargetCacheReport> {
+    inspect_scoped_with_probe(cas_root, policy, known, live, true, false, capacity_status, Some(deadline))
 }
 
 /// Admission reclaims verified relocated worker and resolved review targets. Keep full factory
@@ -240,7 +245,7 @@ pub(crate) fn reclaim_scratch_for_admission(
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
     let review_bytes = crate::factory_review_scratch::reclaim_targets(cas_root, None);
-    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, &probe)?;
+    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, &probe, None)?;
     // Apparent file sizes may include hard-linked seed data. Keep the idle
     // fallback candidates available and stop on measured free space instead.
     for cache in &mut report.caches {
@@ -275,6 +280,7 @@ fn inspect_scoped_with_probe(
     dry_run: bool,
     scratch_only: bool,
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
+    deadline: Option<Instant>,
 ) -> io::Result<TargetCacheReport> {
     let repo_root = cas_root.parent().ok_or_else(|| {
         io::Error::new(
@@ -290,7 +296,7 @@ fn inspect_scoped_with_probe(
     let reserved_builders = config.max_concurrent_builders;
     capacity.pressure = crate::factory_build_guard::disk_pressure(&capacity, reserved_builders);
     let now = SystemTime::now();
-    let deadline = dry_run.then(|| Instant::now() + Duration::from_secs(8));
+    let deadline = deadline.or_else(|| dry_run.then(|| Instant::now() + Duration::from_secs(8)));
     let mut scanned = discover_caches_scoped(
         repo_root,
         cas_root,
@@ -435,6 +441,8 @@ fn inspect_scoped_with_probe(
                 .map(|preview| preview.bytes)
                 .sum::<u64>(),
         );
+    let pending_reclaim_bytes = crate::factory_review_scratch::pending_reclaim_bytes_until(cas_root, deadline);
+    inventory_complete &= pending_reclaim_bytes.is_some();
     Ok(TargetCacheReport {
         schema_version: 1,
         filesystem: capacity,
@@ -444,7 +452,7 @@ fn inspect_scoped_with_probe(
         inventory_complete,
         selected_bytes,
         reclaimed_bytes: 0,
-        pending_reclaim_bytes: crate::factory_review_scratch::pending_reclaim_bytes(cas_root),
+        pending_reclaim_bytes: pending_reclaim_bytes.unwrap_or(0),
         dry_run,
         remediation: "Review gc_report, then run gc_cleanup force=true dry_run=false; Cassy revalidates ownership, liveness, recency, and path containment immediately before each rename.".to_string(),
         caches: records,

@@ -88,19 +88,20 @@ pub(crate) struct RelocatedCache {
 /// Every relocated cache under this project's scratch directory; empty when
 /// the root is unset (cas-baa8).
 pub(crate) fn relocated_caches(cas_dir: &Path) -> Vec<RelocatedCache> {
-    relocated_caches_with_targets(cas_dir, None)
+    relocated_caches_with_targets(cas_dir, None, None)
 }
 
 fn relocated_caches_with_targets(
     cas_dir: &Path,
     targets: Option<&crate::factory_target_cache::TargetCacheReport>,
+    deadline: Option<std::time::Instant>,
 ) -> Vec<RelocatedCache> {
     use cas_types::factory_scratch::{BUILD_CACHE_DIR, RELEASE_GATE_DIR, TARGETS_DIR};
     let Some(root) = configured_scratch_root(cas_dir) else {
         return Vec::new();
     };
     let project = cas_types::factory_scratch::project_scratch_dir(&root, cas_dir);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = deadline.unwrap_or_else(|| std::time::Instant::now() + std::time::Duration::from_secs(5));
     let cache = |label: String, path: PathBuf| {
         let (bytes, complete) = targets
             .and_then(|report| {
@@ -174,7 +175,12 @@ pub(crate) fn render_relocated_with_targets(
     cas_dir: &Path,
     targets: Option<&crate::factory_target_cache::TargetCacheReport>,
 ) -> String {
-    let caches = relocated_caches_with_targets(cas_dir, targets);
+    render_relocated_until(cas_dir, targets, None)
+}
+
+pub(crate) fn render_relocated_until(cas_dir: &Path,
+    targets: Option<&crate::factory_target_cache::TargetCacheReport>, deadline: Option<std::time::Instant>) -> String {
+    let caches = relocated_caches_with_targets(cas_dir, targets, deadline);
     let Some(root) = configured_scratch_root(cas_dir) else {
         return String::new();
     };

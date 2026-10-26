@@ -2,6 +2,10 @@
 use super::*;
 
 pub(crate) fn render(cas_root: &Path, clean: bool) -> String {
+    render_until(cas_root, clean, None)
+}
+
+pub(crate) fn render_until(cas_root: &Path, clean: bool, deadline: Option<Instant>) -> String {
     let Some(repo) = cas_root.parent() else {
         return "\nRelease scratch: unavailable (no project root; none deleted)\n".into();
     };
@@ -13,7 +17,8 @@ pub(crate) fn render(cas_root: &Path, clean: bool) -> String {
     let result = if clean {
         command.output().map_err(|error| error.to_string())
     } else {
-        let budget = Duration::from_secs(5);
+        let budget = deadline.map_or(Duration::from_secs(5), |deadline|
+            deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5)));
         crate::bounded_process::run_command(
             &mut command,
             crate::bounded_process::Deadline::after(budget),

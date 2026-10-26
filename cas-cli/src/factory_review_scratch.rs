@@ -580,12 +580,19 @@ fn collector_lock(cas: &Path, wait: bool) -> Result<Option<CollectorLock>> {
 /// Accounting only: queued output is not free space, including while a build
 /// lease or collector lock prevents this process from deleting it.
 pub(crate) fn pending_reclaim_bytes(cas: &Path) -> u64 {
-    entries(&base(cas))
-        .into_iter()
-        .flat_map(|task| entries(&task))
-        .filter_map(|directory| trash(cas, &directory).ok().flatten())
-        .map(|path| freeable_bytes(&path.join("target")))
-        .sum()
+    pending_reclaim_bytes_until(cas, None).unwrap_or(0)
+}
+
+pub(crate) fn pending_reclaim_bytes_until(cas: &Path,
+    deadline: Option<std::time::Instant>) -> Option<u64> {
+    let mut total = 0u64;
+    for directory in entries(&base(cas)).into_iter().flat_map(|task| entries(&task)) {
+        if deadline.is_some_and(|end| std::time::Instant::now() >= end) { return None; }
+        if let Some(path) = trash(cas, &directory).ok().flatten() {
+            total = total.saturating_add(freeable_bytes_until(&path.join("target"), deadline)?);
+        }
+    }
+    Some(total)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -603,20 +610,25 @@ fn source_is_old(record: &Owner) -> bool {
 }
 
 fn bytes(path: &Path, limit: Option<u64>) -> u64 {
+    bytes_until(path, limit, None).unwrap_or(0)
+}
+
+fn bytes_until(path: &Path, limit: Option<u64>, deadline: Option<std::time::Instant>) -> Option<u64> {
     let mut size = 0u64;
-    for metadata in walkdir::WalkDir::new(path)
+    for entry in walkdir::WalkDir::new(path)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| entry.metadata().ok())
     {
+        if deadline.is_some_and(|end| std::time::Instant::now() >= end) { return None; }
+        if !entry.file_type().is_file() { continue; }
+        let Ok(metadata) = entry.metadata() else { continue; };
         size = size.saturating_add(metadata.len());
         if limit.is_some_and(|limit| size >= limit) {
             break;
         }
     }
-    size
+    Some(size)
 }
 
 /// Disk space is released only when a deletion scope owns every link to an
@@ -664,17 +676,22 @@ impl FreeableInodes {
 }
 
 fn freeable_bytes(path: &Path) -> u64 {
+    freeable_bytes_until(path, None).unwrap_or(0)
+}
+
+fn freeable_bytes_until(path: &Path, deadline: Option<std::time::Instant>) -> Option<u64> {
     let mut inodes = FreeableInodes::default();
-    for metadata in walkdir::WalkDir::new(path)
+    for entry in walkdir::WalkDir::new(path)
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| entry.metadata().ok())
     {
+        if deadline.is_some_and(|end| std::time::Instant::now() >= end) { return None; }
+        if !entry.file_type().is_file() { continue; }
+        let Ok(metadata) = entry.metadata() else { continue; };
         inodes.add(&metadata);
     }
-    inodes.bytes()
+    Some(inodes.bytes())
 }
 
 #[derive(Default)]
@@ -687,6 +704,10 @@ struct ReviewBytes {
 
 /// One walk supplies the row size and both disposable payload sizes.
 fn review_bytes(directory: &Path) -> ReviewBytes {
+    review_bytes_until(directory, None).unwrap_or_default()
+}
+
+fn review_bytes_until(directory: &Path, deadline: Option<std::time::Instant>) -> Option<ReviewBytes> {
     let target = directory.join("repo/target");
     let pending = directory.join("trash/target");
     let mut sizes = ReviewBytes::default();
@@ -697,8 +718,9 @@ fn review_bytes(directory: &Path) -> ReviewBytes {
         .follow_links(false)
         .into_iter()
         .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
     {
+        if deadline.is_some_and(|end| std::time::Instant::now() >= end) { return None; }
+        if !entry.file_type().is_file() { continue; }
         if let Ok(metadata) = entry.metadata() {
             sizes.total = sizes.total.saturating_add(metadata.len());
             whole_inodes.add(&metadata);
@@ -712,7 +734,7 @@ fn review_bytes(directory: &Path) -> ReviewBytes {
     sizes.reclaimable = whole_inodes.bytes();
     sizes.target = target_inodes.bytes();
     sizes.pending = pending_inodes.bytes();
-    sizes
+    Some(sizes)
 }
 
 fn entries(path: &Path) -> Vec<PathBuf> {
@@ -1023,6 +1045,10 @@ pub(crate) async fn reclaim_task_targets(cas: &Path, task_id: &str) {
 
 /// Shared public GC path. Unknown/malformed owners are retained and reported.
 pub(crate) fn render(cas: &Path, clean: bool) -> String {
+    render_until(cas, clean, None)
+}
+
+pub(crate) fn render_until(cas: &Path, clean: bool, deadline: Option<std::time::Instant>) -> String {
     let cas = cas.canonicalize().unwrap_or_else(|_| cas.to_path_buf());
     let cas = cas.as_path();
     let base = base(cas);
@@ -1036,7 +1062,9 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
         .flatten();
     for task in entries(&base) {
         for directory in entries(&task) {
-            let sizes = review_bytes(&directory);
+            let Some(sizes) = review_bytes_until(&directory, deadline) else {
+                return "\nManaged review scratch: report inventory incomplete (scan budget exhausted; none deleted)\n".into();
+            };
             let size = sizes.total;
             let mutate = collector.is_some() && cleaned < MAX_RECLAIMS_PER_PASS;
             let pending = trash(cas, &directory)
@@ -1102,6 +1130,10 @@ pub(crate) fn render(cas: &Path, clean: bool) -> String {
 
 /// Inventory-only evidence for the ad-hoc siblings that motivated this GC.
 pub(crate) fn unmanaged_large(cas: &Path) -> String {
+    unmanaged_large_until(cas, None)
+}
+
+pub(crate) fn unmanaged_large_until(cas: &Path, deadline: Option<std::time::Instant>) -> String {
     let Some(root) = crate::factory_scratch::configured_scratch_root(cas) else {
         return String::new();
     };
@@ -1114,7 +1146,10 @@ pub(crate) fn unmanaged_large(cas: &Path) -> String {
         }) {
             continue;
         }
-        let size = bytes(&path, Some(LARGE_BYTES));
+        let Some(size) = bytes_until(&path, Some(LARGE_BYTES), deadline) else {
+            out.push_str("\nUnmanaged scratch: report inventory incomplete (scan budget exhausted; none deleted)\n");
+            break;
+        };
         if size >= LARGE_BYTES {
             if out.is_empty() {
                 out.push_str("\nLarge unmanaged scratch directories (review-only; >= 1 GiB):\n");

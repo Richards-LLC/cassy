@@ -372,6 +372,11 @@ test("empty captures fail even with a wildcard allowlist", async (t) => {
   assert.equal(report.findings.filter((f) => f.check === "empty-capture").length, 11);
   assert.equal(report.allowed.length, 0);
   assert.match(fs.readFileSync(path.join(out, "report.md"), "utf8"), /^terminal-qa: FAIL/);
+  const ttyNewline = await runTerminalQa({
+    command: [process.execPath, "-e", 'if (!process.stdout.isTTY) console.log("status ok"); else console.log()'],
+    out: path.join(out, "tty-newline"),
+  });
+  assert.equal(ttyNewline.findings.filter((f) => f.check === "empty-capture").length, 10);
 });
 
 function fakeScript(t, body) {

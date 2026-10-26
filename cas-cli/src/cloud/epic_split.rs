@@ -691,7 +691,47 @@ pub fn reconcile(cas_root: &Path, session: &str, now: DateTime<Utc>) -> Result<(
         };
         if let Err(error) = work() { errors.push(error); }
     }
+    if let Err(error) = reconcile_ready_epics(cas_root, &owners) { errors.push(error); }
     if errors.is_empty() { Ok(()) } else { Err(errors.join("; ")) }
+}
+
+/// Cloud pull persists remote closes without a local worker/director edge.
+/// Reconcile on the existing background mailbox duty, independently of peer
+/// receipts. The owner-addressed notice ledger survives retries and restarts.
+fn reconcile_ready_epics(
+    root: &Path,
+    owners: &std::collections::HashMap<String, Agent>,
+) -> Result<(), String> {
+    let splits = current_epic_splits(root)?;
+    let tasks = crate::store::open_task_store_local(root).map_err(|error| error.to_string())?;
+    for split in splits.iter().filter(|split| split.state == SplitState::Accepted) {
+        let epic = match tasks.get(&split.epic_id) {
+            Ok(epic) => epic,
+            Err(cas_store::StoreError::TaskNotFound(_)) => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if epic.is_terminal() { continue }
+        let Some(owner) = owners.values().find(|owner| {
+            owner.role == crate::types::AgentRole::Supervisor
+                && epic.epic_verification_owner.as_deref().is_some_and(|id| {
+                    id == owner.id || id == owner.name || owner.factory_session.as_deref() == Some(id)
+                })
+        }) else { continue };
+        let children = tasks.get_subtasks(&epic.id).map_err(|error| error.to_string())?;
+        // An incomplete sync is not evidence of completion. Include every
+        // child, even lanes outside this split, and require the current shares
+        // to be present before declaring readiness.
+        if children.is_empty()
+            || children.iter().any(|child| child.status != TaskStatus::Closed)
+            || split.mine.iter().chain(&split.theirs)
+                .any(|id| !children.iter().any(|child| child.id == *id))
+        { continue }
+        crate::supervisor_notices::enqueue(root,
+            &crate::supervisor_notices::Recipient::agent(owner), "epic_ready",
+            &format!("EPIC READY: all children closed — {} ({}). Inspect the epic's merged delivery and advance its release.", epic.id, epic.title),
+            &epic.id).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// Local decision state plus explicitly observed Cloud claims. Unavailable

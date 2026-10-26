@@ -848,9 +848,9 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// TTL in seconds for the reminder (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry)
+    /// TTL in seconds for the reminder (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,
@@ -1446,9 +1446,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_id: Option<i64>,
 
-    /// Time-to-live in seconds for the reminder (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry)
+    /// Time-to-live in seconds for the reminder (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry)
     #[schemars(
-        description = "Time-to-live in seconds before an undelivered reminder expires (default: 3600, or 604800 for branch_contained_in, tag_exists and ci_completed; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
+        description = "Time-to-live in seconds before an undelivered reminder expires (default: 0 for task_completed/task_blocked with a task_id filter, 604800 for branch_contained_in/tag_exists/ci_completed, otherwise 3600; zero means no expiry). A time reminder's TTL counts from its due time, so any delay still fires; an event reminder's counts from creation."
     )]
     #[serde(default, deserialize_with = "deser::option_i64")]
     pub remind_ttl_secs: Option<i64>,

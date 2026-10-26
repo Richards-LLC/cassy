@@ -125,3 +125,44 @@ fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
         assert!(error.contains("./scripts/bootstrap-zig.sh"), "{error}");
     }
 }
+
+// Moved from factory_worker_check: discovery belongs to the build script,
+// including explicit overrides and relative ZIG/PATH entries.
+#[cfg(unix)]
+#[test]
+fn zig_resolution_precedence() {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo with spaces");
+    let install = |path: &std::path::Path| {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "#!/bin/sh\nprintf '0.15.2\\n'\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    let local = repo.join(".context/zig/zig");
+    let configured = repo.join("configured-zig");
+    let on_path = repo.join("bin/zig");
+    for path in [&local, &configured, &on_path] {
+        install(path);
+    }
+    assert_eq!(
+        build_support::find_zig(
+            &repo,
+            Some(OsStr::new("configured-zig")),
+            Some(OsStr::new("bin"))
+        )
+        .unwrap(),
+        configured
+    );
+    assert_eq!(
+        build_support::find_zig(&repo, Some(OsStr::new("missing")), Some(OsStr::new("bin")))
+            .unwrap(),
+        on_path
+    );
+    assert_eq!(
+        build_support::find_zig(&repo, None, Some(OsStr::new(""))).unwrap(),
+        local
+    );
+}

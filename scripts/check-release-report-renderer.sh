@@ -6,6 +6,8 @@
 # missing, the report stage stopped after publication; this probe lets
 # preflight catch it before anything publishes.
 #
+# The PDF check needs PyMuPDF.
+#
 # Prints `playwright-version=<v>` and exits 0 when the browser launches.
 set -euo pipefail
 
@@ -15,6 +17,12 @@ for tool in node npm; do
         exit 1
     }
 done
+
+# `cas deliverable finalize` checks every printed page with PyMuPDF.
+python3 -c 'import pymupdf' >/dev/null 2>&1 || {
+    printf 'report renderer: PyMuPDF is not installed; run python3 -m pip install pymupdf\n' >&2
+    exit 1
+}
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/cas-report-renderer.XXXXXX")"
 trap 'rm -rf "$work"' EXIT

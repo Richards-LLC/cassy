@@ -285,10 +285,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
         content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
     },
@@ -315,14 +311,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
@@ -1012,10 +1000,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
         content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
     },
@@ -1042,14 +1026,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
@@ -1786,10 +1762,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
         content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
     },
@@ -1816,14 +1788,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
@@ -8643,11 +8607,8 @@ This is the body content."#;
                 "{label}: the CLI comes before the manual renderer"
             );
 
-            let check = wp10_get(
-                label,
-                catalog,
-                "skills/cas-release-report/scripts/check-pdf.py",
-            );
+            // The PDF check ships once, in the deliverables core.
+            let check = include_str!("deliverable/assets/check-pdf.py");
             assert!(check.contains("import pymupdf") && !check.contains("import fitz"));
 
             let html = wp10_get(label, catalog, "skills/cas-html-reports/SKILL.md");
@@ -8669,7 +8630,6 @@ This is the body content."#;
                 "skills/cas-ui-craft/scripts/visual-qa.mjs",
                 "skills/cas-cli-craft/scripts/terminal-qa.mjs",
                 "skills/design-spec/references/tokens.css",
-                "skills/cas-release-report/scripts/check-pdf.py",
                 "skills/cas-frontend-engineering/references/playwright-acceptance.md",
             ] {
                 assert!(!wp10_get(label, catalog, path).is_empty(), "{label} {path} is empty");

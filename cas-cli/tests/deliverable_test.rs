@@ -140,3 +140,117 @@ fn deliverable_brand_customer_without_design_md_is_a_finding() {
     let receipt: Value = serde_json::from_slice(&internal.get_output().stdout).unwrap();
     assert_eq!(receipt["source"], "defaults", "{receipt}");
 }
+
+/// A small project whose DESIGN.md gives a customer brand, plus a draft with
+/// the brand marker and relative images beside it.
+fn finalize_fixture(body: &str, images: &[(&str, usize)]) -> TempDir {
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    fs::write(
+        root.join("DESIGN.md"),
+        "---\nname: Northwind\ncolors:\n  bg: '#fffdf3'\n  ink: '#232124'\n  verdict: '#ff682f'\n---\n",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join("report/shots")).unwrap();
+    for (name, bytes) in images {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        png.resize(*bytes, b'x');
+        fs::write(root.join("report/shots").join(name), png).unwrap();
+    }
+    fs::write(
+        root.join("report/draft.html"),
+        format!("<!doctype html><html><head><style>/*cas:brand*/</style></head><body>{body}</body></html>"),
+    )
+    .unwrap();
+    project
+}
+
+/// Customer hygiene refuses a ticket label that internal output may carry;
+/// both runs brand and inline the draft into one file.
+#[test]
+fn deliverable_finalize_customer_hygiene_refuses_a_planted_ticket_label() {
+    let project = finalize_fixture(
+        "<h1>Round 2</h1><p>The export shipped in cas-1a2b.</p><figure><img src=\"shots/r1.png\" alt=\"Export\"></figure>",
+        &[("r1.png", 2_000)],
+    );
+    let run = |audience: &str| {
+        cas_cmd(project.path())
+            .args([
+                "--json",
+                "deliverable",
+                "finalize",
+                "report/draft.html",
+                "--audience",
+                audience,
+            ])
+            .args(["--out", &format!("report/{audience}.html")])
+            .assert()
+    };
+    let customer = run("customer").code(1);
+    let receipt: Value = serde_json::from_slice(&customer.get_output().stdout).unwrap();
+    assert_eq!(receipt["findings"][0]["code"], "hygiene", "{receipt}");
+    let message = receipt["findings"][0]["message"].as_str().unwrap();
+    assert!(message.contains("ticket label 'cas-1a2b'"), "{message}");
+
+    let internal = run("internal").success();
+    let receipt: Value = serde_json::from_slice(&internal.get_output().stdout).unwrap();
+    assert_eq!(receipt["findings"], Value::Array(vec![]), "{receipt}");
+    assert_eq!(receipt["inlined"], 1);
+    let html = fs::read_to_string(project.path().join("report/internal.html")).unwrap();
+    assert!(
+        html.contains("--verdict:#ff682f") && !html.contains("/*cas:brand*/"),
+        "{html}"
+    );
+    assert!(html.contains("src=\"data:image/png;base64,") && !html.contains("shots/r1.png"));
+}
+
+/// Over the report image budget, the lowest-priority pair goes as a whole and
+/// the receipt names it; a pair never leaves one side behind.
+#[test]
+fn deliverable_finalize_drops_the_lowest_priority_pair_over_budget() {
+    let pair = |id: &str, priority: u8| {
+        format!(
+            "<p>Change {id}</p><figure class=\"captures\" data-priority=\"{priority}\">\
+             <img src=\"shots/{id}.before.png\" alt=\"Before\"><img src=\"shots/{id}.after.png\" alt=\"After\"></figure>"
+        )
+    };
+    let project = finalize_fixture(
+        &(pair("a", 1) + &pair("b", 0) + &pair("c", 1)),
+        &[
+            ("a.before.png", 30_000),
+            ("a.after.png", 30_000),
+            ("b.before.png", 30_000),
+            ("b.after.png", 30_000),
+            ("c.before.png", 30_000),
+            ("c.after.png", 30_000),
+        ],
+    );
+    let output = cas_cmd(project.path())
+        .args([
+            "--json",
+            "deliverable",
+            "finalize",
+            "report/draft.html",
+            "--audience",
+            "internal",
+        ])
+        .args(["--out", "report/final.html", "--max-images-kb", "150"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let receipt: Value = serde_json::from_slice(&output).unwrap();
+    let dropped = receipt["dropped"].as_array().unwrap();
+    assert_eq!(dropped.len(), 1, "{receipt}");
+    assert_eq!(
+        dropped[0]["refs"],
+        serde_json::json!(["shots/b.before.png", "shots/b.after.png"])
+    );
+    let html = fs::read_to_string(project.path().join("report/final.html")).unwrap();
+    assert!(
+        html.contains("<p>Change b</p><div class=\"missing\">"),
+        "{html}"
+    );
+    assert_eq!(html.matches("data:image/png;base64,").count(), 4);
+}

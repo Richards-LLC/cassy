@@ -1146,8 +1146,6 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
             "references/report-contract.md",
             "references/report-skeleton.html",
             "scripts/capture.mjs",
-            "scripts/print-pdf.mjs",
-            "scripts/inline-images.py",
             "scripts/check-sow.py",
         ] {
             assert!(sow.join(file).is_file(), "missing installed sow {file}");

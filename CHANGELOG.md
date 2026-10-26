@@ -7,6 +7,84 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — every report, page and note wears the target project's DESIGN.md
+
+- One rule, `design-spec/references/design-md-first.md`, now governs every
+  human-facing output an agent produces: resolve the target project's
+  `DESIGN.md` (tokens, type, mark, voice), create one through `design-spec`
+  when it is missing, and record `design: <path>@<revision>` at close. Worker
+  and supervisor guidance, the close gate and every craft and report skill
+  link it instead of restating their own fallbacks.
+
+### Added — `cas deliverable brand` and `cas deliverable finalize`
+
+- `cas deliverable brand` resolves a project's brand: the `DESIGN.md` named
+  by `docs/deliverables/PROFILE.md`, else the one nearest `--surface`, the
+  root one, or a single nested one such as `apps/frontend/DESIGN.md`,
+  following `inherits:`. CSS sources with `maps:` are inlined; otherwise the
+  design-spec `colors`, `typography` and `rounded` values are used, and the
+  receipt names the fallback font stack when no local `.woff2` exists. A
+  customer deliverable with no `DESIGN.md` exits 1 with a finding instead of
+  wearing the default brand.
+- `cas deliverable finalize` turns a draft HTML into the deliverable in one
+  call: it fills the brand, inlines local images within a per-audience
+  budget (about 120 KB per image; over budget, the lowest-priority
+  before/after pair is left out whole and named), checks the visible text
+  for the audience (customer output refuses ticket labels, PR numbers,
+  process words, tool names, local URLs, credentials and home paths), prints
+  A4 and Letter and checks both PDFs. A refused deliverable is not written.
+  Exit 0 is pass, 1 a finding, 2 a usage or environment error.
+- `cas release report` and the SOW delivery report now finish through
+  `finalize`; `cas release report --pdf` checks the A4 and Letter PDFs and
+  needs PyMuPDF. `cas release report --audience customer` is available. The
+  SOW skill's own print and inline scripts are gone, and `check-sow.py` keeps
+  only the gap check.
+
+### Added — feature reports and customer release notes
+
+- `cas-feature-report` builds a branded feature report with real
+  before/after views through `finalize`; `cas-html-reports` now routes
+  feature reports to it.
+- `cas-customer-release-notes` builds a client's release notes from its
+  `docs/deliverables/PROFILE.md` and its own `DESIGN.md`, as HTML and A4 and
+  Letter PDFs that pass customer hygiene. `cas-release-notes` now covers team
+  notes and hands customer notes to it.
+
+### Added — Commander counts journey use, and QA reads it
+
+- Commander counts how often each journey's defining act happens, as
+  per-day action totals with no session, project, machine or message
+  content, and sends them only to the operator's paired machines. Each hub
+  keeps the highest count per device, day and action, so a repeated post
+  never double counts, and a machine that comes online takes its counts at
+  once.
+- `cas qa journeys --traffic [--days N] [--write]` turns those counts into
+  per-journey traffic shares, and the post-release check names the affected
+  journeys to watch first, highest share first.
+- `[qa.capture]` configuration (`cas config list --section qa.capture`)
+  describes how to serve and capture a project for QA: target or serve
+  command, shots, viewports, masks, budgets and an anchored login whose
+  credentials are named by an environment variable, never stored.
+
+### Fixed — factory deliveries return to their workers instead of stalling
+
+- A parked delivery that hits a merge conflict returns Open to its assignee
+  with the conflicting paths and one notice, so the worker can resolve and
+  re-deliver directly.
+- After a merge, an enforced registry or documentation upkeep gate returns
+  the task to its assignee with the gate's text instead of leaving it
+  stranded.
+- A blocked worker's alerts stay quiet once the supervisor answers that
+  blocker (`kind=answer` or a reply to it), and re-arm only on a new question
+  or hold; an unrelated ping no longer silences them.
+- 3.81 follow-ups: a declined or not-ready lane settles until its refs
+  change, a parked anchor never advances to a commit origin lacks, and a
+  failed hold restore or close record is named in the result.
+- `gc_report` detail pages keep every stale-agent row while host scans
+  change between page requests.
+- Capped worker checks stay warm, and Zig is resolved from the shared
+  checkout in linked worktrees.
+
 ## [3.81.0] - 2026-10-26
 
 ### Added

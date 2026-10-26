@@ -51,6 +51,7 @@ fn qa_capture_rejects_invalid_values_without_mutation_cas_db23() {
         ("credentials_env", "9INVALID"),
         ("success_url", "/dashboard"),
         ("success_url", "^https://example.com/dashboard|/login"),
+        ("success_url", "^(?x)dashboard # [\n | login"),
         ("success_url", "^(["),
         ("base_url", "file:///tmp/page"),
         ("base_url", "https://user:password@example.com"),

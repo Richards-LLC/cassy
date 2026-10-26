@@ -554,6 +554,8 @@ export class HubDouble {
   private readonly proofRefusals = new Map<string, { count: number; reason: string; retryable: boolean }>();
   /** Authenticated HTTP requests the double refused with a reasoned 401 (cas-d636). */
   readonly refusedProofs: Array<{ machine: string; path: string; reason: string }> = [];
+  /** Usage counts each machine accepted from the browser (cas-0b3d). */
+  readonly usagePosts: Array<{ machine: string; entries: Array<{ day: string; action: string; journey: string; count: number }> }> = [];
 
   /**
    * Refuse a machine's next `count` authenticated HTTP requests with the real
@@ -826,6 +828,11 @@ export class HubDouble {
         headers: { "www-authenticate": `DPoP error="${refusal.retryable ? "invalid_dpop_proof" : "invalid_token"}", error_description="${refusal.reason}"` },
         json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(this.now() / 1000) },
       });
+    }
+    if (path === "/v1/usage" && method === "POST") {
+      this.usagePosts.push({ machine: machineId, entries: (route.request().postDataJSON() as { entries: HubDouble["usagePosts"][number]["entries"] }).entries });
+      this.observed();
+      return route.fulfill({ json: { recorded: 1 } });
     }
     if (path === "/v1/machine") {
       this.machineProbes.set(machineId, (this.machineProbes.get(machineId) ?? 0) + 1);

@@ -7060,9 +7060,7 @@ This is the body content."#;
                 .iter()
                 .filter(|b| {
                     let body = b.content.to_lowercase();
-                    ["white-label fallback", "neutral fallback", "documented fallback"]
-                        .iter()
-                        .any(|phrase| body.contains(phrase))
+                    ["white-label fallback", "neutral fallback"].iter().any(|phrase| body.contains(phrase))
                 })
                 .map(|b| b.path)
                 .collect();

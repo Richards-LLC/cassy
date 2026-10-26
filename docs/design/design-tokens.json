@@ -1,6 +1,6 @@
 {
   "$schema": "https://design-tokens.github.io/community-group/format/",
-  "$description": "Petrastella design language tokens. Source of truth: petrastella-design-language.md beside this file. Projects copy these into their own token file and override in DESIGN.md; a neutral palette is a documented fallback, never the default.",
+  "$description": "Petrastella design language tokens. Source of truth: petrastella-design-language.md beside this file. Projects copy these into their own token file and override in DESIGN.md; a neutral white-label palette is a brand choice, never the default.",
   "$version": "1.0.0",
   "color": {
     "light": {

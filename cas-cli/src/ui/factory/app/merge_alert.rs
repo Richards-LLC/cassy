@@ -6,11 +6,122 @@ use crate::ui::factory::director::{
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 const RETRY_INTERVAL: chrono::Duration = chrono::Duration::minutes(1);
 const UNKNOWN_AFTER: chrono::Duration = chrono::Duration::minutes(10);
 const IDLE_RELAY_BACKOFF: chrono::Duration = chrono::Duration::minutes(30);
 const UNBOUND_REMINDER_HORIZON: chrono::Duration = chrono::Duration::minutes(10);
+const SETTLED_RETRY: chrono::Duration = chrono::Duration::minutes(10);
+
+pub(super) type ProbeCache = Arc<Mutex<HashMap<String, ProbeRead>>>;
+
+#[derive(Debug, Clone)]
+pub(super) struct ProbeRead {
+    fingerprint: String,
+    checked_at: DateTime<Utc>,
+    ready: Option<Ready>,
+    wait: Option<(String, WorkerWait)>,
+    ci: &'static str,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadyReceipt {
+    evidence: MergeAlertEvidence,
+    worker: Option<String>,
+}
+
+fn ready_receipt_path(cas_dir: &Path, task: &str, tip: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let key = serde_json::to_vec(&(task, tip)).expect("string receipt key");
+    cas_dir.join("receipts/merge-ready").join(format!("{:x}.json", Sha256::digest(&key)))
+}
+
+fn prior_ready(cas_dir: &Path, task: &str, tip: &str) -> Option<Ready> {
+    let receipt: ReadyReceipt = serde_json::from_slice(
+        &std::fs::read(ready_receipt_path(cas_dir, task, tip)).ok()?,
+    ).ok()?;
+    (receipt.evidence.task_id == task && receipt.evidence.factory_tip == tip).then(|| Ready {
+        tip: tip.to_string(), ci: "success", evidence: receipt.evidence, worker: receipt.worker,
+    })
+}
+
+/// Atomic per-delivery admission, shared across daemon lifetimes. Failure to
+/// write defers the signal instead of claiming a receipt that cannot survive.
+pub(super) fn admit_ready(cas_dir: &Path, ready: &Ready) -> bool {
+    use std::io::Write;
+    let path = ready_receipt_path(cas_dir, &ready.evidence.task_id, &ready.tip);
+    let write = || -> std::io::Result<bool> {
+        let parent = path.parent().expect("receipt parent");
+        std::fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
+        let receipt = ReadyReceipt { evidence: ready.evidence.clone(), worker: ready.worker.clone() };
+        file.write_all(&serde_json::to_vec(&receipt)?)?;
+        file.as_file().sync_all()?;
+        match file.persist_noclobber(&path) {
+            Ok(_) => { std::fs::File::open(parent)?.sync_all()?; Ok(true) }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error.error),
+        }
+    };
+    write().unwrap_or_else(|error| {
+        tracing::warn!(%error, task = %ready.evidence.task_id, "READY receipt failed; deferring signal");
+        false
+    })
+}
+
+/// Local ref reads are cheap; network evidence belongs to the external lane.
+/// Keep both refs: a push can change origin without moving the local tip.
+fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String)> {
+    let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event else { return None; };
+    let task = crate::store::open_task_store_local(&repo.join(".cas")).ok()?.get(&active.task_id).ok()?;
+    let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch);
+    let (branch, tip) = crate::ui::factory::director::task_delivery_ref(
+        &task.id, worker, task.deliverables.parked_branch.as_deref(), None,
+        |branch| resolve(branch).or_else(|| resolve(&format!("origin/{branch}"))), |_, _| false,
+    );
+    let lease = data.agents.iter().find(|agent| agent.name == *worker)
+        .and_then(|agent| agent.active_lease.as_ref()).map(|lease| lease.task_id.as_str());
+    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease));
+    Some((task.id, tip.unwrap_or_default(), refs))
+}
+
+/// One observation supplies both readiness and worker waits. Settled results
+/// are reused until refs change; failed CI is revisited slowly for same-SHA
+/// reruns, while pending/unknown retains the existing retry cadence.
+pub(super) fn read_delivery(
+    cache: &ProbeCache, event: &DirectorEvent, data: &DirectorData, repo: &Path, now: DateTime<Utc>,
+) -> (Option<Ready>, Option<(String, WorkerWait)>) {
+    let cas_dir = repo.join(".cas");
+    let Some((task, tip, refs)) = fingerprint(event, data, repo) else { return (None, None); };
+    let mut cache = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(ready) = prior_ready(&cas_dir, &task, &tip) {
+        return (Some(ready), None);
+    }
+    if let Some(previous) = cache.get(&task)
+        && previous.fingerprint == refs
+        && !matches!(previous.ci, "pending" | "unknown")
+        && (previous.ready.is_some() || matches!(previous.ci, "merged" | "unpushed")
+            || now.signed_duration_since(previous.checked_at) < SETTLED_RETRY)
+    {
+        let mut wait = previous.wait.clone();
+        if let Some((worker, read)) = &mut wait {
+            read.waiting = worker_build_pending(data, &cas_dir, worker) || read.ci == "pending";
+        }
+        return (previous.ready.clone(), wait);
+    }
+    let wait = read_worker_wait(event, data, &cas_dir, repo);
+    let mut ci = wait.as_ref().map(|(_, wait)| wait.ci).unwrap_or("unknown");
+    let ready = read(event, data, repo, wait.as_ref().map(|(_, wait)| wait), &mut ci);
+    if let Some((_, Some(target), _)) = Some(crate::ui::factory::director::resolve_merge_target_for_task(data, &task))
+        && !tip.is_empty()
+        && crate::git_evidence::known_unmerged_factory_commits(repo, &tip, &format!("origin/{target}"))
+            == crate::git_evidence::KnownUnmergedCount::KnownZero
+    { ci = "merged"; }
+    let refs = fingerprint(event, data, repo).map(|(_, _, refs)| refs).unwrap_or(refs);
+    cache.insert(task, ProbeRead { fingerprint: refs, checked_at: now, ready: ready.clone(), wait: wait.clone(), ci });
+    (ready, wait)
+}
 
 #[derive(PartialEq, Eq)]
 struct IdleSignal {
@@ -27,6 +138,7 @@ struct Retry {
 
 #[derive(Default)]
 pub(super) struct Retries {
+    pub(super) probes: ProbeCache,
     entries: HashMap<String, Retry>,
     idle_signals: HashMap<String, (IdleSignal, DateTime<Utc>)>,
     #[cfg(test)]
@@ -159,6 +271,7 @@ impl super::FactoryApp {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct Ready {
     pub evidence: MergeAlertEvidence,
     pub tip: String,
@@ -208,6 +321,7 @@ pub(super) fn needs_ci_read(event: &DirectorEvent) -> bool {
     matches!(event, DirectorEvent::WorkerIdle { active_task: Some(_), .. })
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct WorkerWait {
     pub task: String,
     pub tip: Option<String>,
@@ -254,6 +368,17 @@ pub(super) fn worker_has_pending_reminder(
     })
 }
 
+fn worker_build_pending(data: &DirectorData, cas_dir: &Path, worker: &str) -> bool {
+    let Some(agent) = data.agents.iter().find(|agent| agent.name == worker) else { return false; };
+    let Some(stored) = crate::store::open_agent_store(cas_dir).ok().and_then(|store| store.get(&agent.id).ok()) else {
+        return false;
+    };
+    stored.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
+        && stored.metadata.get("clone_path").is_some_and(|clone| {
+            crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
+        })
+}
+
 /// Read the current delivery, not the remembered event's task. Local build
 /// evidence comes from the registered clone's OS lane lock; CI is exact-tip.
 /// Runs with the existing external delivery job, never on the control lane.
@@ -276,11 +401,7 @@ pub(super) fn read_worker_wait(
                 assignee == worker || data.agent_id_to_name.get(assignee) == Some(worker)
             })
     })?;
-    let stored_agent = crate::store::open_agent_store(cas_dir).ok()?.get(&agent.id).ok()?;
-    let build_pending = stored_agent.machine_id == Some(cas_types::Agent::get_or_generate_machine_id())
-        && stored_agent.metadata.get("clone_path").is_some_and(|clone| {
-            crate::factory_worker_check::lane_is_busy(cas_dir, Path::new(clone)).unwrap_or(false)
-        });
+    let build_pending = worker_build_pending(data, cas_dir, worker);
     let mut read = WorkerWait { task: task.id.clone(), tip: None, ci: "unknown", waiting: build_pending };
     if build_pending { return Some((worker.clone(), read)); }
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch)
@@ -293,10 +414,10 @@ pub(super) fn read_worker_wait(
     read.tip = tip;
     let Some(tip) = read.tip.as_deref() else { return Some((worker.clone(), read)); };
     if crate::git_evidence::fetch_parent_branch_result(repo, &branch)
-        != crate::git_evidence::BoundedFetch::Succeeded
-        || crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}"))
-            .as_deref() != Some(tip)
-    {
+        != crate::git_evidence::BoundedFetch::Succeeded {
+        return Some((worker.clone(), read));
+    }
+    if crate::git_evidence::resolve_ref_commit_sha(repo, &format!("origin/{branch}")).as_deref() != Some(tip) {
         read.ci = "unpushed";
         return Some((worker.clone(), read));
     }
@@ -308,12 +429,12 @@ pub(super) fn read_worker_wait(
 }
 
 /// Runs off the loop. No result means defer; it never consumes the dedupe key.
-pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<Ready> {
+fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&WorkerWait>, observed_ci: &mut &'static str) -> Option<Ready> {
     if let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event {
         let summary = data.in_progress_tasks.iter().chain(&data.ready_tasks)
             .find(|task| task.id == active.task_id)?;
         if matches!(summary.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked) {
-            return read_active(worker, &active.task_id, data, repo);
+            return read_active(worker, &active.task_id, data, repo, known, observed_ci);
         }
     }
     let MergeAlertFreshness::Fresh(evidence) = check_merge_alert_freshness(event, data, repo)
@@ -322,6 +443,7 @@ pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> O
     };
     let tip = evidence.factory_tip.clone();
     let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
+    *observed_ci = ci;
     // cas-e48d: the target can gain this delivery while GitHub answers the
     // CI probe. Refresh containment too, so a completed-CI relay cannot quote
     // the pre-CI target. This remains one bounded exact-target check on the
@@ -343,7 +465,7 @@ pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> O
 
 /// The same worker-owned pushed delivery as worktree_merge, with the stricter
 /// signal requirement that origin and the observed lane tip still agree.
-fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path) -> Option<Ready> {
+fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, known: Option<&WorkerWait>, observed_ci: &mut &'static str) -> Option<Ready> {
     use crate::git_evidence::{BoundedFetch, fetch_parent_branch_result, resolve_ref_commit_sha};
     use crate::ui::factory::director::{fresh_merge_alert_tip_evidence, resolve_merge_target_for_task};
     let task = crate::store::open_task_store_local(&repo.join(".cas")).ok()?.get(task_id).ok()?;
@@ -358,18 +480,22 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path) ->
         task_id, worker, task.deliverables.parked_branch.as_deref(), None, resolve, |_, _| false,
     );
     let tip = tip?;
+    let known = known.filter(|known| known.task == task_id && known.tip.as_deref() == Some(&tip));
+    if let Some(known) = known { *observed_ci = known.ci; }
     if task.deliverables.declined_factory_anchors().contains(&tip)
-        || fetch_parent_branch_result(repo, &branch) != BoundedFetch::Succeeded
+        || (known.is_none() && fetch_parent_branch_result(repo, &branch) != BoundedFetch::Succeeded)
         || resolve_ref_commit_sha(repo, &format!("origin/{branch}")).as_deref() != Some(&tip)
     { return None; }
     crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
         repo, &task, &branch, &tip,
     ).ok()?;
-    let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
-    if ci != "success" || resolve(&branch).as_deref() != Some(&tip) { return None; }
+    let ci = known.map(|known| known.ci)
+        .unwrap_or_else(|| crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo));
+    *observed_ci = ci;
     // Re-fetch the target after CI, just as the parked delivery path does.
     let MergeAlertFreshness::Fresh(evidence) = fresh_merge_alert_tip_evidence(
         repo, task_id, &branch, &target, Some(&tip),
     ) else { return None; };
+    if ci != "success" || resolve(&branch).as_deref() != Some(&tip) { return None; }
     Some(Ready { evidence, tip, ci, worker: Some(worker.to_string()) })
 }

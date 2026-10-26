@@ -667,13 +667,13 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onNetworkChange: () => { if (machine.id === selectedMachineId && selectedSession !== undefined) countUsage("network.switch"); },
     onState: (state) => {
       const wasLive = connectionStates.get(machine.id)?.phase === "live";
-      if (state.phase === "live" && !wasLive) {
-        // cas-0b3d: back to live after an outage of the open conversation's
-        // machine is a recovery; any machine coming online takes its counts.
-        if (lastLiveAt.has(machine.id) && machine.id === selectedMachineId) countUsage("connection.recovered");
-        void flushUsage();
-      }
+      // cas-0b3d: back to live after an outage of the open conversation's
+      // machine is a recovery.
+      if (state.phase === "live" && !wasLive && lastLiveAt.has(machine.id) && machine.id === selectedMachineId) countUsage("connection.recovered");
       connectionStates.set(machine.id, state);
+      // A machine coming online takes its unsent counts. Only after the state
+      // is recorded: flushUsage sends to the machines recorded as live.
+      if (state.phase === "live" && !wasLive) void flushUsage();
       // cas-0e14 F30: an open New session follows the machine's connection.
       launchSheet.refresh();
       // Anchor staleness to the last live moment: retry transitions rewrite

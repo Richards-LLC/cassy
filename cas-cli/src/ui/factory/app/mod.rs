@@ -1670,6 +1670,7 @@ impl FactoryApp {
         }
 
         let DeliveryInputs {
+            answered_blocked_workers,
             verification_waits,
             data: loaded_data,
             blocks_deps,
@@ -1731,6 +1732,11 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
+                if let DirectorEvent::WorkerIdle { worker, .. } | DirectorEvent::TaskBlocked { worker, .. } = event
+                    && answered_blocked_workers.contains(worker)
+                {
+                    return None;
+                }
                 // cas-c926: a supervisor hold covers every WorkerIdle relay,
                 // not just the detector's idle streak. The merge-alert retry
                 // re-emits a remembered WorkerIdle each minute without that

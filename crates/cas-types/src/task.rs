@@ -860,6 +860,18 @@ pub struct TaskBlockedHold {
     pub when: DateTime<Utc>,
 }
 
+/// Supervisor ownership of an unchanged worker blocker. The ask is a bounded
+/// fingerprint, not a second copy of the conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskAnsweredBlocker {
+    pub worker: String,
+    pub supervisor: String,
+    pub reason: String,
+    pub ask: Option<String>,
+    pub message_id: i64,
+}
+
 const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "phase",
     "receipts",
@@ -867,6 +879,8 @@ const TASK_EXECUTION_STATE_FIELDS: &[&str] = &[
     "decisions",
     "next_step",
     "blocked_hold",
+    "answered_blocker",
+    "blocker_ask",
     "qa_impact",
 ];
 
@@ -940,7 +954,7 @@ pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
 
 fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(), String> {
     match field {
-        "phase" | "next_step" => validate_state_string(field, value),
+        "phase" | "next_step" | "blocker_ask" => validate_state_string(field, value),
         "files_touched" | "decisions" => validate_state_string_array(field, value),
         "receipts" => {
             let receipts = value
@@ -1018,6 +1032,18 @@ fn validate_task_execution_state_field(field: &str, value: &Value) -> Result<(),
                 return Err(format!(
                     "qa_impact exceeds the {TASK_QA_IMPACT_MAX_BYTES}-byte limit"
                 ));
+            }
+            Ok(())
+        }
+        "answered_blocker" => {
+            let receipt: TaskAnsweredBlocker = serde_json::from_value(value.clone())
+                .map_err(|e| format!("invalid answered_blocker: {e}"))?;
+            if receipt.message_id <= 0 || receipt.worker.is_empty() || receipt.supervisor.is_empty() || receipt.reason.is_empty() {
+                return Err("answered_blocker requires worker, supervisor, reason and a positive message_id".into());
+            }
+            for (field, text) in [("worker", receipt.worker), ("supervisor", receipt.supervisor),
+                ("reason", receipt.reason), ("ask", receipt.ask.unwrap_or_default())] {
+                validate_state_string(field, &Value::String(text))?;
             }
             Ok(())
         }
@@ -1609,6 +1635,16 @@ mod tests {
             "Wait for operator decision"
         );
         assert!(validate_task_execution_state(&state).is_ok());
+        let answered = merge_task_execution_state_patch(&state, &serde_json::json!({
+            "blocker_ask": "a".repeat(64), "answered_blocker": {
+                "worker": "worker", "supervisor": "lead", "reason": "Wait for operator decision",
+                "ask": "a".repeat(64), "message_id": 42
+            }
+        })).unwrap();
+        assert!(validate_task_execution_state(&answered).is_ok());
+        assert!(merge_task_execution_state_patch(&answered, &serde_json::json!({
+            "answered_blocker": {"message_id": 0}
+        })).is_err());
 
         let impact = serde_json::json!({"version": 1, "head_sha": "a".repeat(40),
             "registry": {"present": true}, "journeys": [{"id": "SEND", "status": "live"}],

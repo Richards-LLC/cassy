@@ -976,6 +976,8 @@ impl CasService {
             )
         })?;
         message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
+        // Reply IDs and CAS envelopes are transport metadata, not a new ask.
+        let blocker_question = req.blocker.unwrap_or(false).then(|| message.trim().to_owned());
         let summary = req
             .summary
             .map(|summary| collapse_message_summary(&summary))
@@ -2911,6 +2913,26 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        // A committed supervisor reply owns the worker's unchanged blocked
+        // wait. Automatic verdict/merge notices do not pass through this path.
+        let wait_receipt = if duplicate_suppressed { Ok(()) } else if let (Some(sender), Some(recipient)) =
+            (agent_from_store.as_ref(), resolved_target_agent.as_ref())
+        {
+            if req.blocker.unwrap_or(false) && sender.role == cas_types::AgentRole::Worker {
+                req.task_id.as_deref().map(|task| {
+                    crate::mcp::tools::core::task::block_hold::record_blocker_ask(
+                        &self.inner.cas_root, sender, task, blocker_question.as_deref().unwrap_or(&message),
+                    )
+                }).transpose().map(|_| ())
+            } else {
+                crate::mcp::tools::core::task::block_hold::record_supervisor_answer(
+                    &self.inner.cas_root, sender, recipient, req.task_id.as_deref(), message_id,
+                )
+            }
+        } else { Ok(()) };
+        if let Err(error) = wait_receipt {
+            tracing::warn!(message_id, %error, "message committed but answered-blocker receipt unavailable; retain alerts");
+        }
         // cas-6853 (communication contract v2, P2.4/P3.7): a broadcast's
         // audience policy. Stamped on the committed row; older same-key
         // broadcasts still awaiting transport are withdrawn.

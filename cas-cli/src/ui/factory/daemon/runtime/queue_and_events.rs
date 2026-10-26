@@ -2642,6 +2642,7 @@ pub(crate) struct StallNudgeRead {
 /// and never opens a store for them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
+    pub(crate) answered_blocker: bool,
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
@@ -2690,6 +2691,7 @@ pub(crate) fn read_row_facts(
     row: &cas_store::QueuedPrompt,
 ) -> RowFacts {
     let mut facts = RowFacts {
+        answered_blocker: crate::mcp::tools::core::task::block_hold::answered_blocker_alert(cas_dir, row),
         wake_gate: queue.wake_gate_state(row.id).ok(),
         deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
         assignment_stale: if match queue.is_abandonment_recovery(row.id) {
@@ -8705,6 +8707,18 @@ impl FactoryDaemon {
                     target: "cas::coordination",
                     message_id = queued.id,
                     "row still in flight from an earlier inject; skipped this pass"
+                );
+                continue;
+            }
+            if facts.answered_blocker {
+                // Keep the committed body and its delivery identity intact.
+                // The answer withdraws the wake, not the readable alert.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "answered blocker; readable without another supervisor wake".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                    },
                 );
                 continue;
             }

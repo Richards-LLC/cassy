@@ -1,7 +1,106 @@
 //! Structured provenance for non-dependency task holds.
 
 use cas_store::TaskStore;
-use cas_types::{Task, TaskBlockedHold};
+use cas_types::{Task, TaskAnsweredBlocker as AnsweredBlocker, TaskBlockedHold};
+
+/// Bind the active worker question without copying its prose into resume state.
+pub(crate) fn record_blocker_ask(
+    cas_dir: &std::path::Path, worker: &cas_types::Agent, task_id: &str, ask: &str,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    if worker.role != cas_types::AgentRole::Worker
+        || ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
+    { return Ok(()); }
+    use sha2::{Digest, Sha256};
+    let fingerprint = format!("{:x}", Sha256::digest(ask.as_bytes()));
+    tasks.patch_execution_state(task_id, &serde_json::json!({"blocker_ask": fingerprint}))
+        .map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Called only after a real registered supervisor's direct message commits.
+/// An unbound message cannot guess among multiple blocked tasks.
+pub(crate) fn record_supervisor_answer(
+    cas_dir: &std::path::Path, supervisor: &cas_types::Agent, worker: &cas_types::Agent,
+    task_id: Option<&str>, message_id: i64,
+) -> Result<(), String> {
+    if supervisor.role != cas_types::AgentRole::Supervisor || worker.role != cas_types::AgentRole::Worker
+        || supervisor.factory_session != worker.factory_session
+    { return Ok(()); }
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let blocked = tasks.list(Some(cas_types::TaskStatus::Blocked)).map_err(|e| e.to_string())?;
+    let candidates: Vec<_> = blocked.iter().filter(|task| {
+        task_id.is_none_or(|id| task.id == id)
+            && [Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
+    }).collect();
+    let [task] = candidates.as_slice() else { return Ok(()); };
+    let Some(hold) = read(tasks.as_ref(), &task.id)? else { return Ok(()); };
+    let state = tasks.get_execution_state(&task.id).map_err(|e| e.to_string())?.unwrap_or_default();
+    let receipt = AnsweredBlocker {
+        worker: worker.id.clone(), supervisor: supervisor.id.clone(), reason: hold.reason,
+        ask: state.get("blocker_ask").and_then(serde_json::Value::as_str).map(str::to_owned), message_id,
+    };
+    tasks.patch_execution_state(&task.id, &serde_json::json!({"answered_blocker": receipt}))
+        .map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Positive, durable evidence only. New questions/holds, dependencies, changed
+/// owners and non-blocked task states retain their normal wake policy.
+pub(crate) fn answered_blocker_wait(
+    cas_dir: &std::path::Path, task_id: &str, recipient: &str,
+) -> Option<i64> {
+    let tasks = crate::store::open_task_store_local(cas_dir).ok()?;
+    let task = tasks.get(task_id).ok()?;
+    if task.status != cas_types::TaskStatus::Blocked || !tasks.get_blockers(task_id).ok()?.is_empty()
+        || !cas_store::ExternalTaskDependencyStore::open(cas_dir).ok()?
+            .list_blocking_for_task(task_id).ok()?.is_empty()
+    { return None; }
+    let state = tasks.get_execution_state(task_id).ok()??;
+    let receipt: AnsweredBlocker = serde_json::from_value(state.get("answered_blocker")?.clone()).ok()?;
+    let agents = crate::store::open_agent_store(cas_dir).ok()?;
+    let supervisor = agents.get(&receipt.supervisor).ok()?;
+    let worker = agents.get(&receipt.worker).ok()?;
+    if supervisor.role != cas_types::AgentRole::Supervisor || worker.role != cas_types::AgentRole::Worker
+        || ![supervisor.name.as_str(), supervisor.id.as_str(), "supervisor"].contains(&recipient)
+        || supervisor.factory_session != worker.factory_session
+        || ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
+        || read(tasks.as_ref(), task_id).ok()??.reason != receipt.reason
+        || state.get("blocker_ask").and_then(serde_json::Value::as_str) != receipt.ask.as_deref()
+    { return None; }
+    Some(receipt.message_id)
+}
+
+pub(crate) fn worker_has_answered_blocker(
+    cas_dir: &std::path::Path, worker: &str, recipient: &str,
+) -> bool {
+    let Some(agents) = crate::store::open_agent_store(cas_dir).ok() else { return false; };
+    let Some(worker) = super::resolve_agent_identity(agents.as_ref(), worker) else { return false; };
+    let Some(tasks) = crate::store::open_task_store_local(cas_dir).ok() else { return false; };
+    let Some(assigned) = tasks.ids_by_assignees_and_statuses(&[&worker.name, &worker.id], &[
+        cas_types::TaskStatus::Open, cas_types::TaskStatus::InProgress, cas_types::TaskStatus::Blocked,
+        cas_types::TaskStatus::AwaitingMerge,
+    ]).ok() else { return false; };
+    !assigned.is_empty() && assigned.iter().all(|task| answered_blocker_wait(cas_dir, task, recipient).is_some())
+}
+
+/// Re-check queued alerts as well as newly emitted events. An answered row
+/// remains readable; only its wake is withdrawn.
+pub(crate) fn answered_blocker_alert(cas_dir: &std::path::Path, row: &cas_store::QueuedPrompt) -> bool {
+    if row.origin != Some(cas_store::QueueOrigin::Daemon) { return false; }
+    if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt) {
+        return envelope.new_status == cas_types::TaskStatus::Blocked
+            && answered_blocker_wait(cas_dir, &envelope.task_id, &row.target).is_some();
+    }
+    if cas_types::parse_worker_attention_envelope(&row.prompt).is_some()
+        && let Some(tag) = row.prompt.split('>').next()
+        && tag.contains("kind=\"worker_idle\"")
+        && let Some((_, worker)) = tag.split_once("worker=\"")
+        && let Some(worker) = worker.split('"').next()
+    {
+        return worker_has_answered_blocker(cas_dir, worker, &row.target);
+    }
+    false
+}
 
 /// Positive evidence that this recipient already owns the only recorded wait.
 /// Unknown state, independent holds and dependency blockers retain the alert.

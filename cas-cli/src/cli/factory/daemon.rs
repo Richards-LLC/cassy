@@ -27,7 +27,7 @@ pub(super) fn execute_daemon(
     worker_spec_jsons: Vec<String>,
     supervisor_spec_json: Option<String>,
 ) -> Result<()> {
-    crate::ui::factory::session::validate_daemon_start(session, cwd)?;
+    crate::ui::factory::validate_daemon_start(session, cwd)?;
     // The daemon command is an internal launch path, but it can still be
     // invoked directly from a repository subdirectory. Carry the same
     // git-toplevel project root as the normal factory command so its config
@@ -249,7 +249,7 @@ pub(super) fn run_factory_with_daemon(
     config: FactoryConfig,
     phone_home: bool,
 ) -> Result<()> {
-    crate::ui::factory::session::validate_daemon_start(&session_name, &config.cwd)?;
+    crate::ui::factory::validate_daemon_start(&session_name, &config.cwd)?;
     // macOS can crash when forking a multi-threaded process before exec.
     // Default to subprocess daemon mode there; allow explicit override.
     if should_use_subprocess_daemon_on_macos() {

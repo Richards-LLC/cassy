@@ -34,3 +34,60 @@ fn unknown_targets_fail_closed_with_actionable_diagnostics() {
     assert!(error.contains("riscv64gc-unknown-linux-gnu"), "{error}");
     assert!(error.contains("x86_64-unknown-linux-gnu"), "{error}");
 }
+
+#[cfg(unix)]
+#[test]
+fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
+    use std::ffi::OsStr;
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
+
+    let temp = tempfile::tempdir().unwrap();
+    let main = temp.path().join("main checkout");
+    let worktree = temp.path().join("linked worktree");
+    std::fs::create_dir(&main).unwrap();
+    let git = |args: &[&OsStr]| {
+        let output = Command::new("git")
+            .current_dir(&main)
+            .args([
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&[OsStr::new("init"), OsStr::new("-q")]);
+    git(&[
+        OsStr::new("commit"),
+        OsStr::new("--allow-empty"),
+        OsStr::new("-qm"),
+        OsStr::new("fixture"),
+    ]);
+    git(&[
+        OsStr::new("worktree"),
+        OsStr::new("add"),
+        OsStr::new("--detach"),
+        worktree.as_os_str(),
+    ]);
+    let zig = main.join(".context/zig/zig");
+    std::fs::create_dir_all(zig.parent().unwrap()).unwrap();
+    std::fs::write(&zig, "#!/bin/sh\nprintf '0.15.2\\n'\n").unwrap();
+    std::fs::set_permissions(&zig, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(!worktree.join(".context").exists());
+
+    // Use the same resolver as build.rs; only Git is needed on the host PATH.
+    assert_eq!(
+        build_support::find_zig(&worktree, None, Some(OsStr::new(""))).unwrap(),
+        zig
+    );
+}

@@ -244,11 +244,14 @@ fn cli_release_report_falls_back_from_renderer_without_link_arguments_cas_692a()
     let project = TempDir::new().unwrap();
     let output = project.path().join("reports");
     fs::create_dir_all(&output).unwrap();
-    fs::copy(
+    // The exemplar names a home path in its evidence; internal hygiene
+    // (`cas deliverable finalize`) now refuses that, so the copy drops it.
+    let exemplar = fs::read_to_string(
         cas::test_paths::workspace_root().join("docs/release-reports/2026-09-08-v3.19.0.md"),
-        output.join("v3.19.0.md"),
     )
-    .unwrap();
+    .unwrap()
+    .replace("/home/pippenz/", "~/");
+    fs::write(output.join("v3.19.0.md"), exemplar).unwrap();
     let installed = project.path().join(".claude/skills/cas-release-report/scripts");
     fs::create_dir_all(&installed).unwrap();
     fs::write(installed.join("render.py"), r#"

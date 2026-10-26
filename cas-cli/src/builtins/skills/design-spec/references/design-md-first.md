@@ -24,8 +24,11 @@ names another `DESIGN.md`. Take the revision with
 ## 3. Use all four parts
 
 - **Tokens:** colours, spacing and radii by the role names in the frontmatter
-  (`maps` gives the project variable). No hex or size the file lacks.
-- **Type:** its display, body and mono families and its scale.
+  (`maps` gives the project variable). No hex or size the file lacks. When a
+  role pair fails contrast, change the pairing, not the hex.
+- **Type:** its display, body and mono families and its scale. Use the family
+  stack from the token source; embed a font file only when the project ships
+  it, since reports render offline.
 - **Mark:** its `brand-mark` asset or the logo the file names.
 - **Voice:** the tone and vocabulary rules in its Overview and Do's & Don'ts.
 
@@ -50,8 +53,11 @@ produced the output, as one of these lines:
 
 ```text
 design: <repo-relative path>@<revision>
+design: <project>:<repo-relative path>@<revision>
 design: none: created via design-spec at <path>
 ```
+
+Use the `<project>:` form when the target is not the checkout you ran in.
 
 This is required for a task with a `qa.user_facing_labels` label, a demo
 statement, or a deliverable a person reads. Reviewers and QA check the output

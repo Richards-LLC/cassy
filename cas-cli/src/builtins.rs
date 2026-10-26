@@ -7054,6 +7054,19 @@ This is the body content."#;
                 .map(|b| b.path)
                 .collect();
             assert_eq!(stating, [RULE], "{label}: only the rule states its close record");
+            // cas-39fe: the rule says generic styling is never the fallback,
+            // so no reader may call the white-label palette one.
+            let drifting: Vec<&str> = catalog
+                .iter()
+                .filter(|b| {
+                    let body = b.content.to_lowercase();
+                    ["white-label fallback", "neutral fallback", "documented fallback"]
+                        .iter()
+                        .any(|phrase| body.contains(phrase))
+                })
+                .map(|b| b.path)
+                .collect();
+            assert!(drifting.is_empty(), "{label}: neutral palette called a fallback in {drifting:?}");
         }
     }
 

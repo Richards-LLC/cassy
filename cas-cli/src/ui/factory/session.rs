@@ -710,6 +710,7 @@ mod tests {
         use crate::store::AgentStore;
         use crate::ui::factory::{DaemonConfig, FactoryConfig, FactoryDaemon};
         use std::os::unix::fs::PermissionsExt;
+        let child = std::env::var_os("CAS_4927_CHILD").is_some();
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let original_home = env.home().to_path_buf();
         let project = original_home.join("project");
@@ -726,7 +727,17 @@ mod tests {
         let path = std::env::join_paths(std::iter::once(bin).chain(
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         )).unwrap();
-        env.set("PATH", path);
+        if !child {
+            // Lib tests keep PATH process-local to an owned subprocess.
+            let name = format!("{}::daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927",
+                module_path!().strip_prefix("cas::").unwrap_or(module_path!()));
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", &name, "--nocapture"])
+                .env("PATH", path).env("CAS_4927_CHILD", "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}",
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
         env.set("CAS_ROOT", &foreign);
         env.set("CAS_SKIP_FACTORY_TOOLING", "1");
         env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config --strict-mcp-config");

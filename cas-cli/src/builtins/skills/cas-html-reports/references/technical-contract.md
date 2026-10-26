@@ -63,8 +63,9 @@ Contents: 1 One file · 2 JavaScript · 3 Semantic HTML · 4 Theme and design la
   [DESIGN.md first](../../design-spec/references/design-md-first.md). A project created through
   `design-spec` inherits the Petrastella language (rationale in `petrastella-design-language.md`):
   warm stone paper, a sandstone hero surface, serif display for the verdict and title, body sans,
-  tabular mono for numbers, and semantic color roles. Neutral grey is the white-label fallback; a
-  brief that chooses it names the brand reason in its *omitted* field.
+  tabular mono for numbers, and semantic color roles. The neutral white-label palette is a brand
+  choice a `DESIGN.md` records, never a fallback; a brief that uses it names the brand reason in
+  its *omitted* field.
 - **Colors are semantic roles, declared once in `:root`** by the token names — `bg`, `surface`,
   `surface-hero`, `line`, `line-strong`, `ink`, `ink-muted`, `verdict`, `verdict-soft`, `evidence`,
   `action`, `good`, `warning`, `danger` — and referenced everywhere; no rule carries a hex value the

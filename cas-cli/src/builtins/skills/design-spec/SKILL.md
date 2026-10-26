@@ -45,8 +45,8 @@ survives every override. Add `inherits: petrastella` to the frontmatter.
 
 **Token source found:** add `inherits: petrastella | neutral | none` to the frontmatter and, in
 Colors and Typography, name each Petrastella role the project overrides and what it keeps.
-`neutral` is the design language's documented white-label fallback and requires the brand reason
-in Overview; it is never chosen for lack of a decision. `cas-ui-craft` reads this file before
+`neutral` is the design language's white-label palette, a brand choice that requires the brand
+reason in Overview; it is never chosen for lack of a decision. `cas-ui-craft` reads this file before
 any render, so an override recorded here is an override every surface will honour.
 
 ### 2. Read canonical components (for the Components section)

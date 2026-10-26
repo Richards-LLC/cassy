@@ -10433,6 +10433,15 @@ impl CasCore {
             let proof_repo = worker_worktree_path
                 .as_deref()
                 .unwrap_or(close_project_root.as_path());
+            // cas-e9d6: a supervisor's (or Cassy's) close of a merged delivery
+            // measures the merged anchor instead of the worker checkout, but
+            // the worker's receipts for that exact anchor are keyed by its
+            // worktree. Read them there, so both closes judge one evidence set.
+            let merged_receipt_repo = (worker_worktree_path.is_none()
+                && (supervisor_closing_merged_anchor || supervisor_closing_merged_receipt))
+                .then(|| self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()).ok().flatten())
+                .flatten();
+            let receipt_repo = merged_receipt_repo.as_deref().unwrap_or(proof_repo);
             let mut epic_has_recorded_delivery = !task_commit_identity.known_commits.is_empty();
             if task.task_type == TaskType::Epic
                 && task.branch.is_none()
@@ -10602,14 +10611,14 @@ impl CasCore {
                     .map(|line| (epic.id.clone(), line))
             });
             if let Some(receipt) = delivered_tip.as_deref().and_then(|head| {
-                crate::factory_worker_check::passing_receipt(&self.cas_root, proof_repo, head)
+                crate::factory_worker_check::passing_receipt(&self.cas_root, receipt_repo, head)
             }) && !task.notes.contains(&receipt)
             {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
             let passing_tests = delivered_tip.as_deref().map(|head| {
-                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, proof_repo, head))
+                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head))
             });
             if let Some((_, tests)) = passing_tests.as_ref() {
                 for receipt in tests.receipts() {

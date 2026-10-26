@@ -453,6 +453,26 @@ pub(crate) fn queue_cassy_merge_close_notice(
     })
 }
 
+/// cas-e9d6: tell the worker once that a supervisor merge parked its lane
+/// tip and released its lease, so it neither resumes nor re-closes.
+pub(crate) fn queue_merged_lane_parked_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    tip: &str,
+    merge_commit: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-merged-lane-parked:{}:{merge_commit}:worker:{worker_name}", task.id),
+            format!(
+                "Task {} was merged at {merge_commit} from your pushed tip {tip}, so Cassy parked it for its verdict and released your lease. Don't re-close it: an approved verdict closes it, and a rejection reopens it to you with findings.",
+                task.id
+            ),
+            format!("Merged and parked by Cassy: {}", task.id),
+        )
+    })
+}
+
 /// cas-46ea: tell the assigned worker, once per verdict, that a rejected
 /// verdict returned its merged delivery, with the findings to fix.
 pub(crate) fn queue_rejected_merge_reopen_notice(

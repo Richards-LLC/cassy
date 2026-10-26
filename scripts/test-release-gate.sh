@@ -33,6 +33,8 @@ export CAS_RELEASE_GATE_HOME_DIR
 export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
 export CAS_RELEASE_ENV_SCRATCH_ROOT=""
 export CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT=""
+# Fixture Cargo stubs must never write into a worker or operator build cache.
+unset CARGO_TARGET_DIR CAS_RELEASE_BINARY_TARGET_DIR
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen

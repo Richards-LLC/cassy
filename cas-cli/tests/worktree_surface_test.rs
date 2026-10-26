@@ -3553,6 +3553,8 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     assert!(notices[0].prompt.contains(&target_tip));
 
     env.set_current_dir(&worker);
+    let inbox = service.coordination(Parameters(coord_req("inbox_poll"))).await.unwrap();
+    assert!(get_text(&inbox).contains("merge_conflicted"), "{}", get_text(&inbox));
     let started = service.task(Parameters(start())).await.unwrap();
     assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);

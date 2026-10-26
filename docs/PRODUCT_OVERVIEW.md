@@ -58,7 +58,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - CLI and MCP surfaces: `cas-cli/src/cli/` and `cas-cli/src/mcp/tools/`.
 - Commander browser app: `hub-web/`.
 - Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`.
-- Branding of human-facing output: `cas-cli/src/builtins/skills/design-spec/references/design-md-first.md`.
+- Branding of human-facing output: `cas-cli/src/builtins/skills/design-spec/references/design-md-first.md`; `cas deliverable brand` (`cas-cli/src/deliverable/`) resolves it, and a customer deliverable with no `DESIGN.md` is refused rather than given the default brand.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.
 

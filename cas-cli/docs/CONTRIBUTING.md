@@ -243,6 +243,13 @@ recording `merge_conflicted`, the conflicting paths and the attempted target tip
 The worker receives one notice and can start, resolve and re-deliver directly.
 Target drift and pre-existing checkout residue keep their existing recovery paths.
 
+After a published merge, an enforced registry or documentation upkeep gate
+returns the parked task Open to its assignee through the same `request_changes`
+core. Cassy retains the gate text in task notes, sends one corrective notice,
+and retires the old automatic-close intent. The worker can start, commit the
+source repair and re-deliver with a fresh anchor. Verification and QA waits
+keep their existing dispatch ownership.
+
 A supervisor message to a blocked worker records ownership of that wait only
 when sent with `kind=answer` or `in_reply_to` the worker's blocker message.
 An unrelated ping or a reply to ordinary status leaves blocker alerts armed.

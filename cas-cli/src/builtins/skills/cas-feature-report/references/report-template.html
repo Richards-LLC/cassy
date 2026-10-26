@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<!--
+  cas-feature-report template. Copy it beside the report markdown, then:
+  1. Leave both brand markers as they are: `cas deliverable finalize` fills the
+     style marker from the target project's DESIGN.md (colours by role, type,
+     radii) and the lockup marker with its brand mark. Only layout lives here.
+  2. Replace the example content (a fictional "Northwind" saved-views
+     feature) with the markdown's content. Keep every data-section marker and
+     the order; drop `examples` when the report has no pairs.
+  3. Keep image src values relative (pairs/<id>.before.jpg) and eager.
+     `finalize` inlines them; a lazy image is blank in print.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Saved views for Northwind store managers: feature report (2026-10-26)</title>
+<style>
+/*cas:brand*/
+:root { --container: 1080px; --radius: var(--radius-tile, 10px); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 var(--font-body); }
+a { color: var(--action, var(--verdict)); }
+:focus-visible { outline: 3px solid var(--verdict); outline-offset: 2px; }
+.skip { position: absolute; left: -999px; } .skip:focus { left: 8px; top: 8px; background: var(--surface); color: var(--ink); padding: 8px; }
+.wrap { max-width: var(--container); margin: 0 auto; padding: 0 24px; }
+header.brand { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 20px 0; color: var(--ink-muted); font: 600 12px/16px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; }
+header.brand img.mark { flex: none; width: 28px; height: 28px; }
+section { padding: 40px 0; border-top: 1px solid var(--line); }
+h1, h2 { font-family: var(--font-display); font-weight: 400; }
+h2 { font-size: 30px; line-height: 1.15; margin: 0 0 16px; }
+.eyebrow { font: 600 12px/16px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); margin: 0 0 8px; }
+figcaption, .caption { font-size: 14px; line-height: 20px; color: var(--ink-muted); }
+
+/* 1 summary + hero */
+[data-section=summary] { background: var(--surface-hero, var(--surface)); border-top: 0; padding: 40px 0 32px; }
+[data-section=summary] h1 { font-size: clamp(30px, 4.4vw, 48px); line-height: 1.08; margin: 0 0 12px; max-width: 26ch; }
+.helps { font-size: 19px; line-height: 1.45; margin: 0 0 28px; max-width: 60ch; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 20px 0 0; font: 400 14px/20px var(--font-mono); color: var(--ink-muted); }
+.meta dt { display: inline; } .meta dd { display: inline; margin: 0 0 0 6px; color: var(--ink); }
+
+/* before/after pairs (hero and examples) */
+.pair { margin: 0 0 40px; break-inside: avoid; }
+.pair > figcaption { color: var(--ink); font-size: 17px; margin-bottom: 12px; max-width: 70ch; }
+.sides { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.side { margin: 0; min-width: 0; }
+.shot { position: relative; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.shot img { display: block; width: 100%; height: auto; }
+.side.after .shot { border: 2px solid var(--verdict); }
+.side figcaption b { color: var(--ink); }
+.missing { padding: 16px; border: 1px dashed var(--line-strong, var(--line)); border-radius: var(--radius); color: var(--ink-muted); background: var(--surface); }
+
+/* 2 changes */
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; line-height: 22px; }
+caption { text-align: left; font-size: 14px; color: var(--ink-muted); padding-bottom: 8px; }
+th, td { text-align: left; vertical-align: top; padding: 10px 12px 10px 0; border-bottom: 1px solid var(--line); }
+thead th { font: 600 12px/16px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); border-bottom: 1px solid var(--line-strong, var(--line)); }
+td.now { color: var(--ink); font-weight: 600; }
+td.was { color: var(--ink-muted); }
+
+/* 3 how-to */
+ol.steps { list-style: none; counter-reset: step; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+ol.steps li { counter-increment: step; border-top: 3px solid var(--verdict); padding-top: 12px; }
+ol.steps li::before { content: counter(step); display: block; font: 600 13px/18px var(--font-mono); color: var(--ink-muted); margin-bottom: 4px; }
+ol.steps b { display: block; }
+
+/* 5 good to know */
+ul.notes { margin: 0; padding-left: 20px; max-width: 70ch; }
+ul.notes li + li { margin-top: 8px; }
+.label { font: 600 12px/16px var(--font-mono); text-transform: uppercase; letter-spacing: .05em; color: var(--ink-muted); }
+
+footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14px; color: var(--ink-muted); }
+
+@media print {
+  body { background: #fff; color: #000; font-size: 11pt; }
+  header.brand { padding: 4pt 0; }
+  [data-section=summary] { background: none; padding: 4pt 0; }
+  [data-section=summary] h1 { max-width: none; }
+  section { padding: 8pt 0; }
+  h2 { font-size: 18pt; margin-bottom: 8pt; break-after: avoid; }
+  /* A full-width pair may exceed a sheet: keep each image with its caption. */
+  .pair { break-inside: auto; margin-bottom: 16pt; }
+  .pair > figcaption { break-inside: avoid; margin-bottom: 4pt; }
+  .side { break-inside: avoid; }
+  .side + .side { margin-top: 12pt; }
+  ol.steps { display: block; }
+  ol.steps li { break-inside: avoid; margin-bottom: 8pt; }
+  tr { break-inside: avoid; }
+  thead { display: table-header-group; }
+  /* Good-to-know and provenance print as one block: a footer-only last page is a defect. */
+  .closing { break-inside: avoid; }
+  footer { padding: 12pt 0 0; }
+  a[href^="http"]::after { content: " (" attr(href) ")"; font-size: 9pt; }
+  .skip { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<a class="skip" href="#changes">Skip to what changed</a>
+<div class="wrap">
+<header class="brand">
+  <!--cas:brand-mark-->
+  <span>Northwind · Feature report</span>
+</header>
+</div>
+<main>
+<section data-section="summary"><div class="wrap">
+  <p class="eyebrow">Saved views</p>
+  <h1>Store managers can save a filtered sales view and reopen it in one click.</h1>
+  <p class="helps">For managers who check the same stores every morning: no more rebuilding the same filters each visit.</p>
+  <figure class="pair" id="view-saved-views">
+    <figcaption>The sales page now keeps your views in a menu beside the filters.</figcaption>
+    <div class="sides" data-priority="1">
+      <figure class="side before">
+        <div class="shot"><img src="pairs/saved-views.before.jpg" alt="Sales page before: filters reset on every visit, no saved views."></div>
+        <figcaption><b>Before</b> · production · 2026-10-19</figcaption>
+      </figure>
+      <figure class="side after">
+        <div class="shot"><img src="pairs/saved-views.after.jpg" alt="Sales page now: a Saved views menu lists three named views."></div>
+        <figcaption><b>After</b> · production · 2026-10-26</figcaption>
+      </figure>
+    </div>
+  </figure>
+  <dl class="meta">
+    <div><dt>Product</dt><dd>Northwind sales</dd></div>
+    <div><dt>Available</dt><dd>every store manager account</dd></div>
+    <div><dt>Date</dt><dd>2026-10-26</dd></div>
+  </dl>
+</div></section>
+
+<section id="changes" data-section="changes"><div class="wrap">
+  <h2>What changed</h2>
+  <div class="scroll"><table>
+    <caption>Each change as it was and as it is now.</caption>
+    <thead><tr><th scope="col">Was</th><th scope="col">Now</th><th scope="col">Who it helps</th></tr></thead>
+    <tbody>
+      <tr><td class="was">Filters reset every time the sales page opened.</td><td class="now">Save the current filters as a named view and reopen it from the menu. <a href="#view-saved-views">See it</a></td><td>Store managers</td></tr>
+      <tr><td class="was">The filter panel listed every store in one long list.</td><td class="now">Stores are grouped by region, with a search box. <a href="#view-filter-panel">See it</a></td><td>Regional managers</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<section data-section="how-to"><div class="wrap">
+  <h2>How to use it</h2>
+  <ol class="steps">
+    <li><b>Filter the sales page</b>Pick stores, dates and products as usual.</li>
+    <li><b>Choose Save view</b>Name it, for example “North stores, this week”.</li>
+    <li><b>Reopen it</b>Open the Saved views menu and pick the name.</li>
+  </ol>
+</div></section>
+
+<section data-section="examples"><div class="wrap">
+  <h2>Example views</h2>
+  <figure class="pair" id="view-filter-panel">
+    <figcaption>The filter panel groups stores by region; type to narrow the list.</figcaption>
+    <div class="sides">
+      <figure class="side before">
+        <div class="shot"><img src="pairs/filter-panel.before.jpg" alt="Filter panel before: one alphabetical list of every store."></div>
+        <figcaption><b>Before</b> · production · 2026-10-19</figcaption>
+      </figure>
+      <figure class="side after">
+        <div class="shot"><img src="pairs/filter-panel.after.jpg" alt="Filter panel now: stores grouped under North, South and West, with a search box."></div>
+        <figcaption><b>After</b> · production · 2026-10-26</figcaption>
+      </figure>
+    </div>
+  </figure>
+</div></section>
+
+<div class="closing">
+<section data-section="good-to-know"><div class="wrap">
+  <h2>Good to know</h2>
+  <ul class="notes">
+    <li>Saved views belong to your account; other managers do not see them.</li>
+    <li>You can keep up to 20 views. Rename or delete one from the same menu.</li>
+    <li><span class="label">Planned</span> Sharing a view with a colleague. It is not available yet.</li>
+  </ul>
+</div></section>
+<footer data-section="provenance"><div class="wrap">
+  <p>Views captured from the Northwind sales app on 2026-10-19 (before) and 2026-10-26 (after), version 2026.10.26-1. Report prepared 2026-10-26. Markdown source: 2026-10-26-saved-views.md.</p>
+</div></footer>
+</div>
+</main>
+</body>
+</html>

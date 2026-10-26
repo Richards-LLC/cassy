@@ -129,7 +129,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let blocker_id = queue.peek_all(30).unwrap().into_iter()
         .find(|row| crate::prompt_revalidation::parse_blocker_envelope(&row.prompt).is_some()).unwrap().id;
     let status = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
-        "action": "message", "target": "supervisor", "task_id": task.id, "kind": "status",
+        "action": "message", "target": "supervisor", "task_id": task.id,
         "summary": "Progress", "message": "The completed checks are recorded."
     })).unwrap())).await.unwrap();
     assert!(!status.is_error.unwrap_or(false), "{status:?}");

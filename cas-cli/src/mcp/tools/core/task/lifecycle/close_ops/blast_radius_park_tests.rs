@@ -738,3 +738,39 @@ async fn widening_covered_by_worker_receipts_keeps_the_parked_delivery_cas_d6eb(
     assert!(reset.contains("PROOF-SCOPE FIX REJECTED"), "{reset}");
     assert_eq!(f.task().proof_targets, ["unrelated", "widget::gear"]);
 }
+
+/// cas-e9d6: the 14:01 divergence. Cassy's post-merge close of a parked
+/// blast-radius delivery must judge the same evidence the worker's own close
+/// judges: the worker's receipts at its delivered tip cover the crate, so the
+/// verdict close succeeds without any worker turn.
+#[tokio::test]
+async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env);
+    let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    crate::factory_worker_check::record_passing_test_for_tests(
+        &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
+    );
+    let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+
+    let repo = f.dir.path();
+    git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let merge = git(repo, &["rev-parse", "HEAD"]);
+    open_task_store(&f.cas_dir())
+        .unwrap()
+        .record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green)
+        .unwrap();
+
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let cassy = CasCore::with_daemon(f.cas_dir(), None, None);
+    cassy.set_agent_id_for_testing("br-supervisor-session".into());
+    let outcome = cassy.close_green_merged_delivery(ID).await;
+    assert!(
+        matches!(outcome, super::super::merge_close::CassyMergeClose::Closed { .. }),
+        "{}",
+        outcome.receipt(ID)
+    );
+    assert_eq!(f.task().status, TaskStatus::Closed);
+}

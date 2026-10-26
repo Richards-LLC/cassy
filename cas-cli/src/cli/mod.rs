@@ -79,6 +79,7 @@ mod update;
 pub mod update_transaction;
 pub(crate) mod viktor;
 mod violet_cmd;
+pub(crate) use violet_cmd::channels::session_start_summary as session_start_channels;
 
 use std::path::{Path, PathBuf};
 

@@ -7,11 +7,27 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.80.0] - 2026-10-26
+
+### Added
+
+- **Running daemon's Violet consumer in status and doctor** — Each factory daemon records a consumer receipt for its session when push-wake starts or is skipped: the claim consumer id, its PID and start time, its build, its compiled capabilities and `slack.wake_enabled` as read at start. `cas factory status` (including `--json`) and `cas doctor` trust a receipt as the running daemon's evidence only when its PID and start time match the session's live daemon, and report a running daemon without a matching receipt as unknown (doctor warns) instead of using the build of the CLI on PATH. A `slack.wake_enabled` change made after start is flagged as needing a factory restart, the report is labelled local evidence rather than a Cloud attestation, and a cleanly stopped daemon removes its receipt.
+
+- **Configured Slack channel diagnostics** — When `slack.channels` is set, `cas doctor` adds a `violet channels` row that checks up to 16 configured channels with GET requests under a shared 3-second budget, which also bounds slow DNS resolution. Extra channels are reported unchecked, and a check that exceeds the budget is reported unchecked; a probe that reaches the save after the deadline does not refresh saved evidence. `cas violet channels` and doctor save each configured channel's flags to `.cas/violet-channel-check.json`. Session start makes no channel network request: it reads that saved evidence with the project and Cloud configuration and lists configured channels that are unchecked, flagged or stale (evidence 24 hours old or more, or dated in the future); healthy channels add nothing.
+
+### Fixed
+
+- **Violet consumer receipt writes** — Write and retire a session's consumer receipt under one per-session lock, so a stopping daemon cannot remove a receipt another process is publishing for that session. A write that fails after taking the lock removes its temporary file and makes a best-effort attempt to save a failure record; status and doctor say the receipt write failed only when such a record matches the live daemon's PID and start time, and otherwise name both possible causes (an older build or a failed write).
+
+- **Epic close verification target** — Verify an epic close against its target branch as published on origin, fetched first, with the local branch used when it is unpublished or delivered by local merge, instead of the closing checkout's HEAD and worker delivery anchors, so unrelated work in the supervisor's checkout no longer changes the proof. An epic's `commit_receipt` may name a merge commit on the default branch's first-parent history that contains the epic tip.
+
+- **Terminal QA backspace and repeated carriage returns** — `terminal-qa` moves the cursor one column left on a backspace instead of deleting the cell, and no longer counts a run of carriage returns that ends in a line feed as a redraw.
+
 ## [3.79.0] - 2026-10-25
 
 ### Added
 
-- **Clearing a session whose PID was reused** — Add `cas kill <name> --force-stale` for a session whose recorded PID now runs another program. It shows what that PID currently runs, asks for confirmation (skipped with `--force`, refused without a terminal), pins the confirmed PID and its start time and changes nothing if that process is replaced or exits before the clear, refuses while the recorded daemon is still running, never signals the recorded PID, reaps the session's fingerprint-checked worker process groups and removes the record.
+- **Clearing a session whose PID was reused** — Add `cas kill <name> --force-stale` for a session whose recorded PID now runs another program. It shows what that PID currently runs, asks for confirmation (skipped with `--force`, refused without a terminal), pins the confirmed PID and its start time and changes nothing if that process is replaced or exits before the clear, refuses when the PID's start time matches the one recorded for the session's daemon, never signals the recorded PID, reaps the session's fingerprint-checked worker process groups and removes the record.
 
 ### Fixed
 
@@ -25,7 +41,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Close notes during concurrent edits** — Keep task notes that were rewritten while a close was running, and retry the close when only a note was added in the gap instead of refusing it.
 
-- **Faster close proof checks** — Scan the delivered tree once per close and share it across worktrees at the same commit, bound file reads, and match a relative `include_str!` path written with any `../` spelling.
+- **Faster close proof checks** — Scan the delivered tree once per close and share it across worktrees at the same commit, stream the batched source read so large trees cannot deadlock, and match a relative `include_str!` path written with any `../` spelling.
 
 - **Shared terminal layout with a compact input owner** — Refresh the layout when a full-width viewer resizes while a compact client owns input, and when input moves to or from a compact client at the same size.
 
@@ -33,7 +49,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - **Review checkouts through symlinked paths** — Recognize managed review checkouts when the CAS root is reached through a symlink, such as macOS `/var` and `/private/var`.
 
-- **macOS socket cleanup diagnostics** — Log at debug level why socket cleanup keeps a GUI socket path, such as an incomplete or unreadable holder inventory.
+- **macOS socket cleanup diagnostics** — Log at debug level why socket cleanup keeps a factory socket path, such as an incomplete or unreadable holder inventory.
 
 ## [3.78.0] - 2026-10-24
 

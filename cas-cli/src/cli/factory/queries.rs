@@ -495,12 +495,19 @@ pub(super) fn execute_status(
         &cas_root,
         chrono::Utc::now(),
     );
+    // cas-ef94: the running daemon's own consumer receipt, never PATH's build.
+    let violet_consumer = crate::ui::factory::daemon::runtime::violet_consumer::observe(
+        &cas_root,
+        &session.metadata,
+        session.is_running,
+    );
     if cli.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&StatusJson {
                 schema_version: 1,
                 violet: violet_status.clone(),
+                violet_consumer: violet_consumer.clone(),
                 session: SessionJson::from_session_info(&session, cli.full),
                 prompt_queue_pending: pending,
                 prompt_queue_peek,
@@ -535,6 +542,7 @@ pub(super) fn execute_status(
             violet: violet_status
                 .as_ref()
                 .map(|status| (status.summary(chrono::Utc::now()), status.watch_rows())),
+            violet_consumer: violet_consumer.as_ref().map(|status| status.rows()),
         },
         chrono::Utc::now(),
     )?;
@@ -558,6 +566,8 @@ struct StatusView<'a> {
     /// cas-a897: Violet push-wake watch summary and one row per active watch,
     /// when this project has a watch book.
     pub violet: Option<(String, Vec<String>)>,
+    /// cas-ef94: the session daemon's Violet consumer, one evidence row each.
+    pub violet_consumer: Option<Vec<String>>,
 }
 
 /// Verdict → grouped rows → agents ledger. The first line answers "is the
@@ -642,6 +652,29 @@ fn render_status(
         row(fmt, "Violet", summary.clone())?;
         for watch in watches {
             row(fmt, "", watch.clone())?;
+        }
+    }
+    if let Some(rows) = &view.violet_consumer {
+        // Evidence rows wrap rather than truncate: the explanation is the point.
+        let available = width.saturating_sub(10).max(20);
+        let mut label = "Consumer";
+        for value in rows {
+            let mut line = String::new();
+            for word in value.split_whitespace() {
+                if !view.full
+                    && !line.is_empty()
+                    && line.chars().count() + 1 + word.chars().count() > available
+                {
+                    row(fmt, label, std::mem::take(&mut line))?;
+                    label = "";
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+            }
+            row(fmt, label, line)?;
+            label = "";
         }
     }
 
@@ -1047,6 +1080,9 @@ struct StatusJson {
     /// cas-a897: the Violet push-wake watch book, when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     violet: Option<crate::ui::factory::daemon::runtime::violet_activity::VioletWatchStatus>,
+    /// cas-ef94: the session daemon's own consumer receipt, when observable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    violet_consumer: Option<crate::ui::factory::daemon::runtime::violet_consumer::ConsumerStatus>,
     session: SessionJson,
     prompt_queue_pending: usize,
     prompt_queue_peek: Vec<QueuedPromptJson>,
@@ -1233,8 +1269,18 @@ mod status_render_tests {
                 vec!["#violet-internal (C09F) · watching 4m · last human 4m ago · next sweep in 1m"
                     .to_string()],
             )),
+            // cas-ef94: consumer evidence wraps instead of truncating.
+            violet_consumer: Some(vec![
+                "unknown · local evidence, not a Cloud attestation".to_string(),
+                "daemon pid 4242 (build abc1234) wrote no consumer receipt: it predates consumer reporting; restart the factory to report it".to_string(),
+            ]),
         };
         let out = render_at(80, &view);
+        assert!(out.contains("\nConsumer  unknown · local evidence, not a Cloud attestation\n"), "{out}");
+        assert!(
+            out.split_whitespace().collect::<Vec<_>>().join(" ").contains("predates consumer reporting; restart the factory to report it"),
+            "{out}"
+        );
         assert!(
             out.contains("Violet    1 watch active · relay ok, last claim 12s ago\n"),
             "{out}"
@@ -1262,6 +1308,7 @@ mod status_render_tests {
             agents: &agents,
             full: false,
             violet: None,
+            violet_consumer: None,
         };
         let out = render_at(80, &view);
         assert!(
@@ -1308,6 +1355,7 @@ mod status_render_tests {
             agents: &[agent("a", "active", None, 1)],
             full: false,
             violet: None,
+            violet_consumer: None,
         };
         let out = render_at(80, &idle);
         assert!(out.starts_with("[WARN] idle 14 min · "), "{out}");
@@ -1337,6 +1385,7 @@ mod status_render_tests {
             agents: &agents,
             full: false,
             violet: None,
+            violet_consumer: None,
         };
         let out = render_at(80, &view);
         let row = out

@@ -6,7 +6,12 @@ use crate::coordination::binding_intake::IntakeJournal;
 use crate::coordination::binding_reconciliation::{Binding, BindingMode, SCHEMA, StrictActivation};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, io::Read, path::Path, time::Duration};
+use std::{
+    collections::BTreeMap,
+    io::Read,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 #[derive(clap::Args, Debug, Clone)]
 pub struct ChannelsArgs {
@@ -52,8 +57,60 @@ pub struct Report {
     errors: Vec<String>,
 }
 
-/// No writes: no ensure-registration, mapping upsert, pause, claim or activation.
+/// Remote reads only: no registration, upsert, pause, claim or activation.
+/// The local diagnostic snapshot is not binding or consumer authority.
 pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, VioletError> {
+    inspect_inner(root, args, None)
+}
+
+/// Doctor's configured-only check shares one deadline across all HTTP reads.
+pub(crate) fn inspect_configured(root: &Path, args: &ChannelsArgs) -> Result<Report, VioletError> {
+    let root = root.to_path_buf();
+    let args = args.clone();
+    within_deadline(Duration::from_secs(3), move |deadline| {
+        inspect_inner(Some(&root), &args, Some(deadline))
+    })
+}
+
+fn within_deadline(
+    budget: Duration,
+    probe: impl FnOnce(Instant) -> Result<Report, VioletError> + Send + 'static,
+) -> Result<Report, VioletError> {
+    if budget.is_zero() {
+        return Err(check_timeout());
+    }
+    let deadline = Instant::now() + budget;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // ureq cannot interrupt OS DNS resolution. Bound the caller as peers'
+    // session-start lookup does, rather than relying on HTTP timeouts alone.
+    std::thread::Builder::new()
+        .name("cas-doctor-channels".into())
+        .spawn(move || {
+            let _ = sender.send(probe(deadline));
+        })
+        .map_err(|_| {
+            VioletError::local(
+                "local_request_failed",
+                "channel check could not start; run `cas violet channels`",
+            )
+        })?;
+    receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|_| check_timeout())?
+}
+
+fn check_timeout() -> VioletError {
+    VioletError::local(
+        "local_request_failed",
+        "doctor channel check exceeded its 3-second budget; run `cas violet channels`",
+    )
+}
+
+fn inspect_inner(
+    root: Option<&Path>,
+    args: &ChannelsArgs,
+    deadline: Option<Instant>,
+) -> Result<Report, VioletError> {
     let root = root.ok_or_else(|| {
         VioletError::local(
             "project_required",
@@ -124,7 +181,7 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
         configured.into_iter().map(|id| (id, true)).collect();
     // Keep previously gated channels visible even if both remote rows vanished.
     let journal = IntakeJournal::new(root);
-    if journal.path().exists() {
+    if deadline.is_none() && journal.path().exists() {
         match journal.read() {
             Ok(state) => {
                 for policy in state.policies {
@@ -140,7 +197,7 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
             )),
         }
     }
-    let mappings = match list_mappings(&args.url, token, None) {
+    let mappings = match list_mappings_until(&args.url, token, None, deadline) {
         Ok(rows) => Some(rows),
         Err(error) => {
             report.errors.push(format!(
@@ -149,40 +206,51 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
             None
         }
     };
-    if let Some(rows) = &mappings {
+    if deadline.is_none()
+        && let Some(rows) = &mappings
+    {
         for row in rows.iter().filter(|row| row.project_id == project_id) {
             candidates.entry(row.channel_id.clone()).or_insert(false);
         }
     }
     // Only a registered supervisor may enumerate Cloud's project inventory.
     // Never create or borrow another account's registration to hide this limit.
-    if let Some(registration) = registration {
-        match get_json(
-            &config.endpoint,
-            "/api/coordination/bindings/activation",
-            token,
-            &[("registration_id", &registration)],
-            // Discovery uses Cloud's deployed default cache headers. Each
-            // candidate still needs the no-store authority read below.
-            false,
-        ) {
-            Ok(value) => match inventory_channels(&value, &project_id) {
-                Ok(ids) => {
-                    if ids.len() >= 100 {
-                        report.errors.push("Cloud inventory reached its 100-binding server limit; completeness cannot be proven by this API".into());
+    if deadline.is_none() {
+        if let Some(registration) = registration {
+            match get_json(
+                &config.endpoint,
+                "/api/coordination/bindings/activation",
+                token,
+                &[("registration_id", &registration)],
+                // Discovery uses Cloud's deployed default cache headers. Each
+                // candidate still needs the no-store authority read below.
+                false,
+            ) {
+                Ok(value) => match inventory_channels(&value, &project_id) {
+                    Ok(ids) => {
+                        if ids.len() >= 100 {
+                            report.errors.push("Cloud inventory reached its 100-binding server limit; completeness cannot be proven by this API".into());
+                        }
+                        for id in ids {
+                            candidates.entry(id).or_insert(false);
+                        }
                     }
-                    for id in ids {
-                        candidates.entry(id).or_insert(false);
-                    }
-                }
-                Err(error) => report.errors.push(error),
-            },
-            Err(error) => report.errors.push(format!(
-                "Cloud inventory: {error}; use an existing supervisor's `--registration-id`"
-            )),
+                    Err(error) => report.errors.push(error),
+                },
+                Err(error) => report.errors.push(format!(
+                    "Cloud inventory: {error}; use an existing supervisor's `--registration-id`"
+                )),
+            }
+        } else {
+            report.errors.push("Cloud-only discovery unavailable: rerun with `--registration-id <existing-supervisor-id>`; known channels are still checked".into());
         }
-    } else {
-        report.errors.push("Cloud-only discovery unavailable: rerun with `--registration-id <existing-supervisor-id>`; known channels are still checked".into());
+    }
+    if deadline.is_some() && candidates.len() > 16 {
+        report.errors.push(format!(
+            "{} configured channels unchecked (doctor limit: 16)",
+            candidates.len() - 16
+        ));
+        candidates = candidates.into_iter().take(16).collect();
     }
     for (id, configured) in candidates {
         if !channel_id(&id) {
@@ -195,12 +263,13 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
         let mapping = mappings
             .as_ref()
             .and_then(|rows| rows.iter().find(|row| row.channel_id == id));
-        let observed = get_json(
+        let observed = get_json_until(
             &config.endpoint,
             "/api/coordination/bindings/authority",
             token,
             &[("team_id", &team), ("channel_id", &id)],
             true,
+            deadline,
         )
         .and_then(|value| authority(value, &team, &id));
         let mut flags = Vec::new();
@@ -264,9 +333,147 @@ pub fn inspect(root: Option<&Path>, args: &ChannelsArgs) -> Result<Report, Viole
             remedy,
         });
     }
+    // An abandoned slow resolver must not later refresh the cached evidence.
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(check_timeout());
+    }
+    if let Err(error) = save_snapshot(root, &team, &report) {
+        report
+            .errors
+            .push(format!("Local channel evidence not saved: {error}"));
+    }
     report.complete = report.errors.is_empty();
     report.ok = report.complete && report.channels.iter().all(|row| row.flags.is_empty());
     Ok(report)
+}
+
+const SNAPSHOT_FILE: &str = "violet-channel-check.json";
+const SNAPSHOT_MAX_AGE_HOURS: i64 = 24;
+
+#[derive(Serialize, Deserialize)]
+struct ChannelEvidence {
+    channel_id: String,
+    flags: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Snapshot {
+    schema: u32,
+    project_id: String,
+    team_id: String,
+    checked_at: chrono::DateTime<chrono::Utc>,
+    channels: Vec<ChannelEvidence>,
+}
+
+fn save_snapshot(root: &Path, team: &str, report: &Report) -> Result<(), String> {
+    let snapshot = Snapshot {
+        schema: 1,
+        project_id: report.project_id.clone(),
+        team_id: team.into(),
+        checked_at: chrono::Utc::now(),
+        channels: report
+            .channels
+            .iter()
+            .filter(|row| row.configured)
+            .map(|row| ChannelEvidence {
+                channel_id: row.channel_id.clone(),
+                flags: row.flags.iter().map(|flag| (*flag).into()).collect(),
+            })
+            .collect(),
+    };
+    crate::cli::integrate::fs::atomic_write(
+        &root.join(SNAPSHOT_FILE),
+        &serde_json::to_string(&snapshot).map_err(|_| "invalid evidence")?,
+    )
+    .map_err(|_| "check local .cas write permissions, then run `cas violet channels`".into())
+}
+
+impl Report {
+    pub(crate) fn configured_summary(&self) -> String {
+        let flagged: Vec<_> = self
+            .channels
+            .iter()
+            .filter(|row| row.configured && !row.flags.is_empty())
+            .collect();
+        let mut summary = format!(
+            "{} configured checked; {} flagged",
+            self.channels.iter().filter(|row| row.configured).count(),
+            flagged.len()
+        );
+        for row in flagged.iter().take(3) {
+            summary.push_str(&format!("; {}: {}", row.channel_id, row.flags.join(", ")));
+        }
+        if let Some(error) = self.errors.first() {
+            summary.push_str(&format!("; {error}"));
+        }
+        summary.push_str(". Run `cas violet channels`");
+        summary
+    }
+}
+
+/// Local files only. Cached evidence is diagnostic, never permission to consume.
+pub(crate) fn session_start_summary(
+    root: &Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    let config = crate::config::Config::load(root).ok()?;
+    let configured = config.slack.unwrap_or_default().channels;
+    if configured.is_empty() {
+        return None;
+    }
+    let project = crate::cloud::resolve_canonical_id(root);
+    let team = CloudConfig::load_from_cas_dir(root)
+        .ok()
+        .and_then(|config| config.active_team_id());
+    let snapshot = std::fs::File::open(root.join(SNAPSHOT_FILE))
+        .ok()
+        .and_then(|file| serde_json::from_reader::<_, Snapshot>(file.take(1024 * 1024)).ok())
+        .filter(|snapshot| {
+            snapshot.schema == 1
+                && project.as_deref() == Some(snapshot.project_id.as_str())
+                && team.as_deref() == Some(snapshot.team_id.as_str())
+        });
+    let stale = snapshot.as_ref().is_some_and(|snapshot| {
+        let age = now.signed_duration_since(snapshot.checked_at);
+        age < chrono::Duration::zero() || age >= chrono::Duration::hours(SNAPSHOT_MAX_AGE_HOURS)
+    });
+    let mut findings = Vec::new();
+    for id in configured {
+        let row = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.channels.iter().find(|row| row.channel_id == id));
+        let state = match row {
+            None => "unchecked".to_string(),
+            Some(row) if stale => format!(
+                "stale (24-hour evidence limit){}",
+                if row.flags.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {}", row.flags.join(", "))
+                }
+            ),
+            Some(row) if !row.flags.is_empty() => row.flags.join(", "),
+            Some(_) => continue,
+        };
+        findings.push(format!("{id}: {state}"));
+    }
+    if findings.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "Configured Slack channels: {} need attention (cached evidence)\nRun `cas violet channels` to refresh and inspect.\n",
+        findings.len()
+    );
+    for finding in findings.iter().take(8) {
+        out.push_str(&crate::cloud::presence::wrap_line(finding));
+    }
+    if findings.len() > 8 {
+        out.push_str(&format!(
+            "{} more; inspect the full channel report.\n",
+            findings.len() - 8
+        ));
+    }
+    Some(out)
 }
 
 pub fn render(report: &Report) -> String {
@@ -338,6 +545,15 @@ pub(crate) fn list_mappings(
     token: &str,
     project: Option<&str>,
 ) -> Result<Vec<Mapping>, String> {
+    list_mappings_until(hub, token, project, None)
+}
+
+fn list_mappings_until(
+    hub: &str,
+    token: &str,
+    project: Option<&str>,
+    deadline: Option<Instant>,
+) -> Result<Vec<Mapping>, String> {
     #[derive(Deserialize)]
     struct Listing {
         channels: Vec<Mapping>,
@@ -345,9 +561,15 @@ pub(crate) fn list_mappings(
     let query: Vec<_> = project
         .map(|project| vec![("project_id", project)])
         .unwrap_or_default();
-    let listing: Listing =
-        serde_json::from_value(get_json(hub, "/api/channels", token, &query, false)?)
-            .map_err(|_| "invalid Violet channel listing".to_string())?;
+    let listing: Listing = serde_json::from_value(get_json_until(
+        hub,
+        "/api/channels",
+        token,
+        &query,
+        false,
+        deadline,
+    )?)
+    .map_err(|_| "invalid Violet channel listing".to_string())?;
     let mut known = std::collections::BTreeSet::new();
     if listing.channels.iter().any(|row| {
         !channel_id(&row.channel_id)
@@ -366,6 +588,24 @@ fn get_json(
     query: &[(&str, &str)],
     no_store: bool,
 ) -> Result<Value, String> {
+    get_json_until(origin, path, token, query, no_store, None)
+}
+
+fn get_json_until(
+    origin: &str,
+    path: &str,
+    token: &str,
+    query: &[(&str, &str)],
+    no_store: bool,
+    deadline: Option<Instant>,
+) -> Result<Value, String> {
+    let timeout = match deadline {
+        Some(deadline) => deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or("doctor channel check exceeded its 3-second budget")?,
+        None => Duration::from_secs(10),
+    };
     let mut url = url::Url::parse(origin).map_err(|_| "invalid service URL")?;
     let loopback = url.host_str().is_some_and(|host| {
         host.parse::<std::net::IpAddr>()
@@ -389,7 +629,8 @@ fn get_json(
     }
     let response = ureq::AgentBuilder::new()
         .redirects(0)
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
+        .timeout_connect(timeout)
         .build()
         .get(url.as_str())
         .set("Authorization", &format!("Bearer {token}"))
@@ -522,4 +763,35 @@ fn channel_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_doctor_budget_never_starts_a_probe_cas_cf25() {
+        let error = within_deadline(Duration::ZERO, |_| {
+            panic!("expired doctor budget must not start DNS or HTTP work")
+        })
+        .err()
+        .expect("expired budget is an unchecked result");
+        assert_eq!(error.code, "local_request_failed");
+        // A stalled resolver/probe cannot hold the caller. The gate stays
+        // closed until after the timeout result, with no sleeps or timing assertions.
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let (finished, complete) = std::sync::mpsc::channel();
+        let error = within_deadline(Duration::from_millis(1), move |_| {
+            let _ = held.recv();
+            let _ = finished.send(());
+            Err(VioletError::local("local_request_failed", "probe finished"))
+        })
+        .err()
+        .expect("blocked probe must return an unchecked result");
+        assert!(error.message.contains("budget"));
+        drop(release);
+        complete
+            .recv()
+            .expect("release the probe thread before ending the test");
+    }
 }

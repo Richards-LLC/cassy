@@ -260,7 +260,17 @@ fn channels_report(mappings: serde_json::Value, inventory: Vec<&str>, authoritie
     assert_eq!(output.status.code(), Some(expected_exit), "unexpected report status: {}", String::from_utf8_lossy(&output.stderr));
     served.unwrap();
     assert!(!root.join("cas.db").exists(), "listing must not create a local agent database");
-    serde_json::from_slice(&output.stdout).unwrap()
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("violet-channel-check.json")).expect("channel inspection saves local evidence")
+    ).unwrap();
+    assert_eq!(snapshot["project_id"], "qa.invalid/channels");
+    assert_eq!(snapshot["team_id"], "qa-team");
+    assert_eq!(snapshot["channels"][0]["channel_id"], "C03CONFIG");
+    let configured = report["channels"].as_array().unwrap().iter().find(|row| row["configured"] == true).unwrap();
+    assert_eq!(snapshot["channels"][0]["flags"], configured["flags"]);
+    assert!(!snapshot.to_string().contains("ordinary-fixture-user"));
+    report
 }
 
 fn channel_authority(channel: &str, project: &str, verified: bool) -> serde_json::Value {

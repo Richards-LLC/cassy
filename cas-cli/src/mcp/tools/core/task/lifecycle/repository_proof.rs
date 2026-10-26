@@ -172,6 +172,13 @@ fn resolve_target_branch_ref(
         .filter(|head| !head.is_empty())
         .map(|head| (target_ref, head))
     };
+    // Epic close selects a qualified remote ref explicitly so an unrelated
+    // or divergent local branch cannot replace the published epic boundary.
+    if target_branch.starts_with("refs/heads/") || target_branch.starts_with("refs/remotes/origin/") {
+        return resolve(target_branch.to_string()).ok_or_else(|| {
+            format!("repository proof target ref `{target_branch}` does not resolve")
+        });
+    }
     let local = resolve(format!("refs/heads/{target_branch}"));
     let origin = resolve(format!("refs/remotes/origin/{target_branch}"));
     match (local, origin) {

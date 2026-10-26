@@ -25,7 +25,7 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     for cause in ["owned", "foreign", "expired", "independent", "successor"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
-        let supervisor = Agent::new_with_role("lead-id".into(), "supervisor".into(), AgentRole::Supervisor);
+        let supervisor = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
         crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
         if cause == "successor" {
             let mut successor = supervisor.clone();

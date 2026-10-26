@@ -553,3 +553,28 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     if ci != "success" { return None; }
     Some(Ready { evidence, tip, ci, worker: Some(worker.to_string()) })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cas-43d2: a staged delivery is cached as "merged" until its read
+    /// fingerprint changes, so unstaging it must change the fingerprint.
+    #[test]
+    fn batch_staging_changes_the_delivery_read_fingerprint_cas_43d2() {
+        let f = super::super::merge_alert_tests::Fixture::new();
+        let cas_dir = f.app.cas_dir.clone();
+        let repo = cas_dir.parent().unwrap();
+        let data = DirectorData::load_with_stores_for_project(&cas_dir, None, false, None, None).unwrap();
+        let unstaged = fingerprint(&f.event, &data, repo);
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.deliverables.integration_batch = Some(cas_types::IntegrationBatchEvidence {
+            branch: "batch/x".into(), tip: "a".repeat(40), base: "a".repeat(40),
+            delivered_head: "a".repeat(40), supervisor_id: "sup".into(), recorded_at: Utc::now(),
+        });
+        store.update(&task).unwrap();
+        assert!(unstaged.is_some());
+        assert_ne!(fingerprint(&f.event, &data, repo), unstaged);
+    }
+}

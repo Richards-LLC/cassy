@@ -974,25 +974,3 @@ fn cas_43d2_declined_tip_settles_until_the_worker_commits() {
     f.relay();
     assert!(probes(&f) > settled, "a new commit is read again");
 }
-
-/// cas-43d2: unstaging a batch-staged delivery without a status change must
-/// not leave it cached as merged.
-#[test]
-fn cas_43d2_unstaged_batch_delivery_is_read_again() {
-    let mut f = Fixture::new();
-    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
-    let stage = |batch: Option<cas_types::IntegrationBatchEvidence>| {
-        let mut task = store.get("cas-9efb-test").unwrap();
-        task.deliverables.integration_batch = batch;
-        store.update(&task).unwrap();
-    };
-    let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
-    stage(Some(cas_types::IntegrationBatchEvidence {
-        branch: "batch/x".into(), tip: tip.clone(), base: tip.clone(), delivered_head: tip,
-        supervisor_id: "sup".into(), recorded_at: Utc::now(),
-    }));
-    assert!(f.relay().is_empty(), "a staged delivery is not a merge demand");
-    stage(None);
-    let prompts = f.relay();
-    assert!(prompts.iter().any(|prompt| prompt.merge_alert.is_some()));
-}

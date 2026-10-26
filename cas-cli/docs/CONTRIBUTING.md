@@ -243,6 +243,14 @@ recording `merge_conflicted`, the conflicting paths and the attempted target tip
 The worker receives one notice and can start, resolve and re-deliver directly.
 Target drift and pre-existing checkout residue keep their existing recovery paths.
 
+Factory daemon startup validates both Unix socket pathnames against the target
+ABI before logs, processes or agent registration: Linux has 108 address bytes,
+macOS 104, including the terminating NUL. An oversized HOME/session path is
+refused with its byte count and a shorter-path remedy. A daemon also refuses an
+inherited CAS_ROOT that does not belong to its declared project; canonical and
+worktree aliases of that project's store remain valid. For an isolated QA rig,
+initialize its own project and clear inherited CAS_ROOT before starting it.
+
 After a published merge, an enforced registry or documentation upkeep gate
 returns the parked task Open to its assignee through the same `request_changes`
 core. Cassy retains the gate text in task notes, sends one corrective notice,

@@ -139,26 +139,28 @@ fn main() -> ExitCode {
 
     // The updater owns retired-setting guidance through its maintenance
     // receipts. Establish that scope before the earliest config read.
-    let config_notices = cli::startup_config_notices(&cli);
-    let _sentry_guard = sentry::init(sentry::is_sentry_enabled());
+    let startup = cli::validate_process_startup(&cli);
+    let config_notices = startup.is_ok().then(|| cli::startup_config_notices(&cli));
+    let _sentry_guard = startup.is_ok().then(|| sentry::init(sentry::is_sentry_enabled()));
 
-    // Initialize logging (after CLI parsing so we can use --verbose)
-    init_logging(&cli);
-
-    // Add breadcrumb for crash context (command being executed)
-    let args = redact_viktor_key_args(std::env::args().skip(1).collect());
-    sentry::add_command_breadcrumb(&args.join(" "));
+    if startup.is_ok() {
+        // A refused daemon must leave no startup log or telemetry state.
+        init_logging(&cli);
+        let args = redact_viktor_key_args(std::env::args().skip(1).collect());
+        sentry::add_command_breadcrumb(&args.join(" "));
+    }
 
     // Config and hub refusals are returned through the shared error path. Keep
     // those failures machine-readable on stdout when their caller requested
     // JSON; stderr keeps the human diagnostic either way.
     let json_refusal = cli.json
-        && matches!(
-            cli.command.as_ref(),
-            Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
-        );
+        && (startup.is_err()
+            || matches!(
+                cli.command.as_ref(),
+                Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
+            ));
     let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
-    let outcome = cli::run(cli);
+    let outcome = startup.and_then(|()| cli::run(cli));
     // Unresolved/failed paths replay before the final exit-reason line.
     drop(config_notices);
     // The shared SQLite pool owns every close; checkpoint and close its idle

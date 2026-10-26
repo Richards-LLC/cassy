@@ -89,6 +89,10 @@ impl ConfigMeta {
     pub fn examples(&self) -> Vec<&'static str> {
         match self.key {
             "factory.write_roots" => vec!["~/Downloads,/mnt/models"],
+            "qa.capture.serve" => vec!["pnpm dev --port {port}"],
+            "qa.capture.credentials_env" => vec!["PROJECT_QA_CREDENTIALS"],
+            "qa.capture.success_url" => vec!["^https://[^/]+/dashboard"],
+            "qa.capture.viewports" => vec!["1280x800,390x844"],
             _ => self.value_type.examples(),
         }
     }

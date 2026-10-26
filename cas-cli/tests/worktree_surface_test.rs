@@ -3677,6 +3677,16 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(repaired.as_str()));
     assert_ne!(repaired, anchor);
     env.set_current_dir(&repo.root);
+    let qa_required = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+    assert!(qa_required.message.contains("INDEPENDENT QA REQUIRED"), "{qa_required}");
+    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge,
+        "a QA wait must keep its existing ownership, rather than return a source fix");
+    // This fixture isolates source-gate recovery; settle the independent QA
+    // round explicitly at the repaired tip before proving the next merge.
+    cas_store::waive_qa_pass(
+        &root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &repaired,
+        "fixture: isolate post-merge source correction from independent QA", chrono::Utc::now(),
+    ).unwrap();
     let accepted = supervisor.coordination(Parameters(request)).await.unwrap();
     assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{}", get_text(&accepted));
 }

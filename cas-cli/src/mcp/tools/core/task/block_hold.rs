@@ -246,6 +246,7 @@ pub(crate) fn record_auto_unblock_skipped(task: &mut Task, reason: &str) {
 
 #[cfg(test)]
 mod tests {
+    use cas_store::TaskStore;
     use cas_types::{Agent, AgentRole, TaskStatus};
 
     /// cas-16e1: only the exact wait sentence, read across the whole note,
@@ -253,8 +254,11 @@ mod tests {
     /// while asking for something else keeps alerts armed.
     #[test]
     fn only_the_whole_wait_note_is_a_quiet_verification_wait_cas_16e1() {
-        let fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
-        let cas_dir = fixture.app.cas_dir().to_path_buf();
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        crate::store::open_task_store_local(&cas_dir).unwrap()
+            .add(&cas_types::Task::new("cas-9efb-test".into(), "verification wait".into())).unwrap();
         let lead = Agent::new_with_role("lead-id".into(), "lead".into(), AgentRole::Supervisor);
         crate::store::open_agent_store(&cas_dir).unwrap().register(&lead).unwrap();
         let dispatch = cas_store::create_verification_dispatch(

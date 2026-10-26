@@ -107,6 +107,9 @@ impl ConfigMeta {
         {
             return Err(format!("Invalid {}: use owner/name or empty to clear", self.key));
         }
+        if self.key.starts_with("qa.capture.") {
+            crate::config::qa_capture::validate_value(self.key, value)?;
+        }
         // First check type
         match self.value_type {
             ConfigType::Bool => {

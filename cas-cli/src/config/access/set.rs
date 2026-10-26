@@ -769,6 +769,51 @@ impl Config {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "qa.capture.base_url" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).base_url = value.trim().to_owned();
+            }
+            "qa.capture.serve" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).serve = value.trim().to_owned();
+            }
+            "qa.capture.ready_path" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).ready_path = value.trim().to_owned();
+            }
+            "qa.capture.shots" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).shots = value.trim().to_owned();
+            }
+            "qa.capture.credentials_env" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).credentials_env = value.trim().to_owned();
+            }
+            "qa.capture.login_path" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).login_path = value.trim().to_owned();
+            }
+            "qa.capture.success_url" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).success_url = value.trim().to_owned();
+            }
+            "qa.capture.email_sel" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).email_sel = value.trim().to_owned();
+            }
+            "qa.capture.password_sel" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).password_sel = value.trim().to_owned();
+            }
+            "qa.capture.submit_sel" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).submit_sel = value.trim().to_owned();
+            }
+            "qa.capture.mask" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).mask = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.capture.viewports" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).viewports = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+            }
+            "qa.capture.max_shots" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).max_shots = value.parse().map_err(|_| MemError::Parse("Invalid integer for qa.capture.max_shots".into()))?;
+            }
+            "qa.capture.timeout_secs" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).timeout_secs = value.parse().map_err(|_| MemError::Parse("Invalid integer for qa.capture.timeout_secs".into()))?;
+            }
+            "qa.capture.max_html_mb" => {
+                self.qa.get_or_insert_with(QaConfig::default).capture.get_or_insert_with(Default::default).max_html_mb = value.parse().map_err(|_| MemError::Parse("Invalid integer for qa.capture.max_html_mb".into()))?;
+            }
             "qa.post_release.command" => {
                 let post = self.qa.get_or_insert_with(QaConfig::default).post_release.get_or_insert_with(Default::default);
                 post.command = value.trim().to_string();

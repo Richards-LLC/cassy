@@ -14,7 +14,7 @@ fn qa_capture_keys_round_trip_cas_db23() {
         ("shots", "docs/qa/custom-shots.json"),
         ("credentials_env", "PROJECT_QA_CREDENTIALS"),
         ("login_path", "/login"),
-        ("success_url", "^https?://[^/]+/dashboard"),
+        ("success_url", "^https?://[^/]+/(dashboard|account)"),
         ("email_sel", "#email"),
         ("password_sel", "#password"),
         ("submit_sel", "button[type=submit]"),
@@ -22,11 +22,7 @@ fn qa_capture_keys_round_trip_cas_db23() {
         ("viewports", "1280x800,390x844"),
         ("max_shots", "4"),
         ("timeout_secs", "180"),
-        ("max_jpg_kb", "200"),
-        ("max_image_width", "1200"),
-        ("jpg_quality", "75"),
         ("max_html_mb", "6"),
-        ("max_pairs", "10"),
     ];
     for (name, value) in values {
         let key = format!("qa.capture.{name}");
@@ -47,26 +43,29 @@ fn qa_capture_keys_round_trip_cas_db23() {
 #[test]
 fn qa_capture_rejects_invalid_values_without_mutation_cas_db23() {
     let mut config = Config::default();
+    config.set("qa.capture.credentials_env", "PROJECT_QA_CREDENTIALS").unwrap();
+    config.set("qa.capture.success_url", "^https?://[^/]+/dashboard").unwrap();
     for (name, value) in [
         ("credentials_env", "password=do-not-store"),
         ("credentials_env", "/tmp/credentials.json"),
         ("credentials_env", "9INVALID"),
         ("success_url", "/dashboard"),
+        ("success_url", "^https://example.com/dashboard|/login"),
         ("success_url", "^(["),
         ("base_url", "file:///tmp/page"),
         ("base_url", "https://user:password@example.com"),
         ("max_shots", "0"),
         ("max_shots", "7"),
+        ("serve", "pnpm dev"),
+        ("ready_path", "https://other.example/"),
+        ("login_path", "//other.example/login"),
         ("timeout_secs", "241"),
-        ("max_jpg_kb", "251"),
-        ("max_image_width", "1441"),
-        ("jpg_quality", "101"),
         ("max_html_mb", "9"),
-        ("max_pairs", "13"),
         ("viewports", "desktop"),
     ] {
         let key = format!("qa.capture.{name}");
         let before = toml::to_string(&config).unwrap();
+        assert!(meta::registry().validate(&key, value).is_err(), "{key}");
         assert!(config.set(&key, value).is_err(), "{key}");
         assert_eq!(toml::to_string(&config).unwrap(), before, "{key}");
     }
@@ -1659,4 +1658,49 @@ fn cas_2d63_build_guard_rejects_invalid_limits_without_mutating_config() {
             assert_eq!(config.get(key), before);
         }
     }
+}
+
+#[test]
+fn qa_capture_intent_and_runtime_pointer_findings_cas_db23() {
+    let mut env = TestEnvGuard::temp_home();
+    env.remove("PROJECT_QA_CREDENTIALS");
+    let mut config = Config::default();
+    assert!(config.qa().capture.is_none());
+    config.set("qa.capture.max_shots", "3").unwrap();
+    assert!(!config.qa().capture.unwrap().is_configured().unwrap());
+    config.set("qa.capture.base_url", "http://localhost:4312").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().unwrap());
+    config.set("qa.capture.credentials_env", "PROJECT_QA_CREDENTIALS").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().unwrap_err().contains("unset or empty"));
+
+    let missing_file = env.home().join("missing-file");
+    env.set("PROJECT_QA_CREDENTIALS", &missing_file);
+    assert!(config.qa().capture.unwrap().is_configured().unwrap_err().contains("existing readable file"));
+    let directory = env.home().to_path_buf();
+    env.set("PROJECT_QA_CREDENTIALS", &directory);
+    assert!(config.qa().capture.unwrap().is_configured().is_err());
+    let file = env.home().join("qa-account");
+    // Contents need not be valid credentials: this seam only checks the pointer.
+    std::fs::write(&file, b"opaque fixture bytes").unwrap();
+    env.set("PROJECT_QA_CREDENTIALS", &file);
+    assert_eq!(config.qa().capture.unwrap().credential_file().unwrap(), Some(file.clone()));
+    assert!(config.qa().capture.unwrap().is_configured().unwrap());
+    let serialized = toml::to_string(&config).unwrap();
+    assert!(!serialized.contains(file.to_str().unwrap()));
+    assert!(!serialized.contains("opaque fixture bytes"));
+
+    config.set("qa.capture.login_path", "/login").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().unwrap_err().contains("success_url"));
+    config.set("qa.capture.success_url", "^https?://[^/]+/dashboard").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().unwrap());
+    config.set("qa.capture.credentials_env", "").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().unwrap_err().contains("credentials_env is required"));
+    config.set("qa.capture.base_url", "").unwrap();
+    assert!(!config.qa().capture.unwrap().is_configured().unwrap());
+    config.set("qa.capture.serve", "pnpm dev --port {port}").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().is_err());
+    config.set("qa.capture.login_path", "").unwrap();
+    assert!(config.qa().capture.unwrap().is_configured().unwrap());
+    config.set("qa.capture.serve", "").unwrap();
+    assert!(!config.qa().capture.unwrap().is_configured().unwrap());
 }

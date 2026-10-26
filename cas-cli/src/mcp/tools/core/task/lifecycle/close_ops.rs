@@ -18169,8 +18169,9 @@ fn epic_live_branch_ref(
 }
 
 /// A released epic may name the default-branch merge carrying its target tip.
-/// The receipt must itself be a merge on the live default's first-parent
-/// history: arbitrary commits and unpublished local merges cannot authorize it.
+/// The receipt must introduce the epic on the live default's first-parent
+/// history: arbitrary commits, later merges and unpublished local merges cannot
+/// authorize it. Return the immutable release commit for the review boundary.
 fn released_epic_merge_ref(
     repo: &std::path::Path,
     task: &Task,
@@ -18186,7 +18187,9 @@ fn released_epic_merge_ref(
     }
     let epic_ref = epic_live_branch_ref(repo, target_branch, task.delivery_mode);
     let tip = resolve_branch_sha(repo, &epic_ref)?;
-    if !git_commit_is_ancestor(repo, &tip, &receipt) {
+    if !git_commit_is_ancestor(repo, &tip, &receipt)
+        || git_commit_is_ancestor(repo, &tip, &format!("{receipt}^1"))
+    {
         return None;
     }
     let default = resolve_close_gate_default_branch(repo).ok()?;
@@ -18194,11 +18197,15 @@ fn released_epic_merge_ref(
         fetch_parent_branch_best_effort(repo, &default);
     }
     let default_ref = epic_live_branch_ref(repo, &default, task.delivery_mode);
-    git_stdout_lines(repo, &["rev-list", "--first-parent", &default_ref])
+    // The epic's ancestors cannot include its release merge. Excluding them
+    // bounds the first-parent walk at the shared history instead of scanning
+    // the repository back to its root on every close.
+    let exclude_epic = format!("^{tip}");
+    git_stdout_lines(repo, &["rev-list", "--first-parent", &default_ref, &exclude_epic])
         .ok()?
         .iter()
         .any(|commit| commit == &receipt)
-        .then_some(default_ref)
+        .then_some(receipt)
 }
 
 /// Resolve the code anchor for an Epic's declared pre-close hook when the

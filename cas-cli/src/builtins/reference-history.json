@@ -343,6 +343,18 @@
       "f0b7b7ae2a4347a21ebb9789a2eff2443e11e3b6586175848f10fe606432d360",
       "fd1e13f47f3c3eb2cf489c308a6431623b5b3da5291e48cfb45ccd915b00c04a"
     ],
+    "skills/cas-customer-release-notes/SKILL.md": [
+      "c3533122c07f8700e7eb7905c2066f93b51157a4fbf0672d8613e204bbfc2d57"
+    ],
+    "skills/cas-customer-release-notes/references/PROFILE-template.md": [
+      "0276c0385fd19bd9f9993c6893bc1582833e3f7cc81bf8e727f84a525fceb907"
+    ],
+    "skills/cas-customer-release-notes/references/notes-contract.md": [
+      "1eb3870a23532b4bebd2ee1b9916dcc6096548a5c153c827e1b76d2ed8399755"
+    ],
+    "skills/cas-customer-release-notes/references/notes-skeleton.html": [
+      "1d19154d662e7e1dced7c548b099fb5d16285c2db6f7a84ad5d09c60040122e0"
+    ],
     "skills/cas-cut-release/SKILL.md": [
       "015220064509c154b661bc8393e855dc613bfc4f5ef676b1cc6c636238143674",
       "01f9046d9b1d6a44a34e5ad12ecc5dba4b0bdb82afdb68b5c596647bcbf645b1",
@@ -1221,6 +1233,7 @@
       "4bf9c3cf842fafe776c13129ec47b34482485d725b352d99c11571c7a49fdf34",
       "6da8318351fe0be007ebbe92a81ef384cd644584b97cd7a9c5421aa921a4f6cb",
       "9266b60e7ce672ca3e6e6a676eac9c6d1c2bd6907d94ccb48c29764ec3626149",
+      "befae46fc51ea916d712d15385dfd03f7da10ef3942f198b84a1d667e95ea3b6",
       "c46197b3a01872a32ef6d7825eac49df0d6fbd9f2d51e17c6af390bc75419b01",
       "c681f8109b38eee45303310f445ce4291065fe29aac52daf288fab4681fbc647",
       "d6cb99234c7727814d6213f2dcf72c3bd5fa475952c786e57335bd1f6546bda9",

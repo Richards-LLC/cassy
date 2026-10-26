@@ -407,51 +407,6 @@ fn isolated_test_path(
     Ok((bin, path))
 }
 
-fn worker_zig(
-    repo: &Path,
-    configured: Option<&OsStr>,
-    search_path: Option<&OsStr>,
-) -> Result<Option<PathBuf>> {
-    let common = PathBuf::from(git(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?);
-    let source = common
-        .parent()
-        .context("Git common directory has no parent")?;
-    // The runner also serves projects which do not consume the Zig toolchain.
-    if !repo.join("crates/ghostty_vt_sys/build.rs").is_file()
-        && !source.join("crates/ghostty_vt_sys/build.rs").is_file()
-    {
-        return Ok(None);
-    }
-    let mut candidates = Vec::new();
-    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(configured));
-    }
-    if let Some(search_path) = search_path {
-        candidates.extend(std::env::split_paths(search_path).map(|dir| dir.join("zig")));
-    }
-    candidates.extend([
-        repo.join(".context/zig/zig"),
-        source.join(".context/zig/zig"),
-    ]);
-    for candidate in candidates {
-        // Relative ZIG/PATH entries must be bound before Cargo changes cwd.
-        let candidate = if candidate.is_absolute() {
-            candidate
-        } else {
-            repo.join(candidate)
-        };
-        if executable(&candidate) {
-            return Ok(Some(candidate.canonicalize()?));
-        }
-    }
-    bail!(
-        "Missing Zig compiler in ZIG, PATH or source/main checkout .context.\nRun ./scripts/bootstrap-zig.sh in the source repo, or set an absolute ZIG."
-    )
-}
-
 fn clean_head(repo: &Path) -> Result<String> {
     if !git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         bail!("Commit the worker change before checking; worker PASS must name a clean commit");
@@ -856,11 +811,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let zig = worker_zig(
-        &repo,
-        std::env::var_os("ZIG").as_deref(),
-        std::env::var_os("PATH").as_deref(),
-    )?;
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -935,9 +885,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
-    }
-    if let Some(zig) = zig {
-        command.env("ZIG", zig);
     }
     let mut cargo_args = args.to_vec();
     // An omitted harness means library tests; do not build every test binary.

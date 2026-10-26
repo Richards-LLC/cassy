@@ -52,9 +52,6 @@ impl QaCaptureConfig {
     /// Validate hand-edited configuration with the same metadata as config set.
     /// Call before consuming any field or starting capture resources.
     pub fn validate(&self) -> Result<(), String> {
-        if !self.login_path.is_empty() && self.success_url.is_empty() {
-            return Err("qa.capture.success_url is required for login (anchor it with ^)".into());
-        }
         let config = super::Config {
             qa: Some(super::QaConfig {
                 capture: Some(self.clone()),
@@ -79,6 +76,9 @@ impl QaCaptureConfig {
             }
             meta.validate(&value)
                 .map_err(|error| format!("{}: {error}", meta.key))?;
+        }
+        if !self.login_path.is_empty() && self.success_url.is_empty() {
+            return Err("qa.capture.success_url is required for login (anchor it with ^)".into());
         }
         Ok(())
     }

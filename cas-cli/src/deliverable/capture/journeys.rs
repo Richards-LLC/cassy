@@ -334,10 +334,14 @@ fn import_goal(
         result["viewport"]["width"].as_u64().unwrap_or(0) as u32,
         result["viewport"]["height"].as_u64().unwrap_or(0) as u32,
     ];
-    if !config
-        .viewports
-        .contains(&format!("{}x{}", viewport[0], viewport[1]))
-    {
+    if !config.viewports.iter().any(|bound| {
+        bound.split_once('x').is_some_and(|(w, h)| {
+            w.parse::<u32>().ok() == Some(viewport[0])
+                && h.parse::<u32>()
+                    .ok()
+                    .is_some_and(|h| viewport[1] > 0 && viewport[1] <= h)
+        })
+    }) {
         anyhow::bail!("journey viewport exceeds configured budget");
     }
     let scheme = result["color_scheme"]

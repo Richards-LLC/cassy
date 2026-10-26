@@ -873,12 +873,38 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
     occurrence_id: &str,
     branch_tip: Option<&str>,
 ) -> Result<LifecyclePushResult, String> {
+    emit_task_lifecycle_transition_in_project(
+        supervisor_queue, prompt_queue, agent_store, task_id, task_title,
+        old_status, new_status, actor, reason, kind, occurrence_id, branch_tip, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_task_lifecycle_transition_in_project(
+    supervisor_queue: &dyn SupervisorQueueStore,
+    prompt_queue: Option<&dyn PromptQueueStore>,
+    agent_store: &dyn AgentStore,
+    task_id: &str,
+    task_title: &str,
+    old_status: TaskStatus,
+    new_status: TaskStatus,
+    actor: &str,
+    reason: Option<&str>,
+    kind: LifecycleTransition,
+    occurrence_id: &str,
+    branch_tip: Option<&str>,
+    cas_dir: Option<&Path>,
+) -> Result<LifecyclePushResult, String> {
     let factory_session = resolve_lifecycle_factory_session(agent_store, actor);
     let Some((supervisor, recipient)) =
         lifecycle_notice_owner(agent_store, factory_session.as_deref())
     else {
         return Ok(LifecyclePushResult::NoSupervisor);
     };
+
+    let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.name).is_some()
+    });
 
     let key = transition_key(
         task_id,
@@ -904,6 +930,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
         "recipient_factory_session": recipient.session,
         "occurrence_id": occurrence_id,
         "branch_tip": branch_tip,
+        "verification_wait": verification_wait,
         "transition_key": key,
         "timestamp": now.to_rfc3339(),
     })
@@ -984,6 +1011,7 @@ pub fn emit_task_lifecycle_transition_with_branch_tip(
         branch_tip,
         &recipient.name,
         recipient.session.as_deref(),
+        verification_wait,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1129,9 +1157,10 @@ fn deliver_prompt_for_notification(
     branch_tip: Option<&str>,
     recipient_target: &str,
     recipient_session: Option<&str>,
+    verification_wait: bool,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
-    let body = build_prompt_body(
+    let mut body = build_prompt_body(
         kind,
         task_id,
         task_title,
@@ -1145,7 +1174,12 @@ fn deliver_prompt_for_notification(
         branch_tip,
     );
     let summary = format!("{}: {} ({})", kind.as_event_type(), task_id, occurrence_id);
-    let source = lifecycle_prompt_source(kind, notification_id);
+    let source = if verification_wait {
+        body = format!("{}\n{body}", crate::supervisor_message_wakes::QUIET);
+        format!("{LIFECYCLE_SOURCE_PREFIX}{notification_id}")
+    } else {
+        lifecycle_prompt_source(kind, notification_id)
+    };
     let dedupe = lifecycle_prompt_dedupe_key(notification_id);
 
     prompt_queue
@@ -1369,6 +1403,11 @@ fn deliver_lifecycle_outbox_row_with_agents(
                 None => factory_session,
             },
         },
+        payload.get("verification_wait").and_then(|value| value.as_bool()).unwrap_or(false)
+            && kind == LifecycleTransition::Blocked
+            && recipient.as_ref().is_none_or(|current| {
+                payload.get("recipient_target").and_then(|value| value.as_str()) == Some(current.name.as_str())
+            }),
     )
     .map_err(|error| error.to_string())?;
 
@@ -1501,7 +1540,7 @@ impl CasCore {
         let pq = pq_store
             .as_ref()
             .map(|a| a.as_ref() as &dyn PromptQueueStore);
-        match emit_task_lifecycle_transition_with_branch_tip(
+        match emit_task_lifecycle_transition_in_project(
             sq.as_ref(),
             pq,
             agent_store.as_ref(),
@@ -1514,6 +1553,7 @@ impl CasCore {
             kind,
             occurrence_id,
             branch_tip,
+            Some(&self.cas_root),
         ) {
             Err(e) if e.contains("prompt_queue unavailable") => {
                 if let Some(open_err) = open_err {

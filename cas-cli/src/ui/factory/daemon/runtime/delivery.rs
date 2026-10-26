@@ -432,7 +432,7 @@ pub(crate) fn enqueue_director_prompt(
         target,
         text,
         Some(factory_session),
-        Some("Task assignment"),
+        Some(if crate::supervisor_message_wakes::quiet(text) { "Verification wait receipt" } else { "Task assignment" }),
     )?;
     wake_daemon_after_enqueue(cas_dir);
     Ok(id)
@@ -1093,7 +1093,7 @@ impl FactoryDaemon {
             == DirectorPromptRoute::DurableQueue
     }
 
-    /// Keep the final merge check and native inbox write in the same job.
+    /// Refresh the live target for both native inbox and PTY delivery.
     /// A batch verdict can reach the loop after the supervisor's merge/push;
     /// sending it through another loop turn would reopen that stale window.
     pub(crate) fn submit_merge_alert_inbox(
@@ -1109,17 +1109,12 @@ impl FactoryDaemon {
         } else {
             prompt.target.as_str()
         };
-        if pane_target != self.app.supervisor_name()
-            || choose_channel(self.app.harness_for(pane_target), self.teams.is_some())
-                != DeliveryChannel::TeamsInbox
-        {
+        if pane_target != self.app.supervisor_name() {
             return false;
         }
-        let teams = self
-            .teams
-            .as_ref()
-            .expect("Teams channel requires teams")
-            .snapshot();
+        let teams = (choose_channel(self.app.harness_for(pane_target), self.teams.is_some())
+            == DeliveryChannel::TeamsInbox)
+            .then(|| self.teams.as_ref().expect("Teams channel requires teams").snapshot());
         let request = self.app.deliverability_request();
         let spec = super::jobs::JobSpec {
             kind: super::factory_jobs::MERGE_ALERT_INBOX,
@@ -1132,21 +1127,24 @@ impl FactoryDaemon {
         let mut prompt = prompt.clone();
         let submitted = self.queue_jobs.submit_external(spec, move || {
             let completed = if request.refresh_merge_prompt(&mut prompt) {
-                let missing = teams.team_tree_missing();
                 let inject_started = Instant::now();
-                let result = teams.write_to_inbox_for_merge_alert(
-                    "supervisor",
-                    super::teams::DIRECTOR_AGENT_NAME,
-                    &prompt.text,
-                    None,
-                    Some(super::teams::DIRECTOR_AGENT_COLOR),
-                    prompt.retract_task.as_deref().expect("merge alert task"),
-                );
+                let (native, phase) = match teams {
+                    Some(teams) => {
+                        let missing = teams.team_tree_missing();
+                        let result = teams.write_to_inbox_for_merge_alert(
+                            "supervisor", super::teams::DIRECTOR_AGENT_NAME, &prompt.text,
+                            None, Some(super::teams::DIRECTOR_AGENT_COLOR),
+                            prompt.retract_task.as_deref().expect("merge alert task"),
+                        );
+                        (NativeInboxWrite { result, missing }, MergeAlertPhase::Native)
+                    }
+                    None => (NativeInboxWrite { result: Ok(()), missing: false }, MergeAlertPhase::PtyFallback),
+                };
                 Some(CompletedMergeAlert {
-                    prompt, native: NativeInboxWrite { result, missing },
+                    prompt, native,
                     inject_ms: inject_started.elapsed().as_secs_f64() * 1000.0,
                     refresh_to_deliver_ms: refresh_started.elapsed().as_secs_f64() * 1000.0,
-                    refresh_started, phase: MergeAlertPhase::Native,
+                    refresh_started, phase,
                 })
             } else {
                 tracing::info!(target: "cas::coordination", stage = "suppress_stale_merge_alert",

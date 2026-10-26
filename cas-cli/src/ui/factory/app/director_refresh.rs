@@ -229,6 +229,8 @@ pub(crate) struct DeliveryRequest {
     /// against (cas-3b16: read here, not on the loop).
     session: Option<String>,
     merge_events: Vec<DirectorEvent>,
+    blocked_tasks: Vec<String>,
+    supervisor: String,
 }
 
 /// The idle-worker liveness a delivery read is joined with: agent store,
@@ -258,6 +260,7 @@ impl IdleLivenessRequest {
 /// The delivery stage's fresh read: the unfiltered snapshot events are
 /// revalidated against, and the `Blocks` dependencies that gate dispatch.
 pub(crate) struct DeliveryInputs {
+    pub(super) verification_waits: HashMap<String, String>,
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
     /// Liveness of each idle worker, observed off the loop.
@@ -281,6 +284,7 @@ impl DeliveryInputs {
     #[cfg(test)]
     pub(crate) fn failed_for_test() -> Self {
         Self {
+            verification_waits: HashMap::new(),
             data: Err(anyhow::anyhow!("test: the fresh read failed")),
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
@@ -378,6 +382,11 @@ impl DeliveryRequest {
             data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
             .map(|request| request.read());
         DeliveryInputs {
+            verification_waits: self.blocked_tasks.iter().filter_map(|task| {
+                crate::mcp::tools::core::task::block_hold::owned_verification_wait(
+                    &self.cas_dir, task, &self.supervisor,
+                ).map(|dispatch| (task.clone(), dispatch))
+            }).collect(),
             data,
             blocks_deps,
             idle_liveness,
@@ -713,6 +722,11 @@ impl FactoryApp {
             .flatten();
         let session = stall.as_ref().and(self.factory_session.clone());
         DeliveryRequest {
+            blocked_tasks: events.iter().filter_map(|event| match event {
+                DirectorEvent::TaskBlocked { task_id, .. } => Some(task_id.clone()),
+                _ => None,
+            }).collect(),
+            supervisor: self.supervisor_name.clone(),
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),

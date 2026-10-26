@@ -1145,6 +1145,19 @@ fn handle_pre_tool_use_inner(
     // Check for protected paths that should be blocked (configurable)
     let protection = &stores.config().hooks().pre_tool_use.protection;
     if protection.enabled {
+        // Operator Neon/Vercel store reads belong to supervisors and plain
+        // sessions. Workers were refused before auto-approval above; writes
+        // and unrelated credential files retain the generic protection.
+        let operator_store_read = matches!(tool_name, "Read" | "Grep" | "Glob" | "NotebookRead")
+            && (!is_factory_agent || crate::harness_policy::is_supervisor(input))
+            && file_path.is_some_and(|path| {
+                // Check the protected operand itself, not any other path field.
+                let path_input = HookInput {
+                    tool_input: Some(serde_json::json!({"file_path": path})),
+                    ..input.clone()
+                };
+                super::operator_credentials::references_store(&path_input, tool_name)
+            });
         // Bash has no file_path. Reuse the structural destination recognizer
         // from workspace containment; credential reads and quoted command text
         // do not name write targets. Resolve relative destinations as a direct
@@ -1182,6 +1195,9 @@ fn handle_pre_tool_use_inner(
             }
 
             // Block access to credential files
+            if operator_store_read {
+                continue;
+            }
             for pattern in &protection.patterns {
                 if path.ends_with(pattern) || path.contains(pattern) {
                     return Ok(HookOutput::with_pre_tool_permission(

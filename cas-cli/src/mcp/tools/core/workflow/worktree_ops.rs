@@ -1624,7 +1624,7 @@ fn system_b_merge_source(id: &str, task_id: Option<&str>) -> (String, String) {
 
 /// Delivery spellings are matched against an already-authorized worker/task;
 /// their suffix is never an authority for the worker identity (cas-4fe8).
-fn task_delivery_branch_matches(branch: &str, worker: &str, task_id: &str) -> bool {
+pub(crate) fn task_delivery_branch_matches(branch: &str, worker: &str, task_id: &str) -> bool {
     if branch == format!("factory/{worker}") {
         return true;
     }
@@ -5418,8 +5418,17 @@ impl CasCore {
         let push_note = match (task_id, merge_commit.as_deref()) {
             (Some(task_id), Some(merge_sha))
                 if transactional_delivery.is_none() && push_outcome.is_published() => {
+                // cas-46ea: an unparked task merged from its pushed lane tip
+                // closes the same way as a parked one.
+                let lane = observed_source_tip.as_deref().map(|tip| {
+                    crate::mcp::tools::core::task::lifecycle::merge_close::MergedLane {
+                        repo: &cwd,
+                        branch: &worktree.branch,
+                        tip,
+                    }
+                });
                 let outcome = self
-                    .close_after_published_merge(task_id, merge_sha, ci_admission)
+                    .close_after_published_merge(task_id, merge_sha, ci_admission, lane)
                     .await;
                 crate::mcp::tools::service::mutation_receipt::merge_followup(&outcome.followup(task_id));
                 format!("{push_note}\nCI admission: {}\n{}", ci_admission.label(), outcome.receipt(task_id))

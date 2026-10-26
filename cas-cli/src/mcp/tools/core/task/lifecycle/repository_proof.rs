@@ -172,9 +172,17 @@ fn resolve_target_branch_ref(
         .filter(|head| !head.is_empty())
         .map(|head| (target_ref, head))
     };
+    // Released epic close binds to a full commit ID so subsequent pushes do
+    // not widen the reviewed tree. Resolve the same immutable ID at capture
+    // and evaluation; arbitrary revision expressions remain unsupported.
+    let immutable_commit = matches!(target_branch.len(), 40 | 64)
+        && target_branch.bytes().all(|byte| byte.is_ascii_hexdigit());
     // Epic close selects a qualified remote ref explicitly so an unrelated
     // or divergent local branch cannot replace the published epic boundary.
-    if target_branch.starts_with("refs/heads/") || target_branch.starts_with("refs/remotes/origin/") {
+    if immutable_commit
+        || target_branch.starts_with("refs/heads/")
+        || target_branch.starts_with("refs/remotes/origin/")
+    {
         return resolve(target_branch.to_string()).ok_or_else(|| {
             format!("repository proof target ref `{target_branch}` does not resolve")
         });

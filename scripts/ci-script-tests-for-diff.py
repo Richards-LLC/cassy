@@ -8,6 +8,7 @@ minutes, so merge admission runs only the entries whose subject changed:
 - a file named `scripts/<stem>.*` changed (e.g. `scripts/check-foo.py`, its
   fixture `scripts/check-foo.json`), for the test `scripts/test-<stem>.*`, or
 - a non-script input in NAMED changed, for its one named assertion.
+- either terminal-qa runner copy changed, for `terminal-qa.test.mjs`.
 
 Entries in HEAVY take longer than lane admission's budget allows (about 90 s
 for every fast row together). They are reported as deferred to the full
@@ -45,6 +46,8 @@ NAMED = {
                             "AdmissionTests.test_cas_4cb9_weights_follow_shell_and_actual_package_scripts",
 }
 RELEASE_TRAIN_TEST = "scripts/test-release-portable.py"
+TERMINAL_QA_TEST = "scripts/terminal-qa.test.mjs"
+TERMINAL_QA_BUILTIN = "cas-cli/src/builtins/skills/cas-cli-craft/scripts/terminal-qa.mjs"
 
 
 def tier_commands(repo: Path) -> list[str]:
@@ -66,13 +69,14 @@ def tier_commands(repo: Path) -> list[str]:
 def test_script(command: str) -> str | None:
     for token in shlex.split(command):
         token = token.removeprefix("./")
-        if re.fullmatch(r"scripts/test-[\w.-]+", token):
+        if re.fullmatch(r"scripts/(?:test-[\w.-]+|terminal-qa[\w.-]*\.test\.mjs)", token):
             return token
     return None
 
 
 def changed_paths(repo: Path, base: str) -> list[str]:
-    out = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", base, "--", "scripts", *NAMED],
+    out = subprocess.run(["git", "-C", str(repo), "diff", "--name-only", base, "--", "scripts", *NAMED,
+                          TERMINAL_QA_BUILTIN],
                          capture_output=True, text=True)
     if out.returncode:
         raise ValueError(f"cannot diff scripts against {base}: {out.stderr.strip()}")
@@ -98,7 +102,10 @@ def select(commands: list[str], changed: list[str]) -> list[tuple[str, str]]:
         release_train_related = test == RELEASE_TRAIN_TEST and any(
             path.startswith("scripts/release-train") for path in changed
         )
-        if test in changed or subject in changed_stems or stem(test) in changed_stems or release_train_related:
+        terminal_qa_related = test == TERMINAL_QA_TEST and any(
+            path.startswith("scripts/terminal-qa") or path == TERMINAL_QA_BUILTIN for path in changed
+        )
+        if test in changed or subject in changed_stems or stem(test) in changed_stems or release_train_related or terminal_qa_related:
             selected.append((test, command))
     return selected + [(path, NAMED[path]) for path in sorted(NAMED) if path in changed]
 
@@ -107,11 +114,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--base", required=True)
     parser.add_argument("--repo", default=".")
+    parser.add_argument("--only", help="restrict changed-input selection to one tier test path")
     parser.add_argument("--dry-run", action="store_true", help="print the selection only")
     args = parser.parse_args()
     repo = Path(args.repo).resolve()
     try:
-        selected = select(tier_commands(repo), changed_paths(repo, args.base))
+        commands = tier_commands(repo)
+        if args.only and args.only not in {test_script(command) for command in commands} | NAMED.keys():
+            raise ValueError(f"unknown tier test: {args.only}")
+        selected = select(commands, changed_paths(repo, args.base))
+        if args.only:
+            selected = [(test, command) for test, command in selected if test == args.only]
     except (OSError, ValueError) as error:
         print(f"ci-script-tests-changed: {error}", file=sys.stderr)
         return 2

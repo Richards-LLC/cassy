@@ -216,6 +216,164 @@ impl Fixture {
 }
 
 #[test]
+fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut second = store.get("cas-9efb-test").unwrap();
+    second.id = "cas-second".into();
+    second.assignee = Some("merge-v".into());
+    second.deliverables.factory_branch_anchor = None;
+    store.add(&second).unwrap();
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = cas_types::Agent::new("merge-v".into(), "merge-v".into());
+    worker.role = cas_types::AgentRole::Worker;
+    agents.register(&worker).unwrap();
+    assert!(agents.try_claim(&second.id, &worker.id, 600, None).unwrap().is_success());
+    git(f.repo.path(), &["branch", "factory/merge-v"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-v"]);
+    f.app.add_worker_name_for_test("merge-v");
+    let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
+    f.app.set_director_data_for_test(data);
+    let events = vec![f.event.clone(), DirectorEvent::WorkerIdle {
+        worker: worker.name,
+        active_task: Some(ActiveLeaseSummary {
+            task_id: second.id, task_title: second.title, task_status: second.status,
+            close_rejected_reason: None, pending_qa: None,
+        }),
+    }];
+    // The second lane retains its failed SHA while only the corrected SHA's
+    // GitHub run changes. Keep this at the real external-service boundary.
+    let old_tip = git(f.repo.path(), &["rev-parse", "factory/merge-v"]);
+    f.ci(Some("failure"));
+    std::fs::copy(f.app.cas_dir.join("ci.json"), f.app.cas_dir.join("old-ci.json")).unwrap();
+    crate::test_paths::warm_stub(&f.app.cas_dir.join("gh-fixture"), &format!(
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; else printf '%s\\n' \"$*\" >> .cas/gh-requests; case \"$*\" in *{old_tip}*) cat .cas/old-ci.json;; *) cat .cas/ci.json;; esac; fi\n"
+    ));
+    let trace = f.app.cas_dir.join("git-trace.log");
+    f._env.set("GIT_TRACE", &trace);
+    let counts = |f: &Fixture| {
+        let fetches = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("built-in: git fetch ")).count();
+        let ci = std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap_or_default().lines().count();
+        (fetches, ci)
+    };
+    f.ci(Some("failure"));
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    let settled = counts(&f);
+    assert!(settled.0 > 0 && settled.1 > 0);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(counts(&f), settled);
+
+    std::fs::write(f.repo.path().join("delivery.rs"), "// new pushed tip\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.ci(None);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    let pending = counts(&f);
+    assert_eq!(pending.1 - settled.1, 1);
+    f.ci(Some("success"));
+    let (_, ready, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(ready.iter().filter(|prompt| prompt.merge_alert.is_some()).count(), 1);
+    let signalled = counts(&f);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(counts(&f), signalled);
+
+    let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
+    f.app = FactoryApp::for_test_at(f.app.cas_dir.clone());
+    for name in ["merge-w", "merge-v"] { f.app.add_worker_name_for_test(name); }
+    f.app.set_director_data_for_test(data);
+    let (_, restarted, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+    assert!(restarted.iter().all(|prompt| prompt.merge_alert.is_none()));
+    // The red lane may need its first observation in the new process, but the
+    // already-signalled green lane must not contact Git or GitHub again.
+    let after_restart = counts(&f);
+    assert_eq!(after_restart.1 - signalled.1, 1);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(counts(&f), after_restart);
+    std::fs::write(f.repo.path().join("delivery.rs"), "// already merged correction\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "cas-9efb-test merged correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.advance_target(true);
+    f.app.revalidate_and_prompt_for_delivery(&events[..1]);
+    let merged = counts(&f);
+    f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::hours(1));
+    f.app.revalidate_and_prompt_for_delivery(&events[..1]);
+    assert_eq!(counts(&f), merged);
+    let receipts = f.app.cas_dir.join("receipts/merge-ready");
+    assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 1);
+    let mut closed = store.get("cas-9efb-test").unwrap();
+    closed.status = TaskStatus::Closed;
+    store.update(&closed).unwrap();
+    f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::hours(2));
+    f.app.revalidate_and_prompt_for_delivery(&events[..1]);
+    assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
+}
+
+#[test]
+fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
+    for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
+        let mut f = Fixture::new();
+        f.in_progress();
+        let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.status = status;
+        // A refused park leaves the task active, with no parked branch or tip.
+        task.deliverables.factory_branch_anchor = None;
+        task.notes = "Close rejected: FAST ROWS REQUIRED".into();
+        store.update(&task).unwrap();
+        if status == TaskStatus::Blocked {
+            git(f.repo.path(), &["switch", "-qc", "factory/merge-w-cas-9efb-test"]);
+            git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w-cas-9efb-test"]);
+        }
+        let branch = git(f.repo.path(), &["branch", "--show-current"]);
+        let data = DirectorData::load_with_stores_for_project(
+            &f.app.cas_dir, None, false, None, None,
+        ).unwrap();
+        f.app.set_director_data_for_test(data);
+        let now = Utc::now();
+        f.app.merge_alert_retries.now = Some(now);
+        // A shared unfiltered snapshot cannot dispatch another supervisor's lane.
+        let workers = std::mem::take(&mut f.app.worker_names);
+        assert!(f.app.merge_alert_retry_events_at(now).is_empty());
+        f.app.worker_names = workers;
+        // No WorkerIdle, close, or merge_request event precedes this probe.
+        let events = f.app.merge_alert_retry_events_at(now);
+        for ci in [None, Some("failure")] {
+            f.ci(ci);
+            let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+            assert!(prompts.iter().all(|prompt| prompt.merge_alert.is_none()));
+        }
+        // A settled failure is revisited on the slow same-SHA CI rerun cadence.
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+        f.ci(Some("success"));
+        let (_, mut prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert_eq!(prompts.len(), 1, "{status:?}");
+        let prompt = &mut prompts[0];
+        // pin: this heading is the supervisor's immediate merge trigger.
+        assert!(prompt.text.contains("READY TO MERGE"), "{}", prompt.text);
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch, branch);
+        // pin: merge guidance must identify the resolved target and executable action.
+        assert!(prompt.text.contains("epic/test"), "{}", prompt.text);
+        // pin: the supervisor merges directly without a worker relay.
+        assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
+        assert!(f.app.refresh_prompt_for_delivery(prompt));
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
+        std::fs::write(f.repo.path().join("delivery.rs"), "// next delivery\n").unwrap();
+        git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
+        let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
+        assert!(!f.app.refresh_prompt_for_delivery(prompt));
+        git(f.repo.path(), &["push", "-q", "origin", &branch]);
+        let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert_eq!(newer.len(), 1);
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
+        git(f.repo.path(), &["push", "-q", "origin", "HEAD:epic/test"]);
+        assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
+    }
+}
+
+#[test]
 fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
     let mut f = Fixture::new();
     let now = Utc::now();
@@ -241,6 +399,8 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
+    // Exercise idle/wait recovery, rather than the independent green merge signal.
+    f.ci(Some("failure"));
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     use cas_store::ReminderStore;
@@ -282,6 +442,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
     assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
         "after the wake ends, an idle worker must still alert without a new detector event");
+    // A same-SHA rerun is visible when the settled-failure backoff expires.
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
     assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
@@ -297,10 +459,10 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "old CI must not hide unpushed work");
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
     assert!(f.relay().is_empty(), "new pushed tip can wait on its own CI");
-    f.ci(Some("success"));
-    assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
     std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[]}"#).unwrap();
     assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
+    f.ci(Some("success"));
+    assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
 }
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
@@ -308,6 +470,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
 fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
+    // Green delivery tips have a one-shot merge signal, not an idle backoff.
+    f.ci(Some("failure"));
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     assert_eq!(f.relay().len(), 1, "a stuck worker with no pending wake still alerts");
@@ -525,13 +689,28 @@ fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
         "same delivery/CI cannot nag on unrelated epic changes"
     );
     f.ci(Some("failure"));
+    // After READY, worktree_merge re-reads CI and refuses a same-SHA red run;
+    // the director must stop probing that already-signalled delivery.
+    assert!(f.relay().is_empty());
+    std::fs::write(f.repo.path().join("delivery.rs"), "// new red delivery\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "new red delivery"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
     let decision = f.relay();
     assert_eq!(
         decision.len(),
         1,
-        "changed CI conclusion needs one decision"
+        "a new red delivery needs one decision"
     );
     assert!(decision[0].text.contains("CI failed"));
+    assert!(f.relay().is_empty());
+    // A parked failure still needs the slow same-SHA rerun probe; only a
+    // successful READY may suppress this tip indefinitely.
+    f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::minutes(10));
+    f.ci(Some("success"));
+    let recovered = f.relay();
+    assert_eq!(recovered.len(), 1);
+    // pin: this heading is the supervisor's immediate merge trigger.
+    assert!(recovered[0].text.contains("READY TO MERGE"));
     assert!(f.relay().is_empty());
 }
 
@@ -611,6 +790,7 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     std::fs::write(f.repo.path().join("README.md"), "Documentation delivery\n").unwrap();
     git(f.repo.path(), &["add", "README.md"]);
     git(f.repo.path(), &["commit", "-qm", "docs delivery"]);
+    git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
     std::fs::write(
         f.app.cas_dir.join("ci.json"),
         serde_json::json!({"check_runs": [{
@@ -626,6 +806,11 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     );
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
+    // Same-SHA flips after READY are rechecked by worktree_merge, not by
+    // repeated director probes. A new tip starts a new CI observation.
+    std::fs::write(f.repo.path().join("README.md"), "Documentation correction\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "docs correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
     f.ci(Some("cancelled"));
     assert!(
         f.relay().is_empty(),
@@ -664,6 +849,22 @@ fn cas_9efb_unknown_or_partly_pending_ci_defers_without_consuming_decision() {
     );
     f.ci(Some("failure"));
     assert_eq!(f.relay().len(), 1);
+}
+
+#[test]
+fn cas_65e8_active_target_fetch_failure_retries_without_ci_backoff() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    // Hide only the target ref: the source fetch and green CI still succeed.
+    // This is a real upload-pack failure, not a mocked reader return value.
+    git(f.remote.path(), &["config", "uploadpack.hideRefs", "refs/heads/epic/test"]);
+    let deferred = f.relay();
+    assert!(deferred.iter().all(|prompt| prompt.merge_alert.is_none()));
+    git(f.remote.path(), &["config", "--unset", "uploadpack.hideRefs"]);
+    let recovered = f.relay();
+    assert_eq!(recovered.len(), 1);
+    assert!(recovered[0].merge_alert.is_some());
+    assert!(f.relay().is_empty());
 }
 
 #[test]

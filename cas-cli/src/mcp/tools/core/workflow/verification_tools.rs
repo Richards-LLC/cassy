@@ -1000,17 +1000,31 @@ impl CasCore {
         // Queue only after the verdict transaction commits, so a woken worker
         // can always observe the approval. A transactional delivery still
         // needs its merge transition before close and is excluded here.
+        // cas-46ea: a merged delivery is closed or returned by its verdict;
+        // the merge fact plus this dispatch-bound verdict are the authority.
+        let cassy_merged = task.deliverables.green_merge_commit.is_some()
+            && task.deliverables.effective_merge_ci_admission()
+                != cas_types::MergeCiAdmission::Override;
         let close_retry = if verification.status == VerificationStatus::Approved
             && verification.verification_type == VerificationType::Task
-            && task.pending_verification
+            && (task.pending_verification || cassy_merged)
             && proof_dispatch.delivery_transaction_id.is_none()
         {
             // cas-eda0: a delivery Cassy merged green is closed by Cassy now;
             // the worker retry remains the fallback when a gate still holds.
             use crate::mcp::tools::core::task::lifecycle::merge_close::CassyMergeClose;
-            let cassy_close = self.close_green_merged_delivery(&req.task_id).await;
+            let cassy_close = self
+                .close_green_merged_delivery_after_verdict(&req.task_id, Some(&verification.id))
+                .await;
             let worker_retry = match &cassy_close {
                 CassyMergeClose::Closed { .. } | CassyMergeClose::AlreadyClosed => String::new(),
+                // cas-e9d6: Cassy's close of a merged delivery runs the
+                // worker close's gates on the same evidence, so a worker
+                // retry cannot pass where it held. The gate is the
+                // supervisor's to resolve; never relay it to the worker.
+                CassyMergeClose::Held(_) if cassy_merged => {
+                    "\nNo worker close retry was queued: the gate above is the supervisor's to resolve before this merged delivery can close.".to_string()
+                }
                 CassyMergeClose::NotEligible | CassyMergeClose::Held(_) => match task_store.get(&req.task_id) {
                     Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
                         &self.cas_root,
@@ -1025,6 +1039,12 @@ impl CasCore {
                 },
             };
             format!("{}{worker_retry}", cassy_close.receipt(&req.task_id))
+        } else if verification.status == VerificationStatus::Rejected
+            && verification.verification_type == VerificationType::Task
+            && cassy_merged
+            && proof_dispatch.delivery_transaction_id.is_none()
+        {
+            self.return_rejected_merged_delivery(&req.task_id, &verification)
         } else {
             String::new()
         };

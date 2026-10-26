@@ -45,9 +45,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and send one `merge_request=true` message;
    its body is the request, so do not send a separate prose summary or ACK before
-   or after it. Don't poll for it: after a green merge and an approved verdict
-   Cassy closes the task and tells you once; re-close only when the merge
-   receipt says a gate still holds. Read [recovery.md](references/recovery.md)
+   or after it. Don't poll: the merge's verdict closes the task (you hear
+   once) or reopens it with findings. Don't re-close or block on it. Read [recovery.md](references/recovery.md)
    for the waiting rule and for rejection or crossed-message handling.
 
 One event gets one message. A successful `task action=start` is its own

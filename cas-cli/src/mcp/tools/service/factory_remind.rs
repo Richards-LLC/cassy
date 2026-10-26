@@ -14,8 +14,16 @@ use crate::ui::factory::daemon::runtime::ci_watch::{
 pub(crate) const EXTERNAL_REMINDER_DEFAULT_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// Default `remind_ttl_secs` for an event (or time) reminder.
-fn default_reminder_ttl_secs(remind_event: Option<&str>) -> i64 {
-    if remind_event.is_some_and(is_external_reminder_event) {
+fn default_reminder_ttl_secs(remind_event: Option<&str>, filter: Option<&str>) -> i64 {
+    let task_bound = matches!(remind_event, Some("task_completed" | "task_blocked"))
+        && filter.and_then(|filter| serde_json::from_str::<serde_json::Value>(filter).ok())
+            .and_then(|filter| filter.get("task_id").and_then(|id| id.as_str()).map(str::trim).map(str::to_owned))
+            .is_some_and(|id| !id.is_empty());
+    if task_bound {
+        // A task wait ends with the task, rather than silently timing out
+        // during a long peer lane. Explicit TTLs remain real deadlines.
+        0
+    } else if remind_event.is_some_and(is_external_reminder_event) {
         EXTERNAL_REMINDER_DEFAULT_TTL_SECS
     } else {
         3600
@@ -341,7 +349,7 @@ impl CasService {
 
         let ttl_secs = req
             .remind_ttl_secs
-            .unwrap_or_else(|| default_reminder_ttl_secs(req.remind_event.as_deref()));
+            .unwrap_or_else(|| default_reminder_ttl_secs(req.remind_event.as_deref(), req.remind_filter.as_deref()));
         if ttl_secs < 0 {
             return Err(Self::error(
                 ErrorCode::INVALID_PARAMS,

@@ -426,26 +426,39 @@ fn worker_grep_of_operator_config_parent_is_refused_cas_da9a() {
 }
 
 #[test]
-fn supervisor_cannot_read_operator_neon_and_vercel_auth_stores_cas_da9a() {
-    let (_env, cwd) = role_env("supervisor");
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
-    let project = tempfile::tempdir().unwrap();
-    let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
-    for (tool, args) in [
-        ("Read", json!({"file_path": home.join(".config/neonctl/credentials.json").display().to_string()})),
-        ("Read", json!({"file_path": home.join(".local/share/com.vercel.cli/auth.json").display().to_string()})),
-        ("Bash", json!({"command": format!("cat '{}'", home.join(".config/neonctl/credentials.json").display())})),
-        ("Bash", json!({"command": format!("head -n 1 '{}'", home.join(".local/share/com.vercel.cli/auth.json").display())})),
-    ] {
-        let output = handle_pre_tool_use(&input(tool, args, cwd.path()), Some(&cas_root)).unwrap();
-        let reason = denial(output).unwrap_or_else(|| panic!("supervisor {tool} access was allowed"));
-        assert!(
-            reason.contains("PROTECTED OPERATOR CREDENTIALS"),
-            "supervisor {tool} refusal had the wrong reason: {reason}"
-        );
-        assert!(
-            !reason.contains("WORKER-DENIED OPERATOR CREDENTIALS"),
-            "supervisor {tool} was routed through the worker refusal: {reason}"
-        );
+fn supervisor_and_plain_session_may_read_operator_auth_stores_cas_5120() {
+    for role in ["supervisor", ""] {
+        let (mut env, cwd) = role_env(role);
+        if role.is_empty() {
+            env.remove("CAS_AGENT_ROLE");
+            env.remove("CAS_FACTORY_SESSION");
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+        let project = tempfile::tempdir().unwrap();
+        let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
+        for (tool, args) in [
+            ("Read", json!({"file_path": home.join(".config/neonctl/credentials.json").display().to_string()})),
+            ("Read", json!({"file_path": home.join(".local/share/com.vercel.cli/auth.json").display().to_string()})),
+            ("Bash", json!({"command": format!("cat '{}'", home.join(".config/neonctl/credentials.json").display())})),
+            ("Bash", json!({"command": format!("head -n 1 '{}'", home.join(".local/share/com.vercel.cli/auth.json").display())})),
+            ("Grep", json!({"path": "~/.config/neonctl", "pattern": "token"})),
+            ("Grep", json!({"path": "~/.local/share/com.vercel.cli", "pattern": "token"})),
+        ] {
+            let output = handle_pre_tool_use(&input(tool, args, cwd.path()), Some(&cas_root)).unwrap();
+            let reason = denial(output);
+            assert!(reason.is_none(), "{role:?} {tool} credential access was refused: {reason:?}");
+        }
+        for path in ["credentials.json", "id_rsa"] {
+            let output = handle_pre_tool_use(
+                &input("Read", json!({
+                    "file_path": project.path().join(path),
+                    "path": home.join(".local/share/com.vercel.cli/auth.json"),
+                }), cwd.path()),
+                Some(&cas_root),
+            )
+            .unwrap();
+            let reason = denial(output).expect("unrelated credentials must stay protected");
+            assert!(reason.contains("Protected file:"), "{role:?} {path}: {reason}");
+        }
     }
 }

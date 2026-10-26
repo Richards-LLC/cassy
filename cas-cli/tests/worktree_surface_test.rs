@@ -3529,11 +3529,13 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
     request.id = Some(branch.into());
     request.task_id = Some(task.id.clone());
     request.cleanup = Some(false);
+    let target_status = git_stdout(&repo.root, &["status", "--porcelain"]);
     for _ in 0..2 {
         let error = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
         assert!(error.message.contains("CONTENT CONFLICT"), "{error}");
         assert_eq!(git_stdout(&repo.root, &["rev-parse", "HEAD"]), target_tip);
-        assert!(git_stdout(&repo.root, &["status", "--porcelain"]).is_empty());
+        assert_eq!(git_stdout(&repo.root, &["status", "--porcelain"]), target_status);
+        assert!(!repo.root.join(".git/MERGE_HEAD").exists());
     }
     let returned = tasks.get(&task.id).unwrap();
     assert_eq!(returned.status, TaskStatus::Open, "conflict must release parked task");

@@ -159,27 +159,10 @@ pub(super) fn validate_value(key: &str, raw: &str) -> Result<(), String> {
 }
 
 fn anchored_pattern(pattern: &str) -> bool {
-    if !pattern.starts_with('^') || regex::Regex::new(pattern).is_err() {
-        return false;
-    }
-    // Every top-level alternative needs its own anchor. ^(a|b) is already
-    // anchored as a whole, whereas ^a|b can match the login page via b.
-    let (mut groups, mut classes, mut escaped) = (0_u32, 0_u32, false);
-    for (index, character) in pattern.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match character {
-            '\\' => escaped = true,
-            '[' => classes += 1,
-            ']' if classes > 0 => classes -= 1,
-            _ if classes > 0 => {}
-            '(' => groups += 1,
-            ')' => groups = groups.saturating_sub(1),
-            '|' if groups == 0 && !pattern[index + 1..].starts_with('^') => return false,
-            _ => {}
-        }
-    }
-    true
+    pattern.starts_with('^')
+        && regex_syntax::parse(pattern).is_ok_and(|hir| {
+            hir.properties()
+                .look_set_prefix()
+                .contains(regex_syntax::hir::Look::Start)
+        })
 }

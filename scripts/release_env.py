@@ -115,10 +115,22 @@ def resolve_zig(checkout: Path, env=os.environ, *, link: bool = False) -> ZigRes
         if executable(path):
             return ZigResolution(str(path.resolve()), "ZIG (environment)", tried)
         tried.append(f"ZIG={configured} is not an executable file")
-    on_path = shutil.which("zig", path=env.get("PATH", ""))
-    if on_path:
-        return ZigResolution(str(Path(on_path).resolve()), "PATH", tried)
-    tried.append("no zig on PATH")
+    for directory in env.get("PATH", "").split(os.pathsep):
+        on_path = checkout / directory / "zig"
+        if not executable(on_path):
+            continue
+        try:
+            # Same version authority as ghostty_vt_sys/build_support.rs.
+            manifest = Path(__file__).resolve().parent.parent / "crates/ghostty_vt_sys/zig/build.zig.zon"
+            required = manifest.read_text().split('.minimum_zig_version = "', 1)[1].split('"', 1)[0]
+            version = subprocess.run([str(on_path), "version"], cwd=checkout, env=env,
+                                     capture_output=True, text=True, timeout=5)
+            if version.returncode == 0 and version.stdout.strip() == required:
+                return ZigResolution(str(on_path.resolve()), "PATH", tried)
+            tried.append(f"{on_path} version {version.stdout.strip()!r} (exit {version.returncode}), expected {required}")
+        except (OSError, IndexError, subprocess.TimeoutExpired) as error:
+            tried.append(f"{on_path} cannot validate pinned version: {error}")
+    tried.append("no compatible zig on PATH")
     local = checkout / ".context/zig/zig"
     if executable(local):
         return ZigResolution(str(local.resolve()), "checkout .context/zig", tried)

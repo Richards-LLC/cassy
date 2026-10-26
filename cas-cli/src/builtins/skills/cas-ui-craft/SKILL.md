@@ -16,10 +16,10 @@ page as ours. Compliance with a contract is the floor; this skill is the ceiling
    artifact using [references/concept-brief.md](references/concept-brief.md). Done when all five
    fields hold a specific sentence a stranger could disagree with — a field that would fit any
    page is not filled.
-2. **Inherit the design language.** Read the project's `DESIGN.md`; without one, read
+2. **Inherit the design language.** Resolve the target project's `DESIGN.md` by
+   [DESIGN.md first](../design-spec/references/design-md-first.md); the role intents are in
    [../design-spec/references/petrastella-design-language.md](../design-spec/references/petrastella-design-language.md)
-   and paste [../design-spec/references/tokens.css](../design-spec/references/tokens.css) into
-   the artifact (`design-tokens.json` is for tooling; do not read it to copy values). Done when
+   (`design-tokens.json` is for tooling; do not read it to copy values). Done when
    the artifact's `:root` declares tokens by the names in that source and no rule carries a hex
    value the tokens do not. A neutral palette is chosen
    only when the brief's *omitted* field names the brand reason.

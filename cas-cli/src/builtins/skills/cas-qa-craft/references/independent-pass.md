@@ -154,7 +154,7 @@ whole page: distinctiveness, fit, hierarchy, craft, and accessibility. Give
 one evidence sentence per score. Walk this checklist over the changed parts
 and mark each item pass or fail:
 
-- DESIGN.md and token consistency
+- token consistency with the DESIGN.md the close's `design:` line names
 - spacing and alignment
 - typography
 - copy and microcopy

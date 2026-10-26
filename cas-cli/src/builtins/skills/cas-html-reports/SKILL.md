@@ -88,7 +88,7 @@ system flow, never a manufactured decision. The matrix is `references/report-typ
 Every type, audience, and domain obeys `references/technical-contract.md`: one file (No CDN, no
 framework, no build step), vanilla JS only as progressive enhancement, semantic accessible HTML,
 Print-ready, Provenance per figure, copyable numbers, and the design language by default — the
-project's `DESIGN.md` or, without one, `design-spec/references/tokens.css`. Encodings, scales, and
+target project's `DESIGN.md`, resolved by [DESIGN.md first](../design-spec/references/design-md-first.md). Encodings, scales, and
 number formatting are in `references/presentation-rules.md`; chart construction follows
 `cas-dataviz`.
 

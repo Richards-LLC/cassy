@@ -41,6 +41,9 @@ metadata:
    - If it exists but is stale (structural changes since last update) → run the `codemap` skill to refresh.
    - A trusted Codex `SessionStart` hook adds Cassy's banner as context, but it does not run this check for you, so check explicitly: `cas codemap status`.
    - Workers reference CODEMAP for codebase orientation — ensure it's current before spawning them.
+   - Before human-facing work, confirm each target project has a `DESIGN.md`
+     ([DESIGN.md first](../design-spec/references/design-md-first.md)); plan a
+     `design-spec` task for a missing one.
 5. Check worker availability: `factory action=worker_status`
 6. **Session hygiene triage** — Cassy's SessionStart banner can flag
    prior-factory WIP left in the main worktree, but a missing or untrusted

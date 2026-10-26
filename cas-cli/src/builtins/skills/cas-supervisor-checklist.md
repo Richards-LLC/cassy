@@ -32,6 +32,9 @@ metadata:
    - If `.claude/CODEMAP.md` is missing → run `/codemap` to generate it.
    - If it exists but is stale (structural changes since last update) → run `/codemap` to refresh.
    - Workers reference CODEMAP for codebase orientation — ensure it's current before spawning them.
+   - Before human-facing work, confirm each target project has a `DESIGN.md`
+     ([DESIGN.md first](../design-spec/references/design-md-first.md)); plan a
+     `design-spec` task for a missing one.
 5. Check worker availability: `factory action=worker_status`
 6. **Session hygiene triage** — the SessionStart hook prepends a "⚠ Prior-factory
    WIP detected" banner to the supervisor context when the main worktree has

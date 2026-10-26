@@ -122,7 +122,8 @@ Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.
 
 ## When to run
 
-- **Missing:** no `DESIGN.md` → generate from scratch before any significant UI work.
+- **Missing:** no `DESIGN.md` → generate from scratch before any significant UI work, or when
+  any human-facing output finds none ([DESIGN.md first](references/design-md-first.md)).
 - **Drift:** the token source has commits newer than `DESIGN.md`'s last commit → regenerate; keep-blocks survive. You have to look; nothing announces it.
 - **Manual:** user invokes `/design-spec` or asks for a design spec / DESIGN.md.
 - **After a re-theme:** palette, type stack, or spacing unit changed.

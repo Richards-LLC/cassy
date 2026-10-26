@@ -14,9 +14,11 @@ The socket remedy is a directory/session choice, so it is stated directly rather
 
 Candidate `1277218e2152f3bf934aab80b684a76f3609ff77`; captures use the real executable built by the targeted CLI regression. Later changes only format the same admission and add this critique/capture. Native execution is Linux; the regression carries explicit macOS/Linux boundary expectations for assembly on each OS.
 
+Receipt paths below use the portable `<artifacts>` placeholder; the original receipt lines remain in each task artifact report.
+
 ```text
-terminal-qa: PASS socket-too-long · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-4927/terminal-qa/socket-too-long/report.json
-terminal-qa: PASS foreign-root · 12 runs · 0 fail · 0 warn · 0 allowed · /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-4927/terminal-qa/foreign-root/report.json
+terminal-qa: PASS socket-too-long · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4927/terminal-qa/socket-too-long/report.json
+terminal-qa: PASS foreign-root · 12 runs · 0 fail · 0 warn · 0 allowed · <artifacts>/cas-4927/terminal-qa/foreign-root/report.json
 ```
 
 | Dimension | Score | Evidence |

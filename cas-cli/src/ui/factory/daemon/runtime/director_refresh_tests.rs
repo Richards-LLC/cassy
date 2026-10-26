@@ -128,6 +128,15 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(super::super::queue_and_events::read_row_facts(
         &root, queue.as_ref(), Some(tasks.as_ref()), &agents.list(None).unwrap(), &before_answer,
     ).answered_blocker, "already-queued blocker wake must also be withdrawn after the answer");
+    let idle_id = queue.enqueue_urgent_with_outcome(
+        "lifecycle-wake:worker-attention:42", fixture.app.supervisor_name(),
+        "<worker-attention kind=\"worker_idle\" worker=\"merge-w\" notification_id=\"42\">Idle episode restarted</worker-attention>",
+        None, None, None, false, Some(&cas_store::QueueOrigin::Daemon),
+    ).unwrap().id();
+    let idle_row = queue.peek_all(30).unwrap().into_iter().find(|row| row.id == idle_id).unwrap();
+    assert!(super::super::queue_and_events::read_row_facts(
+        &root, queue.as_ref(), Some(tasks.as_ref()), &agents.list(None).unwrap(), &idle_row,
+    ).answered_blocker);
 
     for rejected in [false, true] {
         if rejected {
@@ -171,6 +180,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     };
     let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
     assert_eq!(prompts.len(), 1);
+    let answered_again = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "merge-w", "task_id": task.id,
+        "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
+    })).unwrap())).await.unwrap();
+    assert!(!answered_again.is_error.unwrap_or(false), "{answered_again:?}");
     // A different hold is a new question even on the same task and assignee.
     block(&mut task, "Credentials are now missing");
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
@@ -179,6 +193,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
     assert_eq!(prompts.len(), 1);
     assert!(!crate::supervisor_message_wakes::quiet(&prompts[0].text));
+    let opened = service.task(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "update", "id": task.id, "status": "open"
+    })).unwrap())).await.unwrap();
+    assert!(!opened.is_error.unwrap_or(false), "{opened:?}");
+    assert!(tasks.get_execution_state(&task.id).unwrap().unwrap().get("answered_blocker").is_none());
 }
 
 #[tokio::test]

@@ -2913,7 +2913,7 @@ impl CasService {
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
         // A committed supervisor reply owns the worker's unchanged blocked
         // wait. Automatic verdict/merge notices do not pass through this path.
-        let wait_receipt = if let (Some(sender), Some(recipient)) =
+        let wait_receipt = if duplicate_suppressed { Ok(()) } else if let (Some(sender), Some(recipient)) =
             (agent_from_store.as_ref(), resolved_target_agent.as_ref())
         {
             if req.blocker.unwrap_or(false) && sender.role == cas_types::AgentRole::Worker {

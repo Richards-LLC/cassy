@@ -283,7 +283,9 @@ fn feature_report_requests_route_to_cas_feature_report() {
         let owner = builtin_catalog::find(flavor, "skills/cas-feature-report/SKILL.md");
         let owner = field(owner, "description").expect("cas-feature-report description");
         assert!(
-            owner.starts_with("Use when asked for a feature report"),
+            owner
+                .trim_start_matches('"')
+                .starts_with("Use when asked for a feature report"),
             "{label}: {owner:?}"
         );
         let reports = builtin_catalog::find(flavor, "skills/cas-html-reports/SKILL.md");

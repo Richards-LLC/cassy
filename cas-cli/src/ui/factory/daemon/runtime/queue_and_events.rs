@@ -13326,6 +13326,118 @@ mod tests {
     /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
     /// satisfied wake fires once with the run conclusions.
     #[test]
+    fn accepted_split_last_remote_child_wakes_epic_owner_once_cas_d8a1() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas = root.path();
+        let agents = crate::store::open_agent_store(cas).unwrap();
+        let mut owner = cas_types::Agent::new_with_role(
+            "epic-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        agents.register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(cas).unwrap();
+        let mut epic = Task::new("cas-ready".into(), "Split epic".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        epic.epic_verification_owner = Some(owner.id.clone());
+        tasks.add(&epic).unwrap();
+        for id in ["cas-remote", "cas-extra"] {
+            let task = Task::new(id.into(), "child".into());
+            tasks.add(&task).unwrap();
+            tasks.add_dependency(&cas_types::Dependency::new(
+                id.into(), epic.id.clone(), cas_types::DependencyType::ParentChild)).unwrap();
+        }
+        let now = chrono::Utc::now();
+        cas_store::insert_epic_split(cas, &cas_store::EpicSplit {
+            id: "split-ready".into(), epic_id: epic.id.clone(), local_agent_id: owner.id.clone(),
+            peer_agent_id: "soundwave-peer".into(), peer_name: "peer".into(), peer_machine: "soundwave".into(),
+            direction: cas_store::SplitDirection::Outgoing, mine: vec![], theirs: vec!["cas-remote".into()],
+            state: cas_store::SplitState::Accepted, reason: None, message_id: None,
+            expires_at: now + chrono::Duration::minutes(30), created_at: now, decided_at: Some(now),
+            decided_by: Some("soundwave-peer".into()), cleanup_pending: false, expiry_notice_pending: false,
+        }).unwrap();
+        let queue = crate::store::open_prompt_queue_store(cas).unwrap();
+        for id in ["cas-remote", "cas-extra"] {
+            crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();
+            assert!(queue.peek_all(10).unwrap().is_empty());
+            // Apply the same persisted task transition as a Cloud pull, without a local director edge.
+            let old = tasks.get(id).unwrap();
+            let mut closed = old.clone();
+            closed.status = TaskStatus::Closed;
+            tasks.update_from_sync(&closed, &old).unwrap();
+        }
+        for _ in 0..2 {
+            crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();
+        }
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, owner.name);
+        // pin: EPIC READY identifies the actionable release handoff.
+        assert!(rows[0].prompt.contains("EPIC READY: all children closed"));
+        assert_eq!(rows[0].origin, Some(cas_store::QueueOrigin::Daemon));
+        assert!(FactoryDaemon::supervisor_wake_class(
+            &super::WakeSender::Daemon, &owner.name, &rows[0].source, &rows[0].prompt).is_some());
+        queue.mark_processed(rows[0].id).unwrap();
+        crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();
+        assert!(queue.peek_all(10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn bound_task_reminder_survives_phase_and_observes_remote_close_cas_d8a1() {
+        use rmcp::handler::server::wrapper::Parameters;
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas = root.path();
+        let core = crate::mcp::server::CasCore::with_daemon(cas.to_path_buf(), None, None);
+        let mut owner = cas_types::Agent::new_with_role(
+            "reminder-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        core.open_agent_store().unwrap().register(&owner).unwrap();
+        core.set_agent_id_for_testing(owner.id.clone());
+        let tasks = crate::store::open_task_store(cas).unwrap();
+        tasks.add(&Task::new("cas-remote".into(), "remote task".into())).unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = crate::mcp::tools::service::CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = crate::mcp::tools::service::CasService::new(core);
+        for ttl in [None, Some(60)] {
+            let mut req = serde_json::json!({"action": "remind", "remind_event": "task_completed",
+                "remind_filter": "{\"task_id\":\"cas-remote\"}", "cross_session": true,
+                "remind_message": "release after remote completion"});
+            if let Some(ttl) = ttl { req["remind_ttl_secs"] = serde_json::json!(ttl); }
+            service.coordination(Parameters(serde_json::from_value(req).unwrap())).await.unwrap();
+        }
+        let reminders = crate::store::open_reminder_store(cas).unwrap();
+        let pending = reminders.list_pending(&owner.id).unwrap();
+        assert_eq!(pending[0].ttl_secs, 0, "a filtered task wait must outlive a one-hour phase");
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE reminders SET created_at = datetime('now', '-2 hours')", []).unwrap();
+        let scan = || super::run_reminder_scan(super::ReminderScanInput {
+            cas_dir: cas.to_path_buf(), session_name: "owner-session".into(), supervisor_name: owner.name.clone(),
+            agent_id_to_name: HashMap::from([(owner.id.clone(), owner.name.clone())]),
+            events: vec![], external_ready: vec![], ci_wakes: vec![],
+        });
+        scan(); scan();
+        let queue = crate::store::open_prompt_queue_store(cas).unwrap();
+        let notices = queue.peek_all(10).unwrap();
+        assert_eq!(notices.len(), 1, "explicit expiry must visibly notify its owner exactly once");
+        assert_eq!(notices[0].target, owner.name);
+        assert!(FactoryDaemon::supervisor_wake_class(
+            &super::WakeSender::Daemon, &owner.name, &notices[0].source, &notices[0].prompt).is_some());
+        assert_eq!(reminders.list_pending(&owner.id).unwrap().len(), 1);
+        let old = tasks.get("cas-remote").unwrap();
+        let mut closed = old.clone(); closed.status = TaskStatus::Closed;
+        tasks.update_from_sync(&closed, &old).unwrap();
+        scan(); scan();
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].fired_event.as_ref().unwrap()["data"]["task_id"], "cas-remote");
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 2);
+        let wake = rows.iter().find(|row| cas_store::parse_reminder_delivery_id(&row.prompt).is_some()).unwrap();
+        assert!(FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, &owner.name, &wake.source, &wake.prompt).is_some());
+    }
+
+    #[test]
     fn ci_completed_reminder_fires_once_with_run_conclusions() {
         let temp = tempfile::TempDir::new().unwrap();
         let reminders: Arc<dyn cas_store::ReminderStore> =

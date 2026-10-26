@@ -976,6 +976,8 @@ impl CasService {
             )
         })?;
         message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
+        // Reply IDs and CAS envelopes are transport metadata, not a new ask.
+        let blocker_question = req.blocker.unwrap_or(false).then(|| message.trim().to_owned());
         let summary = req
             .summary
             .map(|summary| collapse_message_summary(&summary))
@@ -2919,7 +2921,7 @@ impl CasService {
             if req.blocker.unwrap_or(false) && sender.role == cas_types::AgentRole::Worker {
                 req.task_id.as_deref().map(|task| {
                     crate::mcp::tools::core::task::block_hold::record_blocker_ask(
-                        &self.inner.cas_root, sender, task, &message,
+                        &self.inner.cas_root, sender, task, blocker_question.as_deref().unwrap_or(&message),
                     )
                 }).transpose().map(|_| ())
             } else {

@@ -201,6 +201,19 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
     })).unwrap())).await.unwrap();
     assert!(!answered_again.is_error.unwrap_or(false), "{answered_again:?}");
+    let reply_id = queue.peek_all(30).unwrap().into_iter()
+        .filter(|row| row.source == "supervisor" && row.target == "merge-w")
+        .max_by_key(|row| row.id).unwrap().id;
+    let repeated = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "task_id": task.id, "blocker": true,
+        "in_reply_to": reply_id, "summary": "Same pending question",
+        "message": "The operator must now decide a different question."
+    })).unwrap())).await.unwrap();
+    assert!(!repeated.is_error.unwrap_or(false), "{repeated:?}");
+    let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+        task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
+    };
+    assert!(fixture.app.revalidate_and_prompt_for_delivery(&[event]).1.is_empty());
     // A different hold is a new question even on the same task and assignee.
     block(&mut task, "Credentials are now missing");
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {

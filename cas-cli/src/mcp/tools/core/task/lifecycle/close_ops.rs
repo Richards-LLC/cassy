@@ -2467,15 +2467,18 @@ fn matching_assembly_proof(
 }
 
 /// cas-74cb: the tip an epic close answers for. A supplied commit receipt
-/// wins; otherwise the epic's branch, locally or as `origin/<branch>` once
-/// the lane was deleted after release.
+/// wins; otherwise use the published epic branch, with a local fallback for
+/// unpublished lanes and local_merge deliveries.
 fn epic_close_tip(task: &Task, commit_receipt: Option<&str>, repo: &std::path::Path) -> Option<String> {
     if let Some(receipt) = commit_receipt.filter(|receipt| is_safe_git_refname(receipt)) {
         return resolve_branch_sha(repo, &format!("{receipt}^{{commit}}"));
     }
     let branch = task.branch.as_deref().filter(|branch| is_safe_git_refname(branch))?;
-    resolve_branch_sha(repo, &format!("{branch}^{{commit}}"))
-        .or_else(|| resolve_branch_sha(repo, &format!("origin/{branch}^{{commit}}")))
+    if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
+        fetch_parent_branch_best_effort(repo, branch);
+    }
+    let reference = preferred_live_target_ref_for_delivery(repo, branch, task.delivery_mode).0;
+    resolve_branch_sha(repo, &format!("{reference}^{{commit}}"))
 }
 
 /// One integration proof for every code epic, including non-Rust deliveries.
@@ -9508,6 +9511,34 @@ impl CasCore {
                                 })?
                                 .unwrap_or_else(|| close_project_root.clone()),
                         };
+                        // Epics have no worker delivery transaction. Their declared
+                        // target (or legacy epic branch) is the verification tree,
+                        // even while the supervisor checkout carries unrelated work.
+                        let epic_proof_ref = if is_epic
+                            && crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(&close_project_root)
+                        {
+                            let branch = if gone_epic_branch_receipt.is_some() {
+                                resolve_close_gate_default_branch(&close_project_root)
+                            } else {
+                                declared_repo_context.as_ref()
+                                    .map(|context| context.target_branch.clone())
+                                    .or_else(|| task.branch.clone())
+                                    .map(Ok)
+                                    .unwrap_or_else(|| resolve_close_gate_default_branch(&close_project_root))
+                            }.map_err(|message| McpError {
+                                code: ErrorCode::INVALID_PARAMS,
+                                message: Cow::from(message),
+                                data: None,
+                            })?;
+                            if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
+                                fetch_parent_branch_best_effort(&close_project_root, &branch);
+                            }
+                            Some(req.commit_receipt.as_deref()
+                                .and_then(|receipt| released_epic_merge_ref(&close_project_root, &task, &branch, receipt))
+                                .unwrap_or_else(|| epic_live_branch_ref(&close_project_root, &branch, task.delivery_mode)))
+                        } else {
+                            None
+                        };
                         let proof_boundary = if crate::mcp::tools::core::task::lifecycle::repository_proof::is_git_worktree(
                                 &proof_worktree,
                             ) {
@@ -9518,7 +9549,12 @@ impl CasCore {
                                 // the verifier reviewed; with nothing
                                 // delivered the anchor list is empty and the
                                 // strict whole-boundary contract still holds.
-                                let anchor_commits = crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
+                                let anchor_commits = if epic_proof_ref.is_some() {
+                                    // The whole epic tree is reviewed. Checkout HEAD
+                                    // and worker delivery anchors are not its boundary.
+                                    Vec::new()
+                                } else {
+                                    crate::mcp::tools::core::task::lifecycle::repository_proof::delivered_anchor_commits(
                                     &proof_worktree,
                                     // cas-5200: a merged receipt is the whole
                                     // delivery; never add the checkout HEAD.
@@ -9528,8 +9564,13 @@ impl CasCore {
                                         .as_deref()
                                         .or(req.commit_receipt.as_deref()),
                                     task.deliverables.factory_branch_anchor.as_deref(),
-                                );
-                                let repository_proof = if use_target_branch_proof {
+                                )
+                                };
+                                let repository_proof = if let Some(reference) = epic_proof_ref.as_deref() {
+                                    crate::mcp::tools::core::task::lifecycle::repository_proof::capture_repository_proof_at_target(
+                                        &close_project_root, reference, anchor_commits,
+                                    )
+                                } else if use_target_branch_proof {
                                     if let Some(context) = declared_repo_context.as_ref() {
                                         // A declared WorkTarget is authoritative
                                         // for the post-merge verification
@@ -18080,6 +18121,55 @@ fn preferred_live_target_ref_for_delivery(
     }
 }
 
+/// The explicit ref keeps published epic proof independent of local branch
+/// drift, while local_merge continues to use only the local integration tree.
+fn epic_live_branch_ref(
+    repo: &std::path::Path,
+    branch: &str,
+    delivery_mode: cas_types::DeliveryMode,
+) -> String {
+    if delivery_mode != cas_types::DeliveryMode::LocalMerge
+        && git_ref_exists(repo, &format!("refs/remotes/origin/{branch}"))
+    {
+        format!("refs/remotes/origin/{branch}")
+    } else {
+        format!("refs/heads/{branch}")
+    }
+}
+
+/// A released epic may name the default-branch merge carrying its target tip.
+/// The receipt must itself be a merge on the live default's first-parent
+/// history: arbitrary commits and unpublished local merges cannot authorize it.
+fn released_epic_merge_ref(
+    repo: &std::path::Path,
+    task: &Task,
+    target_branch: &str,
+    receipt: &str,
+) -> Option<String> {
+    if task.task_type != TaskType::Epic {
+        return None;
+    }
+    let receipt = resolve_task_commit_receipt_sha(repo, receipt).ok()?;
+    if git_commit_parent_count(repo, &receipt) < 2 {
+        return None;
+    }
+    let epic_ref = epic_live_branch_ref(repo, target_branch, task.delivery_mode);
+    let tip = resolve_branch_sha(repo, &epic_ref)?;
+    if !git_commit_is_ancestor(repo, &tip, &receipt) {
+        return None;
+    }
+    let default = resolve_close_gate_default_branch(repo).ok()?;
+    if task.delivery_mode != cas_types::DeliveryMode::LocalMerge {
+        fetch_parent_branch_best_effort(repo, &default);
+    }
+    let default_ref = epic_live_branch_ref(repo, &default, task.delivery_mode);
+    git_stdout_lines(repo, &["rev-list", "--first-parent", &default_ref])
+        .ok()?
+        .iter()
+        .any(|commit| commit == &receipt)
+        .then_some(default_ref)
+}
+
 /// Resolve the code anchor for an Epic's declared pre-close hook when the
 /// caller omits `commit_receipt`. Epic tasks do not have worker-owned
 /// worktrees, so their own branch is the durable delivery boundary. Prefer
@@ -23373,19 +23463,23 @@ pub(crate) fn run_declared_pre_close_hook(
         &repo_context.target_branch,
         task.delivery_mode,
     );
-    // The merge gate accepts either integration view for push deliveries.
-    // Preserve local_merge's deliberately local-only authority.
-    let target_contains = |repo: &std::path::Path, commit: &str| {
-        if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
-            git_commit_is_ancestor(repo, commit, &live_target_ref)
-        } else {
-            commit_is_merged_into_parent(repo, commit, &repo_context.target_branch)
-        }
-    };
     let normalized_receipt = commit_receipt
         .map(|receipt| resolve_task_commit_receipt_sha(receipt_repo, receipt))
         .transpose()
         .map_err(|error| format!("PRE-CLOSE HOOK CONTEXT REJECTED: commit_receipt {error}"))?;
+    let released_receipt = normalized_receipt.as_deref().filter(|receipt| {
+        released_epic_merge_ref(receipt_repo, task, &repo_context.target_branch, receipt).is_some()
+    });
+    // Preserve both ordinary integration views and local_merge's local-only
+    // authority. Only an epic's proven release merge gets the default-branch door.
+    let target_contains = |repo: &std::path::Path, commit: &str| {
+        released_receipt == Some(commit)
+            || if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
+                git_commit_is_ancestor(repo, commit, &live_target_ref)
+            } else {
+                commit_is_merged_into_parent(repo, commit, &repo_context.target_branch)
+            }
+    };
     let derived_epic_anchor = (worker_worktree_path.is_none()
         && task.task_type == TaskType::Epic
         && normalized_receipt.is_none())

@@ -149,7 +149,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
             "an unrelated supervisor message must leave the blocker armed (reply_to={reply_to:?})");
     }
     let answered = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
-        "action": "message", "target": "merge-w", "task_id": task.id,
+        "action": "message", "target": "merge-w",
         "in_reply_to": blocker_id, "summary": "Decision relayed", "message": "I relayed your question to the operator; wait for their decision."
     })).unwrap())).await.unwrap();
     assert!(!answered.is_error.unwrap_or(false), "{answered:?}");

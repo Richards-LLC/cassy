@@ -229,6 +229,10 @@ pub(crate) struct DeliveryRequest {
     /// against (cas-3b16: read here, not on the loop).
     session: Option<String>,
     merge_events: Vec<DirectorEvent>,
+    merge_probes: super::merge_alert::ProbeCache,
+    probe_now: chrono::DateTime<chrono::Utc>,
+    blocked_tasks: Vec<String>,
+    supervisor: String,
 }
 
 /// The idle-worker liveness a delivery read is joined with: agent store,
@@ -258,6 +262,7 @@ impl IdleLivenessRequest {
 /// The delivery stage's fresh read: the unfiltered snapshot events are
 /// revalidated against, and the `Blocks` dependencies that gate dispatch.
 pub(crate) struct DeliveryInputs {
+    pub(super) verification_waits: HashMap<String, String>,
     pub(super) data: anyhow::Result<DirectorData>,
     pub(super) blocks_deps: Vec<cas_types::Dependency>,
     /// Liveness of each idle worker, observed off the loop.
@@ -281,6 +286,7 @@ impl DeliveryInputs {
     #[cfg(test)]
     pub(crate) fn failed_for_test() -> Self {
         Self {
+            verification_waits: HashMap::new(),
             data: Err(anyhow::anyhow!("test: the fresh read failed")),
             blocks_deps: Vec::new(),
             idle_liveness: HashMap::new(),
@@ -361,23 +367,27 @@ impl DeliveryRequest {
             (Some(session), Some(_)) => Some(session_progress_named(session)),
             _ => None,
         };
-        let merge_alerts = data.as_ref().ok().map(|fresh| {
+        let (mut merge_alerts, mut worker_waits) = (HashMap::new(), HashMap::new());
+        if let Ok(fresh) = &data {
+            super::merge_alert::prune_ready_receipts(&self.merge_probes, &self.cas_dir, self.probe_now);
             let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
-            self.merge_events.iter().filter_map(|event| {
-                let ready = super::merge_alert::read(event, fresh, repo)?;
-                Some((ready.evidence.task_id.clone(), ready))
-            }).collect()
-        }).unwrap_or_default();
-        let worker_waits = data.as_ref().ok().map(|fresh| {
-            let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
-            self.merge_events.iter().filter_map(|event| {
-                super::merge_alert::read_worker_wait(event, fresh, &self.cas_dir, repo)
-            }).collect()
-        }).unwrap_or_default();
+            for event in &self.merge_events {
+                let (ready, wait) = super::merge_alert::read_delivery(
+                    &self.merge_probes, event, fresh, repo, self.probe_now,
+                );
+                if let Some(ready) = ready { merge_alerts.insert(ready.evidence.task_id.clone(), ready); }
+                if let Some((worker, wait)) = wait { worker_waits.insert(worker, wait); }
+            }
+        }
         let assignment = self.stall.as_ref().and_then(|stall|
             data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
             .map(|request| request.read());
         DeliveryInputs {
+            verification_waits: self.blocked_tasks.iter().filter_map(|task| {
+                crate::mcp::tools::core::task::block_hold::owned_verification_wait(
+                    &self.cas_dir, task, &self.supervisor,
+                ).map(|dispatch| (task.clone(), dispatch))
+            }).collect(),
             data,
             blocks_deps,
             idle_liveness,
@@ -713,6 +723,11 @@ impl FactoryApp {
             .flatten();
         let session = stall.as_ref().and(self.factory_session.clone());
         DeliveryRequest {
+            blocked_tasks: events.iter().filter_map(|event| match event {
+                DirectorEvent::TaskBlocked { task_id, .. } => Some(task_id.clone()),
+                _ => None,
+            }).collect(),
+            supervisor: self.supervisor_name.clone(),
             cas_dir: self.cas_dir.clone(),
             worktree_root: self.worktree_manager.as_ref().map(|m| m.worktree_root()),
             project_id: self.project_scope(),
@@ -720,6 +735,8 @@ impl FactoryApp {
             stall,
             session,
             merge_events: events.iter().filter(|event| super::merge_alert::needs_ci_read(event)).cloned().collect(),
+            merge_probes: std::sync::Arc::clone(&self.merge_alert_retries.probes),
+            probe_now: self.merge_alert_retries.clock(),
         }
     }
 
@@ -834,7 +851,11 @@ impl FactoryApp {
         events.extend(timed("supervisor stall", || self.detect_supervisor_stall()));
         let retries = self.merge_alert_retry_events_at(self.merge_alert_retries.clock());
         for retry in retries {
-            if !events.iter().any(|event| super::merge_alert::task_id(event) == super::merge_alert::task_id(&retry)) {
+            if !events.iter().any(|event| match (event, &retry) {
+                (DirectorEvent::WorkerIdle { active_task: Some(a), .. },
+                 DirectorEvent::WorkerIdle { active_task: Some(b), .. }) => a.task_id == b.task_id,
+                _ => false,
+            }) {
                 events.push(retry);
             }
         }

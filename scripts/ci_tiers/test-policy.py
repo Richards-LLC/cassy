@@ -232,6 +232,32 @@ fi
         self.assertNotIn('pull_request_target', ci['on'])
         jobs = lane['jobs']
         self.assertEqual(jobs['full']['uses'], './.github/workflows/ci.yml')
+        # cas-c44f: a step in ci.yml cannot run on a slim factory push.
+        terminal_command = '--only scripts/terminal-qa.test.mjs'
+        terminal_steps = [step for step in jobs['scoped-validation-fast']['steps']
+                          if terminal_command in step.get('run', '')]
+        self.assertEqual(len(terminal_steps), 1, 'slim terminal QA belongs in lane.yml')
+        self.assertFalse(any(terminal_command in step.get('run', '')
+                             for job in ci['jobs'].values() for step in job.get('steps', [])),
+                         'ci.yml must not retain the unreachable slim-only copy')
+        terminal = terminal_steps[0]
+        self.assertEqual(terminal['env']['BASE_SHA'], '${{ needs.ci-diff.outputs.comparison-base }}')
+        bin_dir = self.root / 'bin';bin_dir.mkdir()
+        calls = self.root / 'terminal-selector.args'
+        python = bin_dir / 'python3'
+        python.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CALLS"\n')
+        python.chmod(0o755)
+        for base, expected in [('comparison-base', 'comparison-base'),
+                               ('', 'origin/main'), ('0' * 40, 'origin/main')]:
+            with self.subTest(terminal_base=base):
+                result = self.run_body(terminal['run'], dict(
+                    PATH=f'{bin_dir}:{os.environ["PATH"]}', CALLS=str(calls),
+                    BASE_SHA=base, ZERO_BASE_REF='origin/main'))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(calls.read_text().splitlines(), [
+                    'scripts/ci-script-tests-for-diff.py', '--base',
+                    expected,
+                    '--only', 'scripts/terminal-qa.test.mjs'])
         slim_jobs = {name: job for name, job in jobs.items() if name != 'full'}
         self.assertEqual(
             {job['name'] for job in slim_jobs.values()},

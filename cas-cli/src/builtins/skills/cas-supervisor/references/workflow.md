@@ -203,7 +203,7 @@ clean-target-checkout rule; commit or stash target-checkout dirt first.
 Finish delivered work before expanding noncritical work. Apply this closure
 pass every turn, including startup and simultaneous worker completions:
 
-1. Inspect `awaiting_merge` and delivered corrections. Merge every reviewed
+1. Inspect pushed lanes, `READY TO MERGE`, `awaiting_merge` and delivered corrections. Merge every reviewed
    lane with satisfied QA gates and green required CI now; one lane's proof cannot delay
    another ready merge. Complete any remaining close action.
 2. Give each held delivery a named blocker, next owner and event/reminder:
@@ -279,10 +279,10 @@ Three flags that are routinely confused — they are independent (cas-0b32 / cas
 merge does not delete a live worker's cwd out from under it. Pass `cleanup=true` only at
 end-of-lane, once the worker is done with that worktree.
 
-**Worker hits MERGE REQUIRED / `awaiting_merge` (cas-c145):**
+**Pushed lane is green / READY TO MERGE / MERGE REQUIRED (cas-20d3):**
 
-1. This is a **push signal**, not optional chat. Drain the merge queue before free-form user replies.
-2. Confirm: `factory action=epic_status id=<focused-epic>` and/or `task action=list status=awaiting_merge`.
+1. Merge on `READY TO MERGE` or any evidence that the delivery tip is pushed and required lane CI is green. Never wait for park, `awaiting_merge`, or a merge request, including when a close gate refused park. The merge needs no worker action. Drain ready merges before free-form user replies.
+2. Confirm the tip and resolved target with `factory action=epic_status id=<focused-epic>` or `task action=show id=<task-id>`; `task action=list status=awaiting_merge` shows only parked deliveries.
    **Implementer evidence gates the park (cas-0cd5).** A user-facing delivery parks
    only after its own QA evidence bundle validates for the delivered commit. Before
    that, the worker's close returns `TASK CLOSE REJECTED: <task> is user-facing (…)` with
@@ -311,7 +311,7 @@ end-of-lane, once the worker is done with that worktree.
    ```
 
    The resolved task and target branch are echoed back — read them before moving on. Push if remote tracking applies.
-4. After a green merge and an approved verdict Cassy closes the task and tells the worker once; message the worker to re-close (`task action=close id=<task-id>`) only when the merge receipt says a gate still holds.
+4. The merge starts the close: Cassy parks a pushed, unparked lane tip itself and opens the verification dispatch at the merge commit. Run the verifier on that dispatch and send the worker nothing. PASS closes the task with the merge receipt and tells the worker once. FAIL returns it Open to the same worker with the findings (`request_changes`). Message the worker only when the merge or verdict receipt names another gate that still holds.
 5. Then clear context / hand the worker their next task. Do **not** poll for merge state.
 
 If the merge is rejected on review rather than landed, the sanctioned exit from

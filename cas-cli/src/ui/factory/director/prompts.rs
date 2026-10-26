@@ -862,7 +862,7 @@ fn is_merge_required_idle(task: &ActiveLeaseSummary) -> bool {
 /// count was computed — if a supervisor's own `epic_status` shows a
 /// different SHA, the branch has moved and this alert may already be
 /// out of date again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergeAlertEvidence {
     pub task_id: String,
     pub factory_branch: String,
@@ -1016,7 +1016,7 @@ fn fresh_merge_alert_git_evidence(
     fresh_merge_alert_tip_evidence(repo_root, task_id, factory_branch, epic_branch, None)
 }
 
-fn fresh_merge_alert_tip_evidence(
+pub(crate) fn fresh_merge_alert_tip_evidence(
     repo_root: &Path,
     task_id: &str,
     factory_branch: &str,
@@ -1114,7 +1114,7 @@ pub(crate) fn refresh_ci_merge_signal(
                 .deliverables
                 .factory_branch_anchor
                 .as_ref()
-                .is_some_and(|anchor| anchor != &original.factory_tip)
+                .is_some_and(|anchor| task.status == TaskStatus::AwaitingMerge && anchor != &original.factory_tip)
         {
             prompt.text = format!(
                 "Superseded delivery {} for task {}. The delivery was declined or replaced by a later task cycle; no merge action is pending for this tip.",
@@ -1127,8 +1127,20 @@ pub(crate) fn refresh_ci_merge_signal(
                 "CI-completed merge signal superseded before release");
             return true;
         }
-        if task.status != TaskStatus::AwaitingMerge {
+        if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
             return false;
+        }
+        if task.status != TaskStatus::AwaitingMerge {
+            // A pre-park signal must still name the current pushed lane, never
+            // an earlier green tip after the worker has committed again.
+            let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo_root, branch);
+            if resolve(&original.factory_branch).as_deref() != Some(&original.factory_tip)
+                || fetch_parent_branch_result(repo_root, &original.factory_branch) != BoundedFetch::Succeeded
+                || resolve(&format!("origin/{}", original.factory_branch)).as_deref() != Some(&original.factory_tip)
+                || crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
+                    repo_root, task, &original.factory_branch, &original.factory_tip,
+                ).is_err()
+            { return false; }
         }
     }
     let (_, snapshot_target, _) = resolve_merge_target_for_task(data, &original.task_id);
@@ -1184,7 +1196,12 @@ fn merge_delivery_branch(repo_root: &Path, task_id: &str, worker: &str) -> Strin
     let parked = cas_dir.join("cas.db").is_file().then(|| {
         crate::store::open_task_store_cached(&cas_dir).ok()?.get(task_id).ok()?.deliverables.parked_branch
     }).flatten();
-    parked.unwrap_or_else(|| format!("factory/{worker}"))
+    parked.unwrap_or_else(|| super::events::task_delivery_ref(
+        task_id, worker, None, None,
+        |branch| resolve_ref_commit_sha(repo_root, branch)
+            .or_else(|| resolve_ref_commit_sha(repo_root, &format!("origin/{branch}"))),
+        |_, _| false,
+    ).0)
 }
 
 /// Re-validate a MERGE REQUIRED / AwaitingMerge `WorkerIdle` signal against
@@ -1247,9 +1264,9 @@ pub fn check_merge_alert_freshness(
 /// Returns `Stale` (retract the row) when:
 /// - the task is no longer tracked in `data.in_progress_tasks` at all
 ///   (closed, reset, or otherwise resolved since the alert was written), or
-/// - the task is tracked but its status has moved off `AwaitingMerge`
-///   (re-closed, reopened, reassigned), or
-/// - the task is still `AwaitingMerge` but its factory branch now carries
+/// - the task was reopened for changes and is no longer an active, blocked,
+///   or parked delivery, or
+/// - the task's factory branch now carries
 ///   zero unmerged commits against the live epic tip (the merge landed).
 ///
 /// Returns `NotApplicable` (preserve the row; caller cannot verify either
@@ -1269,13 +1286,13 @@ pub fn check_merge_alert_freshness_for_task(
     data: &DirectorData,
     repo_root: &Path,
 ) -> MergeAlertFreshness {
-    let Some(task) = data.in_progress_tasks.iter().find(|t| t.id == task_id) else {
+    let Some(task) = data.in_progress_tasks.iter().chain(&data.ready_tasks).find(|t| t.id == task_id) else {
         // No longer tracked as in-progress/awaiting-merge in the current
         // snapshot at all — whatever happened (closed, reset elsewhere),
         // the alert's premise no longer holds.
         return MergeAlertFreshness::Stale;
     };
-    if task.status != TaskStatus::AwaitingMerge {
+    if !matches!(task.status, TaskStatus::AwaitingMerge | TaskStatus::InProgress | TaskStatus::Blocked) {
         return MergeAlertFreshness::Stale;
     }
     if staged_integration_batch(repo_root, task_id) {
@@ -1296,7 +1313,7 @@ pub fn check_merge_alert_freshness_for_task(
 /// Resolve the delivery target for a parked task from the current director
 /// snapshot. A task WorkTarget, projected into its summary branch, wins over
 /// the parent epic; the parent remains only as the legacy fallback.
-fn resolve_merge_target_for_task(
+pub(crate) fn resolve_merge_target_for_task(
     data: &DirectorData,
     task_id: &str,
 ) -> (Option<String>, Option<String>, bool) {
@@ -1330,7 +1347,7 @@ fn resolve_merge_target_for_task(
 /// (`main` or `master`, with or without an `origin/` prefix). Factory repos
 /// protect it: it accepts only pull requests through the merge queue, so the
 /// MERGE REQUIRED relay must not tell the supervisor to merge and push it.
-fn target_is_protected_default(target: &str) -> bool {
+pub(crate) fn target_is_protected_default(target: &str) -> bool {
     matches!(
         target.trim().trim_start_matches("origin/"),
         "main" | "master"
@@ -7201,7 +7218,7 @@ mod tests {
         /// `AwaitingMerge` (re-closed after the supervisor merged) while the
         /// alert was queued behind other prompts in the injection loop.
         #[test]
-        fn merge_alert_is_dropped_when_the_task_leaves_awaiting_merge() {
+        fn merge_alert_is_dropped_when_the_task_reopens_for_changes() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
             let mut data = awaiting_merge_data("recipe-be");
@@ -7217,10 +7234,10 @@ mod tests {
                 durable_retry: false,
             };
 
-            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            data.in_progress_tasks[0].status = TaskStatus::Open;
             assert!(
                 !prompt_is_still_deliverable(&prompt, &data, repo.path()),
-                "a task no longer parked has no outstanding merge to demand"
+                "a task reopened for changes has no outstanding merge to demand"
             );
 
             data.in_progress_tasks.clear();
@@ -7564,20 +7581,19 @@ mod tests {
             );
         }
 
-        /// AC1 (task moved off AwaitingMerge): re-closed / reopened /
-        /// reassigned since the alert was written — retract.
+        /// Reopened for changes since the alert was written — retract.
         #[test]
-        fn task_sweep_stale_when_task_left_awaiting_merge() {
+        fn task_sweep_stale_when_task_reopened_for_changes() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
 
             let mut data = awaiting_merge_data("recipe-be");
-            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            data.in_progress_tasks[0].status = TaskStatus::Open;
 
             let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
-                "task no longer AwaitingMerge must be Stale: {outcome:?}"
+                "task reopened for changes must be Stale: {outcome:?}"
             );
         }
 

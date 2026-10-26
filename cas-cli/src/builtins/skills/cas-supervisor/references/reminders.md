@@ -9,12 +9,12 @@ authoritative task/worker state once before acting.
 
 | Situation | First action | Reminder? | Advance/cleanup |
 |---|---|---|---|
-| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, tell worker to re-close, then cancel any phase reminder |
+| Worker reports `MERGE REQUIRED` | Drain the merge queue immediately | No — the push is actionable | Merge, run the verifier on Cassy's dispatch (its verdict closes or returns the task; no worker message), then cancel any phase reminder |
 | GitHub CI on a pushed SHA, or a merge-queue landing | Record the SHA and end the turn | One `ci_completed` (CI) or `branch_contained_in` (landing) reminder — never a delay | Act once on the fired conclusions or landed SHA |
 | Long release, publication, or other detached job | Record its receipt and end the turn | One time checkpoint, bounded 2–5 minutes | Check the authoritative job/task state once; cancel on early completion or replace the old reminder with one later checkpoint |
 | Context-pressure handoff | Commit/push, task note, and explicit supervisor handoff | One time checkpoint only if no next owner can acknowledge before the handoff expires | Cancel when the new owner acknowledges or the task advances |
 | Blocked worker recovery | Read task/heartbeat/process state and send one recovery instruction | Only after an external dependency or unreachable owner could otherwise go quiet | Cancel as soon as the worker responds, is reassigned, or the task closes |
-| Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One event reminder with a TTL | Cancel it if the phase completes through another path |
+| Concrete lifecycle event is already the desired trigger | Use the matching event, not a timer | One task-filtered event reminder, lasting until task terminal | Cancel it if the phase completes through another path |
 
 Never create a reminder instead of checking authoritative task acceptance,
 reading inbox updates, or processing an authenticated typed lifecycle event. Do not sleep,
@@ -23,8 +23,11 @@ watch CI, or repeatedly poll. One active reminder per task/phase is the limit.
 ## API contract
 
 Every reminder has exactly **one** trigger: `remind_delay_secs` *or*
-`remind_event`, never both. Always pass `remind_ttl_secs`; use the shortest TTL
-that covers the phase. Keep the returned reminder ID, list only to reconcile a
+`remind_event`, never both. For time checkpoints, pass `remind_ttl_secs`
+covering the phase. For `task_completed` or `task_blocked` with a task filter,
+omit TTL to wait until the task is terminal; use an explicit positive TTL only
+for a real deadline. A deadline reached while the task is still live sends one
+visible owner notice. Keep the returned reminder ID, list only to reconcile a
 known phase, and cancel or supersede it when state changes. Closing/merging a
 task must leave no stale phase reminder.
 
@@ -48,11 +51,13 @@ later bounded time reminder — do not accumulate timers.
 ### Event checkpoint: only for a concrete lifecycle event
 
 ```text
-coordination action=remind remind_event=task_completed remind_ttl_secs=1800 \
+coordination action=remind remind_event=task_completed cross_session=true \
   remind_filter='{"task_id":"<task-id>"}' \
   remind_message="After this task completes, inspect its close/merge state once"
 ```
 
+A task-filtered wait reconciles persisted task status, including a close synced
+from another machine. Use `cross_session=true` to retain it across session end.
 Without `remind_filter` the reminder fires on any task's completion. `task_completed` is a real event; vague hopes such as "when CI is ready" are
 not. For a parked delivery whose completion is an externally observable git
 condition, use the durable external triggers below instead of a finite timer.
@@ -115,3 +120,7 @@ true, delivering the existing supervisor notification and prompt-queue wake.
 The model pattern: one 2–5 minute checkpoint after an unreachable external
 workflow, followed by a single authoritative check and state advance — not a
 stream of stale reminders.
+
+## Peer release updates
+
+Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.

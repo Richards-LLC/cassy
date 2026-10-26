@@ -20,11 +20,84 @@ const PASS_LATENCY_LIMIT: Duration = Duration::from_millis(100);
 const SLOW_READ: Duration = Duration::from_millis(500);
 
 #[tokio::test]
+async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
+    use cas_types::{Agent, AgentRole, TaskStatus};
+    for cause in ["owned", "foreign", "expired", "independent", "successor"] {
+        let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        let cas_dir = fixture.app.cas_dir().to_path_buf();
+        let supervisor = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        if cause == "successor" {
+            let mut successor = supervisor.clone();
+            successor.id = "successor-id".into();
+            successor.registered_at += chrono::Duration::seconds(1);
+            crate::store::open_agent_store(&cas_dir).unwrap().register(&successor).unwrap();
+        }
+        let dispatch = cas_store::create_verification_dispatch(
+            &cas_dir, "cas-9efb-test", "merge-w",
+            if cause == "foreign" { "other-lead" } else { "lead-id" },
+            chrono::Utc::now() + chrono::Duration::minutes(if cause == "expired" { -1 } else { 10 }),
+        ).unwrap();
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.status = TaskStatus::Blocked;
+        task.notes = format!("[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"), dispatch.id);
+        store.update(&task).unwrap();
+        if cause == "independent" {
+            store.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+                "reason": "Operator must restore credentials", "who": "merge-w", "when": chrono::Utc::now()
+            }})).unwrap();
+        }
+        let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+            task_id: task.id, task_title: task.title, worker: "merge-w".into(),
+        };
+        let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
+        assert_eq!(prompts.len(), 1);
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
+        core.push_task_lifecycle("cas-9efb-test", "verification wait", TaskStatus::InProgress,
+            TaskStatus::Blocked, "merge-w", None, LifecycleTransition::Blocked,
+            &chrono::Utc::now().to_rfc3339()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        // pin: the table labels distinguish the sole owned wait from genuine waking blockers.
+        assert_eq!(is_lifecycle_wake_source(&rows[0].source), cause != "owned",
+            "{cause}: lifecycle routing must use the same sole-blocker classification");
+        // pin: the table's owned case alone gets CAS's quiet receipt marker.
+        assert_eq!(crate::supervisor_message_wakes::quiet(&rows[0].prompt), cause == "owned");
+        queue.mark_processed(rows[0].id).unwrap();
+        // pin: the cause labels select the recipient/dispatch/independent-hold table above.
+        assert_eq!(crate::supervisor_message_wakes::quiet(&prompts[0].text), cause == "owned",
+            "{cause}: only the recipient's sole active verification wait is quiet");
+        if cause == "owned" {
+            let mut daemon = daemon_on_lanes(&cas_dir);
+            std::mem::swap(&mut daemon.app, &mut fixture.app);
+            let worker = super::super::store_worker::global();
+            daemon.inject_rechecked_batch(super::super::factory_jobs::DeliverabilityBatch {
+                prompts: prompts.into_iter().map(|prompt| (prompt, true)).collect(),
+                assignments: vec![], events: vec![event], refresh_started: Instant::now(),
+            }, worker).await;
+            assert!(daemon.finish_shutdown_writes(worker, Duration::from_secs(10)));
+            let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
+            assert_eq!(rows.len(), 1, "receipt must remain available for the supervisor's next poll");
+            assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
+            assert!(FactoryDaemon::supervisor_wake_class(
+                &super::super::queue_and_events::WakeSender::Daemon, "supervisor", &rows[0].source, &rows[0].prompt,
+            ).is_none());
+        }
+    }
+}
+
+#[tokio::test]
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
     let mut shutdown_delivered = false;
     let mut stale_fallback_suppressed = false;
     let mut stale_sync_fallbacks = Vec::new();
     for scenario in [
+        "codex_merged",
+        "codex_positive",
         "merged",
         "positive",
         "superseded",
@@ -42,7 +115,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let _queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         fixture
             .app
-            .set_supervisor_cli_for_test(if synchronous_fallback {
+            .set_supervisor_cli_for_test(if synchronous_fallback || scenario.starts_with("codex_") {
                 cas_mux::SupervisorCli::Codex
             } else {
                 cas_mux::SupervisorCli::Claude
@@ -119,7 +192,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
         let expected_task = prompts[0].retract_task.clone();
         let expected_text = prompts[0].text.lines().next().unwrap().to_string();
         let capture = cas_dir.join("fallback.txt");
-        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") || synchronous_fallback {
+        if matches!(scenario, "missing" | "shutdown" | "merged_fallback") || synchronous_fallback || scenario.starts_with("codex_") {
             let tree = daemon.teams.as_ref().unwrap().teams_dir().to_path_buf();
             std::fs::remove_dir_all(&tree).unwrap();
             // A missing live tree with no saved roster exercises the real ENOENT path.
@@ -153,7 +226,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                     pty,
                     24,
                     80,
-                    if synchronous_fallback {
+                    if synchronous_fallback || scenario.starts_with("codex_") {
                         cas_mux::SupervisorCli::Codex
                     } else {
                         cas_mux::SupervisorCli::Claude
@@ -161,7 +234,8 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 )
                 .unwrap(),
             );
-        } else if scenario == "merged" {
+        }
+        if matches!(scenario, "merged" | "codex_merged") {
             // Preserve the successful verdict while the integration target moves.
             fixture.advance_target(true);
         }
@@ -251,7 +325,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             .inject_rechecked_batch(batch.unwrap(), super::super::store_worker::global())
             .await;
         let deadline = Instant::now() + Duration::from_secs(10);
-        while daemon.queue_jobs.external_completions_ready() == 0 {
+        while !scenario.starts_with("codex_") && daemon.queue_jobs.external_completions_ready() == 0 {
             assert!(
                 Instant::now() < deadline,
                 "merge alert job did not complete"
@@ -309,7 +383,7 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
                 "a genuine merge alert must reach the native inbox exactly once"
             );
             assert_eq!(rows[0].retract_task, expected_task);
-        } else if scenario == "merged_fallback" {
+        } else if scenario == "merged_fallback" || scenario.starts_with("codex_") {
             // A later marker on the same PTY proves all earlier queued payloads
             // have reached cat before absence of the stale body is judged.
             let name = daemon.app.supervisor_name().to_string();
@@ -329,6 +403,11 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             let written = std::fs::read_to_string(&capture).unwrap_or_default();
             stale_fallback_suppressed =
                 written.contains(marker) && !written.contains(&expected_text);
+            if scenario.starts_with("codex_") {
+                assert!(written.contains(marker), "PTY must drain before judging delivery");
+                assert_eq!(written.contains(&expected_text), scenario == "codex_positive",
+                    "only a live merge demand may reach Codex: {written}");
+            }
         } else {
             let deadline = Instant::now() + Duration::from_secs(2);
             while !std::fs::read_to_string(&capture)

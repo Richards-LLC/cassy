@@ -30,6 +30,7 @@ pub(crate) struct Lease {
     lock_path: PathBuf,
     record: Record,
     builder: bool,
+    removed_worktree: bool,
 }
 
 fn owned_metadata(path: &Path) -> io::Result<fs::Metadata> {
@@ -169,7 +170,13 @@ fn write_record(path: &Path, record: &Record) -> io::Result<()> {
 
 fn paths(cas_root: &Path, worktree: &Path) -> io::Result<(PathBuf, PathBuf)> {
     let cas_root = cas_root.canonicalize()?;
-    let worktree = worktree.canonicalize()?;
+    let worktree = worktree.canonicalize().or_else(|error| {
+        if crate::factory_scratch::removed_worker(&cas_root, worktree) {
+            Ok(worktree.to_path_buf())
+        } else {
+            Err(error)
+        }
+    })?;
     if worktree.parent() != Some(cas_root.join("worktrees").canonicalize()?.as_path()) {
         return Err(io::Error::other(
             "target ownership requires a private worker checkout",
@@ -232,7 +239,14 @@ fn open_target(
     target: &Path,
     create: bool,
 ) -> io::Result<Option<Lease>> {
-    let worktree = worktree.canonicalize()?;
+    let removed_worktree = !create
+        && relocated_target(worktree, target)
+        && crate::factory_scratch::removed_worker(cas_root, worktree);
+    let worktree = if removed_worktree {
+        worktree.to_path_buf()
+    } else {
+        worktree.canonicalize()?
+    };
     let relocated = crate::factory_scratch::is_relocated(&worktree, &target);
     if fs::symlink_metadata(&target)
         .is_ok_and(|metadata| !metadata.is_dir() || metadata.file_type().is_symlink())
@@ -330,6 +344,7 @@ fn open_target(
         lock_path,
         record,
         builder: false,
+        removed_worktree,
     };
     if !lease.revalidate(&target).unwrap_or(false) {
         if target.join(MARKER).exists() {
@@ -351,7 +366,17 @@ fn open_target(
 
 impl Lease {
     pub(crate) fn revalidate(&self, actual_target: &Path) -> io::Result<bool> {
-        let tree = worktree_metadata(&self.record.worktree)?;
+        let tree_matches = if self.removed_worktree {
+            let cas_root = self
+                .record_path
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| io::Error::other("missing ownership store"))?;
+            crate::factory_scratch::removed_worker(cas_root, &self.record.worktree)
+        } else {
+            let tree = worktree_metadata(&self.record.worktree)?;
+            (tree.dev(), tree.ino()) == (self.record.worktree_dev, self.record.worktree_ino)
+        };
         let target = private_metadata(actual_target)?;
         let lock = self.file.metadata()?;
         let current_lock = private_metadata(&self.lock_path)?;
@@ -366,10 +391,9 @@ impl Lease {
             && self.record.start != 0
             && current == self.record
             && fs::read_to_string(marker)? == self.record.generation
-            && tree.is_dir()
+            && tree_matches
             && target.is_dir()
             && current_lock.is_file()
-            && (tree.dev(), tree.ino()) == (self.record.worktree_dev, self.record.worktree_ino)
             && (target.dev(), target.ino()) == (self.record.target_dev, self.record.target_ino)
             && (lock.dev(), lock.ino()) == (self.record.lease_dev, self.record.lease_ino)
             && (current_lock.dev(), current_lock.ino()) == (lock.dev(), lock.ino()))

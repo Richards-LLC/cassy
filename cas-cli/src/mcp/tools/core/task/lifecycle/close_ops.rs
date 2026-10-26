@@ -6734,8 +6734,8 @@ impl CasCore {
     /// catches only messages that name another task), so two structural
     /// stops apply:
     /// - the measured branch must be this task's per-task branch
-    ///   (`factory/<assignee>-<task>`). A plain `factory/<assignee>` is a
-    ///   mutable lane where the worker stacks the next task on this one;
+    ///   (`factory/<assignee>-<task>`), or its active assignee's plain lane
+    ///   with every continuation commit explicitly claiming this task;
     /// - no other open task's anchor may sit between the recorded anchor and
     ///   the tip, because that commit is another delivery's boundary.
     pub(crate) fn tip_is_own_task_lineage(
@@ -6751,6 +6751,9 @@ impl CasCore {
             return false;
         };
         let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
         let own_task_branch = match task.assignee.as_deref() {
             Some(assignee) => branch == crate::factory_isolation::worker_task_branch(assignee, &task.id),
             // A released per-task branch still identifies the task. Keep the
@@ -6761,12 +6764,31 @@ impl CasCore {
                     .and_then(|name| name.strip_suffix(&format!("-{}", task.id)))
                     .is_some_and(|holder| !holder.is_empty()),
         };
-        if !own_task_branch {
+        // cas-2bec: spawn assigns the plain lane too. Before the first
+        // park, a RED commit may be the recorded anchor and GREEN the pushed
+        // tip. Require positive ownership here: an unnamed continuation on
+        // a mutable lane may belong to the worker's next task (cas-f1f4).
+        let own_active_lane = task.assignee.as_deref().is_some_and(|assignee| {
+            branch == crate::factory_isolation::expected_worker_branch(assignee)
+                && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+                && !others.iter().any(|other| {
+                    other.id != task.id
+                        && other.status == TaskStatus::InProgress
+                        && other.assignee.as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+                })
+                && git_commit_is_ancestor(repo_path, recorded, tip)
+                && git_stdout_lines(
+                    repo_path,
+                    &["log", "--format=%s", &format!("{recorded}..{tip}"), "--"],
+                ).is_ok_and(|subjects| {
+                    !subjects.is_empty()
+                        && subjects.iter().all(|subject| message_references_task(subject, &task.id))
+                })
+        });
+        if !own_task_branch && !own_active_lane {
             return false;
         }
-        let Ok(others) = task_store.list(None) else {
-            return false;
-        };
         !others.iter().any(|other| {
             other.id != task.id
                 && other.status != TaskStatus::Closed
@@ -10411,6 +10433,15 @@ impl CasCore {
             let proof_repo = worker_worktree_path
                 .as_deref()
                 .unwrap_or(close_project_root.as_path());
+            // cas-e9d6: a supervisor's (or Cassy's) close of a merged delivery
+            // measures the merged anchor instead of the worker checkout, but
+            // the worker's receipts for that exact anchor are keyed by its
+            // worktree. Read them there, so both closes judge one evidence set.
+            let merged_receipt_repo = (worker_worktree_path.is_none()
+                && (supervisor_closing_merged_anchor || supervisor_closing_merged_receipt))
+                .then(|| self.resolve_worker_worktree_path(&task, declared_repo_context.as_ref()).ok().flatten())
+                .flatten();
+            let receipt_repo = merged_receipt_repo.as_deref().unwrap_or(proof_repo);
             let mut epic_has_recorded_delivery = !task_commit_identity.known_commits.is_empty();
             if task.task_type == TaskType::Epic
                 && task.branch.is_none()
@@ -10580,14 +10611,14 @@ impl CasCore {
                     .map(|line| (epic.id.clone(), line))
             });
             if let Some(receipt) = delivered_tip.as_deref().and_then(|head| {
-                crate::factory_worker_check::passing_receipt(&self.cas_root, proof_repo, head)
+                crate::factory_worker_check::passing_receipt(&self.cas_root, receipt_repo, head)
             }) && !task.notes.contains(&receipt)
             {
                 let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M");
                 task.notes = format!("{}\n\n[{ts}] WORKER CHECK {receipt}", task.notes);
             }
             let passing_tests = delivered_tip.as_deref().map(|head| {
-                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, proof_repo, head))
+                (head, crate::factory_worker_check::PassingTests::new(&self.cas_root, receipt_repo, head))
             });
             if let Some((_, tests)) = passing_tests.as_ref() {
                 for receipt in tests.receipts() {
@@ -18138,8 +18169,9 @@ fn epic_live_branch_ref(
 }
 
 /// A released epic may name the default-branch merge carrying its target tip.
-/// The receipt must itself be a merge on the live default's first-parent
-/// history: arbitrary commits and unpublished local merges cannot authorize it.
+/// The receipt must introduce the epic on the live default's first-parent
+/// history: arbitrary commits, later merges and unpublished local merges cannot
+/// authorize it. Return the immutable release commit for the review boundary.
 fn released_epic_merge_ref(
     repo: &std::path::Path,
     task: &Task,
@@ -18155,7 +18187,9 @@ fn released_epic_merge_ref(
     }
     let epic_ref = epic_live_branch_ref(repo, target_branch, task.delivery_mode);
     let tip = resolve_branch_sha(repo, &epic_ref)?;
-    if !git_commit_is_ancestor(repo, &tip, &receipt) {
+    if !git_commit_is_ancestor(repo, &tip, &receipt)
+        || git_commit_is_ancestor(repo, &tip, &format!("{receipt}^1"))
+    {
         return None;
     }
     let default = resolve_close_gate_default_branch(repo).ok()?;
@@ -18163,11 +18197,15 @@ fn released_epic_merge_ref(
         fetch_parent_branch_best_effort(repo, &default);
     }
     let default_ref = epic_live_branch_ref(repo, &default, task.delivery_mode);
-    git_stdout_lines(repo, &["rev-list", "--first-parent", &default_ref])
+    // The epic's ancestors cannot include its release merge. Excluding them
+    // bounds the first-parent walk at the shared history instead of scanning
+    // the repository back to its root on every close.
+    let exclude_epic = format!("^{tip}");
+    git_stdout_lines(repo, &["rev-list", "--first-parent", &default_ref, &exclude_epic])
         .ok()?
         .iter()
         .any(|commit| commit == &receipt)
-        .then_some(default_ref)
+        .then_some(receipt)
 }
 
 /// Resolve the code anchor for an Epic's declared pre-close hook when the
@@ -40360,8 +40398,89 @@ mod zero_change_close_tests {
         git(p, &["merge", "-q", "--no-ff", "other/topic", "-m", "unpublished merge"]);
         let unpublished = head_sha(p);
         assert!(run_declared_pre_close_hook(&task, &context, None, Some(&unpublished), false).is_err());
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+        assert!(
+            run_declared_pre_close_hook(&task, &context, None, Some(&unpublished), false).is_err(),
+            "publishing a later merge must not turn it into the epic's release receipt"
+        );
+        run_declared_pre_close_hook(&task, &context, None, Some(&release), false)
+            .expect("the original release receipt stays valid after later main merges");
         task.task_type = TaskType::Task;
         assert!(run_declared_pre_close_hook(&task, &context, None, Some(&release), false).is_err());
+    }
+
+    #[tokio::test]
+    async fn released_epic_dispatch_binds_merge_despite_later_main_push_cas_b03c() {
+        use crate::mcp::CasService;
+        use crate::test_support::TestEnvGuard;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, _origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "epic/released", "main"]);
+        commit_file(p, "epic.rs", "feat(cas-b03c): epic delivery");
+        git(p, &["push", "-q", "origin", "epic/released"]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "epic/released", "-m", "release epic"]);
+        let release = head_sha(p);
+        commit_file(p, "other.rs", "unrelated main work after release");
+        git(p, &["push", "-q", "origin", "main"]);
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"cas-b03c-fixture\"\n[verification]\nenabled = true\n").unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-b03c-supervisor";
+        agents.register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        let mut epic = Task::new("cas-b03c-epic".into(), "released epic".into());
+        epic.task_type = TaskType::Epic;
+        epic.branch = Some("epic/released".into());
+        epic.risk = vec![TaskRisk::None];
+        epic.epic_verification_owner = Some(actor.into());
+        epic.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-b03c-fixture".into(),
+            target_branch: "epic/released".into(),
+        });
+        store.add(&epic).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": epic.id, "commit_receipt": release,
+            "reason": "released epic needs its exact release review",
+        })).unwrap();
+        let response = service.task(Parameters(request.clone())).await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id)
+            .unwrap().unwrap_or_else(|| panic!("close must dispatch release verification: {response:?}"));
+        let repository = dispatch.repository.as_ref().unwrap();
+        assert_eq!(repository.head_commit, release,
+            "the review must bind the release merge, excluding later unrelated main work");
+        assert!(repository.anchor_commits.is_empty());
+
+        commit_file(p, "next.rs", "another unrelated main push during review");
+        git(p, &["push", "-q", "origin", "main"]);
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(repository)
+            .expect("a later main push must not stale the release review");
+        service.task(Parameters(request)).await.unwrap();
+        let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id).unwrap().unwrap();
+        assert_eq!(retry.id, dispatch.id, "close retries must reuse the release dispatch");
     }
 
     #[test]

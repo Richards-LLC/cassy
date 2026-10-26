@@ -4934,7 +4934,9 @@ impl FactoryDaemon {
         // cas-4491f: the queue write runs on the store worker. A write that
         // fails there is logged; injecting into a pane that is not ready
         // would only be swallowed by its startup input buffer.
-        if self.route_director_prompt_to_queue(&prompt) {
+        if crate::supervisor_message_wakes::quiet(&prompt.text)
+            || self.route_director_prompt_to_queue(&prompt)
+        {
             self.submit_director_prompt_enqueue(store_worker, &prompt, "director_prompt_queued");
             return;
         }

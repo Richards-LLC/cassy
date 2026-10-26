@@ -932,11 +932,11 @@ function runInPty(command, args, { columns, env, timeoutMs }) {
       throw new UsageError(`pty unavailable: ${detail}`);
     }
     let raw = res.stdout ?? Buffer.alloc(0);
-    // BSD script can echo stdin EOF as ^D followed by two backspaces. These
-    // transport bytes must not make an otherwise empty command capture visible.
+    // BSD script can echo stdin EOF as a leading ^D and two backspaces. Remove
+    // that transport prefix before it masks empty output or overwrites text.
     const eofEcho = Buffer.from("^D\b\b");
-    if (bsd && raw.subarray(-eofEcho.length).equals(eofEcho)) {
-      raw = raw.subarray(0, -eofEcho.length);
+    if (bsd && raw.subarray(0, eofEcho.length).equals(eofEcho)) {
+      raw = raw.subarray(eofEcho.length);
     }
     return { raw, exit_code: Number(status) };
   } finally {

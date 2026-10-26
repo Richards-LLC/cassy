@@ -240,7 +240,8 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         let prompt = &mut prompts[0];
         // pin: this heading is the supervisor's immediate merge trigger.
         assert!(prompt.text.contains("READY TO MERGE"), "{}", prompt.text);
-        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch, "factory/merge-w");
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch,
+            git(f.repo.path(), &["branch", "--show-current"]));
         // pin: merge guidance must identify the resolved target and executable action.
         assert!(prompt.text.contains("epic/test"), "{}", prompt.text);
         // pin: the supervisor merges directly without a worker relay.

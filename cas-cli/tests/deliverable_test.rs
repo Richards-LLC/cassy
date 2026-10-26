@@ -38,6 +38,50 @@ fn git(root: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+/// Pair selection verifies the bytes and never promotes a missing side into
+/// report evidence, even when an input incorrectly puts it in pairs[].
+#[test]
+fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
+    use sha2::{Digest, Sha256};
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    let dir = root.join("pairs");
+    fs::create_dir_all(&dir).unwrap();
+    let png = b"\x89PNG\r\n\x1a\nfixture";
+    let jpg = b"\xff\xd8\xfffixture\xff\xd9";
+    let side = |name: &str| {
+        fs::write(dir.join(format!("{name}.png")), png).unwrap();
+        fs::write(dir.join(format!("{name}.jpg")), jpg).unwrap();
+        serde_json::json!({"png":format!("{name}.png"),"jpg":format!("{name}.jpg"),
+            "sha256":format!("{:x}",Sha256::digest(png)),
+            "jpg_sha256":format!("{:x}",Sha256::digest(jpg)),
+            "ref":"fixture","source":"fixture","captured_at":"2026-10-26T00:00:00Z"})
+    };
+    let before = side("roster.before");
+    let after = side("roster.after");
+    fs::write(dir.join("pairs.json"), serde_json::to_vec(&serde_json::json!({
+        "schema":1,"task_id":"cas-fixture","base_sha":"base","head_sha":"head","origin":"fixture",
+        "pairs":[
+            {"id":"roster","surface":"drivers","viewport":[1280,800],"scheme":"light","masked":[".email"],"before":before,"after":after},
+            {"id":"missing","surface":"drivers","viewport":[1280,800],"scheme":"light","masked":[".email"],"before":before}
+        ],"unpaired":[]
+    })).unwrap()).unwrap();
+    let invoke = || {
+        let result = cas_cmd(root).args(["--json","deliverable","pairs","--task","cas-fixture","--dir"])
+            .arg(&dir).assert().code(1);
+        serde_json::from_slice::<Value>(&result.get_output().stdout).unwrap()
+    };
+    let receipt = invoke();
+    assert_eq!(receipt["pairs"].as_array().unwrap().len(), 1, "{receipt}");
+    assert_eq!(receipt["pairs"][0]["id"], "roster");
+    assert_eq!(receipt["unpaired"].as_array().unwrap().len(), 1);
+    fs::write(dir.join("roster.after.jpg"), b"changed after capture").unwrap();
+    let receipt = invoke();
+    assert!(receipt["pairs"].as_array().unwrap().is_empty(), "{receipt}");
+    assert!(receipt["findings"].as_array().unwrap().iter()
+        .any(|finding| finding["code"] == "capture-digest"), "{receipt}");
+}
+
 /// Pulse Card's shape: DESIGN.md under apps/frontend, SCSS sources (no CSS
 /// the report can inline), design-spec value keys and no local .woff2. It must
 /// resolve to the project's own tokens, type and mark, never Petrastella's.

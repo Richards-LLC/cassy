@@ -373,20 +373,6 @@ jobs:
           fi
           ./scripts/release-gate.sh --fast-rows --base "$comparison_base"
 
-      # Slim lanes omit the fast rows; retain this product-script regression
-      # in the existing fast job. Non-slim lanes run it through those rows.
-      - name: Run changed terminal QA tests on slim lanes
-        if: vars.CAS_LANE_SLIM == 'true'
-        env:
-          BASE_SHA: ${{ steps.classify-diff.outputs.comparison-base || github.event.before }}
-          ZERO_BASE_REF: origin/${{ github.event.repository.default_branch }}
-        run: |
-          comparison_base="$BASE_SHA"
-          if [[ -z "$comparison_base" || "$comparison_base" =~ ^0+$ ]]; then
-            comparison_base="$ZERO_BASE_REF"
-          fi
-          python3 scripts/ci-script-tests-for-diff.py --base "$comparison_base" --only scripts/terminal-qa.test.mjs
-
       - name: Detect runner lock fixture changes
         id: runner-lock-diff
         env:

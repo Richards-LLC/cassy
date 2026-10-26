@@ -711,12 +711,13 @@ fn reconcile_ready_epics(
             Err(error) => return Err(error.to_string()),
         };
         if epic.is_terminal() { continue }
-        let Some(owner) = owners.values().find(|owner| {
-            owner.role == crate::types::AgentRole::Supervisor
-                && epic.epic_verification_owner.as_deref().is_some_and(|id| {
-                    id == owner.id || id == owner.name || owner.factory_session.as_deref() == Some(id)
-                })
-        }) else { continue };
+        let agents = crate::store::open_agent_store(root).map_err(|error| error.to_string())?
+            .list(None).map_err(|error| error.to_string())?;
+        let Some(identity) = epic.epic_verification_owner.as_deref() else { continue };
+        let recipient = crate::supervisor_notices::resolve(&agents, Some(identity), Some(identity));
+        // The old identity can have ended; its same-name live successor owns
+        // the wake in its new session. Other daemons leave this recipient alone.
+        let Some(owner) = owners.get(&recipient.id) else { continue };
         let children = tasks.get_subtasks(&epic.id).map_err(|error| error.to_string())?;
         // An incomplete sync is not evidence of completion. Include every
         // child, even lanes outside this split, and require the current shares

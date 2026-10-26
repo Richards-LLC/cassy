@@ -749,19 +749,6 @@ pub(crate) fn delivery_stalled_notice(
     )
 }
 
-fn report_stale_reminder_expiry(result: cas_store::Result<cas_store::ReminderExpiryOutcome>) {
-    match result {
-        Ok(cas_store::ReminderExpiryOutcome::Expired(_)) => {}
-        Ok(cas_store::ReminderExpiryOutcome::DeferredBusy) => {
-            tracing::warn!(
-                budget_ms = REMINDER_EXPIRY_BUSY_BUDGET.as_millis(),
-                "SQLite busy; deferring stale reminder expiry to the next daemon tick"
-            );
-        }
-        Err(error) => tracing::error!("Failed to expire stale reminders: {}", error),
-    }
-}
-
 fn registered_prompt_sweep_agents(
     agents: &[cas_types::Agent],
     factory_session: &str,
@@ -12291,66 +12278,109 @@ struct ReminderScanInput {
     ci_wakes: Vec<super::ci_watch::CiWake>,
 }
 
-/// Reconcile task waits from persisted state, including remote closes and
-/// events predating daemon startup. Notify before allowing TTL expiry: failed
-/// notice writes keep the reminder pending for the next pass.
+/// Reconcile each pending row independently: an orphan or a failed notice
+/// must not prevent another reminder from firing or reaching its deadline.
 fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error::CasError> {
     let reminders = crate::store::open_reminder_store(&scan.cas_dir)?;
     let pending = reminders.list_all_pending()?;
     if pending.is_empty() { return Ok(()) }
     let tasks = crate::store::open_task_store_local(&scan.cas_dir)?;
     for reminder in pending {
-        let event = reminder.trigger_event.as_deref();
-        let task_event = matches!(event, Some("task_completed" | "task_blocked"));
-        let filtered_task = task_event.then(|| reminder.trigger_filter.as_ref()
-            .and_then(|filter| filter.get("task_id")).and_then(serde_json::Value::as_str))
-            .flatten().map(str::trim).filter(|id| !id.is_empty());
-        let Some(task_id) = filtered_task.or(reminder.task_id.as_deref()) else { continue };
-        let task = match tasks.get(task_id) {
-            Ok(task) => Some(task),
-            Err(cas_store::StoreError::TaskNotFound(_)) => None,
-            Err(error) => return Err(error.into()),
-        };
-        if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
-            if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
-                let worker = task.assignee.as_deref().unwrap_or("remote");
-                let worker = scan.agent_id_to_name.get(worker).map(String::as_str).unwrap_or(worker).to_string();
-                let edge = match (event, task.status) {
-                    (Some("task_completed"), cas_types::TaskStatus::Closed) => Some(crate::ui::factory::director::DirectorEvent::TaskCompleted {
-                        task_id: task.id.clone(), task_title: task.title.clone(), worker,
-                    }),
-                    (Some("task_blocked"), cas_types::TaskStatus::Blocked) => Some(crate::ui::factory::director::DirectorEvent::TaskBlocked {
-                        task_id: task.id.clone(), task_title: task.title.clone(), worker,
-                    }),
-                    _ => None,
-                };
-                if let Some(edge) = edge.filter(|edge| matches_event_filter(&reminder, edge)) {
-                    fire_reminder(&reminder, &reminders,
-                        &Some(crate::store::open_supervisor_queue_store(&scan.cas_dir)?),
-                        &Some(crate::store::open_prompt_queue_store(&scan.cas_dir)?),
-                        &scan.session_name, &scan.supervisor_name, &scan.agent_id_to_name,
-                        Some(&ReminderTriggerContext::director(&edge)), &scan.cas_dir);
-                    continue;
+        if let Err(error) = reconcile_task_reminder(scan, &reminder, &reminders, tasks.as_ref()) {
+            tracing::warn!(reminder_id = reminder.id, %error,
+                "reminder reconciliation failed; retrying this reminder next pass");
+        }
+    }
+    Ok(())
+}
+
+fn task_reminder_notice(
+    scan: &ReminderScanInput,
+    reminder: &cas_store::Reminder,
+    kind: &str,
+    detail: &str,
+) -> Result<(), crate::error::CasError> {
+    let agents = crate::store::open_agent_store(&scan.cas_dir)?.list(None)?;
+    let recipient = agents.iter().find(|agent| agent.id == reminder.owner_id && agent.is_alive())
+        .map(crate::supervisor_notices::Recipient::agent)
+        .unwrap_or_else(|| crate::supervisor_notices::resolve(
+            &agents, Some(&reminder.owner_id), reminder.session_id.as_deref()));
+    crate::supervisor_notices::enqueue(&scan.cas_dir, &recipient, kind, detail, &reminder.id.to_string())
+}
+
+fn cancel_task_reminder(
+    reminders: &dyn cas_store::ReminderStore,
+    reminder: &cas_store::Reminder,
+) -> cas_store::Result<()> {
+    match reminders.cancel(reminder.id, &reminder.owner_id) {
+        // Another daemon may have fired/cancelled the row since the snapshot.
+        Err(cas_store::StoreError::NotFound(_)) => Ok(()),
+        result => result,
+    }
+}
+
+fn reconcile_task_reminder(
+    scan: &ReminderScanInput,
+    reminder: &cas_store::Reminder,
+    reminders: &Arc<dyn cas_store::ReminderStore>,
+    tasks: &dyn cas_store::TaskStore,
+) -> Result<(), crate::error::CasError> {
+    let event = reminder.trigger_event.as_deref();
+    let filtered_task = matches!(event, Some("task_completed" | "task_blocked"))
+        .then(|| reminder.trigger_filter.as_ref().and_then(|filter| filter.get("task_id"))
+            .and_then(serde_json::Value::as_str))
+        .flatten().map(str::trim).filter(|id| !id.is_empty());
+    let task_id = filtered_task.or(reminder.task_id.as_deref());
+    let task = match task_id.map(|id| tasks.get(id)) {
+        Some(Ok(task)) => Some(task),
+        Some(Err(cas_store::StoreError::TaskNotFound(_))) | None => None,
+        Some(Err(error)) => return Err(error.into()),
+    };
+    if let Some(task) = task.as_ref().filter(|_| filtered_task.is_some()) {
+        if reminder_matches_factory_session(reminder.session_id.as_deref(), reminder.cross_session, &scan.session_name) {
+            let worker = task.assignee.as_deref().unwrap_or("remote");
+            let worker = scan.agent_id_to_name.get(worker).map(String::as_str).unwrap_or(worker).to_string();
+            let edge = match (event, task.status) {
+                (Some("task_completed"), cas_types::TaskStatus::Closed) => Some(crate::ui::factory::director::DirectorEvent::TaskCompleted {
+                    task_id: task.id.clone(), task_title: task.title.clone(), worker,
+                }),
+                (Some("task_blocked"), cas_types::TaskStatus::Blocked) => Some(crate::ui::factory::director::DirectorEvent::TaskBlocked {
+                    task_id: task.id.clone(), task_title: task.title.clone(), worker,
+                }),
+                _ => None,
+            };
+            if let Some(edge) = edge.filter(|edge| matches_event_filter(reminder, edge)) {
+                fire_reminder(reminder, reminders,
+                    &Some(crate::store::open_supervisor_queue_store(&scan.cas_dir)?),
+                    &Some(crate::store::open_prompt_queue_store(&scan.cas_dir)?),
+                    &scan.session_name, &scan.supervisor_name, &scan.agent_id_to_name,
+                    Some(&ReminderTriggerContext::director(&edge)), &scan.cas_dir);
+                return Ok(());
+            }
+            if task.is_terminal() {
+                if task.status == cas_types::TaskStatus::Cancelled {
+                    task_reminder_notice(scan, reminder, "reminder_cancelled",
+                        &format!("Reminder #{} ended because task {} was cancelled. Inspect the task before continuing. {}",
+                            reminder.id, task.id, reminder.message))?;
                 }
-                if task.is_terminal() {
-                    reminders.cancel(reminder.id, &reminder.owner_id)?;
-                    continue;
-                }
+                cancel_task_reminder(reminders.as_ref(), reminder)?;
+                return Ok(());
             }
         }
-        let ttl_start = reminder.trigger_at.filter(|_| reminder.trigger_type == cas_store::ReminderTriggerType::Time)
-            .unwrap_or(reminder.created_at);
-        if reminder.ttl_secs > 0
-            && chrono::Utc::now().signed_duration_since(ttl_start).num_seconds() > reminder.ttl_secs
-            && task.as_ref().is_none_or(|task| !task.is_terminal())
-        {
-            let owner = crate::store::open_agent_store(&scan.cas_dir)?.get(&reminder.owner_id)?;
-            crate::supervisor_notices::enqueue(&scan.cas_dir,
-                &crate::supervisor_notices::Recipient::agent(&owner), "reminder_expiring",
+    }
+    let ttl_start = reminder.trigger_at.filter(|_| reminder.trigger_type == cas_store::ReminderTriggerType::Time)
+        .unwrap_or(reminder.created_at);
+    if reminder.ttl_secs > 0
+        && chrono::Utc::now().signed_duration_since(ttl_start).num_seconds() > reminder.ttl_secs
+    {
+        // Keep contention bounded; a failed notification retains only this row.
+        let _expiry_budget = cas_store::wait_budget::bound_waits_for(REMINDER_EXPIRY_BUSY_BUDGET);
+        if let Some(task_id) = task_id.filter(|_| task.as_ref().is_none_or(|task| !task.is_terminal())) {
+            task_reminder_notice(scan, reminder, "reminder_expiring",
                 &format!("Reminder #{} reached its {}s deadline while task {} is still unfinished. This wait will expire; inspect the task and re-arm it if needed. {}",
-                    reminder.id, reminder.ttl_secs, task_id, reminder.message),
-                &reminder.id.to_string())?;
+                    reminder.id, reminder.ttl_secs, task_id, reminder.message))?;
         }
+        reminders.expire(reminder.id)?;
     }
     Ok(())
 }
@@ -12360,13 +12390,9 @@ fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error
 /// reminders matching the tick's director events. Store reads and writes, so
 /// it runs as a job on the write lane, never on the loop.
 fn run_reminder_scan(scan: ReminderScanInput) {
-    let safe_to_expire = match reconcile_task_reminders(&scan) {
-        Ok(()) => true,
-        Err(error) => {
-            tracing::warn!(%error, "task reminder reconciliation failed; deferring expiry to avoid a silent task wait loss");
-            false
-        }
-    };
+    if let Err(error) = reconcile_task_reminders(&scan) {
+        tracing::warn!(%error, "could not read pending reminders for reconciliation; retrying next pass");
+    }
     use crate::store::{
         open_prompt_queue_store, open_reminder_store, open_supervisor_queue_store,
     };
@@ -12391,15 +12417,6 @@ fn run_reminder_scan(scan: ReminderScanInput) {
             return;
         }
     };
-
-    // Expire stale reminders within a small budget. Busy is expected to
-    // self-heal on the next pass; other failures are terminal.
-    if safe_to_expire {
-        report_stale_reminder_expiry(cas_store::expire_stale_bounded(
-            &cas_dir,
-            REMINDER_EXPIRY_BUSY_BUDGET,
-        ));
-    }
 
     // Check time-based reminders
     let due_reminders = match reminder_store.get_due_time_reminders() {
@@ -13155,7 +13172,7 @@ mod tests {
         is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
         prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
         registration_timeout_detail, reminder_matches_factory_session,
-        report_stale_reminder_expiry, shutdown_targets, spawn_predates_shutdown,
+        shutdown_targets, spawn_predates_shutdown,
         spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
         take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
         timeout_pane_tail, worker_exit_info,
@@ -13170,7 +13187,7 @@ mod tests {
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::io::Write;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
@@ -13439,8 +13456,14 @@ mod tests {
             closed.status = TaskStatus::Closed;
             tasks.update_from_sync(&closed, &old).unwrap();
         }
+        owner.status = cas_types::AgentStatus::Shutdown;
+        agents.register(&owner).unwrap();
+        let mut successor = cas_types::Agent::new_with_role(
+            "epic-successor".into(), owner.name.clone(), cas_types::AgentRole::Supervisor);
+        successor.factory_session = Some("successor-session".into());
+        agents.register(&successor).unwrap();
         for _ in 0..2 {
-            crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();
+            crate::cloud::epic_split::reconcile(cas, "successor-session", now).unwrap();
         }
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
@@ -13451,8 +13474,55 @@ mod tests {
         assert!(FactoryDaemon::supervisor_wake_class(
             &super::WakeSender::Daemon, &owner.name, &rows[0].source, &rows[0].prompt).is_some());
         queue.mark_processed(rows[0].id).unwrap();
-        crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();
+        crate::cloud::epic_split::reconcile(cas, "successor-session", now).unwrap();
         assert!(queue.peek_all(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ended_reminder_owner_cannot_stall_later_task_waits_cas_d8a1() {
+        let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+        let root = tempfile::tempdir().unwrap();
+        let cas = root.path();
+        let mut owner = cas_types::Agent::new_with_role(
+            "live-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
+        owner.factory_session = Some("owner-session".into());
+        crate::store::open_agent_store(cas).unwrap().register(&owner).unwrap();
+        let tasks = crate::store::open_task_store(cas).unwrap();
+        for id in ["cas-live", "cas-done"] {
+            tasks.add(&Task::new(id.into(), id.into())).unwrap();
+        }
+        let reminders = crate::store::open_reminder_store(cas).unwrap();
+        let mut ids = Vec::new();
+        for (owner_id, task_id, ttl) in [
+            ("deleted-owner", "cas-live", 60),
+            (owner.id.as_str(), "cas-done", 0),
+            (owner.id.as_str(), "cas-live", 60),
+        ] {
+            ids.push(reminders.create_with_scope(owner_id, None, "watch remote task",
+                cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
+                Some(&serde_json::json!({"task_id": task_id})), ttl,
+                Some("owner-session"), None, true, None).unwrap());
+        }
+        rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+            "UPDATE reminders SET created_at = datetime('now', '-2 hours')", []).unwrap();
+        let old = tasks.get("cas-done").unwrap();
+        let mut closed = old.clone(); closed.status = TaskStatus::Closed;
+        tasks.update_from_sync(&closed, &old).unwrap();
+        for _ in 0..2 {
+            super::run_reminder_scan(super::ReminderScanInput {
+                cas_dir: cas.to_path_buf(), session_name: "owner-session".into(), supervisor_name: owner.name.clone(),
+                agent_id_to_name: HashMap::from([(owner.id.clone(), owner.name.clone())]),
+                events: vec![], external_ready: vec![], ci_wakes: vec![],
+            });
+        }
+        let fired = reminders.list_recently_fired(60).unwrap();
+        assert_eq!(fired.len(), 1, "an orphan before this reminder cannot suppress its remote close");
+        assert_eq!(fired[0].id, ids[1]);
+        assert!(reminders.list_all_pending().unwrap().is_empty(), "orphan and later finite waits must expire");
+        let ended = reminders.list_recently_ended(&owner.id, 86400).unwrap();
+        assert!(ended.iter().any(|row| row.id == ids[2] && row.status == cas_store::ReminderStatus::Expired));
+        let rows = crate::store::open_prompt_queue_store(cas).unwrap().peek_all(20).unwrap();
+        assert_eq!(rows.iter().filter(|row| cas_store::parse_reminder_delivery_id(&row.prompt) == Some(ids[1])).count(), 1);
     }
 
     #[tokio::test]
@@ -13509,6 +13579,28 @@ mod tests {
         assert_eq!(rows.len(), 2);
         let wake = rows.iter().find(|row| cas_store::parse_reminder_delivery_id(&row.prompt).is_some()).unwrap();
         assert!(FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, &owner.name, &wake.source, &wake.prompt).is_some());
+
+        let mut cancelled = Task::new("cas-cancelled".into(), "cancelled wait".into());
+        tasks.add(&cancelled).unwrap();
+        let cancelled_id = reminders.create_with_scope(&owner.id, None, "wait for cancelled task",
+            cas_store::ReminderTriggerType::Event, None, Some("task_completed"),
+            Some(&serde_json::json!({"task_id": cancelled.id})), 0,
+            Some("owner-session"), None, true, None).unwrap();
+        let stale = reminders.list_pending(&owner.id).unwrap().into_iter()
+            .find(|row| row.id == cancelled_id).unwrap();
+        let old = cancelled.clone(); cancelled.status = TaskStatus::Cancelled;
+        tasks.update_from_sync(&cancelled, &old).unwrap();
+        scan(); scan();
+        assert!(reminders.list_pending(&owner.id).unwrap().is_empty());
+        let rows = queue.peek_all(20).unwrap();
+        let notices: Vec<_> = rows.iter().filter(|row| row.prompt.contains("reminder_cancelled")).collect();
+        assert_eq!(notices.len(), 1, "task cancellation must visibly end its wait once");
+        assert_eq!(notices[0].target, owner.name);
+        assert!(FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon,
+            &owner.name, &notices[0].source, &notices[0].prompt).is_some());
+        // A concurrent pass can retain this same stale snapshot after another
+        // daemon cancelled it: cancellation must be idempotent at that seam.
+        super::cancel_task_reminder(reminders.as_ref(), &stale).unwrap();
     }
 
     /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
@@ -13862,20 +13954,6 @@ mod tests {
         }
         assert_eq!(super::delivery_stalled_threshold_before_abandonment(10 * 60), 10 * 60);
         assert_eq!(super::delivery_stalled_threshold_before_abandonment(0), 0);
-    }
-
-    #[derive(Clone)]
-    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     /// Trust is a possible diagnosis only with a missing project entry in the
@@ -14347,49 +14425,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(stated.is_file(), "a failed fetch leaves a stated boundary");
-    }
-
-    #[test]
-    fn reminder_expiry_defers_transient_busy_at_warn() {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let writer_logs = Arc::clone(&logs);
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            report_stale_reminder_expiry(Ok(cas_store::ReminderExpiryOutcome::DeferredBusy));
-        });
-
-        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("WARN "));
-        assert!(output.contains("deferring stale reminder expiry"));
-        assert!(!output.contains("ERROR "));
-    }
-
-    #[test]
-    fn reminder_expiry_logs_terminal_failure_at_error() {
-        let logs = Arc::new(Mutex::new(Vec::new()));
-        let writer_logs = Arc::clone(&logs);
-        let subscriber = tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(move || LogBuffer(Arc::clone(&writer_logs)))
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            report_stale_reminder_expiry(Err(cas_store::StoreError::NotFound(
-                "reminder table missing".to_string(),
-            )));
-        });
-
-        let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
-        assert!(output.contains("ERROR "));
-        assert!(output.contains("Failed to expire stale reminders"));
     }
 
     #[test]

@@ -13187,7 +13187,7 @@ mod tests {
     use cas_types::{AgentStatus, Task, TaskStatus};
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::io::Write;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
@@ -13954,20 +13954,6 @@ mod tests {
         }
         assert_eq!(super::delivery_stalled_threshold_before_abandonment(10 * 60), 10 * 60);
         assert_eq!(super::delivery_stalled_threshold_before_abandonment(0), 0);
-    }
-
-    #[derive(Clone)]
-    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for LogBuffer {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     /// Trust is a possible diagnosis only with a missing project entry in the

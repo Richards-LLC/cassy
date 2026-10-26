@@ -2,14 +2,30 @@
 use super::*;
 
 pub(crate) fn render(cas_root: &Path, clean: bool) -> String {
+    render_until(cas_root, clean, None)
+}
+
+pub(crate) fn render_until(cas_root: &Path, clean: bool, deadline: Option<Instant>) -> String {
     let Some(repo) = cas_root.parent() else {
         return "\nRelease scratch: unavailable (no project root; none deleted)\n".into();
     };
-    let result = std::process::Command::new("python3")
+    let mut command = std::process::Command::new("python3");
+    command
         .arg("-c")
         .arg(include_str!("../../../scripts/release_scratch.py"))
-        .args(release_scratch_args(cas_root, repo, clean))
-        .output();
+        .args(release_scratch_args(cas_root, repo, clean));
+    let result = if clean {
+        command.output().map_err(|error| error.to_string())
+    } else {
+        let budget = deadline.map_or(Duration::from_secs(5), |deadline|
+            deadline.saturating_duration_since(Instant::now()).min(Duration::from_secs(5)));
+        crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(budget),
+            budget,
+        )
+        .map_err(|error| format!("report inventory incomplete: {error:?}"))
+    };
     match result {
         Ok(output) if output.status.success() => {
             let raw = String::from_utf8_lossy(&output.stdout);

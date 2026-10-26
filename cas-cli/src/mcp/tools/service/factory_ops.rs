@@ -6682,6 +6682,9 @@ impl CasService {
 
         let view = GcReportView::from_request(&req)
             .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+        // Leave headroom for metadata/proc reads and response rendering within
+        // the eight-second report target. All bulk inventories share this end.
+        let report_deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
 
         let stale_after = req.older_than_secs.unwrap_or(120);
         let agent_store = open_agent_store(&self.inner.cas_root).map_err(|e| {
@@ -6740,7 +6743,8 @@ impl CasService {
             )),
             &closed_task_ids,
         );
-        artifact_report.include_review_roots();
+        artifact_report.include_review_roots_until(Some(report_deadline.min(
+            std::time::Instant::now() + std::time::Duration::from_millis(250))));
         let target_cache_report = {
             let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
             let live_roots = live_target_cache_worktrees(agent_store.as_ref(), &self.inner.cas_root);
@@ -6750,12 +6754,12 @@ impl CasService {
                 agent_store.as_ref(),
                 worktree_store.as_ref(),
             );
-            crate::factory_target_cache::inspect(
+            crate::factory_target_cache::inspect_until(
                 &self.inner.cas_root,
                 policy,
                 &known_roots,
                 &live_roots,
-                true,
+                report_deadline,
             )
         };
         let host_registry_pids = crate::store::known_repos::host_registry_open_pids();
@@ -6821,11 +6825,12 @@ impl CasService {
             );
         }
         out.push_str(&orphan_processes.render());
-        out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
+        out.push_str(&crate::factory_target_cache::scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
-        out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
-        out.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
-        out.push_str(&crate::factory_review_scratch::unmanaged_large(&self.inner.cas_root));
+        out.push_str(&crate::factory_scratch::render_relocated_until(
+            &self.inner.cas_root, target_cache_report.as_ref().ok(), Some(report_deadline)));
+        out.push_str(&crate::factory_review_scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
+        out.push_str(&crate::factory_review_scratch::unmanaged_large_until(&self.inner.cas_root, Some(report_deadline)));
         out.push_str(&artifact_report.render());
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
@@ -6959,7 +6964,7 @@ impl CasService {
         match target_cache_report {
             Ok(report) => {
                 out.push_str(&format!(
-                    "\nCargo target cache pressure:\n  filesystem: {}\n  reserved builders: {}\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  exact cache bytes: {}\n  selected reclaimable bytes: {}\n",
+                    "\nCargo target cache pressure:\n  filesystem: {}\n  reserved builders: {}\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  measured cache bytes: {}\n  selected reclaimable bytes: {}\n  inventory complete: {}\n",
                     report.filesystem_path.display(),
                     report.reserved_builders,
                     report.filesystem.used_percent,
@@ -6968,6 +6973,7 @@ impl CasService {
                     report.filesystem.pressure,
                     report.candidate_bytes,
                     report.selected_bytes,
+                    report.inventory_complete,
                 ));
                 for cache in &report.caches {
                     out.push_str(&format!(
@@ -8353,6 +8359,10 @@ impl FactoryArtifactInventory {
     /// Sibling project keys (including pre-rename keys), bare task IDs and
     /// shared builds have no project-task deletion authority. Inventory only.
     fn include_review_roots(&mut self) {
+        self.include_review_roots_until(None)
+    }
+
+    fn include_review_roots_until(&mut self, deadline: Option<std::time::Instant>) {
         let Some(base) = self.root.parent() else {
             return;
         };
@@ -8369,7 +8379,7 @@ impl FactoryArtifactInventory {
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .map(|entry| {
                 let path = entry.path();
-                let usage = crate::artifacts::retention::artifact_root_usage(&path);
+                let usage = crate::artifacts::retention::artifact_root_usage_until(&path, deadline);
                 (path, usage)
             })
             .collect();
@@ -21148,5 +21158,11 @@ mod artifact_project_scope_tests {
         );
         assert!(renamed.join("build").is_file());
         assert!(shared.join("build").is_file());
+        let mut bounded = factory_artifact_inventory(a_root.clone(), &closed);
+        bounded.include_review_roots_until(Some(std::time::Instant::now()));
+        assert!(!bounded.review_roots.is_empty());
+        assert!(bounded.review_roots.iter().all(|(_, usage)|
+            usage.bytes == 0 && usage.error.as_deref().is_some_and(|error| error.contains("budget exhausted"))));
+        assert!(b_root.join("cas-a4b1/proof.md").is_file());
     }
 }

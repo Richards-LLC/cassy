@@ -781,6 +781,7 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             return;
         }
+        env.set_current_dir(&project);
         // Explicit ABI rows catch both the macOS 104-byte and Linux
         // 108-byte address, including the required terminating NUL.
         for (capacity, bytes, allowed) in [(104, 103, true), (104, 104, false), (108, 107, true), (108, 108, false)] {
@@ -798,7 +799,6 @@ mod tests {
         env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config --strict-mcp-config");
         let spawned = original_home.join("spawned");
         env.set("CAS_4927_SPAWN_MARKER", &spawned);
-        env.set_current_dir(&project);
         let config = || DaemonConfig {
             session_name: "rig-supervisor".into(), foreground: true, boot_progress: false, phone_home: false,
             factory_config: FactoryConfig {

@@ -287,7 +287,7 @@ def local_face(faces, family):
     return named[0] if named else None
 
 
-def value_keys(project_root, chain, warnings):
+def value_keys(project_root, chain, warnings, profile_fonts=()):
     """CSS from the merged colors/typography/rounded values, or None without colors."""
     colors, typography, rounded = {}, {}, {}
     for path, meta in reversed(chain):  # ancestor first; the nearer file overrides
@@ -311,7 +311,8 @@ def value_keys(project_root, chain, warnings):
                 defaulted.append(role)
     css_vars = ['--' + role + ':' + value for role, value in roles.items()]
     faces, picked, type_receipt = [], pick_type(typography), {}
-    local = woff2_files(chain[0][0].parent)
+    # PROFILE.md `fonts` name the faces a design-spec DESIGN.md cannot carry.
+    local = list(profile_fonts) + woff2_files(chain[0][0].parent)
     for role in ('display', 'body', 'mono'):
         names = [n for n in picked.get(role, []) if re.fullmatch(r'[A-Za-z0-9 _-]+', n)]
         stack = names + ([] if names and names[-1] in GENERIC_FAMILIES else
@@ -414,9 +415,25 @@ def inherits_chain(root, path, warnings):
     return chain
 
 
-def brand_mark(root, chain):
-    for path, meta, _ in chain:
-        named = meta.get('brand-mark')
+def profile_meta(root):
+    """docs/deliverables/PROFILE.md frontmatter, with `none` values dropped."""
+    path = root / 'docs/deliverables/PROFILE.md'
+    meta = (frontmatter(path)[0] or {}) if path.is_file() else {}
+    return {k: v for k, v in meta.items() if v not in (None, '', 'none', ['none'])}
+
+
+def profile_fonts(root, profile):
+    named = profile.get('fonts') or []
+    named = [part.strip() for part in named.split(',')] if isinstance(named, str) else named
+    return [root / str(name) for name in named
+            if str(name).endswith('.woff2') and (root / str(name)).is_file()]
+
+
+def brand_mark(root, chain, profile=None):
+    """The DESIGN.md chain's `brand-mark`, else the PROFILE.md `mark`."""
+    marks = [(path, meta.get('brand-mark')) for path, meta, _ in chain]
+    marks.append((root / 'docs/deliverables/PROFILE.md', (profile or {}).get('mark')))
+    for path, named in marks:
         if not isinstance(named, str) or not named.strip():
             continue
         for candidate in (root / named.strip(), path.parent / named.strip()):
@@ -430,6 +447,7 @@ def brand_mark(root, chain):
 def resolve(project_root, *, defaults, tokens=None, audience='internal', surface=None):
     """Return {receipt, css, mark_uri}; css is None when a finding refuses the brand."""
     root = Path(project_root).resolve()
+    profile = profile_meta(root)
     warnings, findings, problems = [], [], []
     receipt = {'schema': 'cas.deliverable.brand/1', 'audience': audience, 'root': str(root),
                'source': None, 'design': None, 'tokens': None, 'type': None, 'mark': None}
@@ -456,7 +474,8 @@ def resolve(project_root, *, defaults, tokens=None, audience='internal', surface
                     receipt['tokens'] = {'from': rel(root, path)}
                     break
             if not css:
-                found = value_keys(root, [(p, m) for p, m, _ in chain], warnings)
+                found = value_keys(root, [(p, m) for p, m, _ in chain], warnings,
+                                   profile_fonts(root, profile))
                 if found:
                     css, receipt['tokens'], receipt['type'] = found
                     receipt['source'] = 'design-md-values'
@@ -464,7 +483,7 @@ def resolve(project_root, *, defaults, tokens=None, audience='internal', surface
                     problems.append(('design-md-unusable', f'{rel(root, design)} has neither CSS sources with maps '
                                      'nor colors values the deliverable can wear'))
             if css:
-                receipt['mark'], mark_uri = brand_mark(root, chain)
+                receipt['mark'], mark_uri = brand_mark(root, chain, profile)
                 if not receipt['mark']:
                     warnings.append(f'{rel(root, design)} names no brand-mark the deliverable can inline')
         elif not problems:

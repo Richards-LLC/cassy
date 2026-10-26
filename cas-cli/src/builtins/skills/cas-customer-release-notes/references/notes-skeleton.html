@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<!--
+  cas-customer-release-notes skeleton. It fixes the content order
+  (notes-contract.md) and the brand markers, nothing else. Copy it beside the
+  notes' markdown, then:
+  1. Keep the cas:brand style marker and the cas:brand-mark comment as they
+     are: `cas deliverable finalize --audience customer` fills them from the
+     client's DESIGN.md (colours by design-spec role, faces, radii, mark).
+  2. Restyle the layout rules below from the client's DESIGN.md: its Layout,
+     Components and Do's & Don'ts decide hierarchy, density, shapes and
+     imagery. The rules here are a neutral starting point that reads only
+     role tokens; they are not a house layout to keep.
+  3. Replace the example content (a fictional "Northwind Planner" update) and
+     keep every data-section marker in order. Keep image src values relative;
+     finalize embeds them.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northwind Planner: what's new in October 2026</title>
+<style>
+/*cas:brand*/
+:root { --container: 960px; --radius: var(--radius-card, 8px); }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 var(--font-body); }
+a { color: var(--action, var(--verdict)); }
+:focus-visible { outline: 3px solid var(--verdict); outline-offset: 2px; }
+.wrap { max-width: var(--container); margin: 0 auto; padding: 0 24px; }
+section { padding: 32px 0; border-top: 1px solid var(--line); }
+h1, h2, h3 { font-family: var(--font-display); font-weight: 400; }
+h1 { font-size: clamp(30px, 4.4vw, 46px); line-height: 1.1; margin: 0 0 16px; }
+h2 { font-size: 26px; line-height: 1.2; margin: 0 0 16px; }
+h3 { font-size: 20px; line-height: 1.3; margin: 0 0 8px; }
+.lockup { display: flex; align-items: center; gap: 10px; color: var(--ink-muted); font: 600 13px/18px var(--font-body); }
+.lockup .mark { width: 28px; height: 28px; }
+[data-section=headline] { border-top: 0; padding-top: 24px; }
+.meta { color: var(--ink-muted); font-size: 14px; margin: 0; }
+.change { padding: 20px 0; border-top: 1px solid var(--line); break-inside: avoid; }
+.change:first-of-type { border-top: 0; }
+.was-now { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 0; }
+.was-now dt { font: 600 12px/16px var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.was-now dd { margin: 4px 0 0; }
+.captures { display: grid; gap: 12px; margin: 16px 0 0; }
+.captures figure { margin: 0; }
+.captures img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+.captures figcaption { font-size: 13px; color: var(--ink-muted); margin-top: 4px; }
+@media (max-width: 640px) { .was-now { grid-template-columns: 1fr; } }
+@media print { section { break-inside: auto; } .change { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<main class="wrap">
+
+<section data-section="headline">
+  <p class="lockup"><!--cas:brand-mark-->Northwind Planner</p>
+  <h1>Planning a week now takes one screen instead of three.</h1>
+  <p class="meta">October 2026 update · prepared for Northwind by the Planner team</p>
+</section>
+
+<section data-section="changes">
+  <h2>What changed</h2>
+  <article class="change">
+    <h3>Weekly plan in one view</h3>
+    <dl class="was-now">
+      <div><dt>Was</dt><dd>Store managers opened three pages to see a week's shifts, sales and deliveries.</dd></div>
+      <div><dt>Now</dt><dd>The weekly plan shows all three side by side, for every store the manager runs.</dd></div>
+    </dl>
+    <div class="captures" data-priority="1">
+      <figure><img src="shots/weekly-plan.before.jpg" alt="Before: the shifts page on its own."><figcaption>Before · captured 2026-09-30</figcaption></figure>
+      <figure><img src="shots/weekly-plan.after.jpg" alt="After: shifts, sales and deliveries on one weekly plan."><figcaption>After · captured 2026-10-28</figcaption></figure>
+    </div>
+  </article>
+  <article class="change">
+    <h3>Exports keep your filters</h3>
+    <dl class="was-now">
+      <div><dt>Was</dt><dd>An export included every store, whatever the screen showed.</dd></div>
+      <div><dt>Now</dt><dd>An export contains exactly the stores and dates on screen.</dd></div>
+    </dl>
+  </article>
+</section>
+
+<section data-section="good-to-know">
+  <h2>Good to know</h2>
+  <ul>
+    <li>Saved views from before October open in the new weekly plan automatically.</li>
+  </ul>
+</section>
+
+<section data-section="provenance">
+  <p class="meta">Covers 1–31 October 2026. Screens from Northwind Planner production, captured 28 October 2026. Prepared 30 October 2026. Markdown source: 2026-10-30-northwind-october.md.</p>
+</section>
+
+</main>
+</body>
+</html>

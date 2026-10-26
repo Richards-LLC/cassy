@@ -1494,7 +1494,7 @@ fi"#);
         let root = dir.path().join(".cas");
         let variable = crate::factory_target_cache::owner::host_runner_env().unwrap();
         // The outer capped test run sets this too; prove only the nested runner's effect.
-        env.remove(variable);
+        env.remove(&variable);
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,

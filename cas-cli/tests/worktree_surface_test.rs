@@ -3548,6 +3548,7 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
         .poll_all(100).unwrap().into_iter()
         .filter(|row| row.prompt.contains("merge_conflicted")).collect();
     assert_eq!(notices.len(), 1, "one worker notice per declined delivery");
+    assert_eq!(notices[0].target, "alice");
     assert!(notices[0].prompt.contains("README.md"));
     assert!(notices[0].prompt.contains(&target_tip));
 

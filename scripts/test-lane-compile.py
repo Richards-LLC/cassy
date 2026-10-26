@@ -132,11 +132,10 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
         self.env["ZIG"] = ".context/custom-zig"
         self.assert_preview_zig(expected)
 
-    def test_source_repo_zig_precedes_path_and_invalid_configured_zig(self):
-        # cas-9f61: one order for every release tool; PATH is the last resort.
-        self.make_zig(self.bin / "zig")
+    def test_path_zig_precedes_source_repo_and_invalid_configured_zig(self):
+        expected = self.make_zig(self.bin / "zig")
         self.env["ZIG"] = "missing-zig"
-        self.assert_preview_zig(self.zig)
+        self.assert_preview_zig(expected)
 
     def test_path_zig_is_the_fallback_without_a_checkout_zig(self):
         expected = self.make_zig(self.bin / "zig")

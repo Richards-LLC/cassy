@@ -21,38 +21,97 @@ pub fn rust_target_to_zig(rust_target: &str) -> Result<&'static str, String> {
     }
 }
 
-/// Find the Zig compiler
+/// Find the pinned Zig compiler, including the main checkout of a linked worktree.
+/// Explicit inputs let callers use their environment without mutating process state.
 pub fn find_zig(
     workspace_root: &Path,
     configured: Option<&std::ffi::OsStr>,
     search_path: Option<&std::ffi::OsStr>,
-) -> Option<PathBuf> {
-    // 1. Check ZIG environment variable
-    if let Some(zig) = configured {
-        let path = PathBuf::from(zig);
-        if path.exists() {
-            return Some(path);
-        }
-    }
+) -> Result<PathBuf, String> {
+    // The Zig package is the version authority; bootstrap-zig.sh installs this pin.
+    let required = include_str!("zig/build.zig.zon")
+        .split_once(".minimum_zig_version = \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(version, _)| version)
+        .expect("Zig package must declare minimum_zig_version");
+    let mut tried = Vec::new();
+    let mut probe = |candidate: PathBuf| {
+        // Cargo invokes build scripts from the crate, not the workspace root.
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            workspace_root.join(candidate)
+        };
+        let reason = if !candidate.is_file() {
+            "missing or not a file".to_string()
+        } else {
+            match Command::new(&candidate)
+                .current_dir(workspace_root)
+                .arg("version")
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    let version = String::from_utf8_lossy(&output.stdout);
+                    if version.trim() == required {
+                        return Some(candidate);
+                    }
+                    format!("version {}, expected {required}", version.trim())
+                }
+                Ok(output) => format!("version command failed: {}", output.status),
+                Err(error) => format!("cannot execute: {error}"),
+            }
+        };
+        tried.push(format!("{}: {reason}", candidate.display()));
+        None
+    };
 
-    // 2. Check system PATH first (for mise, homebrew, etc.)
-    if let Ok(output) = Command::new("which")
-        .arg("zig")
-        .env("PATH", search_path.unwrap_or_default())
-        .output()
-        && output.status.success()
+    // Keep the same precedence in scripts/release_env.py's release preflight.
+    if let Some(zig) = configured.filter(|value| !value.is_empty())
+        && let Some(zig) = probe(PathBuf::from(zig))
     {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
+        return Ok(zig);
+    }
+    if let Some(path) = search_path {
+        for dir in std::env::split_paths(path) {
+            if let Some(zig) = probe(dir.join("zig")) {
+                return Ok(zig);
+            }
         }
     }
-
-    // 3. Check workspace .context/zig/zig (bootstrapped location) as fallback
-    let bootstrapped = workspace_root.join(".context/zig/zig");
-    if bootstrapped.exists() {
-        return Some(bootstrapped);
+    if let Some(zig) = probe(workspace_root.join(".context/zig/zig")) {
+        return Ok(zig);
     }
 
-    None
+    // .context is ignored, so new linked worktrees share the main checkout's
+    // installation via the common Git directory. Git may return a relative path.
+    let common = Command::new("git")
+        .current_dir(workspace_root)
+        .args(["rev-parse", "--git-common-dir"])
+        .output();
+    match common {
+        Ok(output) if output.status.success() => {
+            let common = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+            let common = if common.is_absolute() {
+                common
+            } else {
+                workspace_root.join(common)
+            };
+            if let Some(main) = common.parent()
+                && let Some(zig) = probe(main.join(".context/zig/zig"))
+            {
+                return Ok(zig);
+            }
+        }
+        Ok(output) => tried.push(format!(
+            "git rev-parse --git-common-dir: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(error) => tried.push(format!("git rev-parse --git-common-dir: {error}")),
+    }
+    Err(format!(
+        "Zig compiler {required} not found.\nZIG: {}; PATH: {}\nTried:\n  - {}\nInstall with: ./scripts/bootstrap-zig.sh or set ZIG to a compatible executable.",
+        configured.map_or_else(|| "(unset)".into(), |value| value.to_string_lossy()),
+        search_path.map_or_else(|| "(unset)".into(), |value| value.to_string_lossy()),
+        tried.join("\n  - "),
+    ))
 }

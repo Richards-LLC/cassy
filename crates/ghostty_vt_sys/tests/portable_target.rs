@@ -46,6 +46,7 @@ fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
     let main = temp.path().join("main checkout");
     let worktree = temp.path().join("linked worktree");
     std::fs::create_dir(&main).unwrap();
+    let main = main.canonicalize().unwrap();
     let git = |args: &[&OsStr]| {
         let output = Command::new("git")
             .current_dir(&main)
@@ -79,6 +80,7 @@ fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
         OsStr::new("--detach"),
         worktree.as_os_str(),
     ]);
+    let worktree = worktree.canonicalize().unwrap();
     let zig = main.join(".context/zig/zig");
     std::fs::create_dir_all(zig.parent().unwrap()).unwrap();
     std::fs::write(&zig, "#!/bin/sh\nprintf '0.15.2\\n'\n").unwrap();
@@ -90,4 +92,36 @@ fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
         build_support::find_zig(&worktree, None, Some(OsStr::new(""))).unwrap(),
         zig
     );
+
+    // A broken shared installation must report every attempted candidate and
+    // distinguish an incompatible version from an unexecutable compiler.
+    for (body, mode, diagnostic) in [
+        (
+            "#!/bin/sh\nprintf '0.16.0\\n'\n",
+            0o755,
+            "version 0.16.0, expected 0.15.2",
+        ),
+        ("#!/bin/sh\nprintf '0.15.2\\n'\n", 0o644, "cannot execute"),
+    ] {
+        std::fs::write(&zig, body).unwrap();
+        std::fs::set_permissions(&zig, std::fs::Permissions::from_mode(mode)).unwrap();
+        let configured = worktree.join("missing-configured-zig");
+        let path = worktree.join("empty-bin");
+        let error = build_support::find_zig(
+            &worktree,
+            Some(configured.as_os_str()),
+            Some(path.as_os_str()),
+        )
+        .unwrap_err();
+        for candidate in [
+            &configured,
+            &path.join("zig"),
+            &worktree.join(".context/zig/zig"),
+            &zig,
+        ] {
+            assert!(error.contains(&candidate.display().to_string()), "{error}");
+        }
+        assert!(error.contains(diagnostic), "{error}");
+        assert!(error.contains("./scripts/bootstrap-zig.sh"), "{error}");
+    }
 }

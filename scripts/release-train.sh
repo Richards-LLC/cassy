@@ -805,14 +805,6 @@ run_publish() {
         return 7
     fi
 
-    # The zig toolchain is hardlinked rather than copied: same bytes, no second
-    # multi-hundred-megabyte tree per release.
-    if [[ -d "$main_checkout_dir/.context/zig" && ! -e "$tag_worktree/.context/zig" ]]; then
-        mkdir -p "$tag_worktree/.context"
-        cp -al "$main_checkout_dir/.context/zig" "$tag_worktree/.context/zig" 2>/dev/null || true
-    fi
-    [[ -x "$tag_worktree/.context/zig/zig" ]] && export ZIG="$tag_worktree/.context/zig/zig"
-
     local env_file="${CAS_RELEASE_ENV_FILE:-$HOME/.cas/release.env}"
     if [[ -f "$env_file" ]]; then
         set -a
@@ -1400,7 +1392,7 @@ fi
 # the gate's own resolution names the gap.
 if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" || -z "${ZIG:-}" ]] \
     && release_env_assignments="$(python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
-        --durable --create --link-zig)"; then
+        --durable --create)"; then
     eval "$release_env_assignments"
     if [[ -z "${CAS_RELEASE_GATE_HOME_DIR:-}" && -n "$RELEASE_ENV_SCRATCH" && -z "$RELEASE_ENV_SCRATCH_PROBLEM" ]]; then
         export CAS_RELEASE_GATE_HOME_DIR="$RELEASE_ENV_SCRATCH"
@@ -1444,7 +1436,6 @@ release_portable_setsid_prefix || {
 nohup "${RELEASE_PORTABLE_SETSID[@]}" bash -c '
     worktree=$1; done_file=$2; green_file=$3; sha_file=$4; expected_sha=$5; mode=$6; shift 6
     cd "$worktree" || exit 125
-    [[ -z "${ZIG:-}" && -x "$PWD/.context/zig/zig" ]] && export ZIG="$PWD/.context/zig/zig"
     set +e
     "$@"
     rc=$?

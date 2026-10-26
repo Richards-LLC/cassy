@@ -56,12 +56,12 @@ fn main() {
         env::var_os("ZIG").as_deref(),
         env::var_os("PATH").as_deref(),
     )
-    .expect(
-        "Zig compiler not found. Install with: ./scripts/bootstrap-zig.sh\n\
-         Or set ZIG environment variable to point to zig binary.",
-    );
+    .unwrap_or_else(|message| panic!("{message}"));
 
     // Rebuild triggers
+    println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-changed={}", zig.display());
     println!("cargo:rerun-if-changed=zig/build.zig");
     println!("cargo:rerun-if-changed=zig/build.zig.zon");
     println!("cargo:rerun-if-changed=zig/deps");

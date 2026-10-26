@@ -3650,10 +3650,14 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     assert!(returned.notes.contains("UNOWNED USER-FACING FILE") && returned.notes.contains("src/pages/email.ts"));
     assert!(returned.deliverables.factory_branch_anchor.is_none());
     assert!(returned.deliverables.green_merge_commit.is_none());
+    assert!(!cas_store::has_pending_observed_delivery_merge(
+        &root, &task.id, branch, "epic/upkeep", &anchor,
+    ).unwrap(), "returning the worker must retire the old merge's automatic close intent");
     env.set_current_dir(&worker);
     let _still_gated = service.task(Parameters(close())).await.unwrap();
     let queue = cas::store::open_prompt_queue_store(&root).unwrap();
     let notices: Vec<_> = queue.poll_all(100).unwrap().into_iter()
+        // pin: the recovery receipt identifies this gate return separately from merge/verdict notices.
         .filter(|row| row.prompt.contains("post_merge_close_gate")).collect();
     assert_eq!(notices.len(), 1, "one corrective notice per declined merged delivery");
     assert_eq!(notices[0].target, "alice");

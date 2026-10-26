@@ -1002,7 +1002,9 @@ fn emit_task_lifecycle_transition_in_project(
 
     let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
-            || super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
+    });
+    let answered_blocker = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+        super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
     });
 
     let key = transition_key(
@@ -1030,6 +1032,7 @@ fn emit_task_lifecycle_transition_in_project(
         "occurrence_id": occurrence_id,
         "branch_tip": branch_tip,
         "verification_wait": verification_wait,
+        "answered_blocker": answered_blocker,
         "transition_key": key,
         "timestamp": now.to_rfc3339(),
     })
@@ -1110,7 +1113,7 @@ fn emit_task_lifecycle_transition_in_project(
         branch_tip,
         &recipient.name,
         recipient.session.as_deref(),
-        verification_wait,
+        verification_wait || answered_blocker,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1256,7 +1259,7 @@ fn deliver_prompt_for_notification(
     branch_tip: Option<&str>,
     recipient_target: &str,
     recipient_session: Option<&str>,
-    verification_wait: bool,
+    quiet_blocked_wait: bool,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
     let mut body = build_prompt_body(
@@ -1273,7 +1276,7 @@ fn deliver_prompt_for_notification(
         branch_tip,
     );
     let summary = format!("{}: {} ({})", kind.as_event_type(), task_id, occurrence_id);
-    let source = if verification_wait {
+    let source = if quiet_blocked_wait {
         body = format!("{}\n{body}", crate::supervisor_message_wakes::QUIET);
         format!("{LIFECYCLE_SOURCE_PREFIX}{notification_id}")
     } else {
@@ -1502,7 +1505,8 @@ fn deliver_lifecycle_outbox_row_with_agents(
                 None => factory_session,
             },
         },
-        payload.get("verification_wait").and_then(|value| value.as_bool()).unwrap_or(false)
+        ["verification_wait", "answered_blocker"].iter().any(|key|
+            payload.get(key).and_then(|value| value.as_bool()).unwrap_or(false))
             && kind == LifecycleTransition::Blocked
             && recipient.as_ref().is_none_or(|current| {
                 payload.get("supervisor_id").and_then(|value| value.as_str()) == Some(current.id.as_str())

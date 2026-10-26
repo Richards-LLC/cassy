@@ -3,8 +3,7 @@
 use cas_store::TaskStore;
 use cas_types::{Task, TaskAnsweredBlocker as AnsweredBlocker, TaskBlockedHold};
 
-/// A supervisor owns this unchanged wait, even if verification briefly reopened
-/// the task. Times on holds/idle episodes are observations, not wait identity.
+/// Bind the active worker question without copying its prose into resume state.
 pub(crate) fn record_blocker_ask(
     cas_dir: &std::path::Path, worker: &cas_types::Agent, task_id: &str, ask: &str,
 ) -> Result<(), String> {
@@ -16,7 +15,7 @@ pub(crate) fn record_blocker_ask(
     use sha2::{Digest, Sha256};
     let fingerprint = format!("{:x}", Sha256::digest(ask.as_bytes()));
     tasks.patch_execution_state(task_id, &serde_json::json!({"blocker_ask": fingerprint}))
-        .map_err(|e| e.to_string())
+        .map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Called only after a real registered supervisor's direct message commits.
@@ -42,7 +41,7 @@ pub(crate) fn record_supervisor_answer(
         ask: state.get("blocker_ask").and_then(serde_json::Value::as_str).map(str::to_owned), message_id,
     };
     tasks.patch_execution_state(&task.id, &serde_json::json!({"answered_blocker": receipt}))
-        .map_err(|e| e.to_string())
+        .map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// Positive, durable evidence only. New questions/holds, dependencies, changed
@@ -87,6 +86,7 @@ pub(crate) fn worker_has_answered_blocker(
 /// Re-check queued alerts as well as newly emitted events. An answered row
 /// remains readable; only its wake is withdrawn.
 pub(crate) fn answered_blocker_alert(cas_dir: &std::path::Path, row: &cas_store::QueuedPrompt) -> bool {
+    if row.origin != Some(cas_store::QueueOrigin::Daemon) { return false; }
     if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt) {
         return envelope.new_status == cas_types::TaskStatus::Blocked
             && answered_blocker_wait(cas_dir, &envelope.task_id, &row.target).is_some();

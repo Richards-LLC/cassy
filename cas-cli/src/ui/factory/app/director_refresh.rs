@@ -386,6 +386,9 @@ impl DeliveryRequest {
             .map(|request| request.read());
         DeliveryInputs {
             answered_blocked_workers: data.as_ref().ok().map(|fresh| fresh.agents.iter()
+                .filter(|agent| self.idle_workers.contains(&agent.name) || self.blocked_tasks.iter().any(|id|
+                    fresh.ready_tasks.iter().any(|task| task.id == *id
+                        && [Some(agent.name.as_str()), Some(agent.id.as_str())].contains(&task.assignee.as_deref()))))
                 .filter(|agent| crate::mcp::tools::core::task::block_hold::worker_has_answered_blocker(
                     &self.cas_dir, &agent.id, &self.supervisor,
                 )).map(|agent| agent.name.clone()).collect()).unwrap_or_default(),

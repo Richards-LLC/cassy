@@ -243,6 +243,15 @@ recording `merge_conflicted`, the conflicting paths and the attempted target tip
 The worker receives one notice and can start, resolve and re-deliver directly.
 Target drift and pre-existing checkout residue keep their existing recovery paths.
 
+A direct supervisor reply to a blocked worker records ownership of that wait.
+Repeated idle and blocked alerts stay quiet while the assignee, supervisor,
+structured hold reason and blocker question remain unchanged, including a
+verification rejection followed by the same block. A new blocker question or
+hold re-arms alerts; an explicit Open transition clears the answer. Existing
+queued alerts remain readable without waking the supervisor again. The receipt
+and question fingerprint are maintained by authenticated coordination messages,
+not hand-written execution-state patches.
+
 For Claude supervisors in Teams factories, an authenticated action event whose
 complete framed payload fits the hook budget travels in one PTY turn, with its
 queue id and body inline. No Teams pointer or relay copy is written. A busy

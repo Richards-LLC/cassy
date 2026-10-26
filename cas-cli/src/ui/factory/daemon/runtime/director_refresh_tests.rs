@@ -123,6 +123,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         "summary": "Decision relayed", "message": "I relayed your question to the operator; wait for their decision."
     })).unwrap())).await.unwrap();
     assert!(!answered.is_error.unwrap_or(false), "{answered:?}");
+    let before_answer = queue.peek_all(20).unwrap().into_iter()
+        .find(|row| is_lifecycle_wake_source(&row.source)).unwrap();
+    assert!(super::super::queue_and_events::read_row_facts(
+        &root, queue.as_ref(), Some(tasks.as_ref()), &agents.list(None).unwrap(), &before_answer,
+    ).answered_blocker, "already-queued blocker wake must also be withdrawn after the answer");
 
     for rejected in [false, true] {
         if rejected {
@@ -153,6 +158,19 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         assert!(!is_lifecycle_wake_source(&rows[0].source));
         assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
     }
+    let worker_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    worker_core.set_agent_id_for_testing("merge-w".into());
+    let worker_service = crate::mcp::CasService::new(worker_core, None);
+    let asked = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "task_id": task.id, "blocker": true,
+        "summary": "New operator question", "message": "The operator must now decide a different question."
+    })).unwrap())).await.unwrap();
+    assert!(!asked.is_error.unwrap_or(false), "{asked:?}");
+    let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+        task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
+    };
+    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(prompts.len(), 1, "a new blocker ask must re-arm the alert");
     // A different hold is a new question even on the same task and assignee.
     block(&mut task, "Credentials are now missing");
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {

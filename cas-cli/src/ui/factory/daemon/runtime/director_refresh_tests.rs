@@ -118,9 +118,39 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(queue.peek_all(20).unwrap().iter().any(|row| is_lifecycle_wake_source(&row.source)),
         "an unanswered blocker must still wake its supervisor");
     let service = crate::mcp::CasService::new(core.clone(), None);
+    let worker_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    worker_core.set_agent_id_for_testing("merge-w".into());
+    let worker_service = crate::mcp::CasService::new(worker_core, None);
+    let ask = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "task_id": task.id, "blocker": true,
+        "summary": "Operator decision needed", "message": "Which option should I implement?"
+    })).unwrap())).await.unwrap();
+    assert!(!ask.is_error.unwrap_or(false), "{ask:?}");
+    let blocker_id = queue.peek_all(30).unwrap().into_iter()
+        .find(|row| crate::prompt_revalidation::parse_blocker_envelope(&row.prompt).is_some()).unwrap().id;
+    let status = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "task_id": task.id, "kind": "status",
+        "summary": "Progress", "message": "The completed checks are recorded."
+    })).unwrap())).await.unwrap();
+    assert!(!status.is_error.unwrap_or(false), "{status:?}");
+    let status_id = queue.peek_all(30).unwrap().into_iter()
+        .filter(|row| row.source == "merge-w").max_by_key(|row| row.id).unwrap().id;
+    // Neither an unrelated direct ping nor a reply to ordinary status owns the blocker.
+    for reply_to in [None, Some(status_id)] {
+        let ping = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "message", "target": "merge-w", "task_id": task.id, "in_reply_to": reply_to,
+            "summary": "Status query", "message": "Are your checks complete?"
+        })).unwrap())).await.unwrap();
+        assert!(!ping.is_error.unwrap_or(false), "{ping:?}");
+        let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+            task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
+        };
+        assert_eq!(fixture.app.revalidate_and_prompt_for_delivery(&[event]).1.len(), 1,
+            "an unrelated supervisor message must leave the blocker armed (reply_to={reply_to:?})");
+    }
     let answered = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
         "action": "message", "target": "merge-w", "task_id": task.id,
-        "summary": "Decision relayed", "message": "I relayed your question to the operator; wait for their decision."
+        "in_reply_to": blocker_id, "summary": "Decision relayed", "message": "I relayed your question to the operator; wait for their decision."
     })).unwrap())).await.unwrap();
     assert!(!answered.is_error.unwrap_or(false), "{answered:?}");
     let before_answer = queue.peek_all(20).unwrap().into_iter()
@@ -152,6 +182,19 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     }
     assert_eq!(queue.peek_all(30).unwrap().into_iter().find(|row| row.id == before_answer.id).unwrap().prompt,
         before_answer.prompt);
+    // Release the held lifecycle alert after the worker resumes: it must be
+    // retired as stale, never transported as a fresh blocked notification.
+    task.status = TaskStatus::InProgress;
+    tasks.update(&task).unwrap();
+    queue.park_for_busy_recipient(before_answer.id, None,
+        chrono::Utc::now() - chrono::Duration::seconds(1)).unwrap();
+    daemon.process_prompt_queue().await.unwrap();
+    assert!(daemon.finish_shutdown_writes(super::super::store_worker::global(), Duration::from_secs(10)));
+    let retired = queue.message_delivery_report(before_answer.id).unwrap().unwrap();
+    assert!(retired.delivered_at.is_none(), "a stale held blocker must never be transported");
+    assert!(!queue.peek_all(30).unwrap().iter().any(|row| row.id == before_answer.id),
+        "a held blocker must leave the pending queue once the task leaves Blocked: {retired:?}");
+    block(&mut task, "Awaiting operator decision");
     std::mem::swap(&mut daemon.app, &mut fixture.app);
 
     for rejected in [false, true] {
@@ -183,9 +226,6 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         assert!(!is_lifecycle_wake_source(&rows[0].source));
         assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
     }
-    let worker_core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
-    worker_core.set_agent_id_for_testing("merge-w".into());
-    let worker_service = crate::mcp::CasService::new(worker_core, None);
     let asked = worker_service.coordination(Parameters(serde_json::from_value(serde_json::json!({
         "action": "message", "target": "supervisor", "task_id": task.id, "blocker": true,
         "summary": "New operator question", "message": "The operator must now decide a different question."
@@ -198,7 +238,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert_eq!(prompts.len(), 1);
     let answered_again = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
         "action": "message", "target": "merge-w", "task_id": task.id,
-        "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
+        "kind": "answer", "summary": "New question relayed", "message": "I also relayed your new question; wait for that answer."
     })).unwrap())).await.unwrap();
     assert!(!answered_again.is_error.unwrap_or(false), "{answered_again:?}");
     let reply_id = queue.peek_all(30).unwrap().into_iter()

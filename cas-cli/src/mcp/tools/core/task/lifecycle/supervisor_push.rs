@@ -465,7 +465,7 @@ pub(crate) fn queue_rejected_merge_reopen_notice(
         (
             format!("cassy-merge-rejected:{verification_id}:worker:{worker_name}"),
             format!(
-                "Task {} is Open again: the verifier rejected the merged delivery ({verification_id}). Findings: {findings}\nRun task action=start id={}, land corrective commits on top of the merge, then close as usual.",
+                "Task {} is Open again: the verifier rejected the merged delivery ({verification_id}). Findings: {findings}\nStart task {} again, land corrective commits on top of the merge, then close as usual.",
                 task.id, task.id
             ),
             format!("Verifier rejected merged delivery: {}", task.id),

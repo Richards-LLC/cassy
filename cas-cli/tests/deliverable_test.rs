@@ -259,7 +259,7 @@ fn deliverable_finalize_drops_the_lowest_priority_pair_over_budget() {
 /// project's pairs, becomes a customer deliverable in that project's brand
 /// through `finalize` alone.
 #[test]
-fn feature_report_template_finalizes_in_the_project_brand() {
+fn deliverable_feature_report_template_finalizes_in_the_project_brand() {
     let template = cas::builtins::BUILTIN_SKILLS
         .iter()
         .find(|b| b.path == "skills/cas-feature-report/references/report-template.html")

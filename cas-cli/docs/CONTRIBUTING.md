@@ -1500,6 +1500,31 @@ settings alone do not enable capture. A configured target with broken runtime
 credentials returns a finding in `Err`; evidence gates must refuse that finding.
 `credential_file()` checks the pointer without reading its contents.
 
+Use `cas deliverable capture --task <task> --target <branch> --side both` for
+one bounded merge-base/head run. The default target comes from the task's
+work target; the explicit flag is useful for a disposable project. Capture
+clones immutable revisions (only Git objects are hardlinked), reuses delivered
+`node_modules`, leases ports, masks requested selectors and tears down servers
+on every exit. It writes `<task-artifacts>/qa/pairs/pairs.json` plus PNG/JPGs.
+A failed login or missing mask gives a finding without an unmasked fallback.
+
+The committed shot catalog is an array, for example
+`[{"id":"roster","path":"/drivers/","ready":"main","mask":[".email"]}]`.
+Optional `touches` globs select affected shots. Without a catalog, affected
+journey runs at each revision supply their last-stage screenshot, only when
+both assertion receipts pass. `journey-eval.sh --compare BASE HEAD` and
+`JOURNEY_CAPTURE_MASK` are opt-in; ordinary QA runs keep their existing path.
+The base uses only head's producer instrumentation, recorded by SHA, while its
+application, bundle and tests remain at the base revision.
+
+`cas deliverable pairs --task <task>` verifies complete pairs and their image
+digests. `--range BASE..HEAD` resolves tasks through commit provenance; commits
+without an unambiguous link stay explicitly unlinked. `--side before` or
+`--side after` supports deployed targets, preserving their deployment source.
+A missing side remains unpaired and is excluded from report evidence.
+Global `--json` returns the full receipt. Exit codes are 0 for success,
+1 for an evidence finding and 2 for invalid input or unavailable runtime.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

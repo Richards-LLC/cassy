@@ -11,7 +11,9 @@ use clap::{Args, Subcommand};
 
 use crate::cli::{Cli, JsonReportedFailure};
 use crate::deliverable::brand::{self, BrandRequest};
+use crate::deliverable::capture::{self, CaptureRequest, Side};
 use crate::deliverable::finalize::{self, Budget, FinalizeRequest, Paper};
+use crate::deliverable::pairs::{self, PairsRequest, Selection};
 use crate::deliverable::{Audience, Receipt, UsageError};
 use crate::ui::components::{Formatter, Verdict};
 use crate::ui::theme::ActiveTheme;
@@ -22,6 +24,43 @@ pub enum DeliverableCommands {
     Brand(BrandArgs),
     /// Turn a draft HTML into the branded, single-file deliverable and its PDFs
     Finalize(FinalizeArgs),
+    /// Capture real merge-base/head evidence in one bounded QA run
+    Capture(CaptureArgs),
+    /// List complete, verified pairs for a task or commit range
+    Pairs(PairsArgs),
+}
+
+#[derive(Args)]
+pub struct CaptureArgs {
+    #[arg(long)]
+    pub task: String,
+    /// Both revisions by default; collect one side explicitly for a deployment
+    #[arg(long, value_enum, default_value_t = Side::Both)]
+    pub side: Side,
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    /// Override the durable qa/pairs output directory
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+    /// Explicit integration target; otherwise read the task's declared target
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Project-relative shot catalog; otherwise use qa.capture.shots
+    #[arg(long)]
+    pub shots: Option<PathBuf>,
+}
+
+#[derive(Args)]
+pub struct PairsArgs {
+    #[arg(long, required_unless_present = "range", conflicts_with = "range")]
+    pub task: Option<String>,
+    /// BASE..HEAD, joined to tasks through recorded commit provenance
+    #[arg(long)]
+    pub range: Option<String>,
+    #[arg(long, default_value = ".")]
+    pub root: PathBuf,
+    #[arg(long, requires = "task")]
+    pub dir: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -83,7 +122,92 @@ pub fn execute(command: &DeliverableCommands, cli: &Cli) -> anyhow::Result<()> {
     match command {
         DeliverableCommands::Brand(args) => execute_brand(args, cli),
         DeliverableCommands::Finalize(args) => execute_finalize(args, cli),
+        DeliverableCommands::Capture(args) => execute_capture(args, cli),
+        DeliverableCommands::Pairs(args) => execute_pairs(args, cli),
     }
+}
+
+fn capture_root(root: &std::path::Path) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| UsageError("--root is not a readable project".into()))?;
+    let store = crate::store::CasContext::from_path(&root)
+        .map(|context| context.cas_root)
+        .unwrap_or_else(|_| root.join(".cas"));
+    Ok((root, store))
+}
+
+fn execute_capture(args: &CaptureArgs, cli: &Cli) -> anyhow::Result<()> {
+    let (root, cas_root) = capture_root(&args.root)?;
+    let receipt = capture::capture(&CaptureRequest {
+        root,
+        cas_root,
+        task: args.task.clone(),
+        side: args.side,
+        dir: args.dir.as_ref().map(std::path::absolute).transpose()?,
+        target: args.target.clone(),
+        shots: args.shots.clone(),
+    })?;
+    emit(cli, &receipt, |fmt| {
+        fmt.verdict(
+            if receipt.findings.is_empty() {
+                Verdict::Ok
+            } else {
+                Verdict::Error
+            },
+            if receipt.findings.is_empty() {
+                "capture collected"
+            } else {
+                "capture unavailable"
+            },
+            &format!(
+                "{} pair(s) · {} unpaired · {:.1} s",
+                receipt.pairs,
+                receipt.unpaired,
+                receipt.elapsed_ms as f64 / 1000.0
+            ),
+        )?;
+        fmt.field(
+            "  Evidence",
+            &format!("{}/qa/pairs/pairs.json", receipt.task_id),
+        )?;
+        fmt.field("  Full paths", "--json")
+    })
+}
+
+fn execute_pairs(args: &PairsArgs, cli: &Cli) -> anyhow::Result<()> {
+    let (root, cas_root) = capture_root(&args.root)?;
+    let selection = match (&args.task, &args.range) {
+        (Some(task), None) => Selection::Task(task.clone()),
+        (None, Some(range)) => Selection::Range(range.clone()),
+        _ => return Err(UsageError("choose --task or --range".into()).into()),
+    };
+    let receipt = pairs::pairs(&PairsRequest {
+        root,
+        cas_root,
+        selection,
+        dir: args.dir.as_ref().map(std::path::absolute).transpose()?,
+    })?;
+    emit(cli, &receipt, |fmt| {
+        fmt.verdict(
+            if receipt.findings.is_empty() {
+                Verdict::Ok
+            } else {
+                Verdict::Error
+            },
+            if receipt.findings.is_empty() {
+                "pairs verified"
+            } else {
+                "incomplete evidence"
+            },
+            &format!(
+                "{} pair(s) · {} unpaired",
+                receipt.pairs.len(),
+                receipt.unpaired.len()
+            ),
+        )?;
+        fmt.field("  Full paths", "--json")
+    })
 }
 
 fn execute_finalize(args: &FinalizeArgs, cli: &Cli) -> anyhow::Result<()> {

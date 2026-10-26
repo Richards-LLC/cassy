@@ -13421,11 +13421,14 @@ mod tests {
         cas_store::insert_epic_split(cas, &cas_store::EpicSplit {
             id: "split-ready".into(), epic_id: epic.id.clone(), local_agent_id: owner.id.clone(),
             peer_agent_id: "soundwave-peer".into(), peer_name: "peer".into(), peer_machine: "soundwave".into(),
-            direction: cas_store::SplitDirection::Outgoing, mine: vec![], theirs: vec!["cas-remote".into()],
+            direction: cas_store::SplitDirection::Outgoing, mine: vec![], theirs: vec!["cas-remote".into(), "cas-released".into()],
             state: cas_store::SplitState::Accepted, reason: None, message_id: None,
             expires_at: now + chrono::Duration::minutes(30), created_at: now, decided_at: Some(now),
             decided_by: Some("soundwave-peer".into()), cleanup_pending: false, expiry_notice_pending: false,
         }).unwrap();
+        // A released share no longer belongs to this epic, even if its old
+        // task row is absent locally. Readiness follows the live split projection.
+        cas_store::mark_epic_split_child_released(cas, "split-ready", "cas-released", now).unwrap();
         let queue = crate::store::open_prompt_queue_store(cas).unwrap();
         for id in ["cas-remote", "cas-extra"] {
             crate::cloud::epic_split::reconcile(cas, "owner-session", now).unwrap();

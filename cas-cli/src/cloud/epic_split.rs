@@ -702,7 +702,7 @@ fn reconcile_ready_epics(
     root: &Path,
     owners: &std::collections::HashMap<String, Agent>,
 ) -> Result<(), String> {
-    let splits = list_epic_splits(root).map_err(|error| error.to_string())?;
+    let splits = current_epic_splits(root)?;
     let tasks = crate::store::open_task_store_local(root).map_err(|error| error.to_string())?;
     for split in splits.iter().filter(|split| split.state == SplitState::Accepted) {
         let epic = match tasks.get(&split.epic_id) {
@@ -719,7 +719,7 @@ fn reconcile_ready_epics(
         }) else { continue };
         let children = tasks.get_subtasks(&epic.id).map_err(|error| error.to_string())?;
         // An incomplete sync is not evidence of completion. Include every
-        // child, even lanes outside this split, and require the frozen shares
+        // child, even lanes outside this split, and require the current shares
         // to be present before declaring readiness.
         if children.is_empty()
             || children.iter().any(|child| child.status != TaskStatus::Closed)

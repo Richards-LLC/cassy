@@ -28840,7 +28840,6 @@ mod merge_state_gate_tests {
         if owner_verification {
             env.set("CAS_AGENT_ROLE", "supervisor");
             env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
-            git(p, &["checkout", "-q", &epic_branch]);
         }
         let core = CasCore::with_daemon(cas_dir.clone(), None, None);
         core.set_agent_id_for_testing(actor.into());
@@ -28902,8 +28901,11 @@ mod merge_state_gate_tests {
                 .expect("owner close must mint the active proof boundary");
             assert_eq!(
                 dispatch.repository.as_ref().unwrap().head_commit,
-                rev_parse_local(p, "HEAD")
+                rev_parse_local(p, &format!("origin/{}", epic.branch.as_deref().unwrap())),
+                "epic dispatch must bind the published epic, never the unrelated supervisor HEAD"
             );
+            assert_ne!(dispatch.repository.as_ref().unwrap().head_commit, rev_parse_local(p, "HEAD"));
+            assert!(!dispatch.repository.as_ref().unwrap().anchor_commits.contains(&rev_parse_local(p, "HEAD")));
             let reject = serde_json::from_value(serde_json::json!({
                 "action": "add", "task_id": epic.id, "dispatch_id": dispatch.id,
                 "verification_type": "epic", "status": "rejected",
@@ -29250,6 +29252,10 @@ esac
     async fn epic_with_covering_assembly_proof_defers_build_proof_cas_74cb() {
         let run = run_epic_close_fixture_cas_7e91e(8, FAST_REQUIRING_CHECKER_CAS_74CB, |p| {
             let tip = unreleased_epic_lane_cas_74cb(p);
+            git(p, &["push", "-q", "origin", "epic/unreleased"]);
+            git(p, &["checkout", "-q", "main"]);
+            // A stale local epic ref must not displace its published delivery.
+            git(p, &["branch", "-f", "epic/unreleased", "main"]);
             let notes = format!(
                 "[2026-10-02 20:00] PROGRESS ASSEMBLY_PROOF: head={tip} result=PASS command=assembly-proof log=/tmp/assembly.log"
             );
@@ -40227,6 +40233,41 @@ mod zero_change_close_tests {
 
         // Run from the main checkout itself, there is nothing to compare.
         assert_eq!(stray_main_checkout_edit_note(main, "main"), None);
+    }
+
+    #[test]
+    fn epic_pre_close_accepts_only_published_default_branch_merge_cas_384d() {
+        let (dir, _origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "epic/released", "main"]);
+        let epic_tip = commit_file(p, "epic.rs", "feat(cas-384d): epic delivery");
+        git(p, &["push", "-q", "origin", "epic/released"]);
+        git(p, &["checkout", "-q", "main"]);
+        let unrelated = commit_file(p, "other.rs", "unrelated main work");
+        git(p, &["merge", "-q", "--no-ff", "epic/released", "-m", "release epic"]);
+        let release = head_sha(p);
+        git(p, &["push", "-q", "origin", "main"]);
+        git(p, &["checkout", "-q", "factory/test-worker"]);
+        let mut task = Task::new("cas-384d".into(), "released epic".into());
+        task.task_type = TaskType::Epic;
+        task.branch = Some("epic/released".into());
+        let mut context = declared_main_context(p);
+        context.target_branch = "epic/released".into();
+        let evidence = run_declared_pre_close_hook(&task, &context, None, Some(&release), false)
+            .expect("published default-branch merge carrying the epic is valid close evidence");
+        assert_eq!(evidence.task_tip.as_deref(), Some(release.as_str()));
+        assert!(git_commit_is_ancestor(p, &epic_tip, &release));
+        // Neither another main commit nor an unpublished merge is a release receipt.
+        assert!(run_declared_pre_close_hook(&task, &context, None, Some(&unrelated), false).is_err());
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["checkout", "-q", "-b", "other/topic"]);
+        commit_file(p, "topic.rs", "other topic");
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "other/topic", "-m", "unpublished merge"]);
+        let unpublished = head_sha(p);
+        assert!(run_declared_pre_close_hook(&task, &context, None, Some(&unpublished), false).is_err());
+        task.task_type = TaskType::Task;
+        assert!(run_declared_pre_close_hook(&task, &context, None, Some(&release), false).is_err());
     }
 
     #[test]

@@ -440,11 +440,69 @@ pub(crate) fn queue_cassy_merge_close_notice(
         (
             format!("cassy-merge-closed:{}:worker:{worker_name}", task.id),
             format!(
-                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it with your parked close reason. No re-close is needed.",
-                task.id
+                "Task {} is closed: Cassy merged it at {merge_commit} with {ci} and closed it {}. No re-close is needed.",
+                task.id,
+                if task.deliverables.parked_close_reason.is_some() {
+                    "with your parked close reason"
+                } else {
+                    "on its approved verdict"
+                }
             ),
             format!("Merged and closed by Cassy: {}", task.id),
         )
+    })
+}
+
+/// cas-46ea: tell the assigned worker, once per verdict, that a rejected
+/// verdict returned its merged delivery, with the findings to fix.
+pub(crate) fn queue_rejected_merge_reopen_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    verification_id: &str,
+    findings: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-merge-rejected:{verification_id}:worker:{worker_name}"),
+            format!(
+                "Task {} is Open again: the verifier rejected the merged delivery ({verification_id}). Findings: {findings}\nStart task {} again, land corrective commits on top of the merge, then close as usual.",
+                task.id, task.id
+            ),
+            format!("Verifier rejected merged delivery: {}", task.id),
+        )
+    })
+}
+
+/// cas-46ea: one supervisor receipt when Cassy's verdict close overrode a
+/// worker hold that was not waiting on the verification.
+pub(crate) fn queue_cassy_close_over_hold_receipt(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    hold_reason: &str,
+) -> Result<i64, String> {
+    let queue = crate::store::open_prompt_queue_store(cas_root)
+        .map_err(|error| format!("supervisor receipt queue open failed: {error}"))?;
+    let factory_session = std::env::var("CAS_FACTORY_SESSION")
+        .ok()
+        .filter(|session| !session.trim().is_empty());
+    let result = queue
+        .enqueue_idempotent(
+            "cassy",
+            "supervisor",
+            &format!(
+                "Cassy closed merged task {} on its approved verdict over a worker hold: {hold_reason}",
+                task.id
+            ),
+            factory_session.as_deref(),
+            Some(&format!("Closed over worker hold: {}", task.id)),
+            Some(cas_store::NotificationPriority::Normal),
+            &format!("cassy-close-over-hold:{}", task.id),
+            Some(&cas_store::QueueOrigin::Daemon),
+        )
+        .map_err(|error| format!("supervisor receipt enqueue failed: {error}"))?;
+    Ok(match result {
+        cas_store::EnqueueIdempotentResult::Created(id)
+        | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
     })
 }
 

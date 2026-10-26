@@ -2201,6 +2201,9 @@ pub fn request_changes_for_parked_delivery(
     deliverables.decline_factory_branch_anchor();
     deliverables.parked_branch = None;
     deliverables.merge_conflicted = false;
+    // cas-46ea: the declined delivery's merge no longer authorizes a close.
+    deliverables.green_merge_commit = None;
+    deliverables.merge_ci_admission = None;
     deliverables.review_envelope = None;
     // A corrective close cycle must not keep watching the prior delivery PR;
     // the next parked tip may use the same factory branch with a new PR.

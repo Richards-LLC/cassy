@@ -6,6 +6,7 @@ pub(crate) use worktree_ops::check_runs_still_running;
 pub(crate) use worktree_ops::delivery_ci_pending;
 pub(crate) use worktree_ops::delivery_tip_ci_conclusion;
 pub(crate) use worktree_ops::epic_tip_ci_proof;
+pub(crate) use worktree_ops::task_delivery_branch_matches;
 
 /// Guidance shared by the public coordination gate and the underlying
 /// worktree operation. System A's opt-in configuration is distinct from the

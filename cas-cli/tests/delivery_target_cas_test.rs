@@ -531,6 +531,10 @@ async fn cas8d38_worktree_merge_records_observed_work_target_delivery() {
 async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
     // (row, CI conclusion, verdict recorded after merge, Cassy closes)
     for (row, conclusion, verdict, closes) in [
+        // cas-46ea: the worker tries to close after the merge and blocks.
+        ("worker-blocked", "success", Some("approved"), true),
+        // cas-46ea: merged from a pushed lane tip without a park.
+        ("unparked", "success", Some("approved"), true),
         ("green-approved", "success", Some("approved"), true),
         ("green-rejected", "success", Some("rejected"), false),
         ("advisory-no-checks", "no-checks", Some("approved"), true),
@@ -620,9 +624,12 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             registration.metadata.insert("clone_path".into(), worker_path.display().to_string());
             agents.update(&registration).unwrap();
         }
+        if row == "unparked" {
+            task.status = TaskStatus::Open;
+        }
         task_store.add(&task).unwrap();
 
-        if row == "fresh-branch" {
+        if row == "fresh-branch" || row == "unparked" {
             env.set("CAS_AGENT_ROLE", "worker");
             delivery_service(&cas_root, &worker_id).task(Parameters(task_req(serde_json::json!({
                 "action": "start", "id": task.id,
@@ -639,6 +646,9 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         run_git(&["commit", "-m", &subject], &worker_path);
 
         let mut delivery_branch = format!("factory/{worker}");
+        if row == "unparked" {
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+        }
         if row == "fresh-branch" {
             let original = task_store.get(&task.id).unwrap();
             let original_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
@@ -693,16 +703,17 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         // The worker's own close parks the delivery and keeps its reason.
         let parked_reason = format!("PASS: delivered.txt for {row}");
         env.set("CAS_AGENT_ROLE", "worker");
-        let park = get_text(
+        let park = if row == "unparked" { String::new() } else { get_text(
             &delivery_service(&cas_root, &worker_id)
                 .task(Parameters(task_req(serde_json::json!({
                     "action": "close", "id": task.id, "reason": parked_reason,
                 }))))
                 .await
                 .expect("worker close"),
-        );
+        ) };
         let parked = task_store.get(&task.id).unwrap();
-        assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{row}: {park}");
+        let parked_status = if row == "unparked" { TaskStatus::InProgress } else { TaskStatus::AwaitingMerge };
+        assert_eq!(parked.status, parked_status, "{row}: {park}");
         if row == "fresh-branch" {
             assert!(park.contains("MERGE REQUIRED"), "{park}");
             assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(delivery_branch.as_str()));
@@ -751,7 +762,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
             // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
             assert!(
-                notes.contains("waiting on a gate") && notes.contains("awaiting_merge"),
+                notes.contains("waiting on its verification dispatch") && notes.contains("awaiting_merge"),
                 "{row}: {notes}"
             );
             answer
@@ -760,6 +771,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         };
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
+        // cas-46ea: Cassy parks an unparked pushed lane tip at its merge.
         assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
         let admission = match conclusion {
             "success" => "green",
@@ -787,6 +799,28 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             let dispatch = cas_store::get_latest_verification_dispatch(&cas_root, &task.id)
                 .unwrap()
                 .unwrap_or_else(|| panic!("{row}: Cassy's close dispatches verification: {merged}"));
+            assert_eq!(
+                dispatch.repository.as_ref().map(|proof| proof.head_commit.as_str()),
+                Some(merge_sha.as_str()),
+                "{row}: Cassy binds the dispatch to the merge commit"
+            );
+            if row == "worker-blocked" {
+                // The relay this task removes: a worker close after the merge
+                // is refused on the dispatch and the worker blocks on it.
+                env.set("CAS_AGENT_ROLE", "worker");
+                let worker_service = delivery_service(&cas_root, &worker_id);
+                let refused = worker_service.task(Parameters(task_req(serde_json::json!({
+                    "action": "close", "id": task.id, "commit_receipt": merge_sha, "reason": "merged task",
+                })))).await;
+                assert!(
+                    task_store.get(&task.id).unwrap().status != TaskStatus::Closed,
+                    "{row}: the close waits on the verdict: {refused:?}"
+                );
+                worker_service.task(Parameters(task_req(serde_json::json!({
+                    "action": "update", "id": task.id, "status": "blocked",
+                })))).await.expect("worker blocks on the dispatch");
+                env.set("CAS_AGENT_ROLE", "supervisor");
+            }
             let recorded = get_text(
                 &supervisor
                     .verification(Parameters(verification_req(serde_json::json!({
@@ -800,8 +834,18 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             let task = task_store.get(&task.id).unwrap();
             assert_eq!(task.status == TaskStatus::Closed, closes, "{row}: {recorded}");
             if closes {
-                assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
+                if row == "unparked" {
+                    assert!(task.close_reason.as_deref().is_some_and(|reason| reason.contains(&merge_sha)), "{row}: {:?}", task.close_reason);
+                } else {
+                    assert_eq!(task.close_reason.as_deref(), Some(parked_reason.as_str()));
+                }
                 assert_eq!(task.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()));
+                assert_eq!(task.assignee.as_deref(), Some(worker.as_str()), "{row}: attributed to the assignee");
+            } else if verdict == "rejected" {
+                // cas-46ea: a failed verdict hands the task back with findings.
+                assert_eq!(task.status, TaskStatus::Open, "{row}: {recorded}");
+                assert_eq!(task.assignee.as_deref(), Some(worker.as_str()));
+                assert!(task.notes.contains(&format!("{verdict} {row}")), "{row}: {}", task.notes);
             }
         } else {
             assert_eq!(after_merge.deliverables.green_merge_commit.as_deref(), Some(merge_sha.as_str()), "{row}: {merged}");
@@ -823,9 +867,16 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             "{row}: the worker hears exactly once, only when Cassy closed: {worker_prompts:?}"
         );
         assert!(
-            !closes || !worker_prompts.iter().any(|p| p.contains("Retry task close")),
-            "{row}: no worker close retry once Cassy closed: {worker_prompts:?}"
+            !worker_prompts.iter().any(|p| p.contains("Retry task close")),
+            "{row}: Cassy closes or reopens; the worker never re-closes: {worker_prompts:?}"
         );
+        if verdict == Some("rejected") {
+            assert_eq!(
+                worker_prompts.iter().filter(|p| p.contains(&format!("rejected {row}"))).count(),
+                1,
+                "{row}: the worker hears the findings once: {worker_prompts:?}"
+            );
+        }
         if closes && admission == "advisory" {
             assert!(worker_prompts.iter().any(|p| p.contains("CI advisory (unconfirmed)")), "{worker_prompts:?}");
             assert!(!worker_prompts.iter().any(|p| p.contains("with green CI")), "{worker_prompts:?}");

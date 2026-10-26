@@ -1416,7 +1416,9 @@ pub(crate) fn verification_dispatch_envelope(
          Task {task} is ready to close and is parked on verification dispatch {dispatch}, \
          delivered by {worker}.\n\
          {reason}\
-         Hand the verifier dispatch_id={dispatch}. Record with verification action=add task_id={task} dispatch_id={dispatch}, then close {task}.\n\
+         Hand the verifier dispatch_id={dispatch}. Record with verification action=add task_id={task} dispatch_id={dispatch}. \
+         Do not message {worker} to close: a PASS closes a merged delivery (otherwise it queues the worker's close retry), \
+         and a FAIL on a merged delivery returns it to {worker} with the findings.\n\
          {VERIFICATION_DISPATCH_ENVELOPE_CLOSE}",
         dispatch = xml_attribute_value(dispatch_id),
         task = xml_attribute_value(task_id),

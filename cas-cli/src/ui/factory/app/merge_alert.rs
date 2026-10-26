@@ -456,6 +456,7 @@ pub(super) fn read_worker_wait(
 
 /// Runs off the loop. No result means defer; it never consumes the dedupe key.
 fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&WorkerWait>, observed_ci: &mut &'static str) -> Option<Ready> {
+    *observed_ci = "unknown";
     if let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event {
         let summary = data.in_progress_tasks.iter().chain(&data.ready_tasks)
             .find(|task| task.id == active.task_id)?;
@@ -470,7 +471,6 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
     };
     let tip = evidence.factory_tip.clone();
     let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
-    *observed_ci = ci;
     // cas-e48d: the target can gain this delivery while GitHub answers the
     // CI probe. Refresh containment too, so a completed-CI relay cannot quote
     // the pre-CI target. This remains one bounded exact-target check on the
@@ -488,7 +488,9 @@ fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path, known: Option<&
                 &format!("origin/{}", evidence.factory_branch),
             )
         })?;
-    (tip == evidence.factory_tip && tip == current).then_some(Ready { evidence, tip, ci, worker: None })
+    if tip != evidence.factory_tip || tip != current { return None; }
+    *observed_ci = ci;
+    Some(Ready { evidence, tip, ci, worker: None })
 }
 
 /// The same worker-owned pushed delivery as worktree_merge, with the stricter

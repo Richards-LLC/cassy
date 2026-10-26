@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.82.0] - 2026-10-26
+
 ### Added — every report, page and note wears the target project's DESIGN.md
 
 - One rule, `design-spec/references/design-md-first.md`, now governs every

@@ -147,8 +147,11 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     for id in [before_answer.id, idle_id] {
         let report = queue.message_delivery_report(id).unwrap().unwrap();
         assert!(report.delivered_at.is_none());
-        assert!(report.pending_detail.is_some());
+        // pin: the report distinguishes an intentionally withdrawn wake from failed delivery.
+        assert_eq!(report.pending_detail.as_deref(), Some("answered blocker; readable without another supervisor wake"));
     }
+    assert_eq!(queue.peek_all(30).unwrap().into_iter().find(|row| row.id == before_answer.id).unwrap().prompt,
+        before_answer.prompt);
     std::mem::swap(&mut daemon.app, &mut fixture.app);
 
     for rejected in [false, true] {

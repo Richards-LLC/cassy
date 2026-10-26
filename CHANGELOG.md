@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.80.0] - 2026-10-26
+
 ### Added
 
 - **Running daemon's Violet consumer in status and doctor** — Each factory daemon records a consumer receipt for its session when push-wake starts or is skipped: the claim consumer id, its PID and start time, its build, its compiled capabilities and `slack.wake_enabled` as read at start. `cas factory status` (including `--json`) and `cas doctor` trust a receipt as the running daemon's evidence only when its PID and start time match the session's live daemon, and report a running daemon without a matching receipt as unknown (doctor warns) instead of using the build of the CLI on PATH. A `slack.wake_enabled` change made after start is flagged as needing a factory restart, the report is labelled local evidence rather than a Cloud attestation, and a cleanly stopped daemon removes its receipt.

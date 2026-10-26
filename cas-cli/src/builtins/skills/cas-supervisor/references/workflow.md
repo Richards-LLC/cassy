@@ -311,7 +311,7 @@ end-of-lane, once the worker is done with that worktree.
    ```
 
    The resolved task and target branch are echoed back — read them before moving on. Push if remote tracking applies.
-4. After a green merge and an approved verdict Cassy closes the task and tells the worker once; message the worker to re-close (`task action=close id=<task-id>`) only when the merge receipt says a gate still holds.
+4. The merge starts the close: Cassy parks a pushed, unparked lane tip itself and opens the verification dispatch at the merge commit. Run the verifier on that dispatch and send the worker nothing. PASS closes the task with the merge receipt and tells the worker once. FAIL returns it Open to the same worker with the findings (`request_changes`). Message the worker only when the merge or verdict receipt names another gate that still holds.
 5. Then clear context / hand the worker their next task. Do **not** poll for merge state.
 
 If the merge is rejected on review rather than landed, the sanctioned exit from

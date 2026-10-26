@@ -346,8 +346,14 @@ impl SqliteTaskStore {
                 persisted_deliverables.parked_branch = None;
                 persisted_deliverables.merge_conflicted = false;
             }
-            let leaving_park = prev_status.as_deref() == Some("awaiting_merge")
-                && task.status != TaskStatus::Closed;
+            // cas-46ea: a hold on a merged delivery (awaiting_merge ->
+            // blocked) keeps its merge fact for the verdict close; leaving
+            // the cycle from the park or from that hold clears it.
+            let leaving_park = matches!(prev_status.as_deref(), Some("awaiting_merge" | "blocked"))
+                && !matches!(
+                    task.status,
+                    TaskStatus::Closed | TaskStatus::Blocked | TaskStatus::AwaitingMerge
+                );
             if reopening_terminal || leaving_park {
                 // cas-eda0: both describe one park/merge cycle; a new cycle
                 // must re-park and re-merge before Cassy may close for it.

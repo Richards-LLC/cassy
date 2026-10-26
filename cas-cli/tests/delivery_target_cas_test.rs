@@ -646,6 +646,9 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         run_git(&["commit", "-m", &subject], &worker_path);
 
         let mut delivery_branch = format!("factory/{worker}");
+        if row == "unparked" {
+            run_git(&["push", "origin", &delivery_branch], &worker_path);
+        }
         if row == "fresh-branch" {
             let original = task_store.get(&task.id).unwrap();
             let original_tip = git_stdout(&worker_path, &["rev-parse", "HEAD"]);
@@ -759,7 +762,7 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             assert!(notes.contains("POST_COMMIT_OUTCOME"), "{row}: the close's result is kept: {notes}");
             // pin: the note carries the close's own outcome and the task's status (cas-3937 review).
             assert!(
-                notes.contains("waiting on a gate") && notes.contains("awaiting_merge"),
+                notes.contains("waiting on its verification dispatch") && notes.contains("awaiting_merge"),
                 "{row}: {notes}"
             );
             answer
@@ -768,7 +771,8 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
         };
         let merge_sha = git_stdout(&repo.root, &["rev-parse", "main"]);
         let after_merge = task_store.get(&task.id).unwrap();
-        assert_eq!(after_merge.status, parked_status, "{row}: {merged}");
+        // cas-46ea: Cassy parks an unparked pushed lane tip at its merge.
+        assert_eq!(after_merge.status, TaskStatus::AwaitingMerge, "{row}: {merged}");
         let admission = match conclusion {
             "success" => "green",
             "failure" => "override",

@@ -11,6 +11,45 @@ use crate::mcp::tools::core::imports::*;
 
 use super::close_ops::{ALREADY_CLOSED_PREFIX, as_cassy_merge_close};
 
+/// The delivery a `worktree_merge` just landed: the repository, the source
+/// branch it merged and the exact source commit it merged.
+pub(crate) struct MergedLane<'a> {
+    pub repo: &'a std::path::Path,
+    pub branch: &'a str,
+    pub tip: &'a str,
+}
+
+/// cas-46ea: the one definition of a pushed delivery tip, shared with
+/// merge-on-green (cas-20d3). `tip` qualifies when it is on the assignee's own
+/// delivery branch for this task and origin already holds it, so the merge
+/// carries the worker's pushed work rather than a supervisor-authored commit.
+pub(crate) fn pushed_delivery_tip(
+    repo: &std::path::Path,
+    task: &Task,
+    branch: &str,
+    tip: &str,
+) -> Result<(), String> {
+    if task.task_type == TaskType::Epic {
+        return Err("an epic closes through epic verification".to_string());
+    }
+    let Some(worker) = task.assignee.as_deref() else {
+        return Err("the task has no assignee".to_string());
+    };
+    let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+    if !crate::mcp::tools::core::workflow::task_delivery_branch_matches(
+        branch, worker, &task.id,
+    ) {
+        return Err(format!("{branch} is not {worker}'s delivery branch for {}", task.id));
+    }
+    let Some(pushed) = super::close_ops::resolve_branch_sha(repo, &format!("refs/remotes/origin/{branch}")) else {
+        return Err(format!("origin/{branch} does not exist"));
+    };
+    if pushed != tip && !super::close_ops::git_commit_is_ancestor(repo, tip, &pushed) {
+        return Err(format!("{tip} is not pushed to origin/{branch}"));
+    }
+    Ok(())
+}
+
 /// What Cassy's own post-merge close did.
 pub(crate) enum CassyMergeClose {
     /// The task does not carry a published merge Cassy may close for.
@@ -40,6 +79,12 @@ impl CassyMergeClose {
                 format!("\nCassy closed task {task_id} after the published merge; {notice}.")
             }
             Self::AlreadyClosed => format!("\nTask {task_id} was already closed."),
+            // cas-46ea: the verification gate is Cassy's own next hop, not a
+            // worker turn; say so where the supervisor reads the merge.
+            Self::Held(text) if text.contains("VERIFICATION REQUIRED") => format!(
+                "\nCassy close of {task_id} is waiting on its verification dispatch. Run the verifier on it; \
+                 a PASS closes {task_id} and a FAIL returns it to the worker. Do not message the worker.\n{text}"
+            ),
             Self::Held(text) => format!("\nCassy close of {task_id} is waiting on a gate:\n{text}"),
         }
     }
@@ -54,10 +99,17 @@ impl CasCore {
         task_id: &str,
         merge_commit: &str,
         admission: cas_types::MergeCiAdmission,
+        lane: Option<MergedLane<'_>>,
     ) -> CassyMergeClose {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
+        if admission != cas_types::MergeCiAdmission::Override
+            && let Some(lane) = lane
+            && let Err(error) = self.park_merged_lane(store.as_ref(), task_id, merge_commit, &lane)
+        {
+            return CassyMergeClose::Held(error);
+        }
         // One conditional field write, never a read-modify-write of the row:
         // a worker close landing first must stay closed.
         match store.record_merge_admission(task_id, merge_commit, admission) {
@@ -89,13 +141,76 @@ impl CasCore {
         }
     }
 
+    /// cas-46ea: a supervisor may merge a pushed lane tip before its worker
+    /// parks (merge on green). Record the park the worker would have made, at
+    /// the exact merged tip, so the post-merge close below applies unchanged.
+    /// A task that is not InProgress/Blocked, or whose merged commit is not
+    /// its assignee's pushed delivery tip, is left as it was.
+    fn park_merged_lane(
+        &self,
+        store: &dyn cas_store::TaskStore,
+        task_id: &str,
+        merge_commit: &str,
+        lane: &MergedLane<'_>,
+    ) -> Result<(), String> {
+        let Ok(task) = store.get(task_id) else {
+            return Ok(());
+        };
+        if !matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+            || task.deliverables.merge_conflicted
+            || pushed_delivery_tip(lane.repo, &task, lane.branch, lane.tip).is_err()
+            || !super::close_ops::git_commit_is_ancestor(lane.repo, lane.tip, merge_commit)
+        {
+            return Ok(());
+        }
+        let mut parked = task.clone();
+        parked.status = TaskStatus::AwaitingMerge;
+        if parked.deliverables.factory_branch_anchor.as_deref() != Some(lane.tip) {
+            parked.deliverables.retain_factory_branch_anchor_as_history();
+            parked.deliverables.factory_branch_anchor = Some(lane.tip.to_string());
+        }
+        parked.deliverables.parked_branch =
+            Some(lane.branch.strip_prefix("origin/").unwrap_or(lane.branch).to_string());
+        parked.pending_verification = false;
+        parked.pending_worktree_merge = false;
+        let note = format!(
+            "[{}] Cassy parked this task at its pushed delivery tip {} on {} after merge {merge_commit}; no worker re-close is needed.",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+            lane.tip,
+            lane.branch,
+        );
+        parked.notes = if parked.notes.is_empty() { note } else { format!("{}\n\n{note}", parked.notes) };
+        parked.updated_at = chrono::Utc::now();
+        store
+            .update_if_current(&parked, &task)
+            .map_err(|error| format!("the merged lane could not be parked ({error}); retry task close."))?;
+        if let Ok(agents) = self.open_agent_store()
+            && let Err(error) = agents.release_lease_for_task(task_id, "Merged by supervisor: parked by Cassy")
+        {
+            tracing::warn!(%task_id, %error, "lease release after Cassy lane park failed");
+        }
+        Ok(())
+    }
+
     /// Close a delivery that carries a recorded green merge, with the parked
     /// close reason and the task's own delivered commit as receipt.
     pub(crate) async fn close_green_merged_delivery(&self, task_id: &str) -> CassyMergeClose {
+        self.close_green_merged_delivery_after_verdict(task_id, None).await
+    }
+
+    /// cas-46ea: as above, after `verification_id` approved the merged
+    /// delivery. A worker hold no longer stops the close: a hold set while
+    /// the verification ran was waiting on this verdict; any other hold is
+    /// recorded on the task and reported to the supervisor once.
+    pub(crate) async fn close_green_merged_delivery_after_verdict(
+        &self,
+        task_id: &str,
+        verification_id: Option<&str>,
+    ) -> CassyMergeClose {
         let Ok(store) = self.open_task_store() else {
             return CassyMergeClose::NotEligible;
         };
-        let Ok(task) = store.get(task_id) else {
+        let Ok(mut task) = store.get(task_id) else {
             return CassyMergeClose::NotEligible;
         };
         if task.status == TaskStatus::Closed {
@@ -106,6 +221,12 @@ impl CasCore {
         };
         if task.deliverables.effective_merge_ci_admission() == cas_types::MergeCiAdmission::Override {
             return CassyMergeClose::NotEligible;
+        }
+        if let Some(verification_id) = verification_id {
+            match self.release_hold_for_verdict(store.as_ref(), &task, &merge_commit, verification_id) {
+                Ok(released) => task = released,
+                Err(error) => return CassyMergeClose::Held(error),
+            }
         }
         let reason = task.deliverables.parked_close_reason.clone().unwrap_or_else(|| {
             format!("Merged at {merge_commit}; closed by Cassy after the merge.")
@@ -152,5 +273,111 @@ impl CasCore {
             Err(error) => format!("worker notice failed: {error}"),
         };
         CassyMergeClose::Closed { notice }
+    }
+
+    /// Return a Blocked merged delivery to AwaitingMerge for its verdict
+    /// close, recording the merge and verdict that authorize it.
+    fn release_hold_for_verdict(
+        &self,
+        store: &dyn cas_store::TaskStore,
+        task: &Task,
+        merge_commit: &str,
+        verification_id: &str,
+    ) -> Result<Task, String> {
+        let hold = super::super::block_hold::read(store, &task.id).unwrap_or(None);
+        let dispatch_requested = cas_store::get_latest_verification_dispatch(&self.cas_root, &task.id)
+            .ok()
+            .flatten()
+            .map(|dispatch| dispatch.requested_at);
+        let foreign_hold = hold.as_ref().filter(|hold| {
+            dispatch_requested.is_none_or(|requested| hold.when < requested)
+        });
+        let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M");
+        let mut note = format!(
+            "[{stamp}] Cassy close authority: merge {merge_commit} + verdict {verification_id}."
+        );
+        if let Some(hold) = foreign_hold {
+            note.push_str(&format!(
+                " Closed over a worker hold set by {} at {}: {}",
+                hold.who,
+                hold.when.format("%Y-%m-%d %H:%M"),
+                hold.reason
+            ));
+        }
+        if task.status == TaskStatus::Blocked {
+            let mut parked = task.clone();
+            parked.status = TaskStatus::AwaitingMerge;
+            parked.updated_at = chrono::Utc::now();
+            store
+                .update_if_current(&parked, task)
+                .map_err(|error| format!("the blocked delivery could not be released for close ({error}); retry task close."))?;
+        }
+        if hold.is_some() {
+            store
+                .patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": null}))
+                .map_err(|error| format!("the worker hold could not be cleared ({error}); retry task close."))?;
+        }
+        store
+            .append_trusted_note(&task.id, &note)
+            .map_err(|error| format!("the close authority note could not be recorded ({error}); retry task close."))?;
+        if let Some(hold) = foreign_hold
+            && let Err(error) = super::supervisor_push::queue_cassy_close_over_hold_receipt(
+                &self.cas_root,
+                task,
+                &hold.reason,
+            )
+        {
+            tracing::warn!(task_id = %task.id, %error, "close-over-hold receipt not queued");
+        }
+        store.get(&task.id).map_err(|error| error.to_string())
+    }
+
+    /// cas-46ea: a rejected verdict on a merged delivery returns the task to
+    /// its worker with the findings, exactly as `request_changes` would.
+    pub(crate) fn return_rejected_merged_delivery(
+        &self,
+        task_id: &str,
+        verification: &Verification,
+    ) -> String {
+        let mut findings = verification.summary.trim().to_string();
+        for issue in verification.issues.iter().filter(|issue| issue.is_blocking()) {
+            let location = issue
+                .line
+                .map(|line| format!("{}:{line}", issue.file))
+                .unwrap_or_else(|| issue.file.clone());
+            findings.push_str(&format!("; {location}: {}", issue.problem.trim()));
+        }
+        let findings: String = findings.chars().take(900).collect();
+        let reason = format!(
+            "Verifier rejected the merged delivery ({}): {findings}",
+            verification.id
+        );
+        let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".to_string());
+        if let Err(error) =
+            cas_store::request_changes_for_parked_delivery(&self.cas_root, task_id, &actor, &reason)
+        {
+            return format!(
+                "\nCassy could not return task {task_id} to its worker ({error}); run task action=request_changes id={task_id}."
+            );
+        }
+        let notice = self
+            .open_task_store()
+            .ok()
+            .and_then(|store| store.get(task_id).ok())
+            .map(|task| {
+                super::supervisor_push::queue_rejected_merge_reopen_notice(
+                    &self.cas_root,
+                    &task,
+                    &verification.id,
+                    &findings,
+                )
+            });
+        let notice = match notice {
+            Some(Ok(Some(prompt_id))) => format!("worker notified (prompt {prompt_id})"),
+            Some(Ok(None)) => "no live assigned worker to notify".to_string(),
+            Some(Err(error)) => format!("worker notice failed: {error}"),
+            None => "worker notice skipped: task unreadable".to_string(),
+        };
+        format!("\nCassy returned task {task_id} to its worker with the findings; {notice}.")
     }
 }

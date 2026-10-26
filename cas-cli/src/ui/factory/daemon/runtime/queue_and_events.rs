@@ -12291,10 +12291,6 @@ struct ReminderScanInput {
     ci_wakes: Vec<super::ci_watch::CiWake>,
 }
 
-/// One reminder pass (`ReminderScan`): expire stale reminders, fire due time
-/// reminders, the external and CI conditions observed true, and event
-/// reminders matching the tick's director events. Store reads and writes, so
-/// it runs as a job on the write lane, never on the loop.
 /// Reconcile task waits from persisted state, including remote closes and
 /// events predating daemon startup. Notify before allowing TTL expiry: failed
 /// notice writes keep the reminder pending for the next pass.
@@ -12359,6 +12355,10 @@ fn reconcile_task_reminders(scan: &ReminderScanInput) -> Result<(), crate::error
     Ok(())
 }
 
+/// One reminder pass (`ReminderScan`): expire stale reminders, fire due time
+/// reminders, the external and CI conditions observed true, and event
+/// reminders matching the tick's director events. Store reads and writes, so
+/// it runs as a job on the write lane, never on the loop.
 fn run_reminder_scan(scan: ReminderScanInput) {
     let safe_to_expire = match reconcile_task_reminders(&scan) {
         Ok(()) => true,

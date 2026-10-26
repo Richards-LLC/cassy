@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- **Terminal QA captures on macOS/BSD** — Fix a 3.80.0 regression in `terminal-qa`: strip one exact leading `^D` plus two backspaces emitted by BSD `script` from TTY captures. Captures with no visible output, including blank lines or escape-only output, fail the empty-capture check again, and short printed lines no longer gain stray characters.
+
 ## [3.80.0] - 2026-10-26
 
 ### Added

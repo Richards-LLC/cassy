@@ -319,6 +319,8 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
             let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
             assert!(prompts.iter().all(|prompt| prompt.merge_alert.is_none()));
         }
+        // A settled failure is revisited on the slow same-SHA CI rerun cadence.
+        f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
         f.ci(Some("success"));
         let (_, mut prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(prompts.len(), 1, "{status:?}");

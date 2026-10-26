@@ -229,6 +229,8 @@ pub(crate) struct DeliveryRequest {
     /// against (cas-3b16: read here, not on the loop).
     session: Option<String>,
     merge_events: Vec<DirectorEvent>,
+    merge_probes: super::merge_alert::ProbeCache,
+    probe_now: chrono::DateTime<chrono::Utc>,
     blocked_tasks: Vec<String>,
     supervisor: String,
 }
@@ -365,19 +367,17 @@ impl DeliveryRequest {
             (Some(session), Some(_)) => Some(session_progress_named(session)),
             _ => None,
         };
-        let merge_alerts = data.as_ref().ok().map(|fresh| {
+        let (mut merge_alerts, mut worker_waits) = (HashMap::new(), HashMap::new());
+        if let Ok(fresh) = &data {
             let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
-            self.merge_events.iter().filter_map(|event| {
-                let ready = super::merge_alert::read(event, fresh, repo)?;
-                Some((ready.evidence.task_id.clone(), ready))
-            }).collect()
-        }).unwrap_or_default();
-        let worker_waits = data.as_ref().ok().map(|fresh| {
-            let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
-            self.merge_events.iter().filter_map(|event| {
-                super::merge_alert::read_worker_wait(event, fresh, &self.cas_dir, repo)
-            }).collect()
-        }).unwrap_or_default();
+            for event in &self.merge_events {
+                let (ready, wait) = super::merge_alert::read_delivery(
+                    &self.merge_probes, event, fresh, repo, self.probe_now,
+                );
+                if let Some(ready) = ready { merge_alerts.insert(ready.evidence.task_id.clone(), ready); }
+                if let Some((worker, wait)) = wait { worker_waits.insert(worker, wait); }
+            }
+        }
         let assignment = self.stall.as_ref().and_then(|stall|
             data.as_ref().ok().and_then(|fresh| stall.assignment_request(Some(fresh))))
             .map(|request| request.read());
@@ -734,6 +734,8 @@ impl FactoryApp {
             stall,
             session,
             merge_events: events.iter().filter(|event| super::merge_alert::needs_ci_read(event)).cloned().collect(),
+            merge_probes: std::sync::Arc::clone(&self.merge_alert_retries.probes),
+            probe_now: self.merge_alert_retries.clock(),
         }
     }
 

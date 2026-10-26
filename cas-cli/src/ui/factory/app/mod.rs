@@ -1810,6 +1810,7 @@ impl FactoryApp {
                 || self.event_detector.is_worker_held(worker)
             { continue; }
             if let Some(prompt) = merge_alert::ready_prompt(&ready, &unfiltered_data, &self.supervisor_name, self.supervisor_cli)
+                && merge_alert::admit_ready(&self.cas_dir, &ready)
                 && self.event_detector.merge_alert_should_emit(task_id, &ready.tip, ready.ci)
             {
                 prompts.push(prompt);
@@ -1884,6 +1885,9 @@ impl FactoryApp {
                 }
                 if let Some(ready) = ready {
                     prompt.merge_alert = Some(ready.evidence.clone());
+                    if ready.ci == "success" && !merge_alert::admit_ready(&self.cas_dir, &ready) {
+                        continue;
+                    }
                     if !self.event_detector.merge_alert_should_emit(
                         &ready.evidence.task_id, &ready.tip, ready.ci,
                     ) { continue; }

@@ -862,7 +862,7 @@ fn is_merge_required_idle(task: &ActiveLeaseSummary) -> bool {
 /// count was computed — if a supervisor's own `epic_status` shows a
 /// different SHA, the branch has moved and this alert may already be
 /// out of date again.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MergeAlertEvidence {
     pub task_id: String,
     pub factory_branch: String,

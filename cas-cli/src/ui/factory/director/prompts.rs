@@ -1259,9 +1259,9 @@ pub fn check_merge_alert_freshness(
 /// Returns `Stale` (retract the row) when:
 /// - the task is no longer tracked in `data.in_progress_tasks` at all
 ///   (closed, reset, or otherwise resolved since the alert was written), or
-/// - the task is tracked but its status has moved off `AwaitingMerge`
-///   (re-closed, reopened, reassigned), or
-/// - the task is still `AwaitingMerge` but its factory branch now carries
+/// - the task was reopened for changes and is no longer an active, blocked,
+///   or parked delivery, or
+/// - the task's factory branch now carries
 ///   zero unmerged commits against the live epic tip (the merge landed).
 ///
 /// Returns `NotApplicable` (preserve the row; caller cannot verify either
@@ -7213,7 +7213,7 @@ mod tests {
         /// `AwaitingMerge` (re-closed after the supervisor merged) while the
         /// alert was queued behind other prompts in the injection loop.
         #[test]
-        fn merge_alert_is_dropped_when_the_task_leaves_awaiting_merge() {
+        fn merge_alert_is_dropped_when_the_task_reopens_for_changes() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
             let mut data = awaiting_merge_data("recipe-be");
@@ -7229,10 +7229,10 @@ mod tests {
                 durable_retry: false,
             };
 
-            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            data.in_progress_tasks[0].status = TaskStatus::Open;
             assert!(
                 !prompt_is_still_deliverable(&prompt, &data, repo.path()),
-                "a task no longer parked has no outstanding merge to demand"
+                "a task reopened for changes has no outstanding merge to demand"
             );
 
             data.in_progress_tasks.clear();
@@ -7576,20 +7576,19 @@ mod tests {
             );
         }
 
-        /// AC1 (task moved off AwaitingMerge): re-closed / reopened /
-        /// reassigned since the alert was written — retract.
+        /// Reopened for changes since the alert was written — retract.
         #[test]
-        fn task_sweep_stale_when_task_left_awaiting_merge() {
+        fn task_sweep_stale_when_task_reopened_for_changes() {
             let repo = init_repo("recipe-be");
             commit_file(repo.path(), "a.rs");
 
             let mut data = awaiting_merge_data("recipe-be");
-            data.in_progress_tasks[0].status = TaskStatus::InProgress;
+            data.in_progress_tasks[0].status = TaskStatus::Open;
 
             let outcome = check_merge_alert_freshness_for_task("cas-6883t", &data, repo.path());
             assert!(
                 matches!(outcome, MergeAlertFreshness::Stale),
-                "task no longer AwaitingMerge must be Stale: {outcome:?}"
+                "task reopened for changes must be Stale: {outcome:?}"
             );
         }
 

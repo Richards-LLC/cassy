@@ -1904,7 +1904,7 @@ impl FactoryApp {
                             prompt.text = super::director::with_response_instructions(&text, worker, self.supervisor_cli);
                         }
                     } else {
-                        prompt.text = format!("CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
+                        prompt.text = format!("READY TO MERGE — CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
                     }
                 }
                 if let DirectorEvent::WorkerIdle { worker, active_task: Some(task) } = event

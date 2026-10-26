@@ -635,6 +635,15 @@
       "a74be56b026829e5781251ba13bed08421ee4ef6edb132d6b82e54725bb32b23",
       "ce64da4e01d01457a25de640fa2ce5fbc3c31931971908f63dcab0ba62ba1832"
     ],
+    "skills/cas-feature-report/SKILL.md": [
+      "6a09efeebedb6c0ba3807096527caaea2904749342cdaf1b705e8fc0513baede"
+    ],
+    "skills/cas-feature-report/references/report-contract.md": [
+      "0bbf2ea200df40061d9495daf52fcfad624ce2f93b962d0387515ddb1d05cc63"
+    ],
+    "skills/cas-feature-report/references/report-template.html": [
+      "8a18b473f24907ce9f557a35ad92927a93725883757f189b44e915bdefd4c09b"
+    ],
     "skills/cas-frontend-engineering/SKILL.md": [
       "44fa1e7fcca57217b653f260cad04ed903d7124c5d42aa33ad09989594779434",
       "5360bff11a50d31bbfd5c63b971ba219f7108504431b73a69eb223e17dfc86ee",
@@ -715,6 +724,7 @@
       "3da8e9a1b95c3245725a229e8b5984463e1fe442610dc177a0061dd186125216",
       "5876d70ec02f75d26ce0a5b108c311bcecc961d4085b26e55d2ac52e65a4e870",
       "6347ed3a94fe0e16222b700705d2c1ca8a824f65e445c592d309eca48a8bcbe8",
+      "73ace4ef54a2c876c881543c3265d600e6b4b2c0c2ef741950e8ddfa053c0d64",
       "861f31fa960138a8dad90a3589def4983c96e0e946dbeb2caf4554ec2bfe10e5",
       "88b85e245a4b9c274ed4f3a243f72c56f2130e44954a1df22339862a56d47ab8",
       "9d72928c7835c669fd760a1ec6fbec4658175c61afdda6f982072ba414c9874e",
@@ -783,6 +793,7 @@
       "fc82f138ab0e22de22db3429134f1ac32a094829795ed5a17728fb1ec4bb0186"
     ],
     "skills/cas-html-reports/references/report-types.md": [
+      "3e6ee141f83fcd33f1d7fde8cbecb9446c15c3cbe2c4db8bdc1fd1d73ae28173",
       "862b7dea5b648ec2185d90d1903120de7e4d9ad90ee97e716e420a56e153e0ce",
       "bd97cffcc8d346cd623d34455248b0743e2a10e40526007448f1488938a11337",
       "d3664b6620d9c399cdaa7f660c12090dd17adfb5495322f366e8e723c60ad690",

@@ -143,6 +143,18 @@ impl Receipt for FinalizeReceipt {
 }
 
 pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
+    // Scripts run from the draft's directory; every path they get is absolute.
+    let mut request = request.clone();
+    for path in [&mut request.draft, &mut request.out] {
+        *path = std::path::absolute(&*path)?;
+    }
+    for dir in [&mut request.pdf_dir, &mut request.check_dir]
+        .into_iter()
+        .flatten()
+    {
+        *dir = std::path::absolute(&*dir)?;
+    }
+    let request = &request;
     let draft = fs::read_to_string(&request.draft)
         .map_err(|error| UsageError(format!("draft {}: {error}", request.draft.display())))?;
     let brand = brand::resolve(&BrandRequest {

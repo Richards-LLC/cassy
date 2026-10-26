@@ -170,7 +170,7 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
         task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
     };
     let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
-    assert_eq!(prompts.len(), 1, "a new blocker ask must re-arm the alert");
+    assert_eq!(prompts.len(), 1);
     // A different hold is a new question even on the same task and assignee.
     block(&mut task, "Credentials are now missing");
     let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {

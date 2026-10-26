@@ -1112,8 +1112,13 @@ impl FactoryDaemon {
         if pane_target != self.app.supervisor_name() {
             return false;
         }
-        let teams = (choose_channel(self.app.harness_for(pane_target), self.teams.is_some())
-            == DeliveryChannel::TeamsInbox)
+        let channel = choose_channel(self.app.harness_for(pane_target), self.teams.is_some());
+        // A refreshed supersession notice has no merge demand. Preserve its
+        // direct PTY fallback even when the external lane is shutting down.
+        if channel == DeliveryChannel::Pty && prompt.text.starts_with("Superseded delivery ") {
+            return false;
+        }
+        let teams = (channel == DeliveryChannel::TeamsInbox)
             .then(|| self.teams.as_ref().expect("Teams channel requires teams").snapshot());
         let request = self.app.deliverability_request();
         let spec = super::jobs::JobSpec {

@@ -22,11 +22,17 @@ const SLOW_READ: Duration = Duration::from_millis(500);
 #[tokio::test]
 async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
     use cas_types::{Agent, AgentRole, TaskStatus};
-    for cause in ["owned", "foreign", "expired", "independent"] {
+    for cause in ["owned", "foreign", "expired", "independent", "successor"] {
         let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
         let cas_dir = fixture.app.cas_dir().to_path_buf();
         let supervisor = Agent::new_with_role("lead-id".into(), "supervisor".into(), AgentRole::Supervisor);
         crate::store::open_agent_store(&cas_dir).unwrap().register(&supervisor).unwrap();
+        if cause == "successor" {
+            let mut successor = supervisor.clone();
+            successor.id = "successor-id".into();
+            successor.registered_at += chrono::Duration::seconds(1);
+            crate::store::open_agent_store(&cas_dir).unwrap().register(&successor).unwrap();
+        }
         let dispatch = cas_store::create_verification_dispatch(
             &cas_dir, "cas-9efb-test", "merge-w",
             if cause == "foreign" { "other-lead" } else { "lead-id" },
@@ -59,6 +65,8 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
         // pin: the table labels distinguish the sole owned wait from genuine waking blockers.
         assert_eq!(is_lifecycle_wake_source(&rows[0].source), cause != "owned",
             "{cause}: lifecycle routing must use the same sole-blocker classification");
+        // pin: the table's owned case alone gets CAS's quiet receipt marker.
+        assert_eq!(crate::supervisor_message_wakes::quiet(&rows[0].prompt), cause == "owned");
         queue.mark_processed(rows[0].id).unwrap();
         // pin: the cause labels select the recipient/dispatch/independent-hold table above.
         assert_eq!(crate::supervisor_message_wakes::quiet(&prompts[0].text), cause == "owned",

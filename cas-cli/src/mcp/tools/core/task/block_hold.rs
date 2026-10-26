@@ -19,11 +19,16 @@ pub(crate) fn owned_verification_wait(
     {
         return None;
     }
-    let owner = crate::store::open_agent_store(cas_dir)
-        .ok()?
-        .get(&dispatch.owner_agent_id)
-        .ok()?;
-    if owner.role != AgentRole::Supervisor || (recipient != owner.id && recipient != owner.name) {
+    let agents = crate::store::open_agent_store(cas_dir).ok()?;
+    let recipient = agents.get(recipient).ok().or_else(|| {
+        agents
+            .list(None)
+            .ok()?
+            .into_iter()
+            .filter(|agent| agent.name == recipient && crate::supervisor_notices::is_live(agent))
+            .max_by_key(|agent| agent.registered_at)
+    })?;
+    if recipient.role != AgentRole::Supervisor || recipient.id != dispatch.owner_agent_id {
         return None;
     }
     let tasks = crate::store::open_task_store_local(cas_dir).ok()?;

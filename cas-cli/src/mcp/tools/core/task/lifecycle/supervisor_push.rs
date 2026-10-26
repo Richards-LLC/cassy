@@ -903,7 +903,7 @@ fn emit_task_lifecycle_transition_in_project(
     };
 
     let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
-        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.name).is_some()
+        super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
     });
 
     let key = transition_key(

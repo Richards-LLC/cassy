@@ -291,6 +291,15 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     assert_eq!(after_restart.1 - signalled.1, 1);
     f.app.revalidate_and_prompt_for_delivery(&events);
     assert_eq!(counts(&f), after_restart);
+    std::fs::write(f.repo.path().join("delivery.rs"), "// already merged correction\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "cas-9efb-test merged correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.advance_target(true);
+    f.app.revalidate_and_prompt_for_delivery(&events[..1]);
+    let merged = counts(&f);
+    f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::hours(1));
+    f.app.revalidate_and_prompt_for_delivery(&events[..1]);
+    assert_eq!(counts(&f), merged);
 }
 
 #[test]
@@ -425,6 +434,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(retries.len(), 1, "suppressed in-progress wait retains its delivery retry");
     assert_eq!(f.app.revalidate_and_prompt_for_delivery(&retries).1.len(), 1,
         "after the wake ends, an idle worker must still alert without a new detector event");
+    // A same-SHA rerun is visible when the settled-failure backoff expires.
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
     f.ci(None);
     let relays: usize = (0..3).map(|_| f.relay().len()).sum();
     assert_eq!(relays, 0, "pending pushed-tip CI must suppress every idle relay");
@@ -440,10 +451,10 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     assert_eq!(f.relay().len(), 1, "old CI must not hide unpushed work");
     git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
     assert!(f.relay().is_empty(), "new pushed tip can wait on its own CI");
-    f.ci(Some("success"));
-    assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
     std::fs::write(f.app.cas_dir.join("ci.json"), r#"{"check_runs":[]}"#).unwrap();
     assert_eq!(f.relay().len(), 1, "unknown CI must not hide an idle delivery");
+    f.ci(Some("success"));
+    assert_eq!(f.relay().len(), 1, "settled CI restores the lifecycle alert");
 }
 
 /// Same task/tip liveness relays may arrive from retry jobs rather than the detector.
@@ -670,11 +681,17 @@ fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
         "same delivery/CI cannot nag on unrelated epic changes"
     );
     f.ci(Some("failure"));
+    // After READY, worktree_merge re-reads CI and refuses a same-SHA red run;
+    // the director must stop probing that already-signalled delivery.
+    assert!(f.relay().is_empty());
+    std::fs::write(f.repo.path().join("delivery.rs"), "// new red delivery\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "new red delivery"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
     let decision = f.relay();
     assert_eq!(
         decision.len(),
         1,
-        "changed CI conclusion needs one decision"
+        "a new red delivery needs one decision"
     );
     assert!(decision[0].text.contains("CI failed"));
     assert!(f.relay().is_empty());
@@ -756,6 +773,7 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     std::fs::write(f.repo.path().join("README.md"), "Documentation delivery\n").unwrap();
     git(f.repo.path(), &["add", "README.md"]);
     git(f.repo.path(), &["commit", "-qm", "docs delivery"]);
+    git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
     std::fs::write(
         f.app.cas_dir.join("ci.json"),
         serde_json::json!({"check_runs": [{
@@ -771,6 +789,11 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     );
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
+    // Same-SHA flips after READY are rechecked by worktree_merge, not by
+    // repeated director probes. A new tip starts a new CI observation.
+    std::fs::write(f.repo.path().join("README.md"), "Documentation correction\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "docs correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
     f.ci(Some("cancelled"));
     assert!(
         f.relay().is_empty(),

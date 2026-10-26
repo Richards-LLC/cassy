@@ -52,18 +52,17 @@ pub(super) fn admit_ready(cas_dir: &Path, ready: &Ready) -> bool {
     use std::io::Write;
     let path = ready_receipt_path(cas_dir, &ready.evidence.task_id, &ready.tip);
     let write = || -> std::io::Result<bool> {
-        std::fs::create_dir_all(path.parent().expect("receipt parent"))?;
-        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-            Err(error) => return Err(error),
-        };
+        let parent = path.parent().expect("receipt parent");
+        std::fs::create_dir_all(parent)?;
+        let mut file = tempfile::NamedTempFile::new_in(parent)?;
         let receipt = ReadyReceipt { evidence: ready.evidence.clone(), worker: ready.worker.clone() };
-        if let Err(error) = file.write_all(&serde_json::to_vec(&receipt)?).and_then(|_| file.sync_all()) {
-            let _ = std::fs::remove_file(&path);
-            return Err(error);
+        file.write_all(&serde_json::to_vec(&receipt)?)?;
+        file.as_file().sync_all()?;
+        match file.persist_noclobber(&path) {
+            Ok(_) => { std::fs::File::open(parent)?.sync_all()?; Ok(true) }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(error) => Err(error.error),
         }
-        Ok(true)
     };
     write().unwrap_or_else(|error| {
         tracing::warn!(%error, task = %ready.evidence.task_id, "READY receipt failed; deferring signal");

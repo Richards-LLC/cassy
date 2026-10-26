@@ -513,6 +513,26 @@ pub(crate) fn queue_merge_conflict_reopen_notice(
     })
 }
 
+/// One corrective notice per merged delivery refused by a source-upkeep gate.
+pub(crate) fn queue_source_fix_reopen_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    source_tip: &str,
+    merge_commit: &str,
+    gate: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-source-fix:{}:{source_tip}:{merge_commit}:worker:{worker_name}", task.id),
+            format!(
+                "Task {} is Open again after a post-merge close gate. {gate}\nStart task {} again, fix the source on your delivery branch, push and close as usual. Cassy has already returned the task to you; no supervisor request_changes is needed.",
+                task.id, task.id
+            ),
+            format!("Post-merge source fix returned to worker: {}", task.id),
+        )
+    })
+}
+
 /// cas-46ea: one supervisor receipt when Cassy's verdict close overrode a
 /// worker hold that was not waiting on the verification.
 pub(crate) fn queue_cassy_close_over_hold_receipt(

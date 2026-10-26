@@ -8640,7 +8640,12 @@ impl CasCore {
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices = notices,
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => {
+                    let recovery = self.return_merged_delivery_for_source_fix(
+                        &task, &evidence_repo, &resolved_parent_branch, &message,
+                    );
+                    return Ok(Self::tool_error(format!("{message}{recovery}")));
+                }
             }
             match docs_upkeep::at_park(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
@@ -8648,7 +8653,12 @@ impl CasCore {
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => {
+                    let recovery = self.return_merged_delivery_for_source_fix(
+                        &task, &evidence_repo, &resolved_parent_branch, &message,
+                    );
+                    return Ok(Self::tool_error(format!("{message}{recovery}")));
+                }
             }
             let qa_base = qa_window.and_then(|window| {
                 let head = super::qa_evidence_gate::delivered_head(

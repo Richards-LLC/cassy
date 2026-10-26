@@ -13323,8 +13323,6 @@ mod tests {
         assert_eq!(prompt_store.peek_all(10).unwrap().len(), 1);
     }
 
-    /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
-    /// satisfied wake fires once with the run conclusions.
     #[test]
     fn accepted_split_last_remote_child_wakes_epic_owner_once_cas_d8a1() {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
@@ -13387,7 +13385,7 @@ mod tests {
         let _env = crate::test_env_guard::TestEnvGuard::temp_home();
         let root = tempfile::tempdir().unwrap();
         let cas = root.path();
-        let core = crate::mcp::server::CasCore::with_daemon(cas.to_path_buf(), None, None);
+        let core = crate::mcp::CasCore::with_daemon(cas.to_path_buf(), None, None);
         let mut owner = cas_types::Agent::new_with_role(
             "reminder-owner".into(), "owner".into(), cas_types::AgentRole::Supervisor);
         owner.factory_session = Some("owner-session".into());
@@ -13437,6 +13435,8 @@ mod tests {
         assert!(FactoryDaemon::supervisor_wake_class(&super::WakeSender::Daemon, &owner.name, &wake.source, &wake.prompt).is_some());
     }
 
+    /// cas-0f05: a pending `ci_completed` row is a watcher candidate, and its
+    /// satisfied wake fires once with the run conclusions.
     #[test]
     fn ci_completed_reminder_fires_once_with_run_conclusions() {
         let temp = tempfile::TempDir::new().unwrap();

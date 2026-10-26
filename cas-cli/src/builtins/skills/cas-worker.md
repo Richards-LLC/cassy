@@ -45,10 +45,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and send one `merge_request=true` message;
    its body is the request, so do not send a separate prose summary or ACK before
-   or after it. Don't poll for it. The merge needs no worker turn: an approved
-   verdict closes the task and tells you once, and a rejected one reopens it to
-   you with findings. Never re-close or block on a merged task's verification;
-   re-close only when Cassy's notice names a gate that still holds. Read [recovery.md](references/recovery.md)
+   or after it. Don't poll: the merge's verdict closes the task (you hear
+   once) or reopens it with findings. Don't re-close or block on it. Read [recovery.md](references/recovery.md)
    for the waiting rule and for rejection or crossed-message handling.
 
 One event gets one message. A successful `task action=start` is its own
@@ -75,7 +73,7 @@ use assigned work; `ready` and `available` are backlog
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: at ~80% context, commit, push, write
   [HANDOFF.md](references/recovery.md), then request a respawn.
-- When close says verification required before any merge, quote its guidance in `need:`.
+- When close says verification required, quote its guidance in `need:`.
 
 ## Blockers and review waits
 

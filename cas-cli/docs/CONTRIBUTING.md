@@ -237,6 +237,12 @@ the pushed ref and states that the worker checkout was left untouched.
 Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
 retain the existing protection against deleting uncommitted work.
 
+When a parked delivery hits a content conflict, Cassy returns it Open to its
+assignee through `request_changes`, invalidating the old delivery proof and
+recording `merge_conflicted`, the conflicting paths and the attempted target tip.
+The worker receives one notice and can start, resolve and re-deliver directly.
+Target drift and pre-existing checkout residue keep their existing recovery paths.
+
 For Claude supervisors in Teams factories, an authenticated action event whose
 complete framed payload fits the hook budget travels in one PTY turn, with its
 queue id and body inline. No Teams pointer or relay copy is written. A busy

@@ -493,6 +493,26 @@ pub(crate) fn queue_rejected_merge_reopen_notice(
     })
 }
 
+/// Return one conflict-repair instruction per attempted delivery and target.
+pub(crate) fn queue_merge_conflict_reopen_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    source_tip: &str,
+    target_tip: &str,
+    findings: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-merge-conflicted:{}:{source_tip}:{target_tip}:worker:{worker_name}", task.id),
+            format!(
+                "Task {} is Open again after a content conflict. {findings}\nStart task {} again, resolve on your delivery branch, then push and close as usual. Cassy has already returned the task to you; no supervisor request_changes is needed.",
+                task.id, task.id
+            ),
+            format!("Merge conflict returned to worker: {}", task.id),
+        )
+    })
+}
+
 /// cas-46ea: one supervisor receipt when Cassy's verdict close overrode a
 /// worker hold that was not waiting on the verification.
 pub(crate) fn queue_cassy_close_over_hold_receipt(

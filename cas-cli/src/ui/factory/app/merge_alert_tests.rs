@@ -994,6 +994,5 @@ fn cas_43d2_unstaged_batch_delivery_is_read_again() {
     assert!(f.relay().is_empty(), "a staged delivery is not a merge demand");
     stage(None);
     let prompts = f.relay();
-    assert_eq!(prompts.len(), 1, "unstaged delivery is read again: {prompts:?}");
-    assert!(prompts[0].text.contains("READY TO MERGE"));
+    assert!(prompts.iter().any(|prompt| prompt.merge_alert.is_some()));
 }

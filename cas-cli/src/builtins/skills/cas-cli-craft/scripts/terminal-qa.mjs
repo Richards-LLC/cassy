@@ -413,14 +413,16 @@ export function parseAnsi(raw) {
     }
     if (ch === "\n") { pushLine(); i += 1; continue; }
     if (ch === "\r") {
-      if (chars[i + 1] !== "\n" && i + 1 !== n && line.cells.length > 0) {
+      let next = i + 1;
+      while (chars[next] === "\r") next += 1;
+      if (chars[next] !== "\n" && i + 1 !== n && line.cells.length > 0) {
         line.redraws += 1;
       }
       cursorColumn = 0;
       i += 1;
       continue;
     }
-    if (ch === "\b") { line.cells.pop(); cursorColumn = Math.min(cursorColumn, col()); i += 1; continue; }
+    if (ch === "\b") { cursorColumn = Math.max(0, cursorColumn - 1); i += 1; continue; }
     if (ch === "\t") {
       const c = cursorColumn;
       const pad = 8 - (c % 8);

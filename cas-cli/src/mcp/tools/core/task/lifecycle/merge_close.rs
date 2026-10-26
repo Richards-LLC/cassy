@@ -112,6 +112,63 @@ impl CassyMergeClose {
 }
 
 impl CasCore {
+    /// Source-upkeep refusals opt in here at their typed call sites. Only a
+    /// published, still-current parked delivery may be returned for a fix;
+    /// verification/QA waits and unreadable evidence keep their own recovery.
+    pub(super) fn return_merged_delivery_for_source_fix(
+        &self, task: &Task, repo: &std::path::Path, target: &str, gate: &str,
+    ) -> String {
+        let (Some(anchor), Some(merge), Some(branch)) = (
+            task.deliverables.factory_branch_anchor.as_deref(),
+            task.deliverables.green_merge_commit.as_deref(),
+            task.deliverables.parked_branch.as_deref(),
+        ) else { return String::new(); };
+        if task.status != TaskStatus::AwaitingMerge || task.assignee.is_none() {
+            return String::new();
+        }
+        let target = target.strip_prefix("origin/").unwrap_or(target);
+        let target_tip = super::close_ops::resolve_branch_sha(repo, &format!("origin/{target}"))
+            .or_else(|| super::close_ops::resolve_branch_sha(repo, target));
+        let Some(target_tip) = target_tip.filter(|tip| {
+            super::close_ops::git_commit_is_ancestor(repo, anchor, tip)
+                && super::close_ops::git_commit_is_ancestor(repo, merge, tip)
+        }) else { return String::new(); };
+        let reason = format!("post_merge_close_gate: delivery {anchor} landed at {merge} (target {target_tip}); source correction required.\n{gate}");
+        let actor = self.get_agent_id().unwrap_or_else(|_| "cassy".into());
+        let recovery = (|| -> Result<String, String> {
+            let store = self.open_task_store().map_err(|error| error.to_string())?;
+            let current = store.get(&task.id).map_err(|error| error.to_string())?;
+            if current.status != TaskStatus::AwaitingMerge
+                || current.assignee != task.assignee
+                || current.deliverables.factory_branch_anchor != task.deliverables.factory_branch_anchor
+                || current.deliverables.green_merge_commit != task.deliverables.green_merge_commit
+                || current.deliverables.parked_branch != task.deliverables.parked_branch
+                || current.deliverables.work_target != task.deliverables.work_target
+            {
+                return Ok("delivery changed during close; no task transition attempted".into());
+            }
+            // Retire the old auto-close intent before the worker may start a
+            // correction, so recovery cannot re-park the already declined tip.
+            cas_store::clear_pending_observed_delivery_merge(&self.cas_root, &task.id, branch, target, anchor)
+                .map_err(|error| error.to_string())?;
+            cas_store::request_changes_for_parked_delivery(&self.cas_root, &task.id, &actor, &reason)
+                .map_err(|error| error.to_string())?;
+            let returned = store.get(&task.id).map_err(|error| error.to_string())?;
+            let notice = match super::supervisor_push::queue_source_fix_reopen_notice(
+                &self.cas_root, &returned, anchor, merge, &reason,
+            ) {
+                Ok(Some(id)) => format!("worker notified (prompt {id})"),
+                Ok(None) => "no live assigned worker to notify".into(),
+                Err(error) => format!("worker notice failed: {error}"),
+            };
+            Ok(format!("Cassy returned task {} Open to its assignee for the source fix; {notice}. Start task {} and re-deliver after fixing the gate; no supervisor request_changes is needed.", task.id, task.id))
+        })();
+        match recovery {
+            Ok(detail) => format!("\n\n{detail}"),
+            Err(error) => format!("\n\nCassy could not return task {} for its source fix ({error}); run task action=request_changes id={}.", task.id, task.id),
+        }
+    }
+
     /// Record that `worktree_merge` published this parked delivery, then close
     /// it as Cassy. The legacy green_merge_commit field records the merge tip
     /// with a separate CI admission state, including explicit override merges.
@@ -418,26 +475,40 @@ impl CasCore {
             return CassyMergeClose::Held(text);
         };
         let mut unrestored = Vec::new();
-        if release.was_blocked {
-            let restored = store.get(task_id).map_err(|error| error.to_string()).and_then(|current| {
-                if current.status != TaskStatus::AwaitingMerge {
-                    return Ok(());
+        // A source gate may already have returned this delivery to the
+        // worker. Never restore the old verdict hold over that fresh cycle.
+        let current = match store.get(task_id) {
+            Ok(current) if current.status != TaskStatus::AwaitingMerge => {
+                return CassyMergeClose::Held(text);
+            }
+            Ok(current) => Some(current),
+            Err(error) => {
+                tracing::warn!(%task_id, %error, "held verdict close could not read the task to restore it");
+                if release.was_blocked {
+                    unrestored.push(format!("Blocked status ({error})"));
                 }
+                if release.hold.is_some() {
+                    unrestored.push(format!("the worker hold ({error})"));
+                }
+                None
+            }
+        };
+        if let Some(current) = current {
+            if release.was_blocked {
                 let mut blocked = current.clone();
                 blocked.status = TaskStatus::Blocked;
                 blocked.updated_at = chrono::Utc::now();
-                store.update_if_current(&blocked, &current).map(drop).map_err(|error| error.to_string())
-            });
-            if let Err(error) = restored {
-                tracing::warn!(%task_id, %error, "held verdict close could not restore Blocked");
-                unrestored.push(format!("Blocked status ({error})"));
+                if let Err(error) = store.update_if_current(&blocked, &current) {
+                    tracing::warn!(%task_id, %error, "held verdict close could not restore Blocked");
+                    unrestored.push(format!("Blocked status ({error})"));
+                }
             }
-        }
-        if let Some(hold) = release.hold
-            && let Err(error) = store.patch_execution_state(task_id, &serde_json::json!({"blocked_hold": hold}))
-        {
-            tracing::warn!(%task_id, %error, "held verdict close could not restore the worker hold");
-            unrestored.push(format!("the worker hold ({error})"));
+            if let Some(hold) = release.hold
+                && let Err(error) = store.patch_execution_state(task_id, &serde_json::json!({"blocked_hold": hold}))
+            {
+                tracing::warn!(%task_id, %error, "held verdict close could not restore the worker hold");
+                unrestored.push(format!("the worker hold ({error})"));
+            }
         }
         if unrestored.is_empty() {
             return CassyMergeClose::Held(text);

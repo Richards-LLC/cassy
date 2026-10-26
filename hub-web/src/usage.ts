@@ -117,6 +117,18 @@ export class UsageCounter {
     this.write(state);
   }
 
+  private queue: Promise<void> = Promise.resolve();
+
+  /**
+   * Queue a flush to the machines `machines()` names when it runs. Requests
+   * never merge: a machine that comes online while an earlier flush is still
+   * posting gets its own turn, with the machines live at that moment.
+   */
+  flushQueued(machines: () => readonly { id: string; post: (entries: UsageEntry[]) => Promise<unknown> }[]): Promise<void> {
+    this.queue = this.queue.then(() => this.flush(machines()));
+    return this.queue;
+  }
+
   /** Post each machine's pending days; a failed post is retried next time. */
   async flush(machines: readonly { id: string; post: (entries: UsageEntry[]) => Promise<unknown> }[]): Promise<void> {
     for (const machine of machines) {

@@ -513,6 +513,26 @@ pub(crate) fn queue_merge_conflict_reopen_notice(
     })
 }
 
+/// One corrective notice per merged delivery refused by a source-upkeep gate.
+pub(crate) fn queue_source_fix_reopen_notice(
+    cas_root: &Path,
+    task: &cas_types::Task,
+    source_tip: &str,
+    merge_commit: &str,
+    gate: &str,
+) -> Result<Option<i64>, String> {
+    queue_assignee_notice(cas_root, task, |worker_name| {
+        (
+            format!("cassy-source-fix:{}:{source_tip}:{merge_commit}:worker:{worker_name}", task.id),
+            format!(
+                "Task {} is Open again after a post-merge close gate. {gate}\nStart task {} again, fix the source on your delivery branch, push and close as usual. Cassy has already returned the task to you; no supervisor request_changes is needed.",
+                task.id, task.id
+            ),
+            format!("Post-merge source fix returned to worker: {}", task.id),
+        )
+    })
+}
+
 /// cas-46ea: one supervisor receipt when Cassy's verdict close overrode a
 /// worker hold that was not waiting on the verification.
 pub(crate) fn queue_cassy_close_over_hold_receipt(
@@ -1003,6 +1023,9 @@ fn emit_task_lifecycle_transition_in_project(
     let verification_wait = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
         super::super::block_hold::owned_verification_wait(root, task_id, &recipient.id).is_some()
     });
+    let answered_blocker = kind == LifecycleTransition::Blocked && cas_dir.is_some_and(|root| {
+        super::super::block_hold::answered_blocker_wait(root, task_id, &recipient.id).is_some()
+    });
 
     let key = transition_key(
         task_id,
@@ -1029,6 +1052,7 @@ fn emit_task_lifecycle_transition_in_project(
         "occurrence_id": occurrence_id,
         "branch_tip": branch_tip,
         "verification_wait": verification_wait,
+        "answered_blocker": answered_blocker,
         "transition_key": key,
         "timestamp": now.to_rfc3339(),
     })
@@ -1109,7 +1133,7 @@ fn emit_task_lifecycle_transition_in_project(
         branch_tip,
         &recipient.name,
         recipient.session.as_deref(),
-        verification_wait,
+        verification_wait || answered_blocker,
     )
     .map_err(|error| error.to_string())?;
 
@@ -1255,7 +1279,7 @@ fn deliver_prompt_for_notification(
     branch_tip: Option<&str>,
     recipient_target: &str,
     recipient_session: Option<&str>,
-    verification_wait: bool,
+    quiet_blocked_wait: bool,
 ) -> Result<(), TaskLifecycleGateError> {
     let reject = |message: String| TaskLifecycleGateError::PromptDelivery { message };
     let mut body = build_prompt_body(
@@ -1272,7 +1296,7 @@ fn deliver_prompt_for_notification(
         branch_tip,
     );
     let summary = format!("{}: {} ({})", kind.as_event_type(), task_id, occurrence_id);
-    let source = if verification_wait {
+    let source = if quiet_blocked_wait {
         body = format!("{}\n{body}", crate::supervisor_message_wakes::QUIET);
         format!("{LIFECYCLE_SOURCE_PREFIX}{notification_id}")
     } else {
@@ -1501,7 +1525,8 @@ fn deliver_lifecycle_outbox_row_with_agents(
                 None => factory_session,
             },
         },
-        payload.get("verification_wait").and_then(|value| value.as_bool()).unwrap_or(false)
+        ["verification_wait", "answered_blocker"].iter().any(|key|
+            payload.get(key).and_then(|value| value.as_bool()).unwrap_or(false))
             && kind == LifecycleTransition::Blocked
             && recipient.as_ref().is_none_or(|current| {
                 payload.get("supervisor_id").and_then(|value| value.as_str()) == Some(current.id.as_str())

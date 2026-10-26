@@ -739,6 +739,7 @@ dependencies = [
  "ratatui",
  "rayon",
  "regex",
+ "regex-syntax",
  "rmcp 0.16.0",
  "rstest",
  "rusqlite",

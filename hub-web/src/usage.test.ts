@@ -34,6 +34,21 @@ describe("usage counter (cas-0b3d)", () => {
     ]]);
   });
 
+  it("a flush asked for while another is posting still reaches the machine that just came online", async () => {
+    const counter = new UsageCounter(memoryStore(), () => new Date("2026-10-26T12:00:00Z"));
+    counter.count("inbox.open");
+    let release!: () => void;
+    const slow = new Promise<void>((done) => { release = done; });
+    const posted: string[] = [];
+    const live = [{ id: "prowl", post: async () => { await slow; posted.push("prowl"); } }];
+    const first = counter.flushQueued(() => [...live]);
+    live.push({ id: "soundwave", post: async () => { posted.push("soundwave"); } });
+    const second = counter.flushQueued(() => [...live]);
+    release();
+    await Promise.all([first, second]);
+    expect(posted).toEqual(["prowl", "soundwave"]);
+  });
+
   it("counts an action for every live Commander journey in the registry", () => {
     const registry = readFileSync(new URL("../../docs/qa/journeys.yaml", import.meta.url), "utf8");
     const live = [...registry.matchAll(/^- id: (\S+)\n(?:  .*\n)*?  status: live$/gm)].map((match) => match[1]);

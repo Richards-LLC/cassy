@@ -1063,7 +1063,6 @@ fn release_report_bundle_is_complete_for_every_harness() {
     let files = [
         "SKILL.md",
         "references/brief-template.md",
-        "references/default-tokens.json",
         "references/exemplar.md",
         "references/pdf.md",
         "references/template.html",
@@ -1099,7 +1098,6 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
         for file in [
             "SKILL.md",
             "references/brief-template.md",
-            "references/default-tokens.json",
             "references/exemplar.md",
             "references/pdf.md",
             "references/template.html",
@@ -1148,8 +1146,6 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
             "references/report-contract.md",
             "references/report-skeleton.html",
             "scripts/capture.mjs",
-            "scripts/print-pdf.mjs",
-            "scripts/inline-images.py",
             "scripts/check-sow.py",
         ] {
             assert!(sow.join(file).is_file(), "missing installed sow {file}");

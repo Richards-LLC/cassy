@@ -27,7 +27,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Merge on green** - `READY TO MERGE` fires for any owned, pushed delivery with green CI, even before park or a merge request; the merge requests verification at the merge commit, so approval closes the task in one hop and rejection reopens it to the same worker. An override never closes automatically.
 - **EPIC READY** - a deduplicated action sent to the epic's live owner once every child task, including those of an accepted split, is closed.
 - **Journey registry** - a project's `docs/qa/journeys.yaml` (drafted by `cas qa journeys --seed`): each user journey's owner files, specs, surfaces and live, dark or dead status. Cassy's Commander registry preserves import and CSS selector coverage, with enforcement declared in the tracked registry.
-- **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns.
+- **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns; journeys rank by traffic share.
+- **Journey traffic** - Commander counts each journey's defining act locally and reports the per-day totals only to the operator's paired machines; `cas qa journeys --traffic` turns them into per-journey shares.
 - **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
 - **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.
@@ -43,7 +44,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 3. A QA reviewer runs `cas qa impact` on a delivery, walks the touched journeys and records the verdict in the QA ledger.
 4. A supervisor messages a supervisor on another project or machine, sees RECEIVED or PENDING, or splits an epic with that peer.
 5. After a release merges, `cas serve` runs the post-release check, `cas release report` builds the branded release report, and Violet posts the release notes to Slack; `cas violet channels` and `cas doctor` check the configured channels.
-6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change.
+6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change; `cas deliverable finalize --audience customer` brands it, embeds its screenshots, refuses internal vocabulary and prints and checks the A4 and Letter PDFs.
 7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.
 8. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 
@@ -57,8 +58,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - Adaptive QA: `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_post_release.rs`, `docs/qa/impact.md`, `docs/qa/docs-upkeep.md`.
 - CLI and MCP surfaces: `cas-cli/src/cli/` and `cas-cli/src/mcp/tools/`.
 - Commander browser app: `hub-web/`.
-- Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`.
-- Branding of human-facing output: `cas-cli/src/builtins/skills/design-spec/references/design-md-first.md`.
+- Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`, `cas-cli/src/builtins/skills/cas-feature-report/`; all finish through `cas deliverable finalize` (`cas-cli/src/deliverable/finalize.rs`), the one path for image inlining, audience hygiene, printing and the PDF check (`cas-cli/src/deliverable/assets/`).
+- Branding of human-facing output: `cas-cli/src/builtins/skills/design-spec/references/design-md-first.md`; `cas deliverable brand` (`cas-cli/src/deliverable/`) resolves it, and a customer deliverable with no `DESIGN.md` is refused rather than given the default brand.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.
 

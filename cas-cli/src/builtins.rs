@@ -269,10 +269,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
-    },
-    BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
         content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
@@ -287,10 +283,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
-    },
-    BuiltinFile {
-        path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
@@ -321,16 +313,20 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
     },
     BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-template.html",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-template.html"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1000,10 +996,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
-    },
-    BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
         content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
@@ -1018,10 +1010,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
-    },
-    BuiltinFile {
-        path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
@@ -1052,16 +1040,20 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
     },
     BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-template.html",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-template.html"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -1778,10 +1770,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/references/brief-template.md"),
     },
     BuiltinFile {
-        path: "skills/cas-release-report/references/default-tokens.json",
-        content: include_str!("builtins/skills/cas-release-report/references/default-tokens.json"),
-    },
-    BuiltinFile {
         path: "skills/cas-release-report/references/exemplar.md",
         content: include_str!("builtins/skills/cas-release-report/references/exemplar.md"),
     },
@@ -1796,10 +1784,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
-    },
-    BuiltinFile {
-        path: "skills/cas-release-report/scripts/check-pdf.py",
-        content: include_str!("builtins/skills/cas-release-report/scripts/check-pdf.py"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
@@ -1830,16 +1814,20 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
     },
     BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/print-pdf.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/print-pdf.mjs"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/inline-images.py",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/inline-images.py"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/SKILL.md",
+        content: include_str!("builtins/skills/cas-feature-report/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-contract.md",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-feature-report/references/report-template.html",
+        content: include_str!("builtins/skills/cas-feature-report/references/report-template.html"),
     },
     BuiltinFile {
         path: "skills/cas-cut-release/SKILL.md",
@@ -7031,6 +7019,7 @@ This is the body content."#;
             "skills/cas-html-reports/SKILL.md",
             "skills/cas-release-report/SKILL.md",
             "skills/cas-sow-delivery-report/SKILL.md",
+            "skills/cas-feature-report/SKILL.md",
             "skills/cas-dataviz/SKILL.md",
             "skills/cas-ui-craft/SKILL.md",
             "skills/design-spec/SKILL.md",
@@ -7054,6 +7043,17 @@ This is the body content."#;
                 .map(|b| b.path)
                 .collect();
             assert_eq!(stating, [RULE], "{label}: only the rule states its close record");
+            // cas-39fe: the rule says generic styling is never the fallback,
+            // so no reader may call the white-label palette one.
+            let drifting: Vec<&str> = catalog
+                .iter()
+                .filter(|b| {
+                    let body = b.content.to_lowercase();
+                    ["white-label fallback", "neutral fallback"].iter().any(|phrase| body.contains(phrase))
+                })
+                .map(|b| b.path)
+                .collect();
+            assert!(drifting.is_empty(), "{label}: neutral palette called a fallback in {drifting:?}");
         }
     }
 
@@ -8607,49 +8607,6 @@ This is the body content."#;
         }
     }
 
-    /// Audit L4 F28: the release renderer's bundled defaults are a copy of the
-    /// Petrastella tokens; every value they carry must match design-spec's.
-    #[test]
-    fn release_report_default_tokens_match_the_design_spec_tokens() {
-        fn walk(
-            defaults: &serde_json::Value,
-            design: &serde_json::Value,
-            path: &str,
-            checked: &mut usize,
-            label: &str,
-        ) {
-            if let Some(value) = defaults.get("$value") {
-                *checked += 1;
-                assert_eq!(
-                    Some(value),
-                    design.get("$value"),
-                    "{label} default-tokens.json{path} differs from design-tokens.json"
-                );
-                return;
-            }
-            for (name, child) in wp10_entries(defaults) {
-                walk(child, &design[name.as_str()], &format!("{path}/{name}"), checked, label);
-            }
-        }
-        for (label, catalog) in wp10_catalogs() {
-            let defaults: serde_json::Value = serde_json::from_str(wp10_get(
-                label,
-                catalog,
-                "skills/cas-release-report/references/default-tokens.json",
-            ))
-            .expect("default tokens are JSON");
-            let design: serde_json::Value = serde_json::from_str(wp10_get(
-                label,
-                catalog,
-                "skills/design-spec/references/design-tokens.json",
-            ))
-            .expect("design tokens are JSON");
-            let mut checked = 0;
-            walk(&defaults, &design, "", &mut checked, label);
-            assert!(checked >= 30, "{label}: only {checked} default tokens compared");
-        }
-    }
-
     /// Audit L4 F9 / L1 #8: design and report skill descriptions are loaded on
     /// every turn in every harness; each fits 250 characters.
     #[test]
@@ -8687,11 +8644,8 @@ This is the body content."#;
                 "{label}: the CLI comes before the manual renderer"
             );
 
-            let check = wp10_get(
-                label,
-                catalog,
-                "skills/cas-release-report/scripts/check-pdf.py",
-            );
+            // The PDF check ships once, in the deliverables core.
+            let check = include_str!("deliverable/assets/check-pdf.py");
             assert!(check.contains("import pymupdf") && !check.contains("import fitz"));
 
             let html = wp10_get(label, catalog, "skills/cas-html-reports/SKILL.md");
@@ -8713,7 +8667,6 @@ This is the body content."#;
                 "skills/cas-ui-craft/scripts/visual-qa.mjs",
                 "skills/cas-cli-craft/scripts/terminal-qa.mjs",
                 "skills/design-spec/references/tokens.css",
-                "skills/cas-release-report/scripts/check-pdf.py",
                 "skills/cas-frontend-engineering/references/playwright-acceptance.md",
             ] {
                 assert!(!wp10_get(label, catalog, path).is_empty(), "{label} {path} is empty");

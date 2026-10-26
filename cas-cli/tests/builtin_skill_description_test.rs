@@ -274,6 +274,29 @@ fn cas_dataviz_description_names_its_boundary_with_the_bundled_skill() {
     }
 }
 
+/// cas-150b: a plain-words "feature report" request has one owner. Its
+/// description claims the phrase, and cas-html-reports hands it over instead
+/// of turning it away.
+#[test]
+fn feature_report_requests_route_to_cas_feature_report() {
+    for (label, flavor) in FLAVORS {
+        let owner = builtin_catalog::find(flavor, "skills/cas-feature-report/SKILL.md");
+        let owner = field(owner, "description").expect("cas-feature-report description");
+        assert!(
+            owner
+                .trim_start_matches('"')
+                .starts_with("Use when asked for a feature report"),
+            "{label}: {owner:?}"
+        );
+        let reports = builtin_catalog::find(flavor, "skills/cas-html-reports/SKILL.md");
+        let reports = field(reports, "description").expect("cas-html-reports description");
+        assert!(
+            reports.contains("feature reports cas-feature-report"),
+            "{label} cas-html-reports must route feature reports: {reports:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Portability of shipped text
 // ---------------------------------------------------------------------------

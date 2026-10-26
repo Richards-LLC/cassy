@@ -21,7 +21,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
-use crate::builtins::BUILTIN_SKILLS;
+use crate::deliverable::Audience;
+use crate::deliverable::asset::{Asset, Workspace};
+use crate::deliverable::finalize::{self, Budget, FinalizeRequest, Paper};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::store::find_cas_root_from;
@@ -30,7 +32,8 @@ use crate::ui::theme::ActiveTheme;
 
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
-const PDF_TIMEOUT: Duration = Duration::from_secs(120);
+const RENDER_SCRIPT: &str = "skills/cas-release-report/scripts/render.py";
+const RENDER_TEMPLATE: &str = "skills/cas-release-report/references/template.html";
 /// Issues are closed by hand a few minutes after the release PR merges
 /// (6–7 minutes in the October 2026 releases). A closure up to this long after
 /// the merge belongs to the release.
@@ -74,6 +77,11 @@ pub struct ReleaseReportArgs {
     /// directory is read alongside ~/.cas/artifacts/release
     #[arg(long, value_name = "PATH")]
     pub latency_receipt: Option<PathBuf>,
+
+    /// Who reads the report: customer needs the project's DESIGN.md and
+    /// refuses internal vocabulary
+    #[arg(long, value_enum, default_value_t = Audience::Internal)]
+    pub audience: Audience,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,6 +104,10 @@ struct ReportResult {
     github_repo: Option<String>,
     release_published_at: Option<String>,
     green_to_published_seconds: Option<i64>,
+    /// Which brand source `cas deliverable brand` resolved (design-md-css, …).
+    brand_source: String,
+    /// `path@revision` of the DESIGN.md the report wears.
+    design: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -579,7 +591,10 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         (source, acquired, true)
     };
 
-    let renderer = RendererAssets::locate(&project_root)?;
+    let renderer = Workspace::materialize(&[
+        Asset::builtin(RENDER_SCRIPT, "scripts/render.py")?,
+        Asset::builtin(RENDER_TEMPLATE, "references/template.html")?,
+    ])?;
     let relative = |path: &Path| {
         path.strip_prefix(&project_root)
             .unwrap_or(path)
@@ -594,18 +609,48 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         &relative(&source_path),
         &relative(&pdf_path),
     );
+    let draft = renderer.path(&format!("{tag}.html"));
     render_html(
-        &renderer.script,
+        &renderer.path("scripts/render.py"),
         &source_path,
-        &html_path,
+        &draft,
         &project_root,
-        renderer.render_timeout,
+        RENDER_TIMEOUT,
         links,
     )?;
-
+    // The renderer's draft becomes the report through the deliverables core:
+    // brand fill, inline budget, audience hygiene, then A4 and Letter checked.
+    let pdf_dir = renderer.path("pdf");
+    let finalized = finalize::finalize(&FinalizeRequest {
+        draft: draft.clone(),
+        out: html_path.clone(),
+        audience: args.audience,
+        root: project_root.clone(),
+        surface: None,
+        tokens: None,
+        allow: Vec::new(),
+        budget: Budget::for_audience(args.audience),
+        papers: if args.pdf { vec![Paper::A4, Paper::Letter] } else { Vec::new() },
+        pdf_dir: Some(pdf_dir.clone()),
+        check_dir: None,
+        author: None,
+    })?;
+    for warning in &finalized.warnings {
+        eprintln!("release report: {warning}");
+    }
+    if !finalized.findings.is_empty() {
+        let reasons: Vec<String> = finalized
+            .findings
+            .iter()
+            .map(|finding| format!("{} ({})", finding.message, finding.code))
+            .collect();
+        bail!("release report refused by `cas deliverable finalize`: {}", reasons.join("; "));
+    }
     let mut pdf_written = false;
     if args.pdf {
-        render_pdf(&html_path, &pdf_path, &project_root)?;
+        let a4 = pdf_dir.join(format!("{tag}-A4.pdf"));
+        fs::copy(&a4, &pdf_path)
+            .with_context(|| format!("could not copy PDF to {}", pdf_path.display()))?;
         pdf_written = true;
     }
 
@@ -643,6 +688,8 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
             .and_then(|release| release.published_at.clone())
             .or(acquired.release_evidence.tag_published_at.clone()),
         green_to_published_seconds: acquired.release_evidence.green_to_published_seconds,
+        brand_source: finalized.brand_source.clone().unwrap_or_default(),
+        design: finalized.design.clone(),
     };
 
     if cli.json {
@@ -2407,239 +2454,6 @@ fn render_html(
     Ok(())
 }
 
-fn render_pdf(html: &Path, output: &Path, project_root: &Path) -> anyhow::Result<()> {
-    let node_version = Command::new("node").arg("--version").output();
-    if !node_version
-        .as_ref()
-        .is_ok_and(|output| output.status.success())
-    {
-        bail!(
-            "PDF renderer: Node.js is not installed; install Node.js 18+ and rerun `cas release report {} --pdf`",
-            output
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .unwrap_or("<version>")
-        );
-    }
-    let temp = tempfile::tempdir().context("could not create PDF renderer workspace")?;
-    let script = temp.path().join("render-release-report.cjs");
-    fs::write(&script, PDF_SCRIPT).context("could not write PDF renderer script")?;
-    let output_dir = output
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("PDF output has no parent directory"))?;
-    let mut command = Command::new("node");
-    command
-        .current_dir(project_root)
-        .arg(&script)
-        .arg(html)
-        .arg(output_dir);
-    let mut output_result = run_command(&mut command, Deadline::after(PDF_TIMEOUT), PDF_TIMEOUT)
-        .map_err(|error| anyhow::anyhow!(bounded_error("node", error)))?;
-    if !output_result.status.success() {
-        let detail = command_output_detail(&output_result);
-        if playwright_module_missing(&detail) {
-            // npm exposes the package's CLI through `npm exec`, but does not
-            // add that package to Node's module search path for an external
-            // script. Install into the disposable renderer workspace instead;
-            // Playwright still uses its normal host browser cache.
-            let mut npm_install = Command::new("npm");
-            npm_install
-                .current_dir(temp.path())
-                .args(["install", "--no-save", "playwright"]);
-            let install_result =
-                run_command(&mut npm_install, Deadline::after(PDF_TIMEOUT), PDF_TIMEOUT)
-                    .map_err(|error| anyhow::anyhow!(bounded_error("npm install", error)))?;
-            if !install_result.status.success() {
-                bail!(
-                    "PDF renderer unavailable or failed: {}; remedy `npm install --no-save playwright` in a disposable renderer workspace",
-                    command_output_detail(&install_result)
-                );
-            }
-
-            let node_modules = temp.path().join("node_modules");
-            let playwright_module = node_modules.join("playwright");
-            let mut fallback_node = Command::new("node");
-            fallback_node
-                .current_dir(project_root)
-                .env("NODE_PATH", &node_modules)
-                .env("PLAYWRIGHT_MODULE", &playwright_module)
-                .arg(&script)
-                .arg(html)
-                .arg(output_dir);
-            output_result = run_command(
-                &mut fallback_node,
-                Deadline::after(PDF_TIMEOUT),
-                PDF_TIMEOUT,
-            )
-            .map_err(|error| anyhow::anyhow!(bounded_error("node", error)))?;
-        }
-        if !output_result.status.success() {
-            bail!(
-                "PDF renderer unavailable or failed: {}; remedy `npm exec --yes --package=playwright -- node <renderer-script> <report.html> <output-dir>`",
-                command_output_detail(&output_result)
-            );
-        }
-    }
-    let a4 = output_dir.join(format!(
-        "{}-A4.pdf",
-        html.file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("report")
-    ));
-    if !a4.is_file() {
-        bail!("PDF renderer completed without creating {}", a4.display());
-    }
-    fs::copy(&a4, output).with_context(|| format!("could not copy PDF to {}", output.display()))?;
-    let _ = fs::remove_file(a4);
-    let letter = output_dir.join(format!(
-        "{}-Letter.pdf",
-        html.file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or("report")
-    ));
-    let _ = fs::remove_file(letter);
-    Ok(())
-}
-
-const PDF_SCRIPT: &str = r#"const fs = require('node:fs/promises');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
-(async () => {
-  let playwright;
-  try { playwright = require(process.env.PLAYWRIGHT_MODULE || 'playwright'); }
-  catch (error) {
-    console.error('Playwright is not installed:', error.message);
-    process.exitCode = 2;
-    return;
-  }
-  const [input, output] = process.argv.slice(2);
-  if (!input || !output) throw new Error('expected REPORT.html OUTPUT_DIR');
-  await fs.mkdir(output, { recursive: true });
-  const browser = await playwright.chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage();
-    await page.route(/^https?:/, route => route.abort());
-    await page.goto(pathToFileURL(path.resolve(input)).href, { waitUntil: 'load' });
-    await page.emulateMedia({ media: 'print', colorScheme: 'light' });
-    await page.evaluate(async () => {
-      await document.fonts.ready;
-      document.querySelectorAll('details').forEach(panel => { panel.open = true; });
-      // cas-692a: a link resolving to a local file is dead in every reader's
-      // copy; keep its text and drop the target.
-      document.querySelectorAll('a[href]').forEach(link => {
-        if (link.href.startsWith('file:')) link.removeAttribute('href');
-      });
-    });
-    // The running folio wears the report's own tokens: its title and page
-    // count in the mono stack and muted ink the page declares.
-    const folio = await page.evaluate(() => {
-      const style = getComputedStyle(document.documentElement);
-      const token = name => style.getPropertyValue(name).trim();
-      return { color: token('--ink-muted') || 'GrayText', font: token('--font-mono') || 'monospace' };
-    });
-    const attr = text => text.replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
-    for (const format of ['A4', 'Letter']) {
-      await page.pdf({
-        path: path.join(output, path.basename(input, '.html') + '-' + format + '.pdf'),
-        format, printBackground: true, preferCSSPageSize: false,
-        margin: { top: '15mm', right: '15mm', bottom: '15mm', left: '15mm' },
-        displayHeaderFooter: true, headerTemplate: '<span></span>',
-        footerTemplate: `<div style="width:100%;margin:0 15mm;display:flex;justify-content:space-between;gap:12px;font:7px ${attr(folio.font)};color:${attr(folio.color)}"><span class="title"></span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>`
-      });
-    }
-  } finally { await browser.close(); }
-})().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
-"#;
-
-struct RendererAssets {
-    script: PathBuf,
-    render_timeout: Duration,
-    _temporary_root: Option<tempfile::TempDir>,
-}
-
-impl RendererAssets {
-    fn locate(project_root: &Path) -> anyhow::Result<Self> {
-        let relative = Path::new("skills/cas-release-report/scripts/render.py");
-        let candidates = [
-            project_root.join(".claude").join(relative),
-            project_root.join(".codex").join(relative),
-            project_root.join(".grok").join(relative),
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".claude")
-                .join(relative),
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".codex")
-                .join(relative),
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".grok")
-                .join(relative),
-        ];
-        if let Some(script) = candidates
-            .into_iter()
-            .find(|path| path.is_file() && renderer_supports_source(path))
-        {
-            return Ok(Self {
-                script,
-                render_timeout: RENDER_TIMEOUT,
-                _temporary_root: None,
-            });
-        }
-
-        // Installed binaries and development builds both retain the skill
-        // source in the builtin registry; a checkout-relative path is never
-        // read at runtime (release-gate fixture-paths row).  Materialize only
-        // the renderer's three read-only resources in a private temporary tree.
-        let temp = tempfile::tempdir().context("could not create builtin renderer workspace")?;
-        let root = temp.path().join("skills/cas-release-report");
-        let references = root.join("references");
-        let scripts = root.join("scripts");
-        fs::create_dir_all(&references)?;
-        fs::create_dir_all(&scripts)?;
-        for (path, target) in [
-            (
-                "skills/cas-release-report/scripts/render.py",
-                scripts.join("render.py"),
-            ),
-            (
-                "skills/cas-release-report/references/template.html",
-                references.join("template.html"),
-            ),
-            (
-                "skills/cas-release-report/references/default-tokens.json",
-                references.join("default-tokens.json"),
-            ),
-        ] {
-            let builtin = BUILTIN_SKILLS
-                .iter()
-                .find(|file| file.path == path)
-                .ok_or_else(|| anyhow::anyhow!("builtin renderer resource missing: {path}"))?;
-            fs::write(&target, builtin.content)?;
-        }
-        Ok(Self {
-            script: scripts.join("render.py"),
-            render_timeout: RENDER_TIMEOUT,
-            _temporary_root: Some(temp),
-        })
-    }
-}
-
-/// An installed renderer is used only when it reads the front matter and the
-/// v2 change map this assembler writes, and accepts both link overrides passed
-/// by render_html; older copies fall back to the builtin.
-fn renderer_supports_source(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .map(|content| {
-            content.contains("front matter needs a closing")
-                && content.contains("['area', 'changes', 'what changed']")
-                && content.contains("--source-href")
-                && content.contains("--pdf-href")
-        })
-        .unwrap_or(false)
-}
-
 fn gh_json(project_root: &Path, args: &[&str]) -> anyhow::Result<Value> {
     let binary = std::env::var_os("GH_BIN").unwrap_or_else(|| "gh".into());
     let mut command = Command::new(binary);
@@ -3156,13 +2970,6 @@ fn bounded_error(command: &str, error: BoundedCommandError) -> String {
         BoundedCommandError::TimedOut => format!("{command} timed out"),
         BoundedCommandError::Io => format!("{command} is unavailable or could not be executed"),
     }
-}
-
-fn playwright_module_missing(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    detail.contains("playwright is not installed")
-        || detail.contains("cannot find module 'playwright'")
-        || detail.contains("cannot find module \"playwright\"")
 }
 
 #[cfg(test)]
@@ -3824,19 +3631,6 @@ Was: reports lacked evidence. Now: reports include verification evidence.
     }
 
     #[test]
-    fn playwright_module_failure_is_selected_for_npm_fallback() {
-        assert!(playwright_module_missing(
-            "Playwright is not installed: Cannot find module 'playwright'"
-        ));
-        assert!(playwright_module_missing(
-            "Error: Cannot find module \"playwright\""
-        ));
-        assert!(!playwright_module_missing(
-            "browserType.launch: Executable doesn't exist"
-        ));
-    }
-
-    #[test]
     fn issue_fixture_parses_labels_and_assets_preserve_digests() {
         let issues = serde_json::json!([
             {"number": 12, "title": "Build worker", "url": "https://github.com/o/r/issues/12", "state": "CLOSED", "closedAt": "2026-09-01T01:02:03Z", "labels": [{"name": "factory"}], "body": "worker"},
@@ -3972,6 +3766,8 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             github_repo: None,
             release_published_at: None,
             green_to_published_seconds: None,
+            brand_source: "defaults".to_string(),
+            design: None,
         };
         let mut output = Vec::new();
         {
@@ -4023,6 +3819,8 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             github_repo: None,
             release_published_at: None,
             green_to_published_seconds: None,
+            brand_source: "defaults".to_string(),
+            design: None,
         };
         let mut output = Vec::new();
         {

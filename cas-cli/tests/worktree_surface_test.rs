@@ -3575,6 +3575,123 @@ async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
 }
 
 #[tokio::test]
+async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    let registry = "version: 1\nupdated: '2026-10-26'\nsurfaces: ['src/pages/**']\ninvariants:\n  INV: {statement: Arrived, check: Read state}\njourneys:\n  - id: signup\n    status: live\n    seeded: true\n    entry: {url: /signup, trigger: Open}\n    owners: ['src/pages/signup.ts']\n";
+    let registry_path = "docs/qa/journeys.yaml";
+    std::fs::create_dir_all(repo.root.join("docs/qa")).unwrap();
+    std::fs::create_dir_all(repo.root.join("src/pages")).unwrap();
+    std::fs::write(repo.root.join(registry_path), registry).unwrap();
+    std::fs::write(repo.root.join("src/pages/signup.ts"), "signup\n").unwrap();
+    run_git(&["add", "."], &repo.root);
+    run_git(&["commit", "-m", "base journey registry"], &repo.root);
+    run_git(&["branch", "epic/upkeep"], &repo.root);
+    run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
+    let root = init_cas_dir(&repo.root, &mut env).unwrap();
+    let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
+        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-upkeep\"\n[qa.registry]\npath = \"{registry_path}\"\nenforce = \"{stage}\"\n"
+    )).unwrap();
+    configure("off");
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    for (id, name, role) in [
+        ("upkeep-worker", "alice", AgentRole::Worker),
+        ("upkeep-supervisor", "supervisor", AgentRole::Supervisor),
+    ] {
+        register_delivery_agent(&root, id, name, role, "upkeep-session");
+    }
+    let branch = "factory/alice-cas-efc1";
+    let worker = root.join("worktrees/alice");
+    repo.add_worktree(&worker, branch);
+    let agents = open_agent_store(&root).unwrap();
+    let mut agent = agents.get("upkeep-worker").unwrap();
+    agent.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
+    agents.update(&agent).unwrap();
+    let mut task = Task::new("cas-efc1".into(), "Repair post-merge ownership".into());
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("alice".into());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:merge-upkeep".into(), target_branch: "epic/upkeep".into(),
+    });
+    let tasks = open_task_store(&root).unwrap();
+    tasks.add(&task).unwrap();
+    env.set_current_dir(&worker);
+    let service = delivery_service(&root, "upkeep-worker");
+    let start = || task_req(serde_json::json!({"action": "start", "id": task.id}));
+    let close = || task_req(serde_json::json!({
+        "action": "close", "id": task.id, "reason": "validated delivery ready",
+    }));
+    service.task(Parameters(start())).await.unwrap();
+    std::fs::write(worker.join("src/pages/email.ts"), "email\n").unwrap();
+    run_git(&["add", "."], &worker);
+    run_git(&["commit", "-m", "add email surface"], &worker);
+    let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["push", "origin", branch], &worker);
+    let parked = service.task(Parameters(close())).await.unwrap();
+    assert!(get_text(&parked).contains("MERGE REQUIRED"), "{}", get_text(&parked));
+    // A gate newly enforced after park must return the worker, not strand the landed anchor.
+    configure("enforce");
+    env.set_current_dir(&repo.root);
+    let supervisor = delivery_service(&root, "upkeep-supervisor");
+    let mut request = coord_req("worktree_merge");
+    request.id = Some(branch.into());
+    request.task_id = Some(task.id.clone());
+    request.cleanup = Some(false);
+    let merged = supervisor.coordination(Parameters(request.clone())).await.unwrap();
+    let gate = get_text(&merged);
+    assert!(gate.contains("UNOWNED USER-FACING FILE") && gate.contains("src/pages/email.ts"), "{gate}");
+    run_git(&["merge-base", "--is-ancestor", &anchor, "epic/upkeep"], &repo.root);
+    let returned = tasks.get(&task.id).unwrap();
+    assert_eq!(returned.status, TaskStatus::Open, "a landed gate must release the worker: {gate}");
+    assert_eq!(returned.assignee, task.assignee);
+    assert!(returned.notes.contains("UNOWNED USER-FACING FILE") && returned.notes.contains("src/pages/email.ts"));
+    assert!(returned.deliverables.factory_branch_anchor.is_none());
+    assert!(returned.deliverables.green_merge_commit.is_none());
+    assert!(!cas_store::has_pending_observed_delivery_merge(
+        &root, &task.id, branch, "epic/upkeep", &anchor,
+    ).unwrap(), "returning the worker must retire the old merge's automatic close intent");
+    env.set_current_dir(&worker);
+    let _still_gated = service.task(Parameters(close())).await.unwrap();
+    let queue = cas::store::open_prompt_queue_store(&root).unwrap();
+    let notices: Vec<_> = queue.poll_all(100).unwrap().into_iter()
+        // pin: the recovery receipt identifies this gate return separately from merge/verdict notices.
+        .filter(|row| row.prompt.contains("post_merge_close_gate")).collect();
+    assert_eq!(notices.len(), 1, "one corrective notice per declined merged delivery");
+    assert_eq!(notices[0].target, "alice");
+    // pin: the worker receives the original actionable gate title and offending source path.
+    assert!(notices[0].prompt.contains("UNOWNED USER-FACING FILE") && notices[0].prompt.contains("src/pages/email.ts"));
+    service.coordination(Parameters(coord_req("inbox_poll"))).await.unwrap();
+    let started = service.task(Parameters(start())).await.unwrap();
+    assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
+    std::fs::write(worker.join(registry_path), registry.replace(
+        "owners: ['src/pages/signup.ts']", "owners: ['src/pages/signup.ts', 'src/pages/email.ts']"
+    )).unwrap();
+    run_git(&["commit", "-am", "fix: own delivered email surface"], &worker);
+    run_git(&["push", "origin", branch], &worker);
+    let repaired = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    let delivered = service.task(Parameters(close())).await.unwrap();
+    assert!(get_text(&delivered).contains("MERGE REQUIRED"), "{}", get_text(&delivered));
+    assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(repaired.as_str()));
+    assert_ne!(repaired, anchor);
+    env.set_current_dir(&repo.root);
+    let qa_required = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+    assert!(qa_required.message.contains("INDEPENDENT QA REQUIRED"), "{qa_required}");
+    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::AwaitingMerge,
+        "a QA wait must keep its existing ownership, rather than return a source fix");
+    // This fixture isolates source-gate recovery; settle the independent QA
+    // round explicitly at the repaired tip before proving the next merge.
+    cas_store::waive_qa_pass(
+        &root, &task.id, "upkeep-supervisor", "upkeep-worker", branch, &repaired,
+        "fixture: isolate post-merge source correction from independent QA", chrono::Utc::now(),
+    ).unwrap();
+    let accepted = supervisor.coordination(Parameters(request)).await.unwrap();
+    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{}", get_text(&accepted));
+}
+
+#[tokio::test]
 async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge() {
     let mut env = test_env();
     let fixture_parent = cas::test_paths::runtime_fixture_parent();

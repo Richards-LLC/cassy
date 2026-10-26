@@ -2975,6 +2975,13 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let f = fixture(&mut env, TaskStatus::InProgress);
         let repo = f.dir.path();
         git(repo, &["branch", "factory/worker", &f.tip]);
+        // A task mention in the body cannot claim an unnamed next task's
+        // subject for this delivery. Named continuations are covered by
+        // shared_lane_red_green_close_checks_pushed_tip_cas_2bec.
+        git(repo, &["checkout", "-q", "factory/worker"]);
+        git(repo, &["commit", "-q", "--amend", "-m", "wip\n\nContext: cas-ui02"]);
+        let unnamed = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["checkout", "-q", "main"]);
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
         let parking = f.core.advance_commit_time_anchor_before_park(
             tasks.as_ref(),
@@ -2982,7 +2989,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
             repo,
             "main",
             Some("factory/worker"),
-            Some(&f.tip),
+            Some(&unnamed),
         );
         assert_eq!(
             parking.deliverables.factory_branch_anchor.as_deref(),

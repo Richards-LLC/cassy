@@ -264,21 +264,49 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
     let repo = f.dir.path();
     git(&f.worker_path, &["reset", "--hard", "main"]);
     std::fs::create_dir_all(f.worker_path.join("scripts")).unwrap();
-    std::fs::write(f.worker_path.join("scripts/fast-rows-pre-push.sh"), "#!/bin/sh\n").unwrap();
+    std::fs::write(
+        f.worker_path.join("scripts/fast-rows-pre-push.sh"),
+        "#!/bin/sh\n",
+    )
+    .unwrap();
     std::fs::write(f.worker_path.join("regression.txt"), "RED regression\n").unwrap();
     git(&f.worker_path, &["add", "scripts", "regression.txt"]);
-    git(&f.worker_path, &["commit", "-qm", &format!("test({TASK}): RED regression")]);
+    git(
+        &f.worker_path,
+        &["commit", "-qm", &format!("test({TASK}): RED regression")],
+    );
     let red = git(&f.worker_path, &["rev-parse", "HEAD"]);
     std::fs::write(f.worker_path.join("fix.txt"), "GREEN fix\n").unwrap();
     git(&f.worker_path, &["add", "fix.txt"]);
-    git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): GREEN implementation")]);
+    git(
+        &f.worker_path,
+        &[
+            "commit",
+            "-qm",
+            &format!("fix({TASK}): GREEN implementation"),
+        ],
+    );
     let green = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &green]);
+    git(
+        repo,
+        &[
+            "update-ref",
+            &format!("refs/remotes/origin/{BRANCH}"),
+            &green,
+        ],
+    );
 
-    let common = git(repo, &["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    let common = git(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
     let receipts = Path::new(&common).join("cas/fast-rows");
     std::fs::create_dir_all(&receipts).unwrap();
-    std::fs::write(receipts.join(format!("{green}.pass")), format!("fast-rows: PASS {green} fixture\n")).unwrap();
+    std::fs::write(
+        receipts.join(format!("{green}.pass")),
+        format!("fast-rows: PASS {green} fixture\n"),
+    )
+    .unwrap();
     let tasks = open_task_store(&repo.join(".cas")).unwrap();
     let mut task = tasks.get(TASK).unwrap();
     task.demo_statement.clear();
@@ -287,22 +315,34 @@ async fn shared_lane_red_green_close_checks_pushed_tip_cas_2bec() {
     task.deliverables.historical_factory_branch_anchors.clear();
     tasks.update(&task).unwrap();
 
-    let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
-        id: TASK.into(),
-        reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
-        commit_receipt: None,
-        no_delivery: None,
-        supervisor_override: None,
-        stranded_branch_override: None,
-        legacy_bypass_code_review: None,
-        search_manifest: None,
-    })).await.unwrap());
+    let output = text(
+        f.core
+            .cas_task_close(Parameters(TaskCloseRequest {
+                id: TASK.into(),
+                reason: Some(format!("PASS {green}: RED then GREEN on spawn lane")),
+                commit_receipt: None,
+                no_delivery: None,
+                supervisor_override: None,
+                stranded_branch_override: None,
+                legacy_bypass_code_review: None,
+                search_manifest: None,
+            }))
+            .await
+            .unwrap(),
+    );
     assert!(output.contains("MERGE REQUIRED"), "{output}");
     let parked = tasks.get(TASK).unwrap();
     assert_eq!(parked.status, TaskStatus::AwaitingMerge, "{output}");
     assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
-    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(green.as_str()), "{output}");
-    assert!(parked.notes.contains(&red), "the original RED boundary stays audited");
+    assert_eq!(
+        parked.deliverables.factory_branch_anchor.as_deref(),
+        Some(green.as_str()),
+        "{output}"
+    );
+    assert!(
+        parked.notes.contains(&red),
+        "the original RED boundary stays audited"
+    );
 }
 
 #[tokio::test]

@@ -6734,8 +6734,8 @@ impl CasCore {
     /// catches only messages that name another task), so two structural
     /// stops apply:
     /// - the measured branch must be this task's per-task branch
-    ///   (`factory/<assignee>-<task>`). A plain `factory/<assignee>` is a
-    ///   mutable lane where the worker stacks the next task on this one;
+    ///   (`factory/<assignee>-<task>`), or its active assignee's plain lane
+    ///   with every continuation commit explicitly claiming this task;
     /// - no other open task's anchor may sit between the recorded anchor and
     ///   the tip, because that commit is another delivery's boundary.
     pub(crate) fn tip_is_own_task_lineage(
@@ -6751,6 +6751,9 @@ impl CasCore {
             return false;
         };
         let branch = branch.strip_prefix("origin/").unwrap_or(branch);
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
         let own_task_branch = match task.assignee.as_deref() {
             Some(assignee) => branch == crate::factory_isolation::worker_task_branch(assignee, &task.id),
             // A released per-task branch still identifies the task. Keep the
@@ -6761,12 +6764,31 @@ impl CasCore {
                     .and_then(|name| name.strip_suffix(&format!("-{}", task.id)))
                     .is_some_and(|holder| !holder.is_empty()),
         };
-        if !own_task_branch {
+        // cas-2bec: spawn assigns the plain lane too. Before the first
+        // park, a RED commit may be the recorded anchor and GREEN the pushed
+        // tip. Require positive ownership here: an unnamed continuation on
+        // a mutable lane may belong to the worker's next task (cas-f1f4).
+        let own_active_lane = task.assignee.as_deref().is_some_and(|assignee| {
+            branch == crate::factory_isolation::expected_worker_branch(assignee)
+                && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
+                && !others.iter().any(|other| {
+                    other.id != task.id
+                        && other.status == TaskStatus::InProgress
+                        && other.assignee.as_deref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
+                })
+                && git_commit_is_ancestor(repo_path, recorded, tip)
+                && git_stdout_lines(
+                    repo_path,
+                    &["log", "--format=%s", &format!("{recorded}..{tip}"), "--"],
+                ).is_ok_and(|subjects| {
+                    !subjects.is_empty()
+                        && subjects.iter().all(|subject| message_references_task(subject, &task.id))
+                })
+        });
+        if !own_task_branch && !own_active_lane {
             return false;
         }
-        let Ok(others) = task_store.list(None) else {
-            return false;
-        };
         !others.iter().any(|other| {
             other.id != task.id
                 && other.status != TaskStatus::Closed

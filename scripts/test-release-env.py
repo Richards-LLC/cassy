@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
@@ -106,6 +107,23 @@ class ZigOrder(Fixture):
         zig = self.resolve()
         self.assertEqual(zig.path, "")
         self.assertIn(f"cd {self.main} && ./scripts/bootstrap-zig.sh", zig.fix)
+
+    def test_the_zig_pin_is_read_once_for_every_path_candidate(self):
+        second = make_exe(self.root / "bin2/zig", "#!/bin/sh\necho 0.16.0\n")
+        self.path_zig.write_text("#!/bin/sh\necho 0.16.0\n")
+        self.env["PATH"] = os.pathsep.join([str(self.path_zig.parent), str(second.parent)])
+        reads = []
+        original = Path.read_text
+
+        def counting(path, *args, **kwargs):
+            if path.name == "build.zig.zon":
+                reads.append(path)
+            return original(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "read_text", counting):
+            zig = self.resolve()
+        self.assertEqual(zig.path, str(self.main_zig))
+        self.assertEqual(len(reads), 1, reads)
 
 
 class ScratchPerFilesystem(Fixture):

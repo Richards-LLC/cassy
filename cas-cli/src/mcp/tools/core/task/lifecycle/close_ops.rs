@@ -6556,6 +6556,13 @@ impl CasCore {
         }
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
+        // cas-43d2: a pushed delivery is what origin holds. An unpushed local
+        // rebase must not replace it, or the pushed tip reads as superseded.
+        if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+            && commit_is_absent_from_origin(repo_path, &candidate)
+        {
+            return None;
+        }
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
         let rebase_target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
             parent_branch.to_string()
@@ -6751,9 +6758,6 @@ impl CasCore {
             return false;
         };
         let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        let Ok(others) = task_store.list(None) else {
-            return false;
-        };
         let own_task_branch = match task.assignee.as_deref() {
             Some(assignee) => branch == crate::factory_isolation::worker_task_branch(assignee, &task.id),
             // A released per-task branch still identifies the task. Keep the
@@ -6768,20 +6772,26 @@ impl CasCore {
         // park, a RED commit may be the recorded anchor and GREEN the pushed
         // tip. Require positive ownership here: an unnamed continuation on
         // a mutable lane may belong to the worker's next task (cas-f1f4).
-        let own_active_lane = task.assignee.as_deref().is_some_and(|assignee| {
+        let plain_lane = task.assignee.as_deref().is_some_and(|assignee| {
             branch == crate::factory_isolation::expected_worker_branch(assignee)
                 && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
-                && !others.iter().any(|other| {
+        });
+        // cas-43d2: decide on the branch names before reading every task.
+        if !own_task_branch && !plain_lane {
+            return false;
+        }
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
+        let own_active_lane = plain_lane && task.assignee.as_deref().is_some_and(|assignee| {
+            !others.iter().any(|other| {
                     other.id != task.id
                         && other.status == TaskStatus::InProgress
                         && other.assignee.as_deref()
                             .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
-                && git_stdout_lines(
-                    repo_path,
-                    &["log", "--format=%s", &format!("{recorded}..{tip}"), "--"],
-                ).is_ok_and(|subjects| {
+                && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
                     !subjects.is_empty()
                         && subjects.iter().all(|subject| message_references_task(subject, &task.id))
                 })
@@ -11798,6 +11808,14 @@ impl CasCore {
                 ),
                 None => resolve_system_b_worktree_path(&self.cas_root, assignee),
             });
+        // cas-43d2: with no worktree for the worker, close gates run in the
+        // project root; say so, since a removed worktree looks the same.
+        if system_a.is_none() && system_b.is_none() && let Some(assignee) = task.assignee.as_deref() {
+            tracing::info!(
+                task_id = %task.id, %assignee,
+                "close gates fall back to the project root: the worker has no worktree"
+            );
+        }
         let Some(expected) = declared_repo_context else {
             return Ok(system_b);
         };
@@ -21361,6 +21379,47 @@ impl BranchContentDirection {
 }
 
 /// Run `git` in `repo_path`, returning trimmed stdout on success.
+/// cas-43d2: subjects of the commits a worker added to its plain lane
+/// between `recorded` and `tip`. A worker that merges its target (or the
+/// default branch) mid-task brings in commits that are not its own, so
+/// commits reachable from those branches and the merge commits are left out.
+fn own_lane_subjects(
+    repo_path: &std::path::Path,
+    task: &Task,
+    recorded: &str,
+    tip: &str,
+) -> Result<Vec<String>, String> {
+    let mut excluded: Vec<String> = task.deliverables.work_target.as_ref()
+        .map(|target| preferred_live_target_ref_for_delivery(repo_path, &target.target_branch, task.delivery_mode).0)
+        .into_iter()
+        .collect();
+    if git_ref_exists(repo_path, "refs/remotes/origin/HEAD") {
+        excluded.push("refs/remotes/origin/HEAD".to_string());
+    }
+    let range = format!("{recorded}..{tip}");
+    let mut args = vec!["log", "--no-merges", "--format=%s", range.as_str()];
+    let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
+    args.extend(negated.iter().map(String::as_str));
+    args.push("--");
+    git_stdout_lines(repo_path, &args)
+}
+
+/// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
+/// without an origin remote has nothing to compare, so it answers false.
+fn commit_is_absent_from_origin(repo_path: &std::path::Path, commit: &str) -> bool {
+    let has_origin = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    has_origin
+        && git_stdout_lines(
+            repo_path,
+            &["for-each-ref", "--format=%(refname)", "--contains", commit, "refs/remotes/origin"],
+        )
+        .is_ok_and(|refs| refs.is_empty())
+}
+
 fn git_stdout_lines(repo_path: &std::path::Path, args: &[&str]) -> Result<Vec<String>, String> {
     use std::process::Command;
 
@@ -32276,6 +32335,62 @@ esac
         );
     }
 
+    /// cas-43d2: a worker that merges its target between RED and GREEN keeps
+    /// its plain-lane lineage; the target's commits are not its subjects.
+    #[test]
+    fn target_merge_between_red_and_green_keeps_own_lane_lineage_cas_43d2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let red = commit_local(p, "a.rs", "test(cas-a0a0): red");
+        git(p, &["checkout", "-q", "main"]);
+        commit_local(p, "m.rs", "unrelated target work");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "-m", "Merge main into factory/worker", "main"]);
+        let green = commit_local(p, "b.rs", "fix(cas-a0a0): green");
+        let mut task = worker_task("worker");
+        task.id = "cas-a0a0".to_string();
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        assert!(core.tip_is_own_task_lineage(
+            &store, &task, p, Some("factory/worker"), &red, Some(&green),
+        ));
+    }
+
+    /// cas-43d2: a parked push delivery never advances to a commit origin
+    /// lacks; once that commit is pushed, the same advance succeeds.
+    #[test]
+    fn parked_anchor_never_advances_to_an_unpushed_commit_cas_43d2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        let parked_at = commit_local(p, "a.rs", "task A delivery");
+        git(p, &["push", "-q", "origin", "main", "factory/worker"]);
+        let mut parked = worker_task("worker");
+        parked.id = "cas-a0a0".to_string();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.factory_branch_anchor = Some(parked_at.clone());
+        let own = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
+        let anchor = |store: &crate::store::mock::MockTaskStore| {
+            use cas_store::TaskStore;
+            store.get(&parked.id).unwrap().deliverables.factory_branch_anchor
+        };
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
+        assert_eq!(anchor(&store), Some(parked_at), "an unpushed commit is not the delivery");
+        git(p, &["push", "-q", "origin", "factory/worker"]);
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
+        assert_eq!(anchor(&store), Some(own), "the pushed continuation advances it");
+    }
+
     /// cas-ba4a: a parked task resolves to its anchor; an anchor that cannot
     /// be resolved (and cannot be fetched) refuses with a named reason
     /// instead of substituting the live lane.
@@ -36329,6 +36444,30 @@ mod system_b_worktree_resolution_tests {
             None,
             "a genuinely non-isolated task (no directory at all) must not resolve"
         );
+    }
+
+    /// cas-43d2: a close whose worker has no worktree runs its gates in the
+    /// project root, and the log says so.
+    #[test]
+    fn missing_worker_worktree_logs_the_project_root_fallback_cas_43d2() {
+        let cas_root = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(cas_root.path().join(".cas"), None, None);
+        let mut task = cas_types::Task::new("cas-43d2".into(), "close".into());
+        task.assignee = Some("gone-worker".into());
+        let log = tempfile::tempfile().unwrap();
+        let capture = log.try_clone().unwrap();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_writer(move || capture.try_clone().unwrap()).finish();
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            core.resolve_worker_worktree_path(&task, None)
+        });
+        assert_eq!(resolved, Ok(None));
+        use std::io::{Read, Seek};
+        let mut log = log;
+        log.rewind().unwrap();
+        let mut text = String::new();
+        log.read_to_string(&mut text).unwrap();
+        assert!(text.contains("fall back to the project root") && text.contains("gone-worker"), "{text}");
     }
 
     #[test]

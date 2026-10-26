@@ -670,7 +670,8 @@ fn customer_release_notes_route_to_their_own_skill() {
         );
         let team = description("cas-release-notes");
         assert!(
-            !team.contains("for customers") && team.contains("cas-customer-release-notes"),
+            !team.contains("for the team or for customers")
+                && team.contains("go to cas-customer-release-notes"),
             "{label}: {team}"
         );
     }

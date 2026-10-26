@@ -40406,6 +40406,7 @@ mod zero_change_close_tests {
     #[tokio::test]
     async fn released_epic_dispatch_binds_merge_despite_later_main_push_cas_b03c() {
         use crate::mcp::CasService;
+        use crate::test_support::TestEnvGuard;
         use crate::store::{
             open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
         };

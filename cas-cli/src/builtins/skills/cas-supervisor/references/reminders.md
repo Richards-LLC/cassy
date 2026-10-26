@@ -120,3 +120,7 @@ true, delivering the existing supervisor notification and prompt-queue wake.
 The model pattern: one 2–5 minute checkpoint after an unreachable external
 workflow, followed by a single authoritative check and state advance — not a
 stream of stale reminders.
+
+## Peer release updates
+
+Send a peer merge/close update that unblocks their release with `kind=status`, never `kind=receipt`: receipts stay quiet. Treat `EPIC READY: all children closed` as an action to inspect the epic and advance its release.

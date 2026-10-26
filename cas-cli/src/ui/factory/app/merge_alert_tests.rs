@@ -695,6 +695,15 @@ fn cas_9efb_relay_dedupes_task_tip_ci_despite_unrelated_target_move() {
     );
     assert!(decision[0].text.contains("CI failed"));
     assert!(f.relay().is_empty());
+    // A parked failure still needs the slow same-SHA rerun probe; only a
+    // successful READY may suppress this tip indefinitely.
+    f.app.merge_alert_retries.now = Some(Utc::now() + chrono::Duration::minutes(10));
+    f.ci(Some("success"));
+    let recovered = f.relay();
+    assert_eq!(recovered.len(), 1);
+    // pin: this heading is the supervisor's immediate merge trigger.
+    assert!(recovered[0].text.contains("READY TO MERGE"));
+    assert!(f.relay().is_empty());
 }
 
 #[test]
@@ -832,6 +841,22 @@ fn cas_9efb_unknown_or_partly_pending_ci_defers_without_consuming_decision() {
     );
     f.ci(Some("failure"));
     assert_eq!(f.relay().len(), 1);
+}
+
+#[test]
+fn cas_65e8_active_target_fetch_failure_retries_without_ci_backoff() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    // Hide only the target ref: the source fetch and green CI still succeed.
+    // This is a real upload-pack failure, not a mocked reader return value.
+    git(f.remote.path(), &["config", "uploadpack.hideRefs", "refs/heads/epic/test"]);
+    let deferred = f.relay();
+    assert!(deferred.iter().all(|prompt| prompt.merge_alert.is_none()));
+    git(f.remote.path(), &["config", "--unset", "uploadpack.hideRefs"]);
+    let recovered = f.relay();
+    assert_eq!(recovered.len(), 1);
+    assert!(recovered[0].merge_alert.is_some());
+    assert!(f.relay().is_empty());
 }
 
 #[test]

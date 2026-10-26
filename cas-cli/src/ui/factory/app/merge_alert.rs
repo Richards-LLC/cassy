@@ -110,7 +110,11 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
     );
     let lease = data.agents.iter().find(|agent| agent.name == *worker)
         .and_then(|agent| agent.active_lease.as_ref()).map(|lease| lease.task_id.as_str());
-    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease));
+    // cas-43d2: batch staging and a declined tip settle reads without moving
+    // a ref, so they belong to the fingerprint that decides when to re-read.
+    let staged = task.deliverables.integration_batch.is_some();
+    let declined = tip.as_ref().is_some_and(|tip| task.deliverables.declined_factory_anchors().contains(tip));
+    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined));
     Some((task.id, tip.unwrap_or_default(), refs))
 }
 
@@ -130,7 +134,7 @@ pub(super) fn read_delivery(
         && previous.fingerprint == refs
         && !matches!(previous.ci, "pending" | "unknown")
         && (previous.ready.as_ref().is_some_and(|ready| ready.ci == "success")
-            || matches!(previous.ci, "merged" | "unpushed")
+            || matches!(previous.ci, "merged" | "unpushed" | "declined" | "not-ready")
             || now.signed_duration_since(previous.checked_at) < SETTLED_RETRY)
     {
         let mut wait = previous.wait.clone();
@@ -515,16 +519,25 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     );
     let tip = tip?;
     let known = known.filter(|known| known.task == task_id && known.tip.as_deref() == Some(&tip));
-    if task.deliverables.declined_factory_anchors().contains(&tip)
-        || (known.is_none() && fetch_parent_branch_result(repo, &branch) != BoundedFetch::Succeeded)
-    { return None; }
+    // cas-43d2: a rejected tip stays rejected until the worker commits, which
+    // moves the fingerprint; settle it instead of re-reading every minute.
+    if task.deliverables.declined_factory_anchors().contains(&tip) {
+        *observed_ci = "declined";
+        return None;
+    }
+    if known.is_none() && fetch_parent_branch_result(repo, &branch) != BoundedFetch::Succeeded { return None; }
     if resolve_ref_commit_sha(repo, &format!("origin/{branch}")).as_deref() != Some(&tip) {
         *observed_ci = "unpushed";
         return None;
     }
-    crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
+    // Every refusal here is a function of the fingerprinted refs, so it is
+    // not transient: settle until they change.
+    if crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
         repo, &task, &branch, &tip,
-    ).ok()?;
+    ).is_err() {
+        *observed_ci = "not-ready";
+        return None;
+    }
     let ci = known.map(|known| known.ci)
         .unwrap_or_else(|| crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo));
     // Re-fetch the target after CI, just as the parked delivery path does.
@@ -539,4 +552,29 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
     *observed_ci = ci;
     if ci != "success" { return None; }
     Some(Ready { evidence, tip, ci, worker: Some(worker.to_string()) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cas-43d2: a staged delivery is cached as "merged" until its read
+    /// fingerprint changes, so unstaging it must change the fingerprint.
+    #[test]
+    fn batch_staging_changes_the_delivery_read_fingerprint_cas_43d2() {
+        let f = super::super::merge_alert_tests::Fixture::new();
+        let cas_dir = f.app.cas_dir.clone();
+        let repo = cas_dir.parent().unwrap();
+        let data = DirectorData::load_with_stores_for_project(&cas_dir, None, false, None, None).unwrap();
+        let unstaged = fingerprint(&f.event, &data, repo);
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.deliverables.integration_batch = Some(cas_types::IntegrationBatchEvidence {
+            branch: "batch/x".into(), tip: "a".repeat(40), base: "a".repeat(40),
+            delivered_head: "a".repeat(40), supervisor_id: "sup".into(), recorded_at: Utc::now(),
+        });
+        store.update(&task).unwrap();
+        assert!(unstaged.is_some());
+        assert_ne!(fingerprint(&f.event, &data, repo), unstaged);
+    }
 }

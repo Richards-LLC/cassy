@@ -359,23 +359,10 @@ impl CasCore {
         if closed.status != TaskStatus::Closed {
             return self.held_after_verdict(store.as_ref(), task_id, release, text);
         }
-        if let Some(release) = release.as_ref() {
-            // cas-e9d6: the authority note is written only once the close
-            // has committed, and a foreign hold is reported only then.
-            if let Err(error) = store.append_trusted_note(task_id, &release.note) {
-                tracing::warn!(%task_id, %error, "close authority note not recorded");
-            }
-            if let Some(reason) = release.foreign_hold.as_deref()
-                && let Err(error) = super::supervisor_push::queue_cassy_close_over_hold_receipt(
-                    &self.cas_root,
-                    &closed,
-                    reason,
-                )
-            {
-                tracing::warn!(%task_id, %error, "close-over-hold receipt not queued");
-            }
-        }
-        let notice = match super::supervisor_push::queue_cassy_merge_close_notice(
+        let unrecorded = release.as_ref()
+            .map(|release| self.record_verdict_release(store.as_ref(), &closed, release))
+            .unwrap_or_default();
+        let mut notice = match super::supervisor_push::queue_cassy_merge_close_notice(
             &self.cas_root,
             &closed,
             &merge_commit,
@@ -384,6 +371,11 @@ impl CasCore {
             Ok(None) => "no live assigned worker to notify".to_string(),
             Err(error) => format!("worker notice failed: {error}"),
         };
+        // cas-43d2: the supervisor reads this receipt; a record that failed
+        // after the close committed belongs in it, not only in a warn log.
+        for failure in unrecorded {
+            notice.push_str(&format!("; NOT RECORDED: {failure}"));
+        }
         CassyMergeClose::Closed { notice }
     }
 
@@ -442,7 +434,36 @@ impl CasCore {
         Ok((released, release))
     }
 
+    /// cas-e9d6: the authority note is written only once the close has
+    /// committed, and a foreign hold is reported only then. Returns what
+    /// could not be recorded, for the supervisor-visible receipt.
+    fn record_verdict_release(
+        &self,
+        store: &dyn cas_store::TaskStore,
+        closed: &Task,
+        release: &VerdictRelease,
+    ) -> Vec<String> {
+        let task_id = closed.id.as_str();
+        let mut unrecorded = Vec::new();
+        if let Err(error) = store.append_trusted_note(task_id, &release.note) {
+            tracing::warn!(%task_id, %error, "close authority note not recorded");
+            unrecorded.push(format!("the close-authority note ({error})"));
+        }
+        if let Some(reason) = release.foreign_hold.as_deref()
+            && let Err(error) = super::supervisor_push::queue_cassy_close_over_hold_receipt(
+                &self.cas_root,
+                closed,
+                reason,
+            )
+        {
+            tracing::warn!(%task_id, %error, "close-over-hold receipt not queued");
+            unrecorded.push(format!("the close-over-hold receipt ({error})"));
+        }
+        unrecorded
+    }
+
     /// cas-e9d6: a held verdict close puts back the worker hold it lifted.
+    /// cas-43d2: what it could not put back is part of the held result.
     fn held_after_verdict(
         &self,
         store: &dyn cas_store::TaskStore,
@@ -453,26 +474,49 @@ impl CasCore {
         let Some(release) = release else {
             return CassyMergeClose::Held(text);
         };
+        let mut unrestored = Vec::new();
         // A source gate may already have returned this delivery to the
         // worker. Never restore the old verdict hold over that fresh cycle.
-        let Ok(current) = store.get(task_id) else { return CassyMergeClose::Held(text); };
-        if current.status != TaskStatus::AwaitingMerge {
-            return CassyMergeClose::Held(text);
-        }
-        if release.was_blocked {
-            let mut blocked = current.clone();
-            blocked.status = TaskStatus::Blocked;
-            blocked.updated_at = chrono::Utc::now();
-            if let Err(error) = store.update_if_current(&blocked, &current) {
-                tracing::warn!(%task_id, %error, "held verdict close could not restore Blocked");
+        let current = match store.get(task_id) {
+            Ok(current) if current.status != TaskStatus::AwaitingMerge => {
+                return CassyMergeClose::Held(text);
+            }
+            Ok(current) => Some(current),
+            Err(error) => {
+                tracing::warn!(%task_id, %error, "held verdict close could not read the task to restore it");
+                if release.was_blocked {
+                    unrestored.push(format!("Blocked status ({error})"));
+                }
+                if release.hold.is_some() {
+                    unrestored.push(format!("the worker hold ({error})"));
+                }
+                None
+            }
+        };
+        if let Some(current) = current {
+            if release.was_blocked {
+                let mut blocked = current.clone();
+                blocked.status = TaskStatus::Blocked;
+                blocked.updated_at = chrono::Utc::now();
+                if let Err(error) = store.update_if_current(&blocked, &current) {
+                    tracing::warn!(%task_id, %error, "held verdict close could not restore Blocked");
+                    unrestored.push(format!("Blocked status ({error})"));
+                }
+            }
+            if let Some(hold) = release.hold
+                && let Err(error) = store.patch_execution_state(task_id, &serde_json::json!({"blocked_hold": hold}))
+            {
+                tracing::warn!(%task_id, %error, "held verdict close could not restore the worker hold");
+                unrestored.push(format!("the worker hold ({error})"));
             }
         }
-        if let Some(hold) = release.hold
-            && let Err(error) = store.patch_execution_state(task_id, &serde_json::json!({"blocked_hold": hold}))
-        {
-            tracing::warn!(%task_id, %error, "held verdict close could not restore the worker hold");
+        if unrestored.is_empty() {
+            return CassyMergeClose::Held(text);
         }
-        CassyMergeClose::Held(text)
+        CassyMergeClose::Held(format!(
+            "{text}\n\nCassy lifted these for the verdict close and could not put them back: {}. Restore them before the worker resumes.",
+            unrestored.join("; ")
+        ))
     }
 
     /// cas-46ea: a rejected verdict on a merged delivery returns the task to
@@ -573,5 +617,26 @@ mod tests {
         git(repo, &["fetch", "-q", "origin"]);
         let refused = pushed_delivery_tip(repo, &task, "factory/w", &foreign_tip).unwrap_err();
         assert!(refused.contains("not on w's own factory/w"), "{refused}");
+    }
+
+    /// cas-43d2: what the one-hop verdict close could not restore or record
+    /// reaches the supervisor-visible result, not only a warn log.
+    #[test]
+    fn unrestored_and_unrecorded_close_state_reaches_the_result_cas_43d2() {
+        let cas = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(cas.path().join(".cas"), None, None);
+        let mut task = Task::new("cas-43d2".into(), "held verdict close".into());
+        task.status = TaskStatus::AwaitingMerge;
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        let release = || VerdictRelease {
+            note: "Cassy close authority".into(), foreign_hold: None, was_blocked: true, hold: None,
+        };
+        store.inject_error(cas_store::StoreError::Other("disk full".into()));
+        let held = core.held_after_verdict(&store, &task.id, Some(release()), "gate text".into());
+        let CassyMergeClose::Held(text) = held else { panic!("a held close stays held") };
+        assert!(text.contains("could not put them back: Blocked status") && text.contains("disk full"), "{text}");
+        // The mock store, like a failing one, cannot append a trusted note.
+        let unrecorded = core.record_verdict_release(&store, &task, &release());
+        assert!(unrecorded.iter().any(|failure| failure.contains("close-authority note")), "{unrecorded:?}");
     }
 }

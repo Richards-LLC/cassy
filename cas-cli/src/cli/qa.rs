@@ -164,7 +164,7 @@ pub enum QaCommand {
     /// Observe a release before announcing it or closing its epic
     PostRelease(super::qa_post_release::PostReleaseArgs),
     /// Seed, inspect or validate the journey registry
-    #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status"])))]
+    #[command(group(ArgGroup::new("journey_action").required(true).multiple(false).args(["check", "seed", "status", "traffic"])))]
     Journeys {
         /// Check schema, references and globs without executing specs
         #[arg(long)]
@@ -178,6 +178,15 @@ pub enum QaCommand {
         /// Show registry coverage and integration upkeep drift
         #[arg(long)]
         status: bool,
+        /// Per-journey traffic shares from Commander's local usage counts
+        #[arg(long)]
+        traffic: bool,
+        /// Days of usage to count, ending today
+        #[arg(long, requires = "traffic", default_value_t = 30, value_parser = clap::value_parser!(u32).range(1..=400))]
+        days: u32,
+        /// Write the shares and a traffic_snapshot header into the registry
+        #[arg(long, requires = "traffic")]
+        write: bool,
     },
 }
 
@@ -217,6 +226,9 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
             seed,
             merge,
             status,
+            traffic,
+            days,
+            write,
         } => {
             let git = std::process::Command::new("git")
                 .args(["rev-parse", "--show-toplevel"])
@@ -230,6 +242,9 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
             let local_cas = project_root.join(".cas");
             let config = crate::config::Config::load(cas_root.unwrap_or(&local_cas))?;
             let qa = config.qa();
+            if *traffic {
+                return journey_traffic(&project_root, &qa.registry.path, *days, *write, cli.json);
+            }
             if *seed || *status {
                 let result = if *seed {
                     let result = crate::qa_seed::seed(&project_root, &qa, *merge)?;
@@ -436,6 +451,54 @@ pub fn execute(command: &QaCommand, cli: &Cli, cas_root: Option<&Path>) -> Resul
             Ok(())
         }
     }
+}
+
+/// `cas qa journeys --traffic` (cas-0b3d): shares from this machine's hub ledger.
+fn journey_traffic(project_root: &Path, registry_path: &str, days: u32, write: bool, json: bool) -> Result<()> {
+    let path = project_root.join(registry_path);
+    let text = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    let registry = crate::qa_registry::parse(&text)?;
+    let hub = crate::hub::HubRuntimePaths::default_for_user()?;
+    let ledger_path = hub.root().join(crate::hub::usage::USAGE_FILE);
+    let ledger = crate::hub::usage::read_ledger(hub.root())?.unwrap_or_default();
+    let report = crate::qa_traffic::report(&registry, &ledger, chrono::Utc::now().date_naive(), days);
+    if write {
+        std::fs::write(&path, crate::qa_traffic::apply(&text, &report)?)
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    if json {
+        let mut value = serde_json::to_value(&report)?;
+        value["ledger"] = serde_json::json!(ledger_path);
+        value["written"] = serde_json::json!(write);
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    if report.actions == 0 {
+        println!(
+            "NO DATA: no counted Commander actions in the {} days to {}.",
+            report.window_days, report.as_of
+        );
+        println!("Use Commander with a build that counts usage, then rerun.");
+    } else {
+        println!(
+            "{} counted Commander actions in the {} days to {}",
+            report.actions, report.window_days, report.as_of
+        );
+        for share in &report.journeys {
+            println!("  {:>5.1}%  {:>6}  {}  {}", share.share_pct, share.count, share.id, share.name);
+        }
+    }
+    for (id, count) in &report.unregistered {
+        println!("  not in registry: {id} ({count})");
+    }
+    println!("{}", report.snapshot_line());
+    if write {
+        println!("Wrote shares to {registry_path}");
+    } else if report.actions > 0 {
+        println!("Next: cas qa journeys --traffic --days {days} --write");
+    }
+    println!("Ledger: {}", ledger_path.display());
+    Ok(())
 }
 
 #[derive(Debug, Args)]

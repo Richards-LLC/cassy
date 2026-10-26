@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "3.81.0"
+version = "3.82.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -124,6 +124,7 @@ urlencoding = "2.1"
 
 # Text Processing
 regex = "1.11"
+regex-syntax = "0.8"
 unicode-normalization = "0.1"
 similar = "2.7"
 pulldown-cmark = "0.13"

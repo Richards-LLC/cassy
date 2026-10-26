@@ -15,6 +15,8 @@ pub(crate) mod hooks;
 pub mod operator_policy;
 mod runtime;
 mod settings;
+mod qa_capture;
+pub use qa_capture::QaCaptureConfig;
 mod upkeep;
 pub use upkeep::{ProjectOverviewConfig, UpkeepConfig, UpkeepStage};
 pub(crate) use upkeep::refresh_upkeep;

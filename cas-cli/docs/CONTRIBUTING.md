@@ -237,6 +237,30 @@ the pushed ref and states that the worker checkout was left untouched.
 Unpushed or mismatched tips retain the dirty-checkout refusal; cleanup requests
 retain the existing protection against deleting uncommitted work.
 
+When a parked delivery hits a content conflict, Cassy returns it Open to its
+assignee through `request_changes`, invalidating the old delivery proof and
+recording `merge_conflicted`, the conflicting paths and the attempted target tip.
+The worker receives one notice and can start, resolve and re-deliver directly.
+Target drift and pre-existing checkout residue keep their existing recovery paths.
+
+After a published merge, an enforced registry or documentation upkeep gate
+returns the parked task Open to its assignee through the same `request_changes`
+core. Cassy retains the gate text in task notes, sends one corrective notice,
+and retires the old automatic-close intent. The worker can start, commit the
+source repair and re-deliver with a fresh anchor. Verification and QA waits
+keep their existing dispatch ownership.
+
+A supervisor message to a blocked worker records ownership of that wait only
+when sent with `kind=answer` or `in_reply_to` the worker's blocker message.
+An unrelated ping or a reply to ordinary status leaves blocker alerts armed.
+Repeated idle and blocked alerts stay quiet while the assignee, supervisor,
+structured hold reason and blocker question remain unchanged, including a
+verification rejection followed by the same block. A new blocker question or
+hold re-arms alerts; an explicit Open transition clears the answer. Existing
+queued alerts remain readable without waking the supervisor again. The receipt
+and question fingerprint are maintained by authenticated coordination messages,
+not hand-written execution-state patches.
+
 For Claude supervisors in Teams factories, an authenticated action event whose
 complete framed payload fits the hook budget travels in one PTY turn, with its
 queue id and body inline. No Teams pointer or relay copy is written. A busy
@@ -1450,6 +1474,31 @@ passing capped test receipts for every changed Rust crate. Missing fast rows
 produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
 REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
 waive these refusals or the merge queue's final-tree proof.
+
+## Project capture configuration
+
+`cas config list --section qa.capture` lists the project capture settings.
+Use `cas config set qa.capture.base_url http://localhost:3000` for an existing
+target, or set `qa.capture.serve` to a checkout server command with `{port}`.
+`ready_path` defaults to `/`; `shots` defaults to `docs/qa/shots.json`.
+`mask` is a comma-separated selector list. `viewports` defaults to `1280x800`;
+`390x844` is available for shots that request mobile. `max_shots` defaults to 6
+and `timeout_secs` to 240. `max_html_mb` is a capture-side ceiling of 8 MB;
+report embedding budgets belong to finalize.
+
+For authenticated surfaces, set `login_path`, an anchored `success_url` such as
+`^https://[^/]+/dashboard`, and `credentials_env` to an environment-variable
+**name**, for example `PROJECT_QA_CREDENTIALS`. Optional `email_sel`,
+`password_sel` and `submit_sel` override the standard form selectors. The named
+variable must resolve to an existing readable credentials file at capture time.
+Set validates the variable name without requiring it in the setting shell;
+neither secrets nor resolved file paths are stored in project configuration.
+
+Consumers use `QaCaptureConfig::is_configured() -> Result<bool, String>`:
+`Ok(false)` means both `base_url` and `serve` are empty. Budget and login
+settings alone do not enable capture. A configured target with broken runtime
+credentials returns a finding in `Err`; evidence gates must refuse that finding.
+`credential_file()` checks the pointer without reading its contents.
 
 ## Build, assembly and CI policy
 

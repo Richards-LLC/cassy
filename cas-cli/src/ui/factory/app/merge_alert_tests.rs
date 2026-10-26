@@ -28,7 +28,7 @@ pub(crate) struct Fixture {
     remote: tempfile::TempDir,
     pub(crate) app: FactoryApp,
     pub(crate) event: DirectorEvent,
-    _env: crate::test_support::TestEnvGuard,
+    pub(crate) _env: crate::test_support::TestEnvGuard,
 }
 
 impl Fixture {
@@ -944,4 +944,33 @@ fn cas_c926_held_worker_gets_no_merge_retry_relay_until_release() {
     // Release restores the merge relay.
     let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&retries);
     assert_eq!(prompts.len(), 1);
+}
+
+/// cas-43d2: a lane parked at a declined tip settles instead of costing a
+/// fetch and a GitHub lookup on every retry until the worker commits.
+#[test]
+fn cas_43d2_declined_tip_settles_until_the_worker_commits() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    let tip = git(f.repo.path(), &["rev-parse", "factory/merge-w"]);
+    task.deliverables.declined_factory_branch_anchors = Some(vec![tip]);
+    store.update(&task).unwrap();
+    let trace = f.app.cas_dir.join("git-trace.log");
+    f._env.set("GIT_TRACE", &trace);
+    let probes = |f: &Fixture| {
+        let fetches = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("built-in: git fetch ")).count();
+        fetches + std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap_or_default().lines().count()
+    };
+    assert!(f.relay().iter().all(|prompt| prompt.merge_alert.is_none()));
+    let settled = probes(&f);
+    assert!(f.relay().iter().all(|prompt| prompt.merge_alert.is_none()));
+    assert_eq!(probes(&f), settled, "a declined tip is not re-read");
+    std::fs::write(f.repo.path().join("delivery.rs"), "// corrected\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.relay();
+    assert!(probes(&f) > settled, "a new commit is read again");
 }

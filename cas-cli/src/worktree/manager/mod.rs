@@ -740,9 +740,8 @@ impl WorktreeManager {
 ///
 /// These files are typically gitignored (`.mcp.json` contains API keys, `.claude/`
 /// and `.codex/` contain local settings), so `git worktree add` doesn't check
-/// them out. The pinned `.context/zig/` toolchain is likewise gitignored. Without
-/// these links, workers lose Cassy configuration, Codex's native hook policy, or
-/// the compiler required by the vendored Ghostty build.
+/// them out. Without these links, workers lose Cassy configuration or Codex's
+/// native hook policy.
 ///
 /// Safe to call on worktrees where the files are already present (tracked in git):
 /// existing paths are silently skipped.
@@ -791,27 +790,15 @@ fn project_support_config(repo_root: &Path, worktree_path: &Path, worker: Option
         if codex_src.is_dir() && !codex_dst.exists() {
             let _ = symlink(&codex_src, &codex_dst);
         }
-
-        // .context/zig/ — the pinned Zig toolchain used by ghostty_vt_sys.
-        // Link only the toolchain rather than all of .context/, whose other
-        // contents are not necessarily safe or useful to share with workers.
-        let zig_src = repo_root.join(".context").join("zig");
-        let zig_dst = worktree_path.join(".context").join("zig");
-        if zig_src.is_dir() && !zig_dst.exists() {
-            if let Some(context_dst) = zig_dst.parent() {
-                let _ = std::fs::create_dir_all(context_dst);
-            }
-            let _ = symlink(&zig_src, &zig_dst);
-        }
     }
 }
 
 /// Return the dependency setup instruction an isolated Node worktree needs
 /// before its first JS/TS command.
 ///
-/// `node_modules` deliberately is not linked from the primary checkout: unlike
-/// the pinned `.context/zig` compiler, dependency trees vary with the branch's
-/// lockfile and may contain native artifacts tied to the install path. Running
+/// `node_modules` deliberately is not linked from the primary checkout:
+/// dependency trees vary with the branch's lockfile and may contain native
+/// artifacts tied to the install path. Running
 /// an install during worktree creation would also put network and package-cache
 /// contention on the concurrent spawn path. Instead, the worker receives this
 /// branch-local command in its task brief before it starts work.

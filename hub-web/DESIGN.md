@@ -235,7 +235,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 
 ## Shapes
 
-- Radii: `--radius-card` 4px (controls, project badge), `--radius-pane` 8px (panes), `--glass-radius` 22px (list and context rail), 20px (conversation heading), 24px (dialogs), 26px (composer), 16px (conversation rows, search, app-switcher card), `--radius-pill` 999px (dots, chips, outlined dialog buttons).
+- Radii: `--radius-card` 4px (controls, project badge), `--radius-pane` 8px (panes), `--glass-radius` 22px (list and context rail), 20px (conversation heading), 24px (dialogs), 26px (composer bar), 23px (reply fields: the conversation composer's and the inbox reply composer's), 16px (conversation rows, search, app-switcher card), `--radius-pill` 999px (dots, chips, outlined dialog buttons).
 - Bubbles are asymmetric: supervisor 8px 22px 22px 8px, operator 22px 8px 8px 22px.
 - Lines: `--line-width` 1px hairlines, `--state-rule-width` 2px critical rules, `--rule-verdict` 2.5px and `--rule-hero` 3px (launch progress). The open conversation row has a 2px `--color-action` edge all round, never a left bar.
 - Focus: `--focus-ring-width` 2px in `--color-focus`.
@@ -251,6 +251,7 @@ Lint (`npx @google/design.md lint hub-web/DESIGN.md`) has no errors. Its remaini
 - **Project badge.** `--bg-active` fill, `--color-action` text, 15px semibold, wraps; named from the catalog `project_dir` with an honest missing state.
 - **New session** (`#launch-dialog`, `launch-session.ts`). Chosen rows carry `--bg-active` and a `--color-action` edge (`.is-checked`); Attach and Start are its only `.primary`; progress is a `--rule-hero` rule with a quiet elapsed count, never a spinner.
 - **Toast** (`#toast`, `main.ts`). Solid `--bg-panel`; slides but never fades through the page.
+- **Inbox reply composer** (`form.operator-inbox-composer`, `inbox/inbox-view.ts`; `styles.css`). The offline inbox's reply field reuses the conversation composer's rounded field so a reply looks the same in both places: a column with a `--space-2` gap; the textarea is full width with `--line-width` `--line-strong` edge, 23px radius, `--panel` fill (white 0.84 light, indigo rgba(32, 29, 60, 0.82) dark, opaque `--bg-panel` under more contrast, reduced transparency or forced colours), `--ink` text, inherited font at line-height 1.55 and `resize: none`. Text is inset `12px 22px` so no line touches the rounded edge, including a long reply that scrolls. Unlike the conversation field it carries no `--lift` and keeps `--panel` rather than Glass's `--look-glass-strong`, because it already sits on the glass-strong dialog. HUB-J19 (`e2e/journeys/operator-inbox.journey.ts`) compares the field's fill, edge, radius, ink, inset, line height and resize against these tokens.
 
 ### Brand
 
@@ -296,4 +297,5 @@ Re-pairing proves the retained origin-local signing key and updates the same ins
 
 - Delivery and evidence copy is part of the surface; tests pin the behaviour. Reply receipts: **Forwarded · not stored on this device** until the reply is committed to this browser's IndexedDB journal, then **Stored on this device**; neither claims the operator read it.
 - Kept commands use per-item IndexedDB transactions scoped to hub URL, installation and session; a sending or unconfirmed claim never expires into a second send; held messages keep the two-minute wait and explicit cancel. Local reply payloads expire after 90 days; remove or revocation deletes them.
-- The Connection log shows the measured machine cause while that machine is Unsteady; NetworkInformation estimates never count as a changed route. An Attention notice with unchanged identity and payload keeps its open Details and Copy across outage-copy changes and shell rebuilds.
+- The Connection log shows the measured machine cause while that machine is Unsteady; NetworkInformation estimates never count as a changed route. A hub 503 `auth_store_unavailable` is its own cause, **Hub is temporarily unable to check pairings**, saying Commander retries by itself and this device's pairing is intact; it never reads as a refused or expired credential. An Attention notice with unchanged identity and payload keeps its open Details and Copy across outage-copy changes and shell rebuilds.
+- While a machine is reconnecting or Unsteady, its catalog stays listed past its freshness instead of emptying the list: each row's status label gains **· last known**, and the footer qualifies only that share (**N conversations · K last known**, or **N conversations, last known** when every listed conversation is). A live machine's catalog still expires, and an empty catalog still empties the list.

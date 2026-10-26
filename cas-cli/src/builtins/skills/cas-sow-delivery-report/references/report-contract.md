@@ -90,11 +90,11 @@ omitted* field.
 ## Vocabulary and hygiene
 
 The report goes to the client, so it carries only the client's and the SOW's
-vocabulary. The HTML is generated from the markdown, so check the markdown
-before rendering with `scripts/check-sow.py hygiene <report.md>`. It exits 1
-and prints each line that holds a ticket label, a PR number, a branch, commit,
-agent, worker, supervisor, epic, sprint or ticket word, a local or preview
-URL, `TODO` or placeholder text.
+vocabulary. `cas deliverable finalize --audience customer` checks the text a
+reader sees in the final HTML. It exits 1 and names each line that holds a
+ticket label, a PR number, a branch, commit, agent, worker, supervisor, epic,
+sprint or ticket word, a tool name (Cassy, Claude, Codex), a local or preview
+URL, a credential, a home path, `TODO` or placeholder text.
 
 The checker accepts common identifier families by default: COVID-19, SHA
 hash names, UTF encodings, ISO standard numbers, GPT model numbers, and
@@ -104,7 +104,7 @@ canonical uppercase form. A standard identifier on a line does not exempt a
 tracker label elsewhere on that line.
 
 If a hit is the client's own word (a product genuinely named "Epic"), pass
-`--allow Epic` and record the reason in the brief. Other forbidden content:
+`--allow Epic` to `finalize` and record the reason in the brief. Other forbidden content:
 
 - internal team or agent names;
 - process narration ("after three attempts…");

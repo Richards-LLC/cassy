@@ -31,11 +31,12 @@ metadata:
    re-render; an existing Markdown source is kept unless you pass
    `--refresh-sources`.
 4. Fill `v<version>.brief.md` from
-   [references/brief-template.md](references/brief-template.md). The renderer takes
-   project tokens from the root `DESIGN.md` when its frontmatter names CSS
-   `source` files and `maps` roles (exemplar.md), else `design-tokens.json` or
-   `docs/design/design-tokens.json`, else the bundled Petrastella defaults.
-   Record which in the brief.
+   [references/brief-template.md](references/brief-template.md). The report
+   wears the brand `cas deliverable brand` resolves from the project's
+   `DESIGN.md` (exemplar.md); its JSON `design` and `source` fields, also in
+   the report command's `--json`, name the file and revision. Record them in the
+   brief. A project with no `DESIGN.md` gets one first
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)).
 5. Preserve the identity: a serif verdict, a change map of equal-area dots (one
    per shipped change) in named product areas, a quiet numbered folio and one
    decorative row of dots at install. The project's tokens decide palette,
@@ -61,9 +62,10 @@ metadata:
    release-prep commit; do not rewrite the published tag. Link the report and PDF
    in the release announcement draft before the authorized Slack post.
 
-Without the `cas` CLI, render by hand with
+To re-render by hand, run
 `python3 <skills-dir>/cas-release-report/scripts/render.py <md> --output <html> --project-root .`
-(`--tokens <json>`, `--emphasis <verdict text>`), then print to PDF as pdf.md describes.
+(`--emphasis <verdict text>`); its brand markers stay unfilled until
+`cas release report` runs, so print from that command's HTML (pdf.md).
 
 **Done when** the HTML opens offline with all source content, numbers and links;
 the PDF passes pdf.md; the brief's rubric passes; and committed report/PDF paths

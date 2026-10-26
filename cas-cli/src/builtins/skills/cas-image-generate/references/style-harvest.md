@@ -23,9 +23,9 @@ references: assets/brand/logo-approved.svg, assets/brand/cover-approved.png
 The block is an executable prompt input, not a report paragraph. Tie hex values
 to named objects (for example, “gold #F2A900 ribbon”) and describe typography by
 attributes rather than an unavailable font name. Preserve the project's actual
-case and values. If no design system exists, say so in the block and choose a
-small, explicit palette and tone with the operator rather than inventing brand
-history.
+case and values. If no `DESIGN.md` exists, follow
+[DESIGN.md first](../../design-spec/references/design-md-first.md) to create one
+before harvesting rather than inventing brand history.
 
 For a reference image, state its role and the invariant: “use the approved
 cover for palette and framing; change only the subject.” Nano Banana supports

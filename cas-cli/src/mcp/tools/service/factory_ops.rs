@@ -6824,26 +6824,31 @@ impl CasService {
                 "  Remediation: run the repository's locked package-manager install from the primary checkout before relying on JS/TS tests.\n",
             );
         }
-        out.push_str(&orphan_processes.render());
-        out.push_str(&crate::factory_target_cache::scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
+        // cas-fe7d: host-wide scans (processes, scratch, artifacts, temp roots,
+        // simulators) can change between two detail-page requests. Rendered
+        // after the store-backed inventories, they can no longer shift the
+        // line offsets of those inventories' rows from one page to the next.
+        let mut host = String::new();
+        host.push_str(&orphan_processes.render());
+        host.push_str(&crate::factory_target_cache::scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
-        out.push_str(&crate::factory_scratch::render_relocated_until(
+        host.push_str(&crate::factory_scratch::render_relocated_until(
             &self.inner.cas_root, target_cache_report.as_ref().ok(), Some(report_deadline)));
-        out.push_str(&crate::factory_review_scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
-        out.push_str(&crate::factory_review_scratch::unmanaged_large_until(&self.inner.cas_root, Some(report_deadline)));
-        out.push_str(&artifact_report.render());
+        host.push_str(&crate::factory_review_scratch::render_until(&self.inner.cas_root, false, Some(report_deadline)));
+        host.push_str(&crate::factory_review_scratch::unmanaged_large_until(&self.inner.cas_root, Some(report_deadline)));
+        host.push_str(&artifact_report.render());
         let missing_gitdirs = missing_gitdir_checkouts(&self.inner.cas_root);
         if !missing_gitdirs.is_empty() {
-            out.push_str("\nReclaimable checkouts with missing gitdir (review WIP before removal):\n");
+            host.push_str("\nReclaimable checkouts with missing gitdir (review WIP before removal):\n");
             for (checkout, gitdir) in missing_gitdirs {
-                out.push_str(&format!("  - {} -> {}\n", checkout.display(), gitdir.display()));
+                host.push_str(&format!("  - {} -> {}\n", checkout.display(), gitdir.display()));
             }
         }
 
         // GH #704: leaked disposable roots under $TMPDIR filled a 32 GB tmpfs
         // and broke every live session's shell output. Name them here, with
         // age and size, before the filesystem fills. Read-only by contract.
-        out.push_str(
+        host.push_str(
             &crate::temp_hygiene::scan_stale_temp_roots(
                 &std::env::temp_dir(),
                 std::time::Duration::from_secs(
@@ -6864,7 +6869,7 @@ impl CasService {
         )
         .message()
         {
-            out.push_str(&format!("Active Cassy root placement: {message}\n"));
+            host.push_str(&format!("Active Cassy root placement: {message}\n"));
         }
 
         // cas-75a8 (GH #1296): task-named simulators, read-only here.
@@ -6884,7 +6889,7 @@ impl CasService {
                 ))
             }).await.map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR,
                 format!("Simulator inventory worker failed: {error}")))?;
-            out.push_str(&text);
+            host.push_str(&text);
         }
 
         if !live_viktor_watches.is_empty() {
@@ -6948,6 +6953,7 @@ impl CasService {
                 ));
             }
         }
+        out.push_str(&host);
         if !host_registry_pids.is_empty() {
             let db = crate::store::known_repos::host_cas_dir().join("cas.db");
             out.push_str("\nProcesses with the host registry DB/WAL/SHM open (review for orphaned Cassy children):\n");

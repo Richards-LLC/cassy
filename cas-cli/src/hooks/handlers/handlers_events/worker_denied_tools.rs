@@ -84,6 +84,8 @@ pub(super) fn denial(input: &HookInput, tool: &str, cas_root: Option<&Path>) -> 
 
 /// Refuse factory workers' access to operator-authenticated stores before
 /// auto-approval. The path resolver is shared with every supported file and shell surface.
+/// Only workers are refused: other factory agents, such as CI and the
+/// verifier, may still read the operator's stores through this hook.
 pub(super) fn credential_store_access_denial(input: &HookInput, tool: &str) -> Option<String> {
     if !crate::harness_policy::is_factory_agent(input) || !crate::harness_policy::is_worker(input) {
         return None;

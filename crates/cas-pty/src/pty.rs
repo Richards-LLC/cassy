@@ -1409,11 +1409,6 @@ impl PtyConfig {
         // workers only. The supervisor keeps feature-flag evaluation (Remote
         // Control) and the auto-updater (security patches).
         push_worker_quiet_network_env(&mut env, role);
-        // Point factory workers at the repo's bootstrapped Zig toolchain so the
-        // ghostty_vt_sys build script finds Zig on the first `cargo build` in a
-        // fresh worker worktree instead of failing and forcing a manual
-        // bootstrap-zig.sh + ZIG export dance (observed in the cas-3522 shakedown).
-        push_worker_zig_env(&mut env, role, cas_root);
 
         // Enable native Agent Teams for inter-agent messaging
         if teams.is_some() {
@@ -1603,8 +1598,6 @@ impl PtyConfig {
         push_local_bin_path_env(&mut env);
         // cas-eb39: see equivalent comment in `claude()`.
         push_worker_build_cache_env(&mut env, role);
-        // cas-3522 follow-on: see equivalent comment in `claude()`.
-        push_worker_zig_env(&mut env, role, cas_root);
 
         let mut args = vec!["--yolo".to_string(), "--no-alt-screen".to_string()];
         if role == "worker" {
@@ -1727,7 +1720,6 @@ impl PtyConfig {
         push_worker_cargo_env(&mut env, role);
         push_local_bin_path_env(&mut env);
         push_worker_build_cache_env(&mut env, role);
-        push_worker_zig_env(&mut env, role, cas_root);
 
         let (agent_name, instructions) = if role == "supervisor" {
             ("cassy-supervisor", OPENCODE_SUPERVISOR_INSTRUCTIONS)
@@ -1925,8 +1917,6 @@ impl PtyConfig {
         push_local_bin_path_env(&mut env);
         // cas-eb39: see equivalent comment in `claude()`.
         push_worker_build_cache_env(&mut env, role);
-        // cas-3522 follow-on: see equivalent comment in `claude()`.
-        push_worker_zig_env(&mut env, role, cas_root);
 
         let mut args = vec![
             "--permission-mode".to_string(),
@@ -2356,34 +2346,6 @@ fn push_worker_quiet_network_env(env: &mut Vec<(String, String)>, role: &str) {
         "1".to_string(),
     ));
     env.push(("DISABLE_AUTOUPDATER".to_string(), "1".to_string()));
-}
-
-/// Export `ZIG` into a worker's env pointing at the repo's bootstrapped Zig
-/// binary (`<repo>/.context/zig/zig`), so the `ghostty_vt_sys` build script can
-/// find Zig on the first `cargo build` inside a fresh worker worktree.
-///
-/// Without this, a worker's first build fails in `ghostty_vt_sys` ("could not
-/// find Zig") and the worker has to discover + run `scripts/bootstrap-zig.sh`
-/// and export `ZIG` by hand before it can compile anything — wasted turns
-/// observed in the cas-3522 Codex shakedown.
-///
-/// Worker-only and best-effort, mirroring `push_worker_cargo_env`:
-/// - `cas_root` is `<repo>/.cas`, so the repo root is its parent.
-/// - We only set `ZIG` when the binary actually exists at the expected path;
-///   pointing `ZIG` at a missing file would break builds worse than leaving it
-///   unset (the build script would still try to bootstrap). The path is
-///   absolute, so it resolves correctly from any worktree cwd.
-fn push_worker_zig_env(env: &mut Vec<(String, String)>, role: &str, cas_root: Option<&PathBuf>) {
-    if role != "worker" {
-        return;
-    }
-    let Some(repo) = cas_root.and_then(|r| r.parent()) else {
-        return;
-    };
-    let zig = repo.join(".context").join("zig").join("zig");
-    if zig.is_file() {
-        env.push(("ZIG".to_string(), zig.to_string_lossy().to_string()));
-    }
 }
 
 /// If `CAS_FACTORY_NICE_WORKER=1` is set in the supervisor's env and
@@ -4799,48 +4761,6 @@ echo SMOKE_DONE
             all_args.contains("action=whoami"),
             "codex worker startup should still confirm identity via whoami; got: {all_args}"
         );
-    }
-
-    /// cas-3522 follow-on: a worker gets `ZIG` pointed at the repo's
-    /// bootstrapped binary when it exists; non-workers and missing-binary cases
-    /// leave `ZIG` unset.
-    #[tokio::test]
-    async fn test_push_worker_zig_env_sets_zig_for_worker_when_present() {
-        let dir = std::env::temp_dir().join("cas-3522-zig-env-test");
-        let _ = std::fs::remove_dir_all(&dir);
-        let zig = dir.join(".context").join("zig").join("zig");
-        std::fs::create_dir_all(zig.parent().unwrap()).unwrap();
-        std::fs::write(&zig, b"#!/bin/sh\n").unwrap();
-        let cas_root = dir.join(".cas");
-        std::fs::create_dir_all(&cas_root).unwrap();
-
-        let zig_str = zig.to_string_lossy().to_string();
-
-        let mut worker_env: Vec<(String, String)> = Vec::new();
-        push_worker_zig_env(&mut worker_env, "worker", Some(&cas_root));
-        assert!(
-            worker_env.iter().any(|(k, v)| k == "ZIG" && v == &zig_str),
-            "worker must get ZIG pointing at the bootstrapped binary; got: {worker_env:?}"
-        );
-
-        let mut sup_env: Vec<(String, String)> = Vec::new();
-        push_worker_zig_env(&mut sup_env, "supervisor", Some(&cas_root));
-        assert!(
-            !sup_env.iter().any(|(k, _)| k == "ZIG"),
-            "supervisor must NOT get ZIG; got: {sup_env:?}"
-        );
-
-        // Missing binary -> no ZIG even for a worker.
-        let empty_root = dir.join("empty").join(".cas");
-        std::fs::create_dir_all(&empty_root).unwrap();
-        let mut missing_env: Vec<(String, String)> = Vec::new();
-        push_worker_zig_env(&mut missing_env, "worker", Some(&empty_root));
-        assert!(
-            !missing_env.iter().any(|(k, _)| k == "ZIG"),
-            "worker must not get ZIG when the binary is absent; got: {missing_env:?}"
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

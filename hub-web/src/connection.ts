@@ -76,6 +76,8 @@ export interface HubCallbacks {
   onState(state: ConnectionState): void;
   onAttachState?(session: string, state: AttachSnapshot): void;
   onLatency?(latencyMs: number): void;
+  /** The browser hinted at a changed network: back online, a new connection type, or woken from sleep (cas-0b3d). */
+  onNetworkChange?(): void;
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
@@ -836,6 +838,11 @@ export class HubConnectionSupervisor {
     await this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}/lease`);
   }
 
+  /** Report this browser's usage counts (cas-0b3d); the hub keeps the highest count per day and action. */
+  async postUsage(entries: readonly { day: string; action: string; journey: string; count: number }[]): Promise<void> {
+    await this.request("POST", "/v1/usage", { entries });
+  }
+
   async diagnose(): Promise<Record<string, unknown>> {
     let report: unknown;
     try { report = await this.request<Record<string, unknown>>("GET", "/v1/diagnostics"); }
@@ -1056,6 +1063,8 @@ export class HubConnectionSupervisor {
   private listenForNetworkChanges(): void {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function" || typeof document === "undefined" || this.removeNetworkListeners) return;
     const changed = () => this.networkChanged();
+    // pageshow also fires on every load, so only these say the network moved.
+    const hinted = () => { this.callbacks.onNetworkChange?.(); this.networkChanged(); };
     const offline = () => { if (this.desired && this.lifecycle.phase === "live") this.connectionLostNow("The network went offline"); };
     // A tab switch is not a network change; coming back after long enough to
     // have slept (or had the radio change) is treated as one.
@@ -1063,7 +1072,7 @@ export class HubConnectionSupervisor {
       if (document.visibilityState === "hidden") { this.hiddenAt = Date.now(); return; }
       const hiddenFor = this.hiddenAt === undefined ? 0 : Date.now() - this.hiddenAt;
       this.hiddenAt = undefined;
-      if (hiddenFor >= HEARTBEAT_INTERVAL_MS) this.networkChanged();
+      if (hiddenFor >= HEARTBEAT_INTERVAL_MS) hinted();
     };
     const connection = (navigator as Navigator & { connection?: EventTarget & { type?: string } }).connection;
     let networkType = connection?.type;
@@ -1074,16 +1083,16 @@ export class HubConnectionSupervisor {
       // not turn one missed heartbeat into four (cas-eefe).
       if (typeof nextType !== "string" || nextType === networkType) return;
       networkType = nextType;
-      changed();
+      hinted();
     };
-    window.addEventListener("online", changed);
+    window.addEventListener("online", hinted);
     window.addEventListener("offline", offline);
     window.addEventListener("pageshow", changed);
     document.addEventListener("resume", changed);
     document.addEventListener("visibilitychange", visibility);
     connection?.addEventListener?.("change", transportChanged);
     this.removeNetworkListeners = () => {
-      window.removeEventListener("online", changed);
+      window.removeEventListener("online", hinted);
       window.removeEventListener("offline", offline);
       window.removeEventListener("pageshow", changed);
       document.removeEventListener("resume", changed);

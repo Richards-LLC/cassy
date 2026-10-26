@@ -19,7 +19,9 @@ This skill adds only what an SOW delivery needs and reuses the rest:
   audience row and the client-deliverable type.
 - `cas-ui-craft`: concept brief, design language, rubric and visual QA.
 - `cas-qa-craft`: evidence from the real build and honest labels.
-- `cas-release-report/references/pdf.md`: the PDF check.
+- `cas deliverable finalize`: brand fill from `DESIGN.md`, single-file
+  inlining within the customer budget, client hygiene, print and the PDF
+  check, in one command.
 
 Nothing reaches the client or the client channel without the operator's
 explicit go. Client messages carry commitments the operator owns.
@@ -45,7 +47,8 @@ explicit go. Client messages carry commitments the operator owns.
    length, the round counts and the approval threshold are business terms, so
    do not infer them from code. Commit the file. Done when
    `grep -nE '<<[^>]+>>' docs/sow/DELIVERY.md` prints nothing.
-2. **Confirm the brand source.** Open the `DESIGN.md` that `DELIVERY.md` names.
+2. **Confirm the brand source.** Open the `DESIGN.md` that `DELIVERY.md` names
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)).
    Compare its primary colour and font family with one live screen of the
    environment. If it is missing or disagrees, refresh it with `design-spec`
    first. A report branded from stale tokens looks foreign to the client. Done
@@ -118,24 +121,24 @@ explicit go. Client messages carry commitments the operator owns.
 7. **Write the markdown**
    `docs/sow/<sow-slug>/reports/<date>-<sow-slug>-round-<n>.md` to
    [references/report-contract.md](references/report-contract.md). Done when
-   every DoD row and every round item appears exactly once and
-   `python3 <skills-dir>/cas-sow-delivery-report/scripts/check-sow.py hygiene <report.md>`
-   exits 0.
-8. **Brief, render and critique.** Write the `cas-ui-craft` brief. The default
-   hero is the one in report-contract.md. Render the HTML from
-   [references/report-skeleton.html](references/report-skeleton.html) with
-   the brand tokens as its header comment maps them, then make it a single
-   file:
-   `python3 <skills-dir>/cas-sow-delivery-report/scripts/inline-images.py <draft.html> <final.html>`.
-   Run the strict visual QA from the `cas-ui-craft` critique rubric. This is a
-   public surface, so distinctiveness, fit and hierarchy must each score at
-   least 4. Done when visual QA prints PASS and the scored table is in the
-   brief.
-9. **Print and check the PDF.** Run
-   `npm exec --yes --package=playwright -- node <skills-dir>/cas-sow-delivery-report/scripts/print-pdf.mjs <final.html> <out.pdf> [--author <report_author>]`,
-   then `python3 <skills-dir>/cas-release-report/scripts/check-pdf.py <out.pdf> <artifacts_dir>/pdf`.
-   Inspect every page PNG as `pdf.md` describes. Done when the receipt shows
-   zero bounds findings and you have viewed every page.
+   every DoD row and every round item appears exactly once.
+8. **Brief, render and finalize.** Write the `cas-ui-craft` brief. The default
+   hero is the one in report-contract.md. Fill a copy of
+   [references/report-skeleton.html](references/report-skeleton.html) with the
+   markdown's content, keeping its brand marker, then run
+   `cas deliverable finalize <draft.html> --audience customer --out <final.html> --pdf a4,letter --author <report_author> --check-dir <artifacts_dir>/pdf`.
+   It brands the page from the project's `DESIGN.md`, inlines every shot
+   within the customer budget (it names any pair it had to leave out), checks
+   the visible text for internal vocabulary, then prints A4 and Letter and
+   checks both. Exit 1 names each finding; fix the source, not the output.
+   Done when it exits 0.
+9. **Critique and view every page.** Run the strict visual QA from the
+   `cas-ui-craft` critique rubric on the final HTML. This is a public
+   surface, so distinctiveness, fit and hierarchy must each score at least 4.
+   Inspect every page PNG under `<artifacts_dir>/pdf` as
+   `cas-release-report/references/pdf.md` describes. Done when visual QA
+   prints PASS, the scored table is in the brief and you have viewed every
+   page.
 10. **Commit the round** in one commit:
     - `GAP-CHECK.md` and `ROUNDS.md`;
     - the markdown, brief, HTML and PDF;

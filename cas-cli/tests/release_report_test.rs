@@ -175,6 +175,8 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(first["issue_count"], 2);
     assert_eq!(first["asset_count"], 1);
     assert_eq!(first["github_repo"], "example/project");
+    // The report wears `cas deliverable brand`: no DESIGN.md here, so the defaults.
+    assert_eq!(first["brand_source"], "defaults");
 
     let source_path = project.path().join("docs/release-reports/v3.19.0.md");
     let html_path = project.path().join("docs/release-reports/v3.19.0.html");
@@ -200,6 +202,7 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert!(source.contains("[#705](https://github.com/example/project/issues/705)"));
     assert!(source.contains("sha256:abc123"));
     assert!(html.contains("<html lang=\"en\">"));
+    assert!(html.contains("--bg:#F7F4EE") && !html.contains("/*cas:brand*/"), "{html}");
     assert!(html.contains("data-change-map=\"1\""));
     assert!(html.contains("data-area=\"Sessions\""));
     assert!(html.contains("2 GitHub issues closed with this release"));
@@ -241,11 +244,14 @@ fn cli_release_report_falls_back_from_renderer_without_link_arguments_cas_692a()
     let project = TempDir::new().unwrap();
     let output = project.path().join("reports");
     fs::create_dir_all(&output).unwrap();
-    fs::copy(
+    // The exemplar names a home path in its evidence; internal hygiene
+    // (`cas deliverable finalize`) now refuses that, so the copy drops it.
+    let exemplar = fs::read_to_string(
         cas::test_paths::workspace_root().join("docs/release-reports/2026-09-08-v3.19.0.md"),
-        output.join("v3.19.0.md"),
     )
-    .unwrap();
+    .unwrap()
+    .replace("/home/pippenz/", "~/");
+    fs::write(output.join("v3.19.0.md"), exemplar).unwrap();
     let installed = project.path().join(".claude/skills/cas-release-report/scripts");
     fs::create_dir_all(&installed).unwrap();
     fs::write(installed.join("render.py"), r#"

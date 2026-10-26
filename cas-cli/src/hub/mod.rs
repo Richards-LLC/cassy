@@ -33,6 +33,7 @@ mod runtime;
 mod server;
 pub(crate) mod state;
 mod tailscale;
+pub mod usage;
 mod worker_gate;
 
 pub(crate) use attention::spawn_attention_enricher;

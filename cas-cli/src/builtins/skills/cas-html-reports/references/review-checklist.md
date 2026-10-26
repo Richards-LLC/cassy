@@ -24,8 +24,8 @@ markdown says exactly what the HTML says.**
 - [ ] The `--strict` visual-QA receipt (or its stated fallback) from the `cas-ui-craft` critique
       rubric is `PASS`; every allowlisted exception names a selector, finding type, and specific
       reason. Only the small `visual-qa.md` is ever committed beside the report.
-- [ ] The tokens in `:root` are the project's `DESIGN.md` or `tokens.css`, by name; the brief
-      says which.
+- [ ] The tokens in `:root` are the target project's `DESIGN.md`, by name; the task's `design:`
+      line names that file.
 
 ## 1. Content fidelity
 

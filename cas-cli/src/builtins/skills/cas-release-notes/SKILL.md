@@ -1,6 +1,6 @@
 ---
 name: cas-release-notes
-description: Use when a merge reaches staging or main, or when asked to draft or post release notes for the team or for customers, Slack updates or a release-notes rubric.
+description: Use when a merge reaches staging or main, or when asked to draft or post team release notes, Slack updates or a release-notes rubric; notes for customers or a client go to cas-customer-release-notes.
 metadata:
   managed_by: cas
 ---
@@ -35,7 +35,8 @@ Use the project's release rubric as the contract. The procedure is:
 4. **Draft the messages from the rubric.** Follow its deploy-target label,
    audience labels, Was → Now format, thread count, reply count and Slack
    mrkdwn shape. Put one punch in each top-level message and the supporting
-   detail in its reply. Do not include internal ticket labels or
+   detail in its reply. Write in the target project's voice
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)). Do not include internal ticket labels or
    implementation process. Lay each message out with the
    [slack-formatting](../slack-formatting/SKILL.md) skill and pass its
    self-check: name no file unless it is attached to that message, and show

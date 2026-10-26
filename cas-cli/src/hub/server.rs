@@ -46,6 +46,8 @@ pub struct HubState<R: SessionReadModel> {
     /// operations on this hub.
     operations: Arc<tokio::sync::Mutex<HashMap<(String, String), OperationReplay>>>,
     recovery: super::connection_recovery::RecoveryTelemetry,
+    /// Commander usage counts beside the auth store (cas-0b3d).
+    usage: Option<super::usage::UsageStore>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -69,10 +71,12 @@ impl<R: SessionReadModel> HubState<R> {
             launches: Arc::new(Mutex::new(HashMap::new())),
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             recovery: super::connection_recovery::RecoveryTelemetry::default(),
+            usage: None,
         }
     }
 
     pub fn with_auth(mut self, auth: AuthStore) -> Self {
+        self.usage = Some(super::usage::UsageStore::new(auth.root()));
         self.auth = Some(auth);
         self
     }
@@ -156,6 +160,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/diagnostics",
             get(diagnostics::<R>).options(preflight::<R>),
         )
+        .route("/v1/usage", post(record_usage::<R>).options(preflight::<R>))
         .route(
             "/v1/sessions",
             get(sessions::<R>)
@@ -662,6 +667,34 @@ fn profile_envelope(
             profiles: Vec::new(),
             error: Some("cli_probe_failed"),
         },
+    }
+}
+
+/// Commander's counted actions (cas-0b3d). Any paired browser may report its
+/// own counts; the ledger keys them by the authenticated device so a repeated
+/// post replaces rather than adds.
+async fn record_usage<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    headers: HeaderMap,
+    Json(batch): Json<super::usage::UsageBatch>,
+) -> Response {
+    let context = match authorize(&state, HubAction::Mutation, Scope::MachineRead, &headers, "POST", "/v1/usage") {
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    let Some(usage) = state.usage.clone() else {
+        return with_cors(launch_error(StatusCode::SERVICE_UNAVAILABLE, "usage_unavailable", "this hub keeps no usage ledger"), &headers);
+    };
+    let today = chrono::Utc::now().date_naive();
+    if let Err(detail) = super::usage::validate(&batch, today) {
+        return with_cors(launch_error(StatusCode::BAD_REQUEST, "invalid_usage", &detail), &headers);
+    }
+    let device = context.map(|context| context.device_id).unwrap_or_else(|| "unauthenticated".into());
+    let recorded = tokio::task::spawn_blocking(move || usage.record(&device, &batch, today)).await;
+    match recorded {
+        Ok(Ok(changed)) => with_cors(Json(serde_json::json!({"recorded": changed})).into_response(), &headers),
+        Ok(Err(error)) => with_cors(internal_error(error), &headers),
+        Err(error) => with_cors(internal_error(anyhow::anyhow!("usage writer failed: {error}")), &headers),
     }
 }
 

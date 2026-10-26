@@ -6010,6 +6010,18 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
             .expect("register stale agent");
     }
 
+    // cas-fe7d: host scans change between page requests (a stale temp root
+    // is reaped, a process exits). Stand in for that with checkouts whose
+    // gitdir is missing: listed for the first page, gone for the rest. Their
+    // lines must not shift the stale-agent rows between pages.
+    let vanishing: Vec<_> = (0..3)
+        .map(|index| env.cas_root.join("worktrees").join(format!("vanishing-{index}")))
+        .collect();
+    for checkout in &vanishing {
+        std::fs::create_dir_all(checkout).unwrap();
+        std::fs::write(checkout.join(".git"), "gitdir: ../missing-gitdir\n").unwrap();
+    }
+
     let default_req: FactoryRequest =
         serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
     let default_report = env
@@ -6045,6 +6057,9 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
         );
         for (index, found) in found_agents.iter_mut().enumerate() {
             *found |= page_text.contains(&format!("stale-report-{index:03}-"));
+        }
+        for checkout in &vanishing {
+            let _ = std::fs::remove_dir_all(checkout);
         }
         let Some(next_offset) = page_text.lines().find_map(|line| {
             line.strip_prefix("Next offset: ")

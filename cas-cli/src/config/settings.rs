@@ -531,6 +531,9 @@ impl Default for QaRegistryConfig {
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
+    /// Optional project before/after capture settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<crate::config::QaCaptureConfig>,
     /// Journey registry location and staged upkeep enforcement.
     #[serde(default)]
     pub registry: QaRegistryConfig,
@@ -701,6 +704,7 @@ pub fn default_user_facing_labels() -> Vec<String> {
 impl Default for QaConfig {
     fn default() -> Self {
         Self {
+            capture: None,
             post_release: None,
             mode: QaMode::PerTask,
             registry: QaRegistryConfig::default(),

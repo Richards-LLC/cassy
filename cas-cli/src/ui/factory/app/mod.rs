@@ -1670,6 +1670,7 @@ impl FactoryApp {
         }
 
         let DeliveryInputs {
+            answered_blocked_workers,
             verification_waits,
             data: loaded_data,
             blocks_deps,
@@ -1731,6 +1732,11 @@ impl FactoryApp {
         let delivery_events: Vec<DirectorEvent> = events
             .iter()
             .filter_map(|event| {
+                if let DirectorEvent::WorkerIdle { worker, .. } | DirectorEvent::TaskBlocked { worker, .. } = event
+                    && answered_blocked_workers.contains(worker)
+                {
+                    return None;
+                }
                 // cas-c926: a supervisor hold covers every WorkerIdle relay,
                 // not just the detector's idle streak. The merge-alert retry
                 // re-emits a remembered WorkerIdle each minute without that
@@ -7677,7 +7683,7 @@ mod spawn_isolation_tests {
 
     #[cfg(unix)]
     #[test]
-    fn new_worker_worktree_provisions_gitignored_zig_toolchain() {
+    fn new_worker_worktree_leaves_gitignored_zig_in_main_checkout() {
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir(&repo).unwrap();
@@ -7704,18 +7710,11 @@ mod spawn_isolation_tests {
             base_provenance: None,
         };
 
-        let result = prep.run().expect("create worker worktree with Zig support");
-        let worker_zig = result.cwd.join(".context").join("zig");
+        let result = prep.run().expect("create worker worktree");
         assert!(
-            std::fs::symlink_metadata(&worker_zig)
-                .unwrap()
-                .file_type()
-                .is_symlink(),
-            "new workers must link the gitignored Zig toolchain before their first Cargo build"
-        );
-        assert_eq!(
-            std::fs::read_to_string(worker_zig.join("zig")).unwrap(),
-            "pinned zig binary"
+            std::fs::symlink_metadata(result.cwd.join(".context"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+            "spawn must leave compiler discovery to the build script without provisioning .context"
         );
     }
 

@@ -976,6 +976,8 @@ impl CasService {
             )
         })?;
         message = crate::prompt_revalidation::strip_assignment_envelopes(&message).to_owned();
+        // Reply IDs and CAS envelopes are transport metadata, not a new ask.
+        let blocker_question = req.blocker.unwrap_or(false).then(|| message.trim().to_owned());
         let summary = req
             .summary
             .map(|summary| collapse_message_summary(&summary))
@@ -1877,6 +1879,7 @@ impl CasService {
         let explicit_reply_to = req.in_reply_to;
         // Only a direct reply acknowledges the row it names (cas-009c).
         let mut explicit_reply_acks = false;
+        let mut replied_blocker = None;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
                 .message_delivery_report(notification_id)
@@ -1913,6 +1916,10 @@ impl CasService {
             explicit_reply_acks = reference == Some(ReplyReference::DirectReply);
             match reference {
                 Some(ReplyReference::DirectReply) => {
+                    replied_blocker = crate::prompt_revalidation::parse_blocker_envelope(&prior.prompt)
+                        .filter(|blocker| req.task_id.as_deref().is_none_or(|task_id| {
+                            blocker.task_id.as_deref().is_none_or(|id| id == task_id)
+                        }));
                     message = format!(
                         "[CAS reply: explicitly acknowledges notification_id={notification_id}]\n{message}"
                     );
@@ -2911,6 +2918,30 @@ impl CasService {
             };
 
         crate::mcp::tools::service::mutation_receipt::message_committed(message_id);
+        // Only an explicit answer or a direct reply to the worker's blocker
+        // owns that wait. Status pings and replies elsewhere in the thread do
+        // not answer it. Automatic verdict/merge notices bypass this path.
+        let wait_receipt = if duplicate_suppressed { Ok(()) } else if let (Some(sender), Some(recipient)) =
+            (agent_from_store.as_ref(), resolved_target_agent.as_ref())
+        {
+            if req.blocker.unwrap_or(false) && sender.role == cas_types::AgentRole::Worker {
+                req.task_id.as_deref().map(|task| {
+                    crate::mcp::tools::core::task::block_hold::record_blocker_ask(
+                        &self.inner.cas_root, sender, task, blocker_question.as_deref().unwrap_or(&message),
+                    )
+                }).transpose().map(|_| ())
+            } else if req.kind.as_deref() == Some("answer") || replied_blocker.is_some() {
+                let task_id = req.task_id.as_deref().or_else(|| {
+                    replied_blocker.as_ref().and_then(|blocker| blocker.task_id.as_deref())
+                });
+                crate::mcp::tools::core::task::block_hold::record_supervisor_answer(
+                    &self.inner.cas_root, sender, recipient, task_id, message_id,
+                )
+            } else { Ok(()) }
+        } else { Ok(()) };
+        if let Err(error) = wait_receipt {
+            tracing::warn!(message_id, %error, "message committed but answered-blocker receipt unavailable; retain alerts");
+        }
         // cas-6853 (communication contract v2, P2.4/P3.7): a broadcast's
         // audience policy. Stamped on the committed row; older same-key
         // broadcasts still awaiting transport are withdrawn.

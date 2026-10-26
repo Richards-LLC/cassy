@@ -369,6 +369,7 @@ impl DeliveryRequest {
         };
         let (mut merge_alerts, mut worker_waits) = (HashMap::new(), HashMap::new());
         if let Ok(fresh) = &data {
+            super::merge_alert::prune_ready_receipts(&self.merge_probes, &self.cas_dir, self.probe_now);
             let repo = self.cas_dir.parent().unwrap_or(&self.cas_dir);
             for event in &self.merge_events {
                 let (ready, wait) = super::merge_alert::read_delivery(

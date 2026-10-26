@@ -67,8 +67,18 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
         ],"unpaired":[]
     })).unwrap()).unwrap();
     let invoke = || {
-        let result = cas_cmd(root).args(["--json","deliverable","pairs","--task","cas-fixture","--dir"])
-            .arg(&dir).assert().code(1);
+        let result = cas_cmd(root)
+            .args([
+                "--json",
+                "deliverable",
+                "pairs",
+                "--task",
+                "cas-fixture",
+                "--dir",
+            ])
+            .arg(&dir)
+            .assert()
+            .code(1);
         serde_json::from_slice::<Value>(&result.get_output().stdout).unwrap()
     };
     let receipt = invoke();
@@ -78,8 +88,14 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
     fs::write(dir.join("roster.after.jpg"), b"changed after capture").unwrap();
     let receipt = invoke();
     assert!(receipt["pairs"].as_array().unwrap().is_empty(), "{receipt}");
-    assert!(receipt["findings"].as_array().unwrap().iter()
-        .any(|finding| finding["code"] == "capture-digest"), "{receipt}");
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["code"] == "capture-digest"),
+        "{receipt}"
+    );
 }
 
 /// Pulse Card's shape: DESIGN.md under apps/frontend, SCSS sources (no CSS

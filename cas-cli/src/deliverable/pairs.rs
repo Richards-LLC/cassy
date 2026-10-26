@@ -200,6 +200,25 @@ pub fn pairs(request: &PairsRequest) -> anyhow::Result<PairsReceipt> {
                 primary
             }
         });
+        // Readers never select an old manifest while a capture is replacing
+        // its images. Take the writer's same advisory lock for this read.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join(".capture.lock"));
+        let _lock = match lock {
+            Ok(lock) if fs2::FileExt::try_lock_shared(&lock).is_ok() => Some(lock),
+            Ok(_) => {
+                receipt.findings.push(finding(
+                    "capture-busy",
+                    format!("{task}: capture is still writing; wait for its receipt"),
+                ));
+                continue;
+            }
+            Err(_) => None,
+        };
         let path = dir.join("pairs.json");
         let manifest = match read_manifest(&path) {
             Ok(manifest) if manifest.schema == 1 && manifest.task_id == task => manifest,
@@ -222,7 +241,10 @@ pub fn pairs(request: &PairsRequest) -> anyhow::Result<PairsReceipt> {
         receipt.findings.extend(manifest.findings);
         let mut seen = HashSet::new();
         for mut pair in manifest.pairs.into_iter().chain(manifest.unpaired) {
-            let mut problem = None;
+            let mut problem = pair
+                .reason
+                .as_ref()
+                .map(|reason| finding("unpaired-capture", reason.clone()));
             if !valid_id(&pair.id)
                 || !seen.insert(pair.id.clone())
                 || pair.viewport.contains(&0)

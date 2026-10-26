@@ -124,6 +124,33 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
         warnings: vec![],
         findings: vec![],
     };
+    fs::create_dir_all(&dir)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(".capture.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
+        UsageError("capture is already writing this task's pairs; wait for its receipt".into())
+    })?;
+    let old = pairs::read_manifest(&dir.join("pairs.json"))
+        .ok()
+        .filter(|m| m.schema == 1 && m.task_id == request.task);
+    let mut manifest = PairManifest {
+        schema: 1,
+        task_id: request.task.clone(),
+        base_sha: base.clone(),
+        head_sha: head.clone(),
+        origin: capture.base_url.clone(),
+        pairs: vec![],
+        unpaired: vec![],
+        findings: vec![pairs::finding(
+            "capture-incomplete",
+            "Capture has not completed",
+        )],
+    };
+    pairs::write_manifest(&dir, &manifest)?;
     let catalog = git_optional(
         &request.root,
         &["show", &format!("{head}:{}", capture.shots)],
@@ -179,33 +206,6 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
         receipt.elapsed_ms = started.elapsed().as_millis() as u64;
         return Ok(receipt);
     }
-    fs::create_dir_all(&dir)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(dir.join(".capture.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&lock).map_err(|_| {
-        UsageError("capture is already writing this task's pairs; wait for its receipt".into())
-    })?;
-    let old = pairs::read_manifest(&dir.join("pairs.json"))
-        .ok()
-        .filter(|m| m.schema == 1 && m.task_id == request.task);
-    let mut manifest = PairManifest {
-        schema: 1,
-        task_id: request.task.clone(),
-        base_sha: base.clone(),
-        head_sha: head.clone(),
-        origin: capture.base_url.clone(),
-        pairs: vec![],
-        unpaired: vec![],
-        findings: vec![pairs::finding(
-            "capture-incomplete",
-            "Capture has not completed",
-        )],
-    };
-    pairs::write_manifest(&dir, &manifest)?;
     let result = (|| -> anyhow::Result<Value> {
         let staging_root = request.cas_root.join("tmp");
         fs::create_dir_all(&staging_root)?;
@@ -391,8 +391,6 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
             ));
         }
     }
-    manifest.findings = receipt.findings.clone();
-    pairs::write_manifest(&dir, &manifest)?;
     receipt.pairs = manifest.pairs.len();
     receipt.unpaired = manifest.unpaired.len();
     receipt.pairs_status =
@@ -416,6 +414,8 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
             .warnings
             .push("One side collected; pairs excludes it until the other side is captured".into());
     }
+    manifest.findings = receipt.findings.clone();
+    pairs::write_manifest(&dir, &manifest)?;
     receipt.elapsed_ms = started.elapsed().as_millis() as u64;
     Ok(receipt)
 }
@@ -474,7 +474,7 @@ fn git_optional(root: &Path, args: &[&str], deadline: Deadline) -> anyhow::Resul
 }
 fn reuse_dependencies(source: &Path, target: &Path) -> anyhow::Result<()> {
     // Only dependency directories are shared; cloned source files stay private.
-    for entry in walkdir::WalkDir::new(source)
+    let mut entries = walkdir::WalkDir::new(source)
         .max_depth(4)
         .into_iter()
         .filter_entry(|e| {
@@ -482,13 +482,19 @@ fn reuse_dependencies(source: &Path, target: &Path) -> anyhow::Result<()> {
                 e.file_name().to_str(),
                 Some(".git" | ".cas" | "target" | "dist")
             )
-        })
-    {
+        });
+    while let Some(entry) = entries.next() {
         let entry = entry?;
         if entry.file_name() != "node_modules" || !entry.file_type().is_dir() {
             continue;
         }
         let relative = entry.path().strip_prefix(source)?;
+        if relative
+            .parent()
+            .is_some_and(|p| p.components().any(|c| c.as_os_str() == "node_modules"))
+        {
+            continue;
+        }
         let destination = target.join(relative);
         if destination.exists() {
             continue;

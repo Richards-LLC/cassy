@@ -11,8 +11,8 @@ use clap::{Args, Subcommand};
 
 use crate::cli::{Cli, JsonReportedFailure};
 use crate::deliverable::brand::{self, BrandRequest};
-use crate::deliverable::finalize::{self, Budget, FinalizeRequest, Paper};
 use crate::deliverable::capture::{self, CaptureRequest, Side};
+use crate::deliverable::finalize::{self, Budget, FinalizeRequest, Paper};
 use crate::deliverable::pairs::{self, PairsRequest, Selection};
 use crate::deliverable::{Audience, Receipt, UsageError};
 use crate::ui::components::{Formatter, Verdict};
@@ -128,37 +128,84 @@ pub fn execute(command: &DeliverableCommands, cli: &Cli) -> anyhow::Result<()> {
 }
 
 fn capture_root(root: &std::path::Path) -> anyhow::Result<(PathBuf, PathBuf)> {
-    let root = root.canonicalize().map_err(|_| UsageError("--root is not a readable project".into()))?;
-    let store = crate::store::CasContext::from_path(&root).map(|context| context.cas_root)
+    let root = root
+        .canonicalize()
+        .map_err(|_| UsageError("--root is not a readable project".into()))?;
+    let store = crate::store::CasContext::from_path(&root)
+        .map(|context| context.cas_root)
         .unwrap_or_else(|_| root.join(".cas"));
     Ok((root, store))
 }
 
 fn execute_capture(args: &CaptureArgs, cli: &Cli) -> anyhow::Result<()> {
-    let (root,cas_root)=capture_root(&args.root)?;
-    let receipt=capture::capture(&CaptureRequest { root,cas_root,task:args.task.clone(),side:args.side,
-        dir:args.dir.as_ref().map(std::path::absolute).transpose()?,target:args.target.clone(),shots:args.shots.clone() })?;
-    emit(cli,&receipt,|fmt| {
-        fmt.verdict(if receipt.findings.is_empty(){Verdict::Ok}else{Verdict::Error},
-            if receipt.findings.is_empty(){"capture collected"}else{"capture unavailable"},
-            &format!("{} pair(s) · {} unpaired · {:.1} s",receipt.pairs,receipt.unpaired,receipt.elapsed_ms as f64/1000.0))?;
-        fmt.field("  Evidence", &format!("{}/qa/pairs/pairs.json",receipt.task_id))?;
+    let (root, cas_root) = capture_root(&args.root)?;
+    let receipt = capture::capture(&CaptureRequest {
+        root,
+        cas_root,
+        task: args.task.clone(),
+        side: args.side,
+        dir: args.dir.as_ref().map(std::path::absolute).transpose()?,
+        target: args.target.clone(),
+        shots: args.shots.clone(),
+    })?;
+    emit(cli, &receipt, |fmt| {
+        fmt.verdict(
+            if receipt.findings.is_empty() {
+                Verdict::Ok
+            } else {
+                Verdict::Error
+            },
+            if receipt.findings.is_empty() {
+                "capture collected"
+            } else {
+                "capture unavailable"
+            },
+            &format!(
+                "{} pair(s) · {} unpaired · {:.1} s",
+                receipt.pairs,
+                receipt.unpaired,
+                receipt.elapsed_ms as f64 / 1000.0
+            ),
+        )?;
+        fmt.field(
+            "  Evidence",
+            &format!("{}/qa/pairs/pairs.json", receipt.task_id),
+        )?;
         fmt.field("  Full paths", "--json")
     })
 }
 
 fn execute_pairs(args: &PairsArgs, cli: &Cli) -> anyhow::Result<()> {
-    let (root,cas_root)=capture_root(&args.root)?;
-    let selection=match (&args.task,&args.range) {
-        (Some(task),None)=>Selection::Task(task.clone()),
-        (None,Some(range))=>Selection::Range(range.clone()),
-        _=>return Err(UsageError("choose --task or --range".into()).into()),
+    let (root, cas_root) = capture_root(&args.root)?;
+    let selection = match (&args.task, &args.range) {
+        (Some(task), None) => Selection::Task(task.clone()),
+        (None, Some(range)) => Selection::Range(range.clone()),
+        _ => return Err(UsageError("choose --task or --range".into()).into()),
     };
-    let receipt=pairs::pairs(&PairsRequest{root,cas_root,selection,dir:args.dir.as_ref().map(std::path::absolute).transpose()?})?;
-    emit(cli,&receipt,|fmt| {
-        fmt.verdict(if receipt.findings.is_empty(){Verdict::Ok}else{Verdict::Error},
-            if receipt.findings.is_empty(){"pairs verified"}else{"incomplete evidence"},
-            &format!("{} pair(s) · {} unpaired",receipt.pairs.len(),receipt.unpaired.len()))?;
+    let receipt = pairs::pairs(&PairsRequest {
+        root,
+        cas_root,
+        selection,
+        dir: args.dir.as_ref().map(std::path::absolute).transpose()?,
+    })?;
+    emit(cli, &receipt, |fmt| {
+        fmt.verdict(
+            if receipt.findings.is_empty() {
+                Verdict::Ok
+            } else {
+                Verdict::Error
+            },
+            if receipt.findings.is_empty() {
+                "pairs verified"
+            } else {
+                "incomplete evidence"
+            },
+            &format!(
+                "{} pair(s) · {} unpaired",
+                receipt.pairs.len(),
+                receipt.unpaired.len()
+            ),
+        )?;
         fmt.field("  Full paths", "--json")
     })
 }

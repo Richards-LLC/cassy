@@ -3661,6 +3661,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
         .filter(|row| row.prompt.contains("post_merge_close_gate")).collect();
     assert_eq!(notices.len(), 1, "one corrective notice per declined merged delivery");
     assert_eq!(notices[0].target, "alice");
+    // pin: the worker receives the original actionable gate title and offending source path.
     assert!(notices[0].prompt.contains("UNOWNED USER-FACING FILE") && notices[0].prompt.contains("src/pages/email.ts"));
     service.coordination(Parameters(coord_req("inbox_poll"))).await.unwrap();
     let started = service.task(Parameters(start())).await.unwrap();

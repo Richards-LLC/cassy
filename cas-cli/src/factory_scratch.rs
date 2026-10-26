@@ -49,6 +49,16 @@ pub(crate) fn worker_target_dir(worktree: &Path) -> PathBuf {
     cas_types::factory_scratch::worker_target_dir(root.as_deref(), worktree)
 }
 
+/// A vanished direct worker checkout, with no symlinked ancestors. This is
+/// path evidence only; target GC must separately prove durable provenance.
+pub(crate) fn removed_worker(cas_dir: &Path, worktree: &Path) -> bool {
+    let workers = cas_dir.join("worktrees");
+    worktree.parent() == Some(workers.as_path())
+        && workers.canonicalize().ok().as_ref() == Some(&workers)
+        && std::fs::symlink_metadata(worktree)
+            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
 /// Where published target baselines (`current` and `snapshots/`) live.
 pub(crate) fn build_cache_dir(cas_dir: &Path) -> PathBuf {
     cas_types::factory_scratch::build_cache_dir(
@@ -72,20 +82,41 @@ pub(crate) struct RelocatedCache {
     pub label: String,
     pub path: PathBuf,
     pub bytes: u64,
+    pub complete: bool,
 }
 
 /// Every relocated cache under this project's scratch directory; empty when
 /// the root is unset (cas-baa8).
 pub(crate) fn relocated_caches(cas_dir: &Path) -> Vec<RelocatedCache> {
+    relocated_caches_with_targets(cas_dir, None)
+}
+
+fn relocated_caches_with_targets(
+    cas_dir: &Path,
+    targets: Option<&crate::factory_target_cache::TargetCacheReport>,
+) -> Vec<RelocatedCache> {
     use cas_types::factory_scratch::{BUILD_CACHE_DIR, RELEASE_GATE_DIR, TARGETS_DIR};
     let Some(root) = configured_scratch_root(cas_dir) else {
         return Vec::new();
     };
     let project = cas_types::factory_scratch::project_scratch_dir(&root, cas_dir);
-    let cache = |label: String, path: PathBuf| RelocatedCache {
-        bytes: tree_bytes(&path),
-        label,
-        path,
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let cache = |label: String, path: PathBuf| {
+        let (bytes, complete) = targets
+            .and_then(|report| {
+                report
+                    .caches
+                    .iter()
+                    .find(|record| record.path == path)
+                    .map(|record| (record.bytes, report.inventory_complete))
+            })
+            .unwrap_or_else(|| tree_bytes(&path, deadline));
+        RelocatedCache {
+            bytes,
+            complete,
+            label,
+            path,
+        }
     };
     let mut caches = Vec::new();
     let build_cache = project.join(BUILD_CACHE_DIR);
@@ -115,20 +146,35 @@ pub(crate) fn relocated_caches(cas_dir: &Path) -> Vec<RelocatedCache> {
 
 /// Apparent bytes of every regular file under `path`; symlinks are not
 /// followed, so a link out of the scratch root is never counted.
-fn tree_bytes(path: &Path) -> u64 {
-    walkdir::WalkDir::new(path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| entry.metadata().ok())
-        .map(|meta| meta.len())
-        .sum()
+fn tree_bytes(path: &Path, deadline: std::time::Instant) -> (u64, bool) {
+    let mut bytes = 0u64;
+    for entry in walkdir::WalkDir::new(path).follow_links(false) {
+        if std::time::Instant::now() >= deadline {
+            return (bytes, false);
+        }
+        let Ok(entry) = entry else {
+            return (bytes, false);
+        };
+        if entry.file_type().is_file() {
+            let Ok(meta) = entry.metadata() else {
+                return (bytes, false);
+            };
+            bytes = bytes.saturating_add(meta.len());
+        }
+    }
+    (bytes, true)
 }
 
 /// The `gc_report` section naming the relocated caches. Read-only.
 pub(crate) fn render_relocated(cas_dir: &Path) -> String {
-    let caches = relocated_caches(cas_dir);
+    render_relocated_with_targets(cas_dir, None)
+}
+
+pub(crate) fn render_relocated_with_targets(
+    cas_dir: &Path,
+    targets: Option<&crate::factory_target_cache::TargetCacheReport>,
+) -> String {
+    let caches = relocated_caches_with_targets(cas_dir, targets);
     let Some(root) = configured_scratch_root(cas_dir) else {
         return String::new();
     };
@@ -143,10 +189,15 @@ pub(crate) fn render_relocated(cas_dir: &Path) -> String {
     }
     for cache in &caches {
         out.push_str(&format!(
-            "  {}: {} ({})\n",
+            "  {}: {} ({}{})\n",
             cache.label,
             cache.path.display(),
-            bytes_label(cache.bytes)
+            bytes_label(cache.bytes),
+            if cache.complete {
+                ""
+            } else {
+                "; partial inventory, scan budget exhausted or unreadable"
+            }
         ));
     }
     out.push_str("  Worker targets use owner/liveness checks in TARGET_CACHE_STATUS_JSON; build-cache and unmanaged directories require review.\n");

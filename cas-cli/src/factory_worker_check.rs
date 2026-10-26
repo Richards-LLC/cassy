@@ -1530,7 +1530,13 @@ fn lane_holder_is_alive(_pid: u32) -> Option<bool> {
 }
 
 fn lane_lock_path(cas_root: &Path, repo: &Path) -> std::io::Result<PathBuf> {
-    let repo = repo.canonicalize()?;
+    // GC must lock the same lane after its checkout has been removed. Never
+    // resolve arbitrary missing paths or dangling symlinks as worker lanes.
+    let repo = repo.canonicalize().or_else(|error| {
+        if crate::factory_scratch::removed_worker(cas_root, repo) {
+            Ok(repo.to_path_buf())
+        } else { Err(error) }
+    })?;
     let key = hex::encode(Sha256::digest(repo.as_os_str().as_encoded_bytes()));
     Ok(cas_root.join("worker-check-slots").join(format!("lane-{key}.lock")))
 }

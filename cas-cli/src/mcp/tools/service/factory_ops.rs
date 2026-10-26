@@ -6823,7 +6823,8 @@ impl CasService {
         out.push_str(&orphan_processes.render());
         out.push_str(&crate::factory_target_cache::scratch::render(&self.inner.cas_root, false));
         // cas-baa8: caches factory.scratch_root moved off the checkout.
-        out.push_str(&crate::factory_scratch::render_relocated(&self.inner.cas_root));
+        out.push_str(&crate::factory_scratch::render_relocated_with_targets(
+            &self.inner.cas_root, target_cache_report.as_ref().ok()));
         out.push_str(&crate::factory_review_scratch::render(&self.inner.cas_root, false));
         out.push_str(&crate::factory_review_scratch::unmanaged_large(&self.inner.cas_root));
         out.push_str(&artifact_report.render());
@@ -6959,7 +6960,7 @@ impl CasService {
         match target_cache_report {
             Ok(report) => {
                 out.push_str(&format!(
-                    "\nCargo target cache pressure:\n  filesystem: {}\n  reserved builders: {}\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  exact cache bytes: {}\n  selected reclaimable bytes: {}\n",
+                    "\nCargo target cache pressure:\n  filesystem: {}\n  reserved builders: {}\n  filesystem used: {}% (high {}%, low {}%)\n  pressure: {}\n  measured cache bytes: {}\n  selected reclaimable bytes: {}\n  inventory complete: {}\n",
                     report.filesystem_path.display(),
                     report.reserved_builders,
                     report.filesystem.used_percent,
@@ -6968,6 +6969,7 @@ impl CasService {
                     report.filesystem.pressure,
                     report.candidate_bytes,
                     report.selected_bytes,
+                    report.inventory_complete,
                 ));
                 for cache in &report.caches {
                     out.push_str(&format!(

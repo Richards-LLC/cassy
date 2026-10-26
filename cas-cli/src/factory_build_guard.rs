@@ -711,7 +711,12 @@ mod tests {
         )).unwrap();
         let config = crate::config::Config::load(&cas).unwrap().factory();
         let mut targets = Vec::new();
-        for (name, age) in [("old", 300), ("warm", 200), ("live", 100)] {
+        for (name, age) in [
+            ("z-old", 400),
+            ("a-next", 300),
+            ("warm", 200),
+            ("live", 100),
+        ] {
             let worker = cas.join("worktrees").join(name);
             fs::create_dir_all(&worker).unwrap();
             drop(
@@ -722,7 +727,10 @@ mod tests {
             let target = crate::factory_scratch::worker_target_dir(&worker);
             fs::create_dir_all(target.join("debug")).unwrap();
             fs::write(target.join("debug/.cargo-lock"), "").unwrap();
-            fs::write(target.join("debug/output"), "regenerable").unwrap();
+            fs::File::create(target.join("debug/output"))
+                .unwrap()
+                .set_len(6 * 1024_u64.pow(3))
+                .unwrap();
             let time =
                 filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(age));
             for entry in walkdir::WalkDir::new(&target).contents_first(true) {
@@ -731,8 +739,10 @@ mod tests {
             targets.push((worker, target));
         }
         // Previous factory sessions leave durable target provenance after checkout cleanup.
-        fs::remove_dir_all(&targets[0].0).unwrap();
-        let _live = crate::factory_target_cache::owner::acquire(&cas, &targets[2].0)
+        for (worker, _) in &targets[..2] {
+            fs::remove_dir_all(worker).unwrap();
+        }
+        let _live = crate::factory_target_cache::owner::acquire(&cas, &targets[3].0)
             .unwrap()
             .unwrap();
         let unmanaged = scratch.join("verify-unmanaged");
@@ -745,7 +755,15 @@ mod tests {
             evaluate(32, Some(0.0), 0, 1, 1).with_disk_probe(&cas, &config, |path, policy| {
                 assert_eq!(path, scratch);
                 crate::factory_target_cache::capacity_status_with(path, policy, |_| {
-                    let available = if targets[0].1.exists() { 10 } else { 60 } * 1024_u64.pow(3);
+                    assert!(
+                        targets[0].1.exists() == targets[1].1.exists() || !targets[0].1.exists(),
+                        "the oldest dead target must be deleted first, regardless of its name"
+                    );
+                    let deleted = targets[..2]
+                        .iter()
+                        .filter(|(_, path)| !path.exists())
+                        .count();
+                    let available = (16 + 6 * deleted as u64) * 1024_u64.pow(3);
                     Ok(crate::fs_space::FsSpace {
                         total_bytes: 100 * 1024_u64.pow(3),
                         available_bytes: available,
@@ -762,9 +780,13 @@ mod tests {
             "fresh capacity should admit: {:?}",
             snapshot.violations()
         );
-        assert_eq!(snapshot.disk.unwrap().unwrap().used_percent, 40);
-        assert!(targets[1].1.exists(), "warm cache must survive");
-        assert!(targets[2].1.exists(), "live cache must survive");
+        assert_eq!(snapshot.disk.unwrap().unwrap().used_percent, 72);
+        assert!(
+            !targets[1].1.exists(),
+            "reclaim until measured usage reaches the low watermark"
+        );
+        assert!(targets[2].1.exists(), "warm cache must survive");
+        assert!(targets[3].1.exists(), "live cache must survive");
         assert!(unknown.exists(), "unverifiable checkout must survive");
         assert_eq!(
             fs::read_to_string(unmanaged.join("proof")).unwrap(),

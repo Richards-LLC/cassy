@@ -20,7 +20,6 @@ use walkdir::WalkDir;
 use crate::config::FactoryConfig;
 
 mod lane;
-mod unknown;
 pub(crate) mod legacy;
 #[cfg(unix)]
 pub(crate) mod owner;
@@ -29,6 +28,7 @@ pub(crate) mod parked;
 mod process_probe;
 pub(crate) mod retirement;
 pub(crate) mod scratch;
+mod unknown;
 pub use lane::LanePreviewRecord;
 
 const QUARANTINE_PREFIX: &str = ".cas-target-gc-";
@@ -122,6 +122,9 @@ pub struct TargetCacheReport {
     #[serde(default)]
     pub reserved_builders: usize,
     pub candidate_bytes: u64,
+    /// False when the read-only inventory exhausted its scan budget. Bytes
+    /// then describe completed scans only, never an exact full-tree total.
+    pub inventory_complete: bool,
     pub selected_bytes: u64,
     pub reclaimed_bytes: u64,
     /// Verifier output atomically queued for deletion, still occupying disk.
@@ -236,8 +239,29 @@ pub(crate) fn reclaim_scratch_for_admission(
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
     let review_bytes = crate::factory_review_scratch::reclaim_targets(cas_root, None);
-    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, probe)?;
-    cleanup_selected(cas_root, &mut report, policy, &[])?;
+    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, &probe)?;
+    // Apparent file sizes may include hard-linked seed data. Keep the idle
+    // fallback candidates available and stop on measured free space instead.
+    for cache in &mut report.caches {
+        if report.filesystem.pressure && cache.disposition == CacheDisposition::Eligible {
+            cache.disposition = CacheDisposition::Selected;
+        }
+    }
+    report.selected_bytes = report
+        .caches
+        .iter()
+        .filter(|cache| cache.disposition == CacheDisposition::Selected)
+        .map(|cache| cache.bytes)
+        .sum();
+    cleanup_selected_with_capacity(
+        cas_root,
+        &mut report,
+        policy,
+        &[],
+        None,
+        Path::new("/proc"),
+        Some(&probe),
+    )?;
     report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(review_bytes);
     Ok(report)
 }
@@ -265,10 +289,15 @@ fn inspect_scoped_with_probe(
     let reserved_builders = config.max_concurrent_builders;
     capacity.pressure = crate::factory_build_guard::disk_pressure(&capacity, reserved_builders);
     let now = SystemTime::now();
-    let mut scanned = discover_caches(repo_root, cas_root, known_worktree_roots);
-    if scratch_only {
-        scanned.retain(|cache| relocated_target(&cache.worktree, &cache.path));
-    }
+    let deadline = dry_run.then(|| Instant::now() + Duration::from_secs(8));
+    let mut scanned = discover_caches_scoped(
+        repo_root,
+        cas_root,
+        known_worktree_roots,
+        scratch_only,
+        deadline,
+    );
+    let mut inventory_complete = scanned.iter().all(|cache| cache.snapshot.is_some());
     let canonical_live_roots: HashSet<PathBuf> = live_worktree_roots
         .iter()
         .filter_map(|path| path.canonicalize().ok())
@@ -282,6 +311,12 @@ fn inspect_scoped_with_probe(
             .map(|age| age.as_secs());
         let (disposition, reason) = if let Some(reason) = cache.unsafe_reason {
             (CacheDisposition::UnsafePath, reason)
+        } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            inventory_complete = false;
+            (
+                CacheDisposition::Indeterminate,
+                "report inventory budget exhausted; retained".into(),
+            )
         } else if cache.ownership == CacheOwnership::Unknown {
             (
                 CacheDisposition::OwnershipUncertain,
@@ -325,9 +360,11 @@ fn inspect_scoped_with_probe(
         };
         let release_warm_on_pressure = capacity.pressure
             && disposition == CacheDisposition::Eligible
-            && legacy::lane_target(cas_root, &cache.worktree, &cache.path)
-            && !relocated_target(&cache.worktree, &cache.path)
-            && legacy::terminal_dead_owner(cas_root, &cache.worktree);
+            && (crate::factory_scratch::removed_worker(cas_root, &cache.worktree)
+                && relocated_target(&cache.worktree, &cache.path)
+                || legacy::lane_target(cas_root, &cache.worktree, &cache.path)
+                    && !relocated_target(&cache.worktree, &cache.path)
+                    && legacy::terminal_dead_owner(cas_root, &cache.worktree));
         records.push(TargetCacheRecord {
             path: cache.path,
             worktree: cache.worktree,
@@ -379,11 +416,12 @@ fn inspect_scoped_with_probe(
     }
     records.sort_by(|a, b| a.path.cmp(&b.path));
     let candidate_bytes = records.iter().map(|record| record.bytes).sum();
-    let lane_previews = if scratch_only {
-        Vec::new()
-    } else {
-        lane::inspect(cas_root, policy, live_worktree_roots)
-    };
+    let lane_previews =
+        if scratch_only || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            Vec::new()
+        } else {
+            lane::inspect(cas_root, policy, live_worktree_roots)
+        };
     let selected_bytes = records
         .iter()
         .filter(|record| record.disposition == CacheDisposition::Selected)
@@ -402,6 +440,7 @@ fn inspect_scoped_with_probe(
         filesystem_path,
         reserved_builders,
         candidate_bytes,
+        inventory_complete,
         selected_bytes,
         reclaimed_bytes: 0,
         pending_reclaim_bytes: crate::factory_review_scratch::pending_reclaim_bytes(cas_root),
@@ -445,6 +484,26 @@ fn cleanup_selected_using(
     live_worktree_roots: &[PathBuf],
     reclaim_unknown_target: Option<&Path>,
     proc_root: &Path,
+) -> io::Result<()> {
+    cleanup_selected_with_capacity(
+        cas_root,
+        report,
+        policy,
+        live_worktree_roots,
+        reclaim_unknown_target,
+        proc_root,
+        None,
+    )
+}
+
+fn cleanup_selected_with_capacity(
+    cas_root: &Path,
+    report: &mut TargetCacheReport,
+    policy: TargetCachePolicy,
+    live_worktree_roots: &[PathBuf],
+    reclaim_unknown_target: Option<&Path>,
+    proc_root: &Path,
+    capacity_probe: Option<&dyn Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>>,
 ) -> io::Result<()> {
     if let Some(path) = reclaim_unknown_target {
         // Named reclaim never widens into ordinary cache, preview or artifact GC.
@@ -496,18 +555,34 @@ fn cleanup_selected_using(
         .checked_sub(Duration::from_secs(policy.min_idle_secs))
         .unwrap_or(UNIX_EPOCH);
     let mut ordinal = 0u64;
+    report
+        .caches
+        .sort_by_key(|record| record.newest_write_unix_secs);
+    let low_available = report
+        .filesystem
+        .total_bytes
+        .saturating_mul(u64::from(100 - policy.low_watermark_percent))
+        / 100;
 
     for record in report
         .caches
         .iter_mut()
         .filter(|record| record.disposition == CacheDisposition::Selected)
     {
-        let explicit_unknown = reclaim_unknown_target.is_some() && record.ownership == CacheOwnership::Unknown;
+        if capacity_probe.is_some() && report.filesystem.available_bytes >= low_available {
+            record.disposition = CacheDisposition::Eligible;
+            record.reason = "low watermark reached by measured free space".into();
+            continue;
+        }
+        let explicit_unknown =
+            reclaim_unknown_target.is_some() && record.ownership == CacheOwnership::Unknown;
         if (if let Some(path) = reclaim_unknown_target {
             unknown::validate(cas_root, record, path, policy).is_err()
-        } else { !ownership_is_current(cas_root, record) })
-            || record.release_warm_on_pressure
-                && !legacy::terminal_dead_owner(cas_root, &record.worktree)
+        } else {
+            !ownership_is_current(cas_root, record)
+        }) || record.release_warm_on_pressure
+            && !relocated_target(&record.worktree, &record.path)
+            && !legacy::terminal_dead_owner(cas_root, &record.worktree)
         {
             record.disposition = CacheDisposition::OwnershipChanged;
             record.reason =
@@ -583,6 +658,7 @@ fn cleanup_selected_using(
         }
 
         if record.release_warm_on_pressure
+            && !relocated_target(&record.worktree, &record.path)
             && !legacy::terminal_dead_owner(cas_root, &record.worktree)
             || guard
                 .as_ref()
@@ -683,6 +759,9 @@ fn cleanup_selected_using(
                 record.disposition = CacheDisposition::Reclaimed;
                 record.reason = "reclaimed regenerable Cargo artifacts".to_string();
                 report.reclaimed_bytes = report.reclaimed_bytes.saturating_add(record.bytes);
+                if let Some(probe) = capacity_probe {
+                    report.filesystem = probe(&report.filesystem_path, policy)?;
+                }
             }
             Err(error) => {
                 record.path = quarantine;
@@ -715,7 +794,6 @@ fn cleanup_selected_using(
     FileExt::unlock(&lock)?;
     Ok(())
 }
-
 
 fn plan_records(
     records: &mut [TargetCacheRecord],
@@ -758,7 +836,7 @@ fn plan_records(
         }
         records[index].disposition = CacheDisposition::Selected;
         records[index].reason = if records[index].release_warm_on_pressure {
-            "selected terminal-owned dead lane under pressure; warm reservation released; cleanup revalidates owner, tasks and locks".into()
+            "selected dead lane under pressure; warm reservation released; cleanup revalidates provenance, owner and locks".into()
         } else {
             "selected oldest-first to reach the low watermark".into()
         };
@@ -766,10 +844,21 @@ fn plan_records(
     }
 }
 
+#[cfg(test)]
 fn discover_caches(
     repo_root: &Path,
     cas_root: &Path,
     known_worktree_roots: &[PathBuf],
+) -> Vec<ScannedCache> {
+    discover_caches_scoped(repo_root, cas_root, known_worktree_roots, false, None)
+}
+
+fn discover_caches_scoped(
+    repo_root: &Path,
+    cas_root: &Path,
+    known_worktree_roots: &[PathBuf],
+    scratch_only: bool,
+    deadline: Option<Instant>,
 ) -> Vec<ScannedCache> {
     let git_worktrees = list_validated_git_worktrees(repo_root);
     let git_identities: HashMap<PathBuf, GitWorktreeIdentity> = git_worktrees
@@ -823,6 +912,9 @@ fn discover_caches(
     roots.sort_by(|left, right| left.0.cmp(&right.0));
     let mut caches = Vec::new();
     for (root, ownership) in roots {
+        if scratch_only {
+            continue;
+        }
         // Preview ownership, recency and lifetime locks are enforced by lane
         // cleanup. Never select the same bytes through ordinary target GC.
         let ownership = if lane::is_preview_path(cas_root, &root) {
@@ -833,7 +925,7 @@ fn discover_caches(
         let git_identity = git_identities.get(&root);
         let target = root.join("target");
         if fs::symlink_metadata(&target).is_ok() {
-            let mut cache = scan_cache(&root, &target, false)
+            let mut cache = scan_cache_until(&root, &target, false, deadline)
                 .unwrap_or_else(|error| scan_error_record(root.clone(), target, false, error));
             cache.ownership = ownership;
             cache.git_admin_dir = git_identity.and_then(|identity| identity.git_admin_dir.clone());
@@ -849,7 +941,7 @@ fn discover_caches(
                     .starts_with(QUARANTINE_PREFIX)
                 {
                     let path = entry.path();
-                    let mut cache = scan_cache(&root, &path, true)
+                    let mut cache = scan_cache_until(&root, &path, true, deadline)
                         .unwrap_or_else(|error| scan_error_record(root.clone(), path, true, error));
                     cache.ownership = ownership;
                     cache.git_admin_dir =
@@ -884,13 +976,25 @@ fn discover_caches(
                 &name
             };
             let worktree = cas_root.join("worktrees").join(worker);
-            let ownership = scratch_owners
+            let mut ownership = scratch_owners
                 .get(&worktree)
                 .copied()
                 .unwrap_or(CacheOwnership::Unknown);
-            let mut cache = scan_cache(&worktree, &path, interrupted).unwrap_or_else(|error| {
-                scan_error_record(worktree.clone(), path, interrupted, error)
-            });
+            // Previous factory sessions can remove the checkout while leaving
+            // private build output. Only an intact external inode/generation
+            // record and an idle lifetime lease can supply the missing owner.
+            #[cfg(unix)]
+            if ownership == CacheOwnership::Unknown
+                && relocated_target(&worktree, &path)
+                && crate::factory_scratch::removed_worker(cas_root, &worktree)
+                && owner::for_gc(cas_root, &worktree, &path).is_ok_and(|lease| lease.is_some())
+            {
+                ownership = CacheOwnership::Durable;
+            }
+            let mut cache = scan_cache_until(&worktree, &path, interrupted, deadline)
+                .unwrap_or_else(|error| {
+                    scan_error_record(worktree.clone(), path, interrupted, error)
+                });
             cache.ownership = ownership;
             if let Some(identity) = git_identities.get(&worktree) {
                 cache.git_admin_dir = identity.git_admin_dir.clone();
@@ -901,9 +1005,9 @@ fn discover_caches(
         }
     }
     let retired = cas_root.join("merge-sweeps/assembly-target");
-    if fs::symlink_metadata(&retired).is_ok() {
+    if !scratch_only && fs::symlink_metadata(&retired).is_ok() {
         let worktree = cas_root.join("merge-sweeps");
-        let mut cache = scan_cache(&worktree, &retired, false)
+        let mut cache = scan_cache_until(&worktree, &retired, false, deadline)
             .unwrap_or_else(|error| scan_error_record(worktree, retired, false, error));
         cache.ownership = CacheOwnership::Unknown;
         caches.push(cache);
@@ -1177,6 +1281,15 @@ fn relocated_target(worktree: &Path, path: &Path) -> bool {
 }
 
 fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Result<ScannedCache> {
+    scan_cache_until(worktree, path, interrupted_cleanup, None)
+}
+
+fn scan_cache_until(
+    worktree: &Path,
+    path: &Path,
+    interrupted_cleanup: bool,
+    deadline: Option<Instant>,
+) -> io::Result<ScannedCache> {
     let started = Instant::now();
     let relocated = relocated_target(worktree, path);
     let worktree_metadata = fs::symlink_metadata(worktree);
@@ -1258,6 +1371,12 @@ fn scan_cache(worktree: &Path, path: &Path, interrupted_cleanup: bool) -> io::Re
     let mut bytes = 0u64;
     let mut newest_write = metadata.modified().ok();
     for entry in WalkDir::new(&canonical_path).follow_links(false) {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "report inventory budget exhausted; size and idle evidence incomplete",
+            ));
+        }
         let entry = entry.map_err(io::Error::other)?;
         let metadata = entry.metadata().map_err(io::Error::other)?;
         snapshot.record(&canonical_path, &entry, &metadata)?;
@@ -1325,13 +1444,31 @@ fn cache_admission_at(
         if let Some(disposition) = process_block_at(worktree, cache, &[], false, proc_root) {
             return Err((disposition, "native process/handle evidence does not prove the unknown cache idle".into()));
         }
-        let snapshot = snapshot.filter(|snapshot| snapshot.admissible())
-            .ok_or_else(|| (CacheDisposition::UnsafePath, "unsafe unknown-cache snapshot".into()))?;
-        if !lock { return Ok(None); }
-        let guard = legacy::acquire_explicit(cas_root, worktree, cache, snapshot)
-            .map_err(|error| (CacheDisposition::Indeterminate, format!("unknown-cache build guard refused: {error}")))?;
-        if let Some(disposition) = process_block_at(worktree, cache, &guard.descriptors(), false, proc_root) {
-            return Err((disposition, "process evidence changed under unknown-cache build guard".into()));
+        let snapshot = snapshot
+            .filter(|snapshot| snapshot.admissible())
+            .ok_or_else(|| {
+                (
+                    CacheDisposition::UnsafePath,
+                    "unsafe unknown-cache snapshot".into(),
+                )
+            })?;
+        if !lock {
+            return Ok(None);
+        }
+        let guard =
+            legacy::acquire_explicit(cas_root, worktree, cache, snapshot).map_err(|error| {
+                (
+                    CacheDisposition::Indeterminate,
+                    format!("unknown-cache build guard refused: {error}"),
+                )
+            })?;
+        if let Some(disposition) =
+            process_block_at(worktree, cache, &guard.descriptors(), false, proc_root)
+        {
+            return Err((
+                disposition,
+                "process evidence changed under unknown-cache build guard".into(),
+            ));
         }
         return Ok(Some(guard));
     }
@@ -1887,6 +2024,22 @@ mod tests {
         assert_eq!(fs::read_to_string(targets[0].0.join("source.txt")).unwrap(), "keep source");
         assert_eq!(fs::read_to_string(unmanaged.join("evidence")).unwrap(), "review only");
         assert!(orphan.exists(), "unknown checkout must remain review-only");
+        // A live owner's lifetime lease survives its checkout disappearing.
+        fs::remove_dir_all(&targets[2].0).unwrap();
+        let mut live_missing = inspect_with_probe(&cas, policy, &[], &[], false, probe).unwrap();
+        cleanup_selected(&cas, &mut live_missing, policy, &[]).unwrap();
+        assert!(
+            targets[2].1.exists(),
+            "live output must survive a missing checkout"
+        );
+        // An expired inventory budget retains every unmeasured cache.
+        let partial = discover_caches_scoped(&repo, &cas, &[], false, Some(Instant::now()));
+        assert!(!partial.is_empty());
+        assert!(
+            partial
+                .iter()
+                .all(|cache| cache.snapshot.is_none() && cache.bytes == 0)
+        );
         // Resume an interrupted scratch quarantine without crossing devices.
         let quarantine = targets[1].1.with_file_name(format!("{QUARANTINE_PREFIX}warm--{}", uuid::Uuid::new_v4()));
         fs::rename(&targets[1].1, &quarantine).unwrap();
@@ -1927,7 +2080,6 @@ mod tests {
         assert!(process_arguments_use(format!("{other} cargo --target-dir /tmp/cache/debug\n").as_bytes(), Path::new("/tmp/worktree"), Path::new("/tmp/cache")));
         assert!(!process_arguments_use(format!("{other} sleep 30\n").as_bytes(), Path::new("/tmp/worktree"), Path::new("/tmp/cache")));
         assert!(process_arguments_use(b"", cache, cache));
-
     }
 
     #[test]

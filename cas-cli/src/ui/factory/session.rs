@@ -720,6 +720,8 @@ mod tests {
         fs::create_dir_all(&foreign).unwrap();
         let agents = crate::store::SqliteAgentStore::open(&foreign).unwrap();
         agents.init().unwrap();
+        crate::store::open_task_store_local(&foreign).unwrap();
+        crate::store::open_task_store_local(&own).unwrap();
         let bin = original_home.join("bin");
         fs::create_dir_all(&bin).unwrap();
         fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();

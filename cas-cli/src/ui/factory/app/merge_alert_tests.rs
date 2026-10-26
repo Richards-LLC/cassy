@@ -298,6 +298,8 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
+    // Exercise idle/wait recovery, rather than the independent green merge signal.
+    f.ci(Some("failure"));
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     use cas_store::ReminderStore;
@@ -365,6 +367,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
 fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
+    // Green delivery tips have a one-shot merge signal, not an idle backoff.
+    f.ci(Some("failure"));
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     assert_eq!(f.relay().len(), 1, "a stuck worker with no pending wake still alerts");

@@ -48,6 +48,18 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
         };
         let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(std::slice::from_ref(&event));
         assert_eq!(prompts.len(), 1);
+        let core = crate::mcp::CasCore::with_daemon(cas_dir.clone(), None, None);
+        use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
+        core.push_task_lifecycle("cas-9efb-test", "verification wait", TaskStatus::InProgress,
+            TaskStatus::Blocked, "merge-w", None, LifecycleTransition::Blocked,
+            &chrono::Utc::now().to_rfc3339()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        // pin: the table labels distinguish the sole owned wait from genuine waking blockers.
+        assert_eq!(is_lifecycle_wake_source(&rows[0].source), cause != "owned",
+            "{cause}: lifecycle routing must use the same sole-blocker classification");
+        queue.mark_processed(rows[0].id).unwrap();
         // pin: the cause labels select the recipient/dispatch/independent-hold table above.
         assert_eq!(crate::supervisor_message_wakes::quiet(&prompts[0].text), cause == "owned",
             "{cause}: only the recipient's sole active verification wait is quiet");
@@ -63,7 +75,7 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
             let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().peek_all(10).unwrap();
             assert_eq!(rows.len(), 1, "receipt must remain available for the supervisor's next poll");
             assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
-            assert!(super::super::FactoryDaemon::supervisor_wake_class(
+            assert!(FactoryDaemon::supervisor_wake_class(
                 &super::super::queue_and_events::WakeSender::Daemon, "supervisor", &rows[0].source, &rows[0].prompt,
             ).is_none());
         }

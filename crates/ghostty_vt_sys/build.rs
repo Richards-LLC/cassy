@@ -60,7 +60,6 @@ fn main() {
 
     // Rebuild triggers
     println!("cargo:rerun-if-env-changed=ZIG");
-    println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-changed={}", zig.display());
     println!("cargo:rerun-if-changed=zig/build.zig");
     println!("cargo:rerun-if-changed=zig/build.zig.zon");

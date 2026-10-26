@@ -35,6 +35,7 @@ pub fn find_zig(
         .map(|(version, _)| version)
         .expect("Zig package must declare minimum_zig_version");
     let mut tried = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut probe = |candidate: PathBuf| {
         // Cargo invokes build scripts from the crate, not the workspace root.
         let candidate = if candidate.is_absolute() {
@@ -42,6 +43,9 @@ pub fn find_zig(
         } else {
             workspace_root.join(candidate)
         };
+        if !seen.insert(candidate.clone()) {
+            return None;
+        }
         let reason = if !candidate.is_file() {
             "missing or not a file".to_string()
         } else {

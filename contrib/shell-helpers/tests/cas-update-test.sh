@@ -189,7 +189,7 @@ test_build_uses_detached_fetched_worktree() {
     && [ "$(cat "$tmp/source/tracked.txt")" = 'operator dirty content' ] \
     && [ "$(cat "$tmp/cargo.log")" != "$tmp/source" ] \
     && [ "$(cat "$tmp/cargo.log")" = "$stable_worktree" ] \
-    && [ "$(cat "$tmp/zig.log")" = "$tmp/source/.context/zig/zig" ] \
+    && [ -f "$tmp/zig.log" ] && [ -z "$(cat "$tmp/zig.log")" ] \
     && assert_contains "$tmp/bin/cas" '"fetched"' \
     && git -C "$tmp/source" worktree list --porcelain | grep -Fq "$stable_worktree"; then
     pass 'fetched builds use a persistent detached worktree without touching dirty or untracked operator checkout files'

@@ -235,6 +235,12 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         f.app.merge_alert_retries.now = Some(now);
         // No WorkerIdle, close, or merge_request event precedes this probe.
         let events = f.app.merge_alert_retry_events_at(now);
+        for ci in [None, Some("failure")] {
+            f.ci(ci);
+            let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+            assert!(prompts.iter().all(|prompt| prompt.merge_alert.is_none()));
+        }
+        f.ci(Some("success"));
         let (_, mut prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(prompts.len(), 1, "{status:?}");
         let prompt = &mut prompts[0];
@@ -248,8 +254,17 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
         assert!(f.app.refresh_prompt_for_delivery(prompt));
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
-        f.advance_target(true);
+        std::fs::write(f.repo.path().join("delivery.rs"), "// next delivery\n").unwrap();
+        git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
+        let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
         assert!(!f.app.refresh_prompt_for_delivery(prompt));
+        git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+        let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert_eq!(newer.len(), 1);
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
+        f.advance_target(true);
+        assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
     }
 }
 

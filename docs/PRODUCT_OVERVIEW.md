@@ -45,6 +45,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 4. A supervisor messages a supervisor on another project or machine, sees RECEIVED or PENDING, or splits an epic with that peer.
 5. After a release merges, `cas serve` runs the post-release check, `cas release report` builds the branded release report, and Violet posts the release notes to Slack; `cas violet channels` and `cas doctor` check the configured channels.
 6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change; `cas deliverable finalize --audience customer` brands it, embeds its screenshots, refuses internal vocabulary and prints and checks the A4 and Letter PDFs.
+   For a client product, `cas-customer-release-notes` writes the period's customer release notes from its `docs/deliverables/PROFILE.md`; the client's `DESIGN.md` shapes the layout, and the same `finalize --audience customer` call produces the HTML and PDFs.
 7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.
 8. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 
@@ -58,7 +59,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - Adaptive QA: `cas-cli/src/qa_registry.rs`, `cas-cli/src/qa_impact.rs`, `cas-cli/src/qa_post_release.rs`, `docs/qa/impact.md`, `docs/qa/docs-upkeep.md`.
 - CLI and MCP surfaces: `cas-cli/src/cli/` and `cas-cli/src/mcp/tools/`.
 - Commander browser app: `hub-web/`.
-- Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`; both finish through `cas deliverable finalize` (`cas-cli/src/deliverable/finalize.rs`), the one path for image inlining, audience hygiene, printing and the PDF check (`cas-cli/src/deliverable/assets/`).
+- Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`, `cas-cli/src/builtins/skills/cas-customer-release-notes/`; both finish through `cas deliverable finalize` (`cas-cli/src/deliverable/finalize.rs`), the one path for image inlining, audience hygiene, printing and the PDF check (`cas-cli/src/deliverable/assets/`).
 - Branding of human-facing output: `cas-cli/src/builtins/skills/design-spec/references/design-md-first.md`; `cas deliverable brand` (`cas-cli/src/deliverable/`) resolves it, and a customer deliverable with no `DESIGN.md` is refused rather than given the default brand.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.

@@ -3471,6 +3471,105 @@ async fn cas_4221_contained_tip_is_not_a_merge_and_recorded_rework_is_resolved()
 }
 
 #[tokio::test]
+async fn cas_5dc4_conflicting_parked_merge_returns_worker_for_redelivery() {
+    let mut env = test_env();
+    let repo = GitRepo::new();
+    let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(&["init", "--bare", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["remote", "add", "origin", remote.path().to_str().unwrap()], &repo.root);
+    run_git(&["branch", "epic/conflict"], &repo.root);
+    run_git(&["push", "origin", "main", "epic/conflict"], &repo.root);
+    let root = init_cas_dir(&repo.root, &mut env).unwrap();
+    std::fs::write(root.join("config.toml"),
+        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-conflict\"\n").unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    for (id, name, role) in [
+        ("conflict-worker", "alice", AgentRole::Worker),
+        ("conflict-supervisor", "supervisor", AgentRole::Supervisor),
+    ] {
+        register_delivery_agent(&root, id, name, role, "conflict-session");
+    }
+    let branch = "factory/alice-cas-5dc4";
+    let worker = root.join("worktrees/alice");
+    repo.add_worktree(&worker, branch);
+    let agents = open_agent_store(&root).unwrap();
+    let mut agent = agents.get("conflict-worker").unwrap();
+    agent.metadata.insert("clone_path".into(), worker.to_string_lossy().into_owned());
+    agents.update(&agent).unwrap();
+    let mut task = Task::new("cas-5dc4".into(), "Repair conflicting delivery".into());
+    task.depth = TaskDepth::Light;
+    task.assignee = Some("alice".into());
+    task.deliverables.work_target = Some(WorkTarget {
+        repo_selector: "project:merge-conflict".into(), target_branch: "epic/conflict".into(),
+    });
+    let tasks = open_task_store(&root).unwrap();
+    tasks.add(&task).unwrap();
+    env.set_current_dir(&worker);
+    let service = delivery_service(&root, "conflict-worker");
+    let start = || task_req(serde_json::json!({"action": "start", "id": task.id}));
+    let close = || task_req(serde_json::json!({
+        "action": "close", "id": task.id, "reason": "validated delivery ready",
+    }));
+    service.task(Parameters(start())).await.unwrap();
+    std::fs::write(worker.join("README.md"), "worker delivery\n").unwrap();
+    run_git(&["commit", "-am", "fix: worker delivery"], &worker);
+    let anchor = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    run_git(&["push", "origin", branch], &worker);
+    let parked = service.task(Parameters(close())).await.unwrap();
+    assert!(get_text(&parked).contains("MERGE REQUIRED"), "{}", get_text(&parked));
+
+    run_git(&["switch", "epic/conflict"], &repo.root);
+    std::fs::write(repo.root.join("README.md"), "target delivery\n").unwrap();
+    run_git(&["commit", "-am", "competing target"], &repo.root);
+    run_git(&["push", "origin", "epic/conflict"], &repo.root);
+    let target_tip = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+    env.set_current_dir(&repo.root);
+    let supervisor = delivery_service(&root, "conflict-supervisor");
+    let mut request = coord_req("worktree_merge");
+    request.id = Some(branch.into());
+    request.task_id = Some(task.id.clone());
+    request.cleanup = Some(false);
+    for _ in 0..2 {
+        let error = supervisor.coordination(Parameters(request.clone())).await.unwrap_err();
+        assert!(error.message.contains("CONTENT CONFLICT"), "{error}");
+        assert_eq!(git_stdout(&repo.root, &["rev-parse", "HEAD"]), target_tip);
+        assert!(git_stdout(&repo.root, &["status", "--porcelain"]).is_empty());
+    }
+    let returned = tasks.get(&task.id).unwrap();
+    assert_eq!(returned.status, TaskStatus::Open, "conflict must release parked task");
+    assert_eq!(returned.assignee, task.assignee);
+    assert!(returned.notes.contains("merge_conflicted"));
+    assert!(returned.notes.contains("README.md"));
+    assert!(returned.notes.contains(&target_tip));
+    assert_eq!(returned.deliverables.factory_branch_anchor, None);
+    let notices: Vec<_> = cas::store::open_prompt_queue_store(&root).unwrap()
+        .poll_all(100).unwrap().into_iter()
+        .filter(|row| row.prompt.contains("merge_conflicted")).collect();
+    assert_eq!(notices.len(), 1, "one worker notice per declined delivery");
+    assert!(notices[0].prompt.contains("README.md"));
+    assert!(notices[0].prompt.contains(&target_tip));
+
+    env.set_current_dir(&worker);
+    let started = service.task(Parameters(start())).await.unwrap();
+    assert!(!started.is_error.unwrap_or(false), "{}", get_text(&started));
+    assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::InProgress);
+    let merge = Command::new("git").args(["merge", "epic/conflict"])
+        .current_dir(&worker).output().unwrap();
+    assert!(!merge.status.success(), "fixture must reproduce a real content conflict");
+    std::fs::write(worker.join("README.md"), "target and worker delivery\n").unwrap();
+    run_git(&["add", "README.md"], &worker);
+    run_git(&["commit", "-m", "fix: resolve delivery conflict"], &worker);
+    run_git(&["push", "origin", branch], &worker);
+    let delivered = service.task(Parameters(close())).await.unwrap();
+    assert!(get_text(&delivered).contains("MERGE REQUIRED"), "{}", get_text(&delivered));
+    let repaired = tasks.get(&task.id).unwrap();
+    assert_eq!(repaired.status, TaskStatus::AwaitingMerge);
+    assert_ne!(repaired.deliverables.factory_branch_anchor.as_deref(), Some(anchor.as_str()));
+    assert_eq!(repaired.deliverables.factory_branch_anchor,
+        Some(git_stdout(&worker, &["rev-parse", "HEAD"])));
+}
+
+#[tokio::test]
 async fn cas_cfd1_dirty_source_refuses_unpushed_mismatched_or_destructive_merge() {
     let mut env = test_env();
     let fixture_parent = cas::test_paths::runtime_fixture_parent();

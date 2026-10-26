@@ -16,3 +16,7 @@ name = "ghostty_vt_sys"
 
 [dev-dependencies]
 tempfile = "3.14"
+
+[[test]]
+name = "portable_target"
+path = "tests/portable_target.rs"

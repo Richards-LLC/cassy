@@ -254,3 +254,43 @@ fn deliverable_finalize_drops_the_lowest_priority_pair_over_budget() {
     );
     assert_eq!(html.matches("data:image/png;base64,").count(), 4);
 }
+
+/// cas-feature-report ships no render code: its template, filled with a
+/// project's pairs, becomes a customer deliverable in that project's brand
+/// through `finalize` alone.
+#[test]
+fn deliverable_feature_report_template_finalizes_in_the_project_brand() {
+    let template = cas::builtins::BUILTIN_SKILLS
+        .iter()
+        .find(|b| b.path == "skills/cas-feature-report/references/report-template.html")
+        .expect("feature report template ships")
+        .content;
+    let project = finalize_fixture("", &[]);
+    let report = project.path().join("report");
+    fs::write(report.join("draft.html"), template).unwrap();
+    fs::create_dir_all(report.join("pairs")).unwrap();
+    for view in ["saved-views", "filter-panel"] {
+        for side in ["before", "after"] {
+            fs::write(report.join(format!("pairs/{view}.{side}.jpg")), b"\xff\xd8\xff\xe0jpeg").unwrap();
+        }
+    }
+    let output = cas_cmd(project.path())
+        .args(["--json", "deliverable", "finalize", "report/draft.html"])
+        .args(["--audience", "customer", "--out", "report/final.html"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let receipt: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(receipt["findings"], Value::Array(vec![]), "{receipt}");
+    assert_eq!(receipt["inlined"], 4, "{receipt}");
+    assert!(receipt["design"].as_str().unwrap().starts_with("DESIGN.md@"), "{receipt}");
+    let html = fs::read_to_string(report.join("final.html")).unwrap();
+    assert!(html.contains("--verdict:#ff682f"), "project brand not worn");
+    assert!(
+        !html.contains("/*cas:brand*/") && !html.contains("<!--cas:brand-mark-->"),
+        "{html}"
+    );
+    assert!(!html.contains("src=\"pairs/"), "{html}");
+}

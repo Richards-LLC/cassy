@@ -173,7 +173,8 @@ Mandatory encodings (invariant across every chart in the report):
 ### 8. Product / feature showcase
 
 Show what was built through the reader's experience, then prove that the capability is real. This is
-not a release log or a decision brief.
+not a release log or a decision brief. A feature report on shipped work, branded with before/after
+views, is `cas-feature-report`'s.
 
 1. `[R]` **Capability thesis** — what is newly possible for the reader, in one sentence, first.
 2. `[R]` **Product journey or capability map** — the reader path or grouped capabilities, with the

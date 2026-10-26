@@ -191,6 +191,9 @@ fn deliverable_finalize_customer_hygiene_refuses_a_planted_ticket_label() {
     assert_eq!(receipt["findings"][0]["code"], "hygiene", "{receipt}");
     let message = receipt["findings"][0]["message"].as_str().unwrap();
     assert!(message.contains("ticket label 'cas-1a2b'"), "{message}");
+    // A refused customer file never sits at the deliverable path.
+    assert_eq!(receipt["html"], Value::Null, "{receipt}");
+    assert!(!project.path().join("report/customer.html").exists());
 
     let internal = run("internal").success();
     let receipt: Value = serde_json::from_slice(&internal.get_output().stdout).unwrap();

@@ -142,9 +142,10 @@ pub(crate) fn owned_verification_wait(
     {
         return None;
     }
-    let is_wait = |reason: &str| {
-        reason.contains(&dispatch.id) && reason.to_ascii_lowercase().contains("verif")
-    };
+    // cas-16e1: a wait is the exact system-authored sentence for this
+    // dispatch, never any text that merely mentions it.
+    let wait = verification_wait_note(&dispatch.id);
+    let is_wait = |reason: &str| reason.trim() == wait;
     let hold = read(tasks.as_ref(), task_id).ok()?;
     if hold.as_ref().is_some_and(|hold| {
         hold.reason != "Task explicitly set to status=blocked." && !is_wait(&hold.reason)
@@ -153,10 +154,7 @@ pub(crate) fn owned_verification_wait(
     }
     // A new park starts a delivery cycle; old blocker notes cannot hold it.
     let notes = task.notes.rsplit("Task parked as awaiting_merge").next()?;
-    let blockers: Vec<_> = notes
-        .lines()
-        .filter_map(|line| line.split_once("🚫 BLOCKER").map(|(_, body)| body))
-        .collect();
+    let blockers = blocker_notes(notes);
     if blockers.iter().any(|reason| !is_wait(reason))
         || (!blockers.iter().any(|reason| is_wait(reason))
             && !hold.as_ref().is_some_and(|hold| is_wait(&hold.reason)))
@@ -164,6 +162,35 @@ pub(crate) fn owned_verification_wait(
         return None;
     }
     Some(dispatch.id)
+}
+
+/// cas-16e1: the one note a worker records to wait, blocked, on a pending
+/// verification dispatch without waking its supervisor.
+pub(crate) fn verification_wait_note(dispatch_id: &str) -> String {
+    format!("Verification required: exact dispatch {dispatch_id} must record a verdict before close.")
+}
+
+/// The full text of every blocker note, across all of its lines. A note
+/// entry starts at a `[YYYY-MM-DD HH:MM] ` line and runs to the next one.
+fn blocker_notes(notes: &str) -> Vec<String> {
+    let starts_entry = |line: &str| {
+        let bytes = line.as_bytes();
+        bytes.len() > 19 && bytes[0] == b'[' && bytes[17] == b']' && bytes[18] == b' '
+            && line[1..17].chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | ' ' | ':'))
+    };
+    let mut entries: Vec<String> = Vec::new();
+    for line in notes.lines() {
+        match entries.last_mut() {
+            Some(entry) if !starts_entry(line) => {
+                entry.push('\n');
+                entry.push_str(line);
+            }
+            _ => entries.push(line.to_string()),
+        }
+    }
+    entries.into_iter()
+        .filter_map(|entry| entry.get(19..)?.strip_prefix("🚫 BLOCKER").map(|body| body.trim().to_string()))
+        .collect()
 }
 
 /// Read the hold that controls whether dependency auto-unblock may reopen a task.
@@ -215,4 +242,40 @@ pub(crate) fn record_auto_unblock_skipped(task: &mut Task, reason: &str) {
         task.notes.push_str(&note);
     }
     task.updated_at = chrono::Utc::now();
+}
+
+#[cfg(test)]
+mod tests {
+    use cas_types::{Agent, AgentRole, TaskStatus};
+
+    /// cas-16e1: only the exact wait sentence, read across the whole note,
+    /// keeps a verification wait quiet; a blocker that mentions the dispatch
+    /// while asking for something else keeps alerts armed.
+    #[test]
+    fn only_the_whole_wait_note_is_a_quiet_verification_wait_cas_16e1() {
+        let fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+        let cas_dir = fixture.app.cas_dir().to_path_buf();
+        let lead = Agent::new_with_role("lead-id".into(), "lead".into(), AgentRole::Supervisor);
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&lead).unwrap();
+        let dispatch = cas_store::create_verification_dispatch(
+            &cas_dir, "cas-9efb-test", "merge-w", "lead-id",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        ).unwrap();
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let wait = super::verification_wait_note(&dispatch.id);
+        for (note, quiet) in [
+            (wait.clone(), true),
+            (format!("{wait}\nAlso restore the staging database credentials."), false),
+            (format!("Verification of {} is stuck; I need the staging credentials.", dispatch.id), false),
+        ] {
+            let mut task = store.get("cas-9efb-test").unwrap();
+            task.status = TaskStatus::Blocked;
+            task.notes = format!("[2026-10-26 21:30] 🚫 BLOCKER {note}");
+            store.update(&task).unwrap();
+            assert_eq!(
+                super::owned_verification_wait(&cas_dir, "cas-9efb-test", "lead-id").is_some(), quiet,
+                "{note}"
+            );
+        }
+    }
 }

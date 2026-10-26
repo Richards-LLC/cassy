@@ -153,3 +153,8 @@ Record applicable evidence and the reason for each inapplicable surface:
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
 criterion evidence, safety facts and deferred proof ownership. Read actual tool
 rejections as state; forward verification-required guidance once to the supervisor.
+
+To wait blocked on a pending verification dispatch without waking the
+supervisor, set `status=blocked` and record exactly one blocker note:
+`Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
+A note with any other text or extra lines is a real blocker and wakes the supervisor.

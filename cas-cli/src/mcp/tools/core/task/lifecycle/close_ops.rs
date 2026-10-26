@@ -6558,8 +6558,11 @@ impl CasCore {
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
         // cas-43d2: a pushed delivery is what origin holds. An unpushed local
         // rebase must not replace it, or the pushed tip reads as superseded.
+        let lane = task.deliverables.parked_branch.clone().or_else(|| {
+            task.assignee.as_deref().map(crate::factory_isolation::expected_worker_branch)
+        });
         if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
-            && commit_is_absent_from_origin(repo_path, &candidate)
+            && commit_is_absent_from_origin(repo_path, &candidate, lane.as_deref())
         {
             return None;
         }
@@ -21416,14 +21419,24 @@ fn own_lane_subjects(
 
 /// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
 /// without an origin remote has nothing to compare, so it answers false.
-fn commit_is_absent_from_origin(repo_path: &std::path::Path, commit: &str) -> bool {
+/// cas-16e1: the delivery lane's own `origin/<lane>` answers first; only a
+/// commit it lacks pays for the scan of every remote ref.
+fn commit_is_absent_from_origin(repo_path: &std::path::Path, commit: &str, lane: Option<&str>) -> bool {
     let has_origin = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output()
         .is_ok_and(|output| output.status.success());
-    has_origin
-        && git_stdout_lines(
+    if !has_origin {
+        return false;
+    }
+    if let Some(lane) = lane {
+        let remote = format!("refs/remotes/origin/{}", lane.strip_prefix("origin/").unwrap_or(lane));
+        if git_ref_exists(repo_path, &remote) && git_commit_is_ancestor(repo_path, commit, &remote) {
+            return false;
+        }
+    }
+    git_stdout_lines(
             repo_path,
             &["for-each-ref", "--format=%(refname)", "--contains", commit, "refs/remotes/origin"],
         )
@@ -32397,8 +32410,17 @@ esac
         core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
         assert_eq!(anchor(&store), Some(parked_at), "an unpushed commit is not the delivery");
         git(p, &["push", "-q", "origin", "factory/worker"]);
+        // cas-16e1: the lane's own origin branch answers before any scan of
+        // every remote ref.
+        let trace = temp.path().join("git-trace.log");
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("GIT_TRACE", &trace);
         core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
+        drop(env);
         assert_eq!(anchor(&store), Some(own), "the pushed continuation advances it");
+        let scans = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("for-each-ref") && line.contains("refs/remotes/origin")).count();
+        assert_eq!(scans, 0);
     }
 
     /// cas-ba4a: a parked task resolves to its anchor; an anchor that cannot

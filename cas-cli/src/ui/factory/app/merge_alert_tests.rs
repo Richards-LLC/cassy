@@ -974,3 +974,32 @@ fn cas_43d2_declined_tip_settles_until_the_worker_commits() {
     f.relay();
     assert!(probes(&f) > settled, "a new commit is read again");
 }
+
+/// cas-16e1: a refused pushed-tip check is re-read on the slow retry timer,
+/// because the refusal can rest on state the read fingerprint does not watch.
+#[test]
+fn cas_16e1_not_ready_lane_is_reread_after_the_settled_retry() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    // Only origin carries the lane, so the worker's own branch lacks the tip.
+    git(f.repo.path(), &["switch", "-q", "epic/test"]);
+    git(f.repo.path(), &["branch", "-D", "factory/merge-w"]);
+    let trace = f.app.cas_dir.join("git-trace.log");
+    f._env.set("GIT_TRACE", &trace);
+    let probes = |f: &Fixture| {
+        let fetches = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("built-in: git fetch ")).count();
+        fetches + std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap_or_default().lines().count()
+    };
+    let now = Utc::now();
+    f.app.merge_alert_retries.now = Some(now);
+    f.relay();
+    let settled = probes(&f);
+    assert!(settled > 0);
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(5));
+    f.relay();
+    assert_eq!(probes(&f), settled);
+    f.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(11));
+    f.relay();
+    assert!(probes(&f) > settled);
+}

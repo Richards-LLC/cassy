@@ -4,6 +4,75 @@ use crate::ui::theme::{ThemeConfig, ThemeMode, ThemeVariant};
 use tempfile::TempDir;
 
 #[test]
+fn qa_capture_keys_round_trip_cas_db23() {
+    let temp = TempDir::new().unwrap();
+    let mut config = Config::default();
+    let values = [
+        ("base_url", "http://localhost:4312"),
+        ("serve", "pnpm dev --port {port}"),
+        ("ready_path", "/health"),
+        ("shots", "docs/qa/custom-shots.json"),
+        ("credentials_env", "PROJECT_QA_CREDENTIALS"),
+        ("login_path", "/login"),
+        ("success_url", "^https?://[^/]+/dashboard"),
+        ("email_sel", "#email"),
+        ("password_sel", "#password"),
+        ("submit_sel", "button[type=submit]"),
+        ("mask", "[data-pii], .account-name"),
+        ("viewports", "1280x800,390x844"),
+        ("max_shots", "4"),
+        ("timeout_secs", "180"),
+        ("max_jpg_kb", "200"),
+        ("max_image_width", "1200"),
+        ("jpg_quality", "75"),
+        ("max_html_mb", "6"),
+        ("max_pairs", "10"),
+    ];
+    for (name, value) in values {
+        let key = format!("qa.capture.{name}");
+        let meta = meta::registry().get(&key).expect("registered capture key");
+        assert_eq!(config.get(&key).as_deref(), Some(meta.default), "{key}");
+        config.set(&key, value).unwrap();
+    }
+    config.save(temp.path()).unwrap();
+    let loaded = Config::load(temp.path()).unwrap();
+    for (name, value) in values {
+        let key = format!("qa.capture.{name}");
+        let expected = if name == "mask" { "[data-pii],.account-name" } else { value };
+        assert_eq!(loaded.get(&key).as_deref(), Some(expected), "{key}");
+        assert!(loaded.list().contains(&(key, expected.into())));
+    }
+}
+
+#[test]
+fn qa_capture_rejects_invalid_values_without_mutation_cas_db23() {
+    let mut config = Config::default();
+    for (name, value) in [
+        ("credentials_env", "password=do-not-store"),
+        ("credentials_env", "/tmp/credentials.json"),
+        ("credentials_env", "9INVALID"),
+        ("success_url", "/dashboard"),
+        ("success_url", "^(["),
+        ("base_url", "file:///tmp/page"),
+        ("base_url", "https://user:password@example.com"),
+        ("max_shots", "0"),
+        ("max_shots", "7"),
+        ("timeout_secs", "241"),
+        ("max_jpg_kb", "251"),
+        ("max_image_width", "1441"),
+        ("jpg_quality", "101"),
+        ("max_html_mb", "9"),
+        ("max_pairs", "13"),
+        ("viewports", "desktop"),
+    ] {
+        let key = format!("qa.capture.{name}");
+        let before = toml::to_string(&config).unwrap();
+        assert!(config.set(&key, value).is_err(), "{key}");
+        assert_eq!(toml::to_string(&config).unwrap(), before, "{key}");
+    }
+}
+
+#[test]
 fn test_config_defaults() {
     let config = Config::default();
     assert!(config.sync.enabled);

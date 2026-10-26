@@ -13,7 +13,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { analyzeCapture, contrastRatio, displayWidth, lineText, parseAnsi, runTerminalQa, PALETTES, UsageError } from "./terminal-qa.mjs";
+import { analyzeCapture, contrastRatio, displayWidth, lineText, parseAnsi, runTerminalQa, stripAnsi, stripBsdScriptEof, PALETTES, UsageError } from "./terminal-qa.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const script = path.join(here, "terminal-qa.mjs");
@@ -372,6 +372,7 @@ test("empty captures fail even with a wildcard allowlist", async (t) => {
   assert.equal(report.findings.filter((f) => f.check === "empty-capture").length, 11);
   assert.equal(report.allowed.length, 0);
   assert.match(fs.readFileSync(path.join(out, "report.md"), "utf8"), /^terminal-qa: FAIL/);
+  assert.equal(stripAnsi(stripBsdScriptEof(Buffer.from("^D\b\b\r\n"))).trim(), "");
 });
 
 function fakeScript(t, body) {

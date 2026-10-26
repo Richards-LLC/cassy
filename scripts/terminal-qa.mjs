@@ -911,6 +911,13 @@ function baseEnv() {
   return env;
 }
 
+export function stripBsdScriptEof(raw) {
+  // BSD script can echo stdin EOF as a leading ^D and two backspaces. Remove
+  // that transport prefix before it masks empty output or overwrites text.
+  const eofEcho = Buffer.from("^D\b\b");
+  return raw.subarray(0, eofEcho.length).equals(eofEcho) ? raw.subarray(eofEcho.length) : raw;
+}
+
 function runInPty(command, args, { columns, env, timeoutMs }) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "terminal-qa-pty-"));
   const statusFile = path.join(dir, "command-status");
@@ -931,14 +938,8 @@ function runInPty(command, args, { columns, env, timeoutMs }) {
       const detail = res.error?.message || res.stderr?.toString().trim() || res.stdout?.toString().trim() || `script exited ${res.status} without completing the command`;
       throw new UsageError(`pty unavailable: ${detail}`);
     }
-    let raw = res.stdout ?? Buffer.alloc(0);
-    // BSD script can echo stdin EOF as ^D followed by two backspaces. These
-    // transport bytes must not make an otherwise empty command capture visible.
-    const eofEcho = Buffer.from("^D\b\b");
-    if (bsd && raw.subarray(-eofEcho.length).equals(eofEcho)) {
-      raw = raw.subarray(0, -eofEcho.length);
-    }
-    return { raw, exit_code: Number(status) };
+    const raw = res.stdout ?? Buffer.alloc(0);
+    return { raw: bsd ? stripBsdScriptEof(raw) : raw, exit_code: Number(status) };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

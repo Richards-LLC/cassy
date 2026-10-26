@@ -216,6 +216,41 @@ impl Fixture {
 }
 
 #[test]
+fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
+    for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
+        let mut f = Fixture::new();
+        f.in_progress();
+        let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.status = status;
+        // A refused park leaves the task active, with no parked branch or tip.
+        task.deliverables.factory_branch_anchor = None;
+        task.notes = "Close rejected: FAST ROWS REQUIRED".into();
+        store.update(&task).unwrap();
+        let data = DirectorData::load_with_stores_for_project(
+            &f.app.cas_dir, None, false, None, None,
+        ).unwrap();
+        f.app.set_director_data_for_test(data);
+        let now = Utc::now();
+        f.app.merge_alert_retries.now = Some(now);
+        // No WorkerIdle, close, or merge_request event precedes this probe.
+        let events = f.app.merge_alert_retry_events_at(now);
+        let (_, mut prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert_eq!(prompts.len(), 1, "{status:?}: pushed green delivery owes a signal");
+        let prompt = &mut prompts[0];
+        assert!(prompt.text.contains("READY TO MERGE"), "{}", prompt.text);
+        assert!(prompt.text.contains("factory/merge-w"), "{}", prompt.text);
+        assert!(prompt.text.contains("epic/test"), "{}", prompt.text);
+        assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
+        assert!(f.app.refresh_prompt_for_delivery(prompt), "pre-park signal must survive release");
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty(),
+            "the same pushed green tip signals exactly once");
+        f.advance_target(true);
+        assert!(!f.app.refresh_prompt_for_delivery(prompt), "a merged tip is no longer actionable");
+    }
+}
+
+#[test]
 fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
     let mut f = Fixture::new();
     let now = Utc::now();

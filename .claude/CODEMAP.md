@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map of the 3.81.0 release tree (its report set is the newest in `docs/release-reports/`): 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map regenerated for the 3.82 cut-prep tree (the 3.81.0 report set is the newest in `docs/release-reports/`): 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -71,7 +71,7 @@
 - `cas-cli/src/deliverable/`, `cas-cli/src/cli/deliverable.rs` - `cas deliverable` core: embedded asset workspace, `brand` (DESIGN.md resolution in `assets/brand.py`), `finalize` (fill, inline budget, audience hygiene, print, check-pdf in `assets/`) `capture` (immutable merge-base/head QA, catalog or journey goals), `pairs` (digest/framing validation and range provenance) and the shared receipt/exit contract.
 - `cas-cli/src/builtins/` - canonical agents, skills, jobs, harness mirrors and sync manifest.
 - `cas-cli/src/builtins/skills/finish/`, `cas-cli/src/builtins/reference-history.json` - shared finish command and per-reference provenance.
-- `cas-cli/src/builtins/skills/cas-sow-delivery-report/`, `cas-cli/src/builtins/skills/cas-feature-report/` - deliverable front-ends: contract and template only, rendered through `cas deliverable finalize`.
+- `cas-cli/src/builtins/skills/cas-sow-delivery-report/`, `cas-cli/src/builtins/skills/cas-feature-report/`, `cas-cli/src/builtins/skills/cas-customer-release-notes/` - deliverable front-ends: contract, template and (customer notes) `PROFILE.md` template only, rendered through `cas deliverable finalize`.
 
 ## Factory runtime and terminals
 

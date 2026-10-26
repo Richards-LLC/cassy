@@ -40,8 +40,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    Add milestones with `task action=notes note_type=progress`.
 4. Read [verify-before-claim](../verify-before-claim/SKILL.md) and
    [close-gate.md](references/close-gate.md); close with `task action=close reason="PASS <sha>: <proof>"`
-   on a clean tree at that HEAD. Quote verification-required guidance in `need:`;
-   retry close after verification completes.
+   on a clean tree at that HEAD. When close says verification required, quote its
+   guidance in `need:`; retry close after verification completes.
 5. For MERGE REQUIRED, drain `inbox_poll` of unread supervisor messages, capture
    the current factory-branch tip SHA, and send one `merge_request=true` message;
    its body is the request, so do not send a separate prose summary or ACK before

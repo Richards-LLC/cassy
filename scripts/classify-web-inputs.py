@@ -27,6 +27,8 @@ WEB_INPUTS = (
     'hub-web/',
     # The user-journey catalog the Commander journeys implement.
     'docs/qa/journeys.md',
+    # The journey registry hub-web/src/usage.test.ts reads for the usage map.
+    'docs/qa/journeys.yaml',
     # Read by hub-web/scripts/generate-tokens.mjs and src/tokens.test.ts.
     'docs/design/design-tokens.json',
     # Imported by hub-web/scripts/visual-qa.mjs and the real-hub journeys.

@@ -91,6 +91,79 @@ async fn b8916_owned_verification_block_is_a_non_waking_receipt() {
 }
 
 #[tokio::test]
+async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8e() {
+    use crate::mcp::tools::core::task::lifecycle::supervisor_push::{LifecycleTransition, is_lifecycle_wake_source};
+    use cas_types::{Agent, AgentRole, TaskStatus, Verification, VerificationStatus};
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    let root = fixture.app.cas_dir().to_path_buf();
+    let agents = crate::store::open_agent_store(&root).unwrap();
+    let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);
+    agents.register(&lead).unwrap();
+    let tasks = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = tasks.get("cas-9efb-test").unwrap();
+    let block = |task: &mut cas_types::Task, reason: &str| {
+        task.status = TaskStatus::Blocked;
+        tasks.update(task).unwrap();
+        tasks.patch_execution_state(&task.id, &serde_json::json!({"blocked_hold": {
+            "reason": reason, "who": "merge-w", "when": chrono::Utc::now()
+        }})).unwrap();
+    };
+    block(&mut task, "Awaiting operator decision");
+    let core = crate::mcp::CasCore::with_daemon(root.clone(), None, None);
+    core.set_agent_id_for_testing(lead.id.clone());
+    let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+    core.push_task_lifecycle(&task.id, &task.title, TaskStatus::InProgress, TaskStatus::Blocked,
+        "merge-w", None, LifecycleTransition::Blocked, &chrono::Utc::now().to_rfc3339()).unwrap();
+    assert!(queue.peek_all(20).unwrap().iter().any(|row| is_lifecycle_wake_source(&row.source)),
+        "an unanswered blocker must still wake its supervisor");
+    let service = crate::mcp::CasService::new(core.clone(), None);
+    let answered = service.coordination(Parameters(serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "merge-w", "task_id": task.id,
+        "summary": "Decision relayed", "message": "I relayed your question to the operator; wait for their decision."
+    })).unwrap())).await.unwrap();
+    assert!(!answered.is_error.unwrap_or(false), "{answered:?}");
+
+    for rejected in [false, true] {
+        if rejected {
+            let mut verdict = Verification::new(task.id.clone(), "reviewer".into());
+            verdict.status = VerificationStatus::Rejected;
+            verdict.summary = "Operator decision remains outstanding; re-open to finish after the answer.".into();
+            core.return_rejected_merged_delivery(&task.id, &verdict);
+            task = tasks.get(&task.id).unwrap();
+            assert_eq!(task.status, TaskStatus::Open);
+            task.status = TaskStatus::InProgress;
+            tasks.update(&task).unwrap();
+            block(&mut task, "Awaiting operator decision");
+        }
+        let events = [
+            crate::ui::factory::director::DirectorEvent::WorkerIdle { worker: "merge-w".into(), active_task: None },
+            crate::ui::factory::director::DirectorEvent::TaskBlocked {
+                task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
+            },
+        ];
+        let (current, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&events);
+        assert!(current.is_empty() && prompts.is_empty(),
+            "answered blocker must suppress idle and director-blocked wakes (rejected={rejected}): {prompts:?}");
+        for row in queue.peek_all(30).unwrap() { queue.mark_processed(row.id).unwrap(); }
+        core.push_task_lifecycle(&task.id, &task.title, TaskStatus::InProgress, TaskStatus::Blocked,
+            "merge-w", None, LifecycleTransition::Blocked, &chrono::Utc::now().to_rfc3339()).unwrap();
+        let rows = queue.peek_all(30).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(!is_lifecycle_wake_source(&rows[0].source));
+        assert!(crate::supervisor_message_wakes::quiet(&rows[0].prompt));
+    }
+    // A different hold is a new question even on the same task and assignee.
+    block(&mut task, "Credentials are now missing");
+    let event = crate::ui::factory::director::DirectorEvent::TaskBlocked {
+        task_id: task.id.clone(), task_title: task.title.clone(), worker: "merge-w".into(),
+    };
+    let (_, prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(&[event]);
+    assert_eq!(prompts.len(), 1);
+    assert!(!crate::supervisor_message_wakes::quiet(&prompts[0].text));
+}
+
+#[tokio::test]
 async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
     let mut shutdown_delivered = false;
     let mut stale_fallback_suppressed = false;

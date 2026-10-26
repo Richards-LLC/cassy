@@ -238,6 +238,10 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         f.app.set_director_data_for_test(data);
         let now = Utc::now();
         f.app.merge_alert_retries.now = Some(now);
+        // A shared unfiltered snapshot cannot dispatch another supervisor's lane.
+        let workers = std::mem::take(&mut f.app.worker_names);
+        assert!(f.app.merge_alert_retry_events_at(now).is_empty());
+        f.app.worker_names = workers;
         // No WorkerIdle, close, or merge_request event precedes this probe.
         let events = f.app.merge_alert_retry_events_at(now);
         for ci in [None, Some("failure")] {

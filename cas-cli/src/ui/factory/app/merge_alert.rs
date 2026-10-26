@@ -36,7 +36,7 @@ pub(super) struct Retries {
 impl Retries {
     /// Probe deliveries even while their workers execute or a close gate refuses
     /// to park. This only schedules external reads; it performs no Git/CI I/O.
-    fn discover(&mut self, data: &DirectorData, now: DateTime<Utc>) {
+    fn discover(&mut self, data: &DirectorData, workers: &[String], now: DateTime<Utc>) {
         for task in data.in_progress_tasks.iter().chain(&data.ready_tasks) {
             if !matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked) {
                 continue;
@@ -45,6 +45,7 @@ impl Retries {
             let Some(agent) = data.agents.iter().find(|agent| agent.id == assignee || agent.name == assignee) else {
                 continue;
             };
+            if !workers.contains(&agent.name) { continue; }
             self.entries.entry(task.id.clone()).or_insert_with(|| Retry {
                 event: DirectorEvent::WorkerIdle {
                     worker: agent.name.clone(),
@@ -152,7 +153,7 @@ impl Retries {
 impl super::FactoryApp {
     pub(crate) fn merge_alert_retry_events_at(&mut self, now: DateTime<Utc>) -> Vec<DirectorEvent> {
         // Only this supervisor's session workers may seed a delivery probe.
-        self.merge_alert_retries.discover(&self.director_data, now);
+        self.merge_alert_retries.discover(&self.director_data, &self.worker_names, now);
         self.merge_alert_retries
             .due(now, &self.unfiltered_director_data)
     }

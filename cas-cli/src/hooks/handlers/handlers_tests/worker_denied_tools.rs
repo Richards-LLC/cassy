@@ -445,7 +445,20 @@ fn supervisor_and_plain_session_may_read_operator_auth_stores_cas_5120() {
             ("Grep", json!({"path": "~/.local/share/com.vercel.cli", "pattern": "token"})),
         ] {
             let output = handle_pre_tool_use(&input(tool, args, cwd.path()), Some(&cas_root)).unwrap();
-            assert!(denial(output).is_none(), "{role:?} {tool} credential access was refused");
+            let reason = denial(output);
+            assert!(reason.is_none(), "{role:?} {tool} credential access was refused: {reason:?}");
+        }
+        for path in ["credentials.json", "id_rsa"] {
+            let output = handle_pre_tool_use(
+                &input("Read", json!({
+                    "file_path": project.path().join(path),
+                    "path": home.join(".local/share/com.vercel.cli/auth.json"),
+                }), cwd.path()),
+                Some(&cas_root),
+            )
+            .unwrap();
+            let reason = denial(output).expect("unrelated credentials must stay protected");
+            assert!(reason.contains("Protected file:"), "{role:?} {path}: {reason}");
         }
     }
 }

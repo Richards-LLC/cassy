@@ -21,7 +21,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
-use crate::builtins::BUILTIN_SKILLS;
+use crate::deliverable::Audience;
+use crate::deliverable::asset::{Asset, Workspace};
+use crate::deliverable::brand::{self, BrandRequest};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::store::find_cas_root_from;
@@ -30,6 +32,8 @@ use crate::ui::theme::ActiveTheme;
 
 const GH_TIMEOUT: Duration = Duration::from_secs(20);
 const RENDER_TIMEOUT: Duration = Duration::from_secs(45);
+const RENDER_SCRIPT: &str = "skills/cas-release-report/scripts/render.py";
+const RENDER_TEMPLATE: &str = "skills/cas-release-report/references/template.html";
 const PDF_TIMEOUT: Duration = Duration::from_secs(120);
 /// Issues are closed by hand a few minutes after the release PR merges
 /// (6–7 minutes in the October 2026 releases). A closure up to this long after
@@ -96,6 +100,10 @@ struct ReportResult {
     github_repo: Option<String>,
     release_published_at: Option<String>,
     green_to_published_seconds: Option<i64>,
+    /// Which brand source `cas deliverable brand` resolved (design-md-css, …).
+    brand_source: String,
+    /// `path@revision` of the DESIGN.md the report wears.
+    design: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -579,7 +587,10 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         (source, acquired, true)
     };
 
-    let renderer = RendererAssets::locate(&project_root)?;
+    let renderer = Workspace::materialize(&[
+        Asset::builtin(RENDER_SCRIPT, "scripts/render.py")?,
+        Asset::builtin(RENDER_TEMPLATE, "references/template.html")?,
+    ])?;
     let relative = |path: &Path| {
         path.strip_prefix(&project_root)
             .unwrap_or(path)
@@ -594,14 +605,26 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
         &relative(&source_path),
         &relative(&pdf_path),
     );
+    let brand = brand::resolve(&BrandRequest {
+        root: project_root.clone(),
+        audience: Audience::Internal,
+        surface: None,
+        tokens: None,
+    })?;
     render_html(
-        &renderer.script,
+        &renderer.path("scripts/render.py"),
         &source_path,
         &html_path,
         &project_root,
-        renderer.render_timeout,
+        RENDER_TIMEOUT,
         links,
     )?;
+    let draft = fs::read_to_string(&html_path)
+        .with_context(|| format!("could not read rendered {}", html_path.display()))?;
+    write_text(&html_path, &brand.fill(&draft)?)?;
+    for warning in &brand.receipt.warnings {
+        eprintln!("release report: brand: {warning}");
+    }
 
     let mut pdf_written = false;
     if args.pdf {
@@ -643,6 +666,8 @@ pub fn execute(args: &ReleaseReportArgs, cli: &Cli) -> anyhow::Result<()> {
             .and_then(|release| release.published_at.clone())
             .or(acquired.release_evidence.tag_published_at.clone()),
         green_to_published_seconds: acquired.release_evidence.green_to_published_seconds,
+        brand_source: brand.receipt.source.clone().unwrap_or_default(),
+        design: brand.receipt.design_line(),
     };
 
     if cli.json {
@@ -2551,95 +2576,6 @@ const { pathToFileURL } = require('node:url');
 })().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
 "#;
 
-struct RendererAssets {
-    script: PathBuf,
-    render_timeout: Duration,
-    _temporary_root: Option<tempfile::TempDir>,
-}
-
-impl RendererAssets {
-    fn locate(project_root: &Path) -> anyhow::Result<Self> {
-        let relative = Path::new("skills/cas-release-report/scripts/render.py");
-        let candidates = [
-            project_root.join(".claude").join(relative),
-            project_root.join(".codex").join(relative),
-            project_root.join(".grok").join(relative),
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".claude")
-                .join(relative),
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".codex")
-                .join(relative),
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".grok")
-                .join(relative),
-        ];
-        if let Some(script) = candidates
-            .into_iter()
-            .find(|path| path.is_file() && renderer_supports_source(path))
-        {
-            return Ok(Self {
-                script,
-                render_timeout: RENDER_TIMEOUT,
-                _temporary_root: None,
-            });
-        }
-
-        // Installed binaries and development builds both retain the skill
-        // source in the builtin registry; a checkout-relative path is never
-        // read at runtime (release-gate fixture-paths row).  Materialize only
-        // the renderer's three read-only resources in a private temporary tree.
-        let temp = tempfile::tempdir().context("could not create builtin renderer workspace")?;
-        let root = temp.path().join("skills/cas-release-report");
-        let references = root.join("references");
-        let scripts = root.join("scripts");
-        fs::create_dir_all(&references)?;
-        fs::create_dir_all(&scripts)?;
-        for (path, target) in [
-            (
-                "skills/cas-release-report/scripts/render.py",
-                scripts.join("render.py"),
-            ),
-            (
-                "skills/cas-release-report/references/template.html",
-                references.join("template.html"),
-            ),
-            (
-                "skills/cas-release-report/references/default-tokens.json",
-                references.join("default-tokens.json"),
-            ),
-        ] {
-            let builtin = BUILTIN_SKILLS
-                .iter()
-                .find(|file| file.path == path)
-                .ok_or_else(|| anyhow::anyhow!("builtin renderer resource missing: {path}"))?;
-            fs::write(&target, builtin.content)?;
-        }
-        Ok(Self {
-            script: scripts.join("render.py"),
-            render_timeout: RENDER_TIMEOUT,
-            _temporary_root: Some(temp),
-        })
-    }
-}
-
-/// An installed renderer is used only when it reads the front matter and the
-/// v2 change map this assembler writes, and accepts both link overrides passed
-/// by render_html; older copies fall back to the builtin.
-fn renderer_supports_source(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .map(|content| {
-            content.contains("front matter needs a closing")
-                && content.contains("['area', 'changes', 'what changed']")
-                && content.contains("--source-href")
-                && content.contains("--pdf-href")
-        })
-        .unwrap_or(false)
-}
-
 fn gh_json(project_root: &Path, args: &[&str]) -> anyhow::Result<Value> {
     let binary = std::env::var_os("GH_BIN").unwrap_or_else(|| "gh".into());
     let mut command = Command::new(binary);
@@ -3972,6 +3908,8 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             github_repo: None,
             release_published_at: None,
             green_to_published_seconds: None,
+            brand_source: "defaults".to_string(),
+            design: None,
         };
         let mut output = Vec::new();
         {
@@ -4023,6 +3961,8 @@ Was: reports lacked evidence. Now: reports include verification evidence.
             github_repo: None,
             release_published_at: None,
             green_to_published_seconds: None,
+            brand_source: "defaults".to_string(),
+            design: None,
         };
         let mut output = Vec::new();
         {

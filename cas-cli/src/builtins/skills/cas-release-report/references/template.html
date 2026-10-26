@@ -2,14 +2,15 @@
 <!-- Render with ../scripts/render.py. Contract and source schema: exemplar.md.
      UPPER_CASE slots accept escaped text or renderer-owned HTML only.
      section data-section markers are stable; preserve their order.
-     Every colour, face, radius and surface comes from the TOKENS slot: the project's
-     DESIGN.md sources and maps, or design-tokens.json. The --r-* roles below
-     fall back to Petrastella roles when a project names no glass. -->
+     Every colour, face, radius and surface comes from the cas:brand style
+     marker, which `cas deliverable` fills from the project's DESIGN.md; the
+     lockup's cas:brand-mark comment takes its mark. The --r-* roles below fall back to
+     Petrastella roles when a project names no glass. -->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light dark"><title>{{TITLE}} · Release report · {{DATE}}</title>
 <style>
-{{TOKENS}}
+/*cas:brand*/
 :root{--r-band:var(--hero-band,var(--bg));--r-glass:var(--glass-panel,var(--surface-hero));--r-glass-strong:var(--glass-panel-strong,var(--surface));--r-edge:var(--glass-edge,var(--line));--r-blur:var(--glass-blur,none);--r-float:var(--glass-shadow,none);--r-lift:var(--lift,none);--r-panel:var(--radius-panel,0px);--r-tile:var(--radius-tile,0px);--r-chip:var(--radius-chip,0px);--r-emphasis:var(--emphasis,var(--verdict));--r-on-emphasis:var(--on-emphasis,var(--surface));--r-card:var(--card,var(--surface))}
 
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 var(--font-body)}
@@ -81,7 +82,7 @@ a[href^="http"]::after{content:" (" attr(href) ")";font:7pt var(--font-mono);ove
 <a class="skip" href="#content">Skip to release details</a>
 <div class="page">
 <!-- section: hero -->
-<header class="hero" data-section="hero"><div class="folio"><span class="lockup">{{MARK}}{{TITLE}}</span><span class="eyebrow">Release report · {{DATE}}</span></div>
+<header class="hero" data-section="hero"><div class="folio"><span class="lockup"><!--cas:brand-mark-->{{TITLE}}</span><span class="eyebrow">Release report · {{DATE}}</span></div>
 <div class="hero-grid"><h1>{{VERDICT}}</h1><figure class="map-card">
 <!-- Change-map contract v2: each g[data-area] has data-count (integer >= 1),
      data-changes (JSON string array of plain-language change titles) and

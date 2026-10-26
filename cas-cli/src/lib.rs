@@ -75,6 +75,7 @@ pub mod history;
 pub mod task_ownership;
 pub mod task_simulators;
 pub mod db_branch;
+pub mod deliverable;
 pub mod hooks;
 pub mod issue_reconcile;
 pub mod hub;

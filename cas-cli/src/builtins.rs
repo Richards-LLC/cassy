@@ -7069,6 +7069,9 @@ This is the body content."#;
     fn install_parity_is_clean_after_sync_and_names_every_kind_of_drift() {
         use tempfile::tempdir;
 
+        // A host's personal Codex finish skill intentionally excludes its
+        // builtin from sync/parity; a clean-install fixture needs a clean HOME.
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         for harness in [SupervisorCli::Claude, SupervisorCli::Codex, SupervisorCli::Grok] {
             let temp = tempdir().unwrap();
             let dir = temp.path().join("home");
@@ -7080,7 +7083,8 @@ This is the body content."#;
             );
             assert_eq!(
                 parity.checked,
-                agent_catalog_for_harness(harness).len() + skill_catalog_for_harness(harness).len()
+                agent_catalog_for_harness(harness).len() + skill_catalog_for_harness(harness).len(),
+                "{harness:?} clean install must compare the complete catalog"
             );
         }
 

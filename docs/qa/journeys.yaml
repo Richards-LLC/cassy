@@ -3,7 +3,7 @@
 # Header policy is authoritative; local qa.registry.enforce is fallback only.
 # A delivery uses the stricter policy at base and head.
 version: 1
-updated: '2026-10-21'
+updated: '2026-10-26'
 selection: legacy_catalog
 enforce: enforce
 seeded_from:
@@ -241,7 +241,7 @@ journeys:
   - HUB-J1-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/pair-code.journey.ts
   catalog_gaps: the relay and the machine-side `cas hub authorize` are doubled; real pairing is proven by `docs/design/hub-web/pairing-verification.md`
 - id: HUB-J2
@@ -317,7 +317,7 @@ journeys:
   - HUB-J2-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/pair-link.journey.ts
   catalog_gaps: the exchange endpoint is doubled
 - id: HUB-J3
@@ -412,7 +412,7 @@ journeys:
   - HUB-J3-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/find-conversation.journey.ts
   catalog_gaps: none
   additional_specs:
@@ -485,7 +485,7 @@ journeys:
   - HUB-J4-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/read-history.journey.ts
   catalog_gaps: history pages come from the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`
 - id: HUB-J5
@@ -584,7 +584,7 @@ journeys:
   - HUB-J5-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/reply-typed.journey.ts
   catalog_gaps: delivery by a running daemon and operator stamping are doubled
 - id: HUB-J6
@@ -623,7 +623,7 @@ journeys:
   - HUB-J6-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/reply-voice.journey.ts
   catalog_gaps: speech recognition is stubbed; a real microphone and recognizer are not exercised
 - id: HUB-J7
@@ -716,7 +716,7 @@ journeys:
   - HUB-J7-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/answer-ask.journey.ts
   catalog_gaps: none
 - id: HUB-J8
@@ -792,7 +792,7 @@ journeys:
   - HUB-J8-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/switch-machines.journey.ts
   catalog_gaps: none
 - id: HUB-J9
@@ -835,7 +835,7 @@ journeys:
   - HUB-J9-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/phone.journey.ts
   catalog_gaps: a real on-screen keyboard resize is not emulated
   additional_specs:
@@ -869,7 +869,7 @@ journeys:
   - HUB-J10-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/dark-theme.journey.ts
   catalog_gaps: none
 - id: HUB-J11
@@ -949,7 +949,7 @@ journeys:
   - HUB-J11-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/reconnect.journey.ts
   catalog_gaps: the regular suite uses a protocol double; the separate real-hub part proves Linux recovery with
     a real disposable hub and real operator queue (see [local run instructions](real-hub-journey.md)); macOS remains
@@ -1071,7 +1071,7 @@ journeys:
   - HUB-J12-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/network-switch.journey.ts
   catalog_gaps: the protocol double reproduces what a switch leaves behind (reset sockets, half-open sockets, offline,
     no event at all); a real phone moving between radios and a laptop truly sleeping are not driven, and a sleeping
@@ -1159,7 +1159,7 @@ journeys:
   - HUB-J13-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/launch-session.journey.ts
   catalog_gaps: the hub's project catalog, folder browse and session start are doubled; that a hub-started session
     survives a hub restart and the tab closing is proven at epic assembly on a real machine
@@ -1245,7 +1245,7 @@ journeys:
   - HUB-J14-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/session-identity.journey.ts
   catalog_gaps: the daemon's session-bound history page, the catalog's last activity and the hub's End session are
     doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
@@ -1342,7 +1342,7 @@ journeys:
   - HUB-J15-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/delivery-notice.journey.ts
   catalog_gaps: the daemon's notice state and resolution announcement are doubled; that the daemon announces a real
     relay reaching the supervisor is proven by its Rust tests and at epic assembly
@@ -1379,7 +1379,7 @@ journeys:
   - HUB-J16-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/end-session.journey.ts
   catalog_gaps: the hub double ends the session; that the daemon stops its supervisor and workers is covered by
     the hub's Rust tests
@@ -1465,7 +1465,7 @@ journeys:
   - HUB-J17-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/fleet-ops.journey.ts
   catalog_gaps: the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe,
     409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
@@ -1542,7 +1542,7 @@ journeys:
   - HUB-J18-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/interrupt-raw-output.journey.ts
   catalog_gaps: the hub double records the InterruptPane frame and models another device's lease (refused unless
     forced by hub-admin, as hub/auth.rs does); that the supervisor's pane really stops is proven by the hub's Rust
@@ -1603,7 +1603,7 @@ journeys:
   - HUB-J19-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/operator-inbox.journey.ts
   catalog_gaps: the cloud is a protocol double (PoP, enrollment check, epoch wraps, coverage, ACKs, commands), so
     the deployed-cloud two-profile journey of cas-9b7d S5 is the acceptance gate; soundwave's reservation and admission
@@ -1700,7 +1700,7 @@ journeys:
   - HUB-J20-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/write-grant.journey.ts
   catalog_gaps: the hub double answers `POST /v1/sessions/<s>/write-grants` like the hub; that the hub writes `.cas/operator/write-policy.toml`
     with the device id, notes the task and posts the operator receipt to the supervisor is proven by the Rust hub
@@ -1739,7 +1739,7 @@ journeys:
   - HUB-J21-GOAL
   traffic:
     share_pct: null
-    basis: Commander usage is not instrumented; no measured share is claimed.
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/app-switcher.journey.ts
   catalog_gaps: Explorer is stubbed at the cloud origin; Explorer's own switcher back to Commander and its token
     adoption are tracked in Richards-LLC/petra-stella-cloud#148; that the hub reports `cloud_project_id` from the

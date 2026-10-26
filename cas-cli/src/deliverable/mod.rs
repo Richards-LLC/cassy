@@ -2,13 +2,14 @@
 //!
 //! Each verb is a module with a typed request and a receipt that carries its
 //! own findings. The CLI prints the receipt and applies one exit contract:
-//! 0 pass, 1 finding, 2 usage or environment ([`UsageError`]). `brand` is the
-//! first verb; `capture`, `pairs` and `finalize` join as sibling modules and
-//! CLI variants without changing this one. Scripts a verb lifts from a skill
+//! 0 pass, 1 finding, 2 usage or environment ([`UsageError`]). `brand` and
+//! `finalize` are built; `capture` and `pairs` join as sibling modules and
+//! CLI variants without changing these. Scripts a verb lifts from a skill
 //! ship once, embedded in the binary, through [`asset`].
 
 pub mod asset;
 pub mod brand;
+pub mod finalize;
 
 use serde::{Deserialize, Serialize};
 

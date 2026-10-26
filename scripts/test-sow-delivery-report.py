@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 """Gate checks of cas-sow-delivery-report: python3 scripts/test-sow-delivery-report.py."""
+import importlib.util
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 
-CHECK = Path(__file__).resolve().parent.parent / 'cas-cli/src/builtins/skills/cas-sow-delivery-report/scripts/check-sow.py'
+ROOT = Path(__file__).resolve().parent.parent
+CHECK = ROOT / 'cas-cli/src/builtins/skills/cas-sow-delivery-report/scripts/check-sow.py'
+# Client hygiene moved into the deliverables core (`cas deliverable finalize`).
+SPEC = importlib.util.spec_from_file_location('deliverable_hygiene', ROOT / 'cas-cli/src/deliverable/assets/hygiene.py')
+hygiene = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(hygiene)
 CAPTURE = CHECK.with_name('capture.mjs')
 HEADER = '| R# | The SOW says | Status | Evidence | Owner or open decision |\n| --- | --- | --- | --- | --- |\n'
 
@@ -32,23 +38,19 @@ class SowGateTests(unittest.TestCase):
             self.assertIn('status variant', result.stderr)
 
     def test_hygiene_fails_on_a_planted_ticket_label(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            clean = '# Northwind round 1\n\nEvery outcome is live on staging since mid-2026.\n'
-            self.assertEqual(run(tmp, 'clean.md', clean, 'hygiene').returncode, 0)
-            for label in ('cas-ddb0', 'cas-9060', 'cas-1a2b3', 'PROJ-123', 'ENG-1234', 'proj-123', 'eng-1234', 'abc-12f4', 'ISO-123', 'ISO-123456'):
-                with self.subTest(label=label):
-                    result = run(tmp, 'planted.md', clean + f'The SHA-256 export shipped in {label}.\n', 'hygiene')
-                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                    self.assertIn(f"planted.md:4: ticket label '{label}'", result.stdout)
+        clean = '# Northwind round 1\n\nEvery outcome is live on staging since mid-2026.\n'
+        self.assertEqual(hygiene.scan(clean, 'customer'), [])
+        for label in ('cas-ddb0', 'cas-9060', 'cas-1a2b3', 'PROJ-123', 'ENG-1234', 'proj-123', 'eng-1234', 'abc-12f4', 'ISO-123', 'ISO-123456'):
+            with self.subTest(label=label):
+                hits = hygiene.scan(clean + f'The SHA-256 export shipped in {label}.\n', 'customer')
+                self.assertEqual([(line, kind, match) for line, kind, match, _ in hits], [(4, 'ticket label', label)])
 
     def test_hygiene_accepts_client_prose_and_dates(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            for prose in ('Self-feed and self-feed work since mid-2026.',
-                          'COVID-19', 'SHA-256', 'UTF-8', 'ISO-9001', 'ISO-27001', 'GPT-4',
-                          'Q3-2026', 'FY-2026', 'FY-26', 'SOC-2', 'ASC-606'):
-                with self.subTest(prose=prose):
-                    result = run(tmp, 'clean.md', f'# Northwind round 1\n\n{prose}\n', 'hygiene')
-                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for prose in ('Self-feed and self-feed work since mid-2026.',
+                      'COVID-19', 'SHA-256', 'UTF-8', 'ISO-9001', 'ISO-27001', 'GPT-4',
+                      'Q3-2026', 'FY-2026', 'FY-26', 'SOC-2', 'ASC-606'):
+            with self.subTest(prose=prose):
+                self.assertEqual(hygiene.scan(f'# Northwind round 1\n\n{prose}\n', 'customer'), [])
 
     def test_login_requires_a_success_url_before_reading_credentials_or_launching_a_browser(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -304,7 +304,7 @@ class PdfCheckTests(unittest.TestCase):
     def test_empty_assets_header_requires_its_first_row_on_the_same_page(self):
         """A printable PDF may pass bounds while leaving a table header alone."""
         import pymupdf, subprocess, sys
-        check = ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py'
+        check = ROOT / 'cas-cli/src/deliverable/assets/check-pdf.py'
 
         with tempfile.TemporaryDirectory() as tmp:
             for orphaned in (True, False):
@@ -331,7 +331,7 @@ class PdfCheckTests(unittest.TestCase):
         """GH #1305: a last page holding only the closing folio stays inside the
         bounds yet prints an empty sheet; check-pdf must refuse it."""
         import pymupdf, subprocess, sys
-        check = ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py'
+        check = ROOT / 'cas-cli/src/deliverable/assets/check-pdf.py'
 
         def run(last_page_body):
             with tempfile.TemporaryDirectory() as tmp:
@@ -356,7 +356,7 @@ class PdfCheckTests(unittest.TestCase):
     def test_local_file_links_are_refused_cas_692a(self):
         """cas-692a: a link into the generating checkout is dead for every reader."""
         import pymupdf, subprocess, sys
-        check = ROOT / 'cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py'
+        check = ROOT / 'cas-cli/src/deliverable/assets/check-pdf.py'
 
         def run(link):
             with tempfile.TemporaryDirectory() as tmp:

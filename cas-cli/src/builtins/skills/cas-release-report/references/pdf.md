@@ -2,13 +2,14 @@
 
 ## Render
 
-`cas release report <version> --pdf` renders the PDF with Playwright's Chromium in
-print media and light scheme, with disclosures expanded, network requests blocked
-and 15 mm margins, and writes the A4 copy as `v<version>.pdf`. Its running
-folio prints the document title and "n / N" in the page's `--font-mono` stack and
-`--ink-muted` colour. If Playwright is not
-importable it installs it into a disposable workspace. Without the CLI, print the
-HTML from Chromium with the same settings.
+`cas release report <version> --pdf` finalizes the report through
+`cas deliverable finalize`: Playwright's Chromium prints A4 and Letter in print
+media and light scheme, with disclosures expanded, network requests blocked
+(a blocked request fails the run) and 15 mm margins; both are checked below,
+and the A4 copy is written as `v<version>.pdf`. Its running folio prints the
+document title and "n / N" in the page's `--font-mono` stack and `--ink-muted`
+colour. If Playwright is not importable it installs it into a disposable
+workspace.
 
 The template declares margins, not a fixed `@page size`. Print CSS uses
 `break-before:auto` for sections and `break-inside:avoid` for cards, rows and
@@ -19,12 +20,17 @@ short pages by shrinking the whole document or cropping text.
 
 ## Render every page back to PNG and check bounds
 
+`finalize` runs the PDF check (`check-pdf.py`, embedded in the `cas` binary)
+on every printed format and fails on a finding.
+To keep its page PNGs for inspection, finalize the report's HTML yourself:
+
 ```bash
-python3 <skills-dir>/cas-release-report/scripts/check-pdf.py \
-  docs/release-reports/v<version>.pdf <artifacts_root>/<project-key>/<task-id>/pdf
+cas deliverable finalize docs/release-reports/v<version>.html --audience internal \
+  --out <artifacts_root>/<project-key>/<task-id>/v<version>.html --pdf a4,letter \
+  --check-dir <artifacts_root>/<project-key>/<task-id>/pdf
 ```
 
-The script needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a
+The check needs PyMuPDF (`import pymupdf`). It writes one PNG per page and a
 `receipt.json` with the page count, out-of-bounds text blocks, a
 `footer_only_last_page` flag, `orphaned_assets_headers` pages, link targets and
 `local_links`. Text in the bottom margin counts as the running folio only when

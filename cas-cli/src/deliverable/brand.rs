@@ -7,7 +7,6 @@
 //! [`MARK_MARKER`] in their HTML and [`Brand::fill`] replaces them.
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +14,6 @@ use serde_json::Value;
 
 use super::asset::{Asset, Workspace};
 use super::{Audience, Finding, Receipt, UsageError};
-use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
 const SCRIPT: Asset = Asset {
     path: "brand.py",
@@ -115,41 +113,22 @@ pub fn resolve(request: &BrandRequest) -> anyhow::Result<Brand> {
         SCRIPT,
         Asset::builtin(DEFAULT_TOKENS, "default-tokens.json")?,
     ])?;
-    let mut command = Command::new("python3");
-    command
-        .current_dir(&request.root)
-        .arg("-I")
-        .arg(workspace.path(SCRIPT.path))
-        .arg("--root")
-        .arg(&request.root)
-        .arg("--defaults")
-        .arg(workspace.path("default-tokens.json"))
-        .arg("--audience")
-        .arg(request.audience.as_str());
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--root".into(),
+        request.root.clone().into(),
+        "--defaults".into(),
+        workspace.path("default-tokens.json").into(),
+        "--audience".into(),
+        request.audience.as_str().into(),
+    ];
     if let Some(tokens) = &request.tokens {
-        command.arg("--tokens").arg(tokens);
+        args.extend(["--tokens".into(), tokens.clone().into()]);
     }
     if let Some(surface) = &request.surface {
-        command.arg("--surface").arg(surface);
+        args.extend(["--surface".into(), surface.clone().into()]);
     }
-    let output = run_command(&mut command, Deadline::after(TIMEOUT), TIMEOUT).map_err(|error| {
-        UsageError(match error {
-            BoundedCommandError::TimedOut => "brand: python3 timed out".to_string(),
-            BoundedCommandError::Io => {
-                "brand: python3 is unavailable; install Python 3".to_string()
-            }
-        })
-    })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("no detail");
-        return Err(UsageError(format!("brand: {}", detail.trim_start_matches("brand: "))).into());
-    }
-    let parsed: ScriptOutput = serde_json::from_slice(&output.stdout)
+    let output = workspace.python(SCRIPT.path, args, &request.root, TIMEOUT)?;
+    let parsed: ScriptOutput = serde_json::from_value(output)
         .map_err(|error| UsageError(format!("brand: unreadable resolver output: {error}")))?;
     let mut receipt = parsed.receipt;
     receipt.css_bytes = parsed.css.as_deref().map_or(0, str::len);
@@ -187,8 +166,10 @@ impl Brand {
             .as_deref()
             .map(|uri| format!(r#"<img class="mark" src="{uri}" alt="" width="32" height="32">"#))
             .unwrap_or_default();
+        // Mark first: brand CSS that happened to hold the mark marker's text
+        // must not receive the logo.
         Ok(html
-            .replacen(STYLE_MARKER, css, 1)
-            .replacen(MARK_MARKER, &mark, 1))
+            .replacen(MARK_MARKER, &mark, 1)
+            .replacen(STYLE_MARKER, css, 1))
     }
 }

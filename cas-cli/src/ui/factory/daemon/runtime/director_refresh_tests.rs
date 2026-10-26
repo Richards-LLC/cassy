@@ -137,6 +137,19 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     assert!(super::super::queue_and_events::read_row_facts(
         &root, queue.as_ref(), Some(tasks.as_ref()), &agents.list(None).unwrap(), &idle_row,
     ).answered_blocker);
+    for row in queue.peek_all(30).unwrap() {
+        if row.id != before_answer.id && row.id != idle_id { queue.mark_processed(row.id).unwrap(); }
+    }
+    let mut daemon = super::super::provisioning_tests::daemon(&root);
+    std::mem::swap(&mut daemon.app, &mut fixture.app);
+    daemon.process_prompt_queue().await.unwrap();
+    assert!(daemon.finish_shutdown_writes(super::super::store_worker::global(), Duration::from_secs(10)));
+    for id in [before_answer.id, idle_id] {
+        let report = queue.message_delivery_report(id).unwrap().unwrap();
+        assert!(report.delivered_at.is_none());
+        assert!(report.pending_detail.is_some());
+    }
+    std::mem::swap(&mut daemon.app, &mut fixture.app);
 
     for rejected in [false, true] {
         if rejected {

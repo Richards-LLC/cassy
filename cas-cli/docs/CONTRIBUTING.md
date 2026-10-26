@@ -243,7 +243,9 @@ recording `merge_conflicted`, the conflicting paths and the attempted target tip
 The worker receives one notice and can start, resolve and re-deliver directly.
 Target drift and pre-existing checkout residue keep their existing recovery paths.
 
-A direct supervisor reply to a blocked worker records ownership of that wait.
+A supervisor message to a blocked worker records ownership of that wait only
+when sent with `kind=answer` or `in_reply_to` the worker's blocker message.
+An unrelated ping or a reply to ordinary status leaves blocker alerts armed.
 Repeated idle and blocked alerts stay quiet while the assignee, supervisor,
 structured hold reason and blocker question remain unchanged, including a
 verification rejection followed by the same block. A new blocker question or

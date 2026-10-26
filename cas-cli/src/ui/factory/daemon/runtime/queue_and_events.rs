@@ -2642,6 +2642,7 @@ pub(crate) struct StallNudgeRead {
 /// and never opens a store for them.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
+    pub(crate) answered_blocker: bool,
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
@@ -2690,6 +2691,7 @@ pub(crate) fn read_row_facts(
     row: &cas_store::QueuedPrompt,
 ) -> RowFacts {
     let mut facts = RowFacts {
+        answered_blocker: crate::mcp::tools::core::task::block_hold::answered_blocker_alert(cas_dir, row),
         wake_gate: queue.wake_gate_state(row.id).ok(),
         deferred_inbox: queue.deferred_inbox_state(row.id).ok().flatten(),
         assignment_stale: if match queue.is_abandonment_recovery(row.id) {
@@ -8668,9 +8670,12 @@ impl FactoryDaemon {
             // re-read, transport claim) runs as the `ClaimForInject` job just
             // before transport, and the row is injected only on a later pass
             // once that claim came back.
-            let queued = selected;
+            let mut queued = selected;
             if queued.processed_at.is_some() { continue; }
             let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
+            if facts.answered_blocker && !crate::supervisor_message_wakes::quiet(&queued.prompt) {
+                queued.prompt = format!("{}\n{}", crate::supervisor_message_wakes::QUIET, queued.prompt);
+            }
             let batch_len = facts.message_batch.len();
             let leader_held = facts.deferred_inbox.is_some()
                 || self.inbox_deferred_writes.contains_key(&queued.id);

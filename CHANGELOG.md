@@ -7,6 +7,36 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Closing merged deliveries after review** — A green `worktree_merge` can park an eligible pushed delivery before its worker parks it and request verification at the merge commit. A dispatch-bound approval closes the task with its merge receipt; a rejection returns it Open to the same assignee with findings. Existing close gates still apply, and an explicit CI override does not authorize automatic close.
+
+### Changed
+
+- **Merge on green** — Signal `READY TO MERGE` for an owned, pushed delivery with green CI even while its task is InProgress or Blocked and park has been refused. Supervisor guidance and startup briefs now say to merge on pushed-green evidence without waiting for park or a merge request, while retaining existing CI and QA gates.
+
+- **Merge readiness probes** — Share the external observation used for readiness and wait reporting, reuse settled results for unchanged delivery refs, and persist per-task/tip READY admission across daemon restarts. Failed CI, including parked failures, retries after 10 minutes so a same-commit rerun can become ready; pending, unknown and transient target-evidence failures remain retryable. Changed refs prompt a fresh probe, and terminal tasks' cached observations and receipts are retired.
+
+### Fixed
+
+- **Close proof on shared delivery branches** — Advance a test-first delivery's close anchor from its initial commit to the pushed continuation on the active assignee's plain `factory/<name>` branch when every continuation subject names the task. Unnamed or foreign-task commits, conflicting anchors and another active task for the assignee still prevent advancement.
+
+- **Consistent post-merge close evidence** — Read exact-delivery check and test receipts from the assignee's worktree when Cassy closes a merged delivery, matching the worker close's evidence. A held verdict close reports its gate without queuing a worker retry, restores a lifted hold and records close authority only after closure. A merge that parks an active delivery notifies its assignee once; automatic parking also requires the delivered tip on the assignee's local branch as well as origin.
+
+- **Operator credential-store access** — Allow supervisors and ordinary non-factory sessions to read resolver-recognized Neon and Vercel authentication stores. Keep worker refusals and unrelated credential/private-key protection; the narrow generic read exemption resolves only the protected `file_path` and does not exempt writes or explicitly protected files.
+
+- **Stale merge and blocker alerts** — Refresh the live integration target immediately before Codex PTY merge-alert delivery, as for the native inbox, and drop stale or unavailable merge demands. Director and lifecycle alerts become quiet receipts when positive evidence shows that the only blocker is the recipient's own active, unexpired verification dispatch; foreign or expired dispatches and independent blockers retain waking alerts.
+
+- **Reclaiming removed checkouts' build caches** — Recognize durable ownership of idle target caches after their checkout is removed. Under disk pressure, admission reclaims eligible dead caches oldest first and remeasures free space until the low watermark, preserving live owners and existing deletion guards. Read-only cache reports use bounded inventory scans and explicitly label incomplete totals.
+
+- **Builtin install-parity test isolation** — Run the clean-install parity regression with an isolated home so a personal Codex finish skill cannot alter its expected catalog count. Runtime precedence for personal skills is unchanged.
+
+- **Released epic review boundary** — Bind close verification to the immutable default-branch merge that introduced the epic, rather than the moving default-branch tip. Reject later merges whose first parent already contains the epic, and bound the first-parent receipt search by excluding the epic's ancestry.
+
+- **Remote completion reminders** — Reconcile accepted split epics after synced closes and enqueue a deduplicated `EPIC READY` action when every child is closed, routing to a live successor after an owner restart. Task-filtered completion/block reminders default to no expiry and observe persisted task state without a local event. Explicit expiry and cancellation notify visibly; one orphaned owner or failed reminder no longer stops later rows from firing or expiring. Guidance marks release-unblocking peer updates as status messages.
+
+- **Terminal QA regression selection in CI** — Select the Node terminal QA suite when either runner copy or its test changes. Non-slim lanes use the existing fast row; slim lanes run the selected suite in their own workflow's existing fast job, with a default-branch fallback for empty or all-zero comparison bases.
+
 ## [3.80.1] - 2026-10-26
 
 ### Fixed

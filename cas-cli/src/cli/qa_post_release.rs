@@ -46,6 +46,9 @@ pub fn execute(args: &PostReleaseArgs, cli: &super::Cli, cas_root: Option<&Path>
             receipt.expected_runs(),
             receipt.sha
         );
+        if let Some(line) = crate::qa_post_release::watch_first_line(&receipt.watch_first) {
+            println!("{line}");
+        }
     }
     Ok(())
 }

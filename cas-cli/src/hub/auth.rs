@@ -820,6 +820,11 @@ impl DerefMut for LockedState<'_> {
 pub struct AuthStore(Arc<AuthInner>);
 
 impl AuthStore {
+    /// The hub state directory this store lives in.
+    pub(crate) fn root(&self) -> &Path {
+        &self.0.root
+    }
+
     pub fn open(root: impl AsRef<Path>, machine_id: impl Into<String>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         super::ensure_private_dir(&root)?;

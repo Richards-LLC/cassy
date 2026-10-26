@@ -6,7 +6,7 @@
 //! 3. Links the resulting static library
 
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 mod build_support;
@@ -51,12 +51,17 @@ fn main() {
     }
 
     // Find Zig compiler
-    let zig = find_zig(workspace_root).expect(
-        "Zig compiler not found. Install with: ./scripts/bootstrap-zig.sh\n\
-         Or set ZIG environment variable to point to zig binary.",
-    );
+    let zig = build_support::find_zig(
+        workspace_root,
+        env::var_os("ZIG").as_deref(),
+        env::var_os("PATH").as_deref(),
+    )
+    .unwrap_or_else(|message| panic!("{message}"));
 
     // Rebuild triggers
+    println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-changed={}", zig.display());
     println!("cargo:rerun-if-changed=zig/build.zig");
     println!("cargo:rerun-if-changed=zig/build.zig.zon");
     println!("cargo:rerun-if-changed=zig/deps");
@@ -131,33 +136,4 @@ fn main() {
 
     // Link C standard library
     println!("cargo:rustc-link-lib=c");
-}
-
-/// Find the Zig compiler
-fn find_zig(workspace_root: &Path) -> Option<PathBuf> {
-    // 1. Check ZIG environment variable
-    if let Ok(zig) = env::var("ZIG") {
-        let path = PathBuf::from(zig);
-        if path.exists() {
-            return Some(path);
-        }
-    }
-
-    // 2. Check system PATH first (for mise, homebrew, etc.)
-    if let Ok(output) = Command::new("which").arg("zig").output()
-        && output.status.success()
-    {
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-
-    // 3. Check workspace .context/zig/zig (bootstrapped location) as fallback
-    let bootstrapped = workspace_root.join(".context/zig/zig");
-    if bootstrapped.exists() {
-        return Some(bootstrapped);
-    }
-
-    None
 }

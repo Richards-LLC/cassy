@@ -392,6 +392,7 @@ class TokenPreflight(unittest.TestCase):
                     if not name.startswith(("VIOLET_", LEGACY_ENV_PREFIX, "CAS_RELEASE_"))}
         self.env.update(
             CLAUDE_CONFIG_DIR=str(self.root),
+            CODEX_HOME=str(self.root / ".codex"),
             CAS_CREDENTIALS_FILE=str(self.root / "credentials.env"),
             CAS_RELEASE_ARTIFACTS_ROOT=str(self.root / "artifacts"),
             CAS_RELEASE_TRAIN_RUN_DIR=str(self.run),

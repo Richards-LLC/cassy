@@ -7,8 +7,9 @@ exported by hand. Resolution is deterministic and takes milliseconds, so it
 runs every time and nothing is persisted beyond creating
 <factory.scratch_root>/<project-key>/release-gate when that root is set.
 
-Zig: $ZIG; the checkout's .context/zig/zig; the main checkout's (symlinked in
-with --link-zig); `zig` on PATH. Otherwise the fix is ./scripts/bootstrap-zig.sh.
+Zig: $ZIG; `zig` on PATH; the checkout's .context/zig/zig; the main checkout's
+(optionally symlinked in with --link-zig). This order matches ghostty_vt_sys's
+build script. Otherwise the fix is ./scripts/bootstrap-zig.sh.
 
 Scratch base: an exported CAS_RELEASE_GATE_HOME_DIR;
 <factory.scratch_root>/<project-key>/release-gate/base; <staging.scratch_root>/
@@ -114,6 +115,10 @@ def resolve_zig(checkout: Path, env=os.environ, *, link: bool = False) -> ZigRes
         if executable(path):
             return ZigResolution(str(path.resolve()), "ZIG (environment)", tried)
         tried.append(f"ZIG={configured} is not an executable file")
+    on_path = shutil.which("zig", path=env.get("PATH", ""))
+    if on_path:
+        return ZigResolution(str(Path(on_path).resolve()), "PATH", tried)
+    tried.append("no zig on PATH")
     local = checkout / ".context/zig/zig"
     if executable(local):
         return ZigResolution(str(local.resolve()), "checkout .context/zig", tried)
@@ -126,10 +131,6 @@ def resolve_zig(checkout: Path, env=os.environ, *, link: bool = False) -> ZigRes
                 link_zig(checkout, main)
             return ZigResolution(str(shared.resolve()), "main checkout .context/zig", tried)
         tried.append(f"{shared} missing")
-    on_path = shutil.which("zig", path=env.get("PATH", ""))
-    if on_path:
-        return ZigResolution(str(Path(on_path).resolve()), "PATH", tried)
-    tried.append("no zig on PATH")
     root = shlex.quote(str(main or checkout))
     return ZigResolution("", "", tried, f"(cd {root} && ./scripts/bootstrap-zig.sh)")
 

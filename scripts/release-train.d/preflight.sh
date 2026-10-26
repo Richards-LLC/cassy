@@ -113,7 +113,7 @@ cut_preflight_resolve_env() {
     resolved="$(CAS_RELEASE_GATE_HOME_DIR="${CAS_RELEASE_GATE_HOME_DIR:-}" ZIG="${ZIG:-}" \
         CAS_RELEASE_PORTABLE_STAT="${CAS_RELEASE_PORTABLE_STAT:-}" \
         python3 "$script_dir/release_env.py" resolve --worktree "$worktree" \
-        --durable --create --link-zig)" || {
+        --durable --create)" || {
         cut_preflight_block release-env "scripts/release_env.py could not resolve the release environment"
         return $?
     }

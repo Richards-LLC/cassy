@@ -27,7 +27,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - **Merge on green** - `READY TO MERGE` fires for any owned, pushed delivery with green CI, even before park or a merge request; the merge requests verification at the merge commit, so approval closes the task in one hop and rejection reopens it to the same worker. An override never closes automatically.
 - **EPIC READY** - a deduplicated action sent to the epic's live owner once every child task, including those of an accepted split, is closed.
 - **Journey registry** - a project's `docs/qa/journeys.yaml` (drafted by `cas qa journeys --seed`): each user journey's owner files, specs, surfaces and live, dark or dead status. Cassy's Commander registry preserves import and CSS selector coverage, with enforcement declared in the tracked registry.
-- **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns.
+- **Journey impact** - which journeys a diff or delivery touches, the evidence each needs, and the files no journey owns; journeys rank by traffic share.
+- **Journey traffic** - Commander counts each journey's defining act locally and reports the per-day totals only to the operator's paired machines; `cas qa journeys --traffic` turns them into per-journey shares.
 - **Upkeep gates (G1-G9)** - park refuses until the journey registry, regression case, CODEMAP and this overview are updated or a reasoned decision is recorded; release notes wait for the post-release check.
 - **Acknowledged delivery** - a message counts as delivered only when the recipient's session receives it; idle recipients get bounded wakes and the sender is told after five minutes.
 - **Peer messaging** - supervisors reach each other by name, project, `project@machine` or `supervisor:<project>`; a message to an ended session goes to its live successor.

@@ -1798,7 +1798,27 @@ impl FactoryApp {
             crate::ui::factory::director::compute_gated_task_ids(&non_closed_ids, &blocks_deps);
 
         let mut prompts: Vec<Prompt> = Vec::with_capacity(delivery_events.len());
+        // Readiness belongs to the delivery, not the worker's idle/park state.
+        // Render it before reminder/liveness relays and consume the same tip
+        // dedupe used by parked CI signals.
+        let active_ready_ids: HashSet<_> = merge_alerts.values()
+            .filter(|ready| ready.worker.is_some()).map(|ready| ready.evidence.task_id.clone()).collect();
+        for task_id in &active_ready_ids {
+            let ready = merge_alerts.remove(task_id).expect("ready delivery was just observed");
+            let Some(worker) = ready.worker.as_deref() else { continue; };
+            if !self.director_data.agents.iter().any(|agent| agent.name == worker)
+                || self.event_detector.is_worker_held(worker)
+            { continue; }
+            if let Some(prompt) = merge_alert::ready_prompt(&ready, &unfiltered_data, &self.supervisor_name, self.supervisor_cli)
+                && self.event_detector.merge_alert_should_emit(task_id, &ready.tip, ready.ci)
+            {
+                prompts.push(prompt);
+            }
+        }
         for event in &delivery_events {
+            if let DirectorEvent::WorkerIdle { active_task: Some(task), .. } = event
+                && active_ready_ids.contains(&task.task_id)
+            { continue; }
             // cas-d4ae: taskless idle and escalated stall events are factory
             // health incidents, not ordinary one-shot director chatter.  The
             // daemon persists and wakes the owning supervisor through its
@@ -1884,7 +1904,7 @@ impl FactoryApp {
                             prompt.text = super::director::with_response_instructions(&text, worker, self.supervisor_cli);
                         }
                     } else {
-                        prompt.text = format!("CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
+                        prompt.text = format!("READY TO MERGE — CI completed successfully for delivery {}.\n{}", ready.tip, prompt.text);
                     }
                 }
                 if let DirectorEvent::WorkerIdle { worker, active_task: Some(task) } = event

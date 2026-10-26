@@ -216,6 +216,67 @@ impl Fixture {
 }
 
 #[test]
+fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
+    for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
+        let mut f = Fixture::new();
+        f.in_progress();
+        let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+        let mut task = store.get("cas-9efb-test").unwrap();
+        task.status = status;
+        // A refused park leaves the task active, with no parked branch or tip.
+        task.deliverables.factory_branch_anchor = None;
+        task.notes = "Close rejected: FAST ROWS REQUIRED".into();
+        store.update(&task).unwrap();
+        if status == TaskStatus::Blocked {
+            git(f.repo.path(), &["switch", "-qc", "factory/merge-w-cas-9efb-test"]);
+            git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w-cas-9efb-test"]);
+        }
+        let branch = git(f.repo.path(), &["branch", "--show-current"]);
+        let data = DirectorData::load_with_stores_for_project(
+            &f.app.cas_dir, None, false, None, None,
+        ).unwrap();
+        f.app.set_director_data_for_test(data);
+        let now = Utc::now();
+        f.app.merge_alert_retries.now = Some(now);
+        // A shared unfiltered snapshot cannot dispatch another supervisor's lane.
+        let workers = std::mem::take(&mut f.app.worker_names);
+        assert!(f.app.merge_alert_retry_events_at(now).is_empty());
+        f.app.worker_names = workers;
+        // No WorkerIdle, close, or merge_request event precedes this probe.
+        let events = f.app.merge_alert_retry_events_at(now);
+        for ci in [None, Some("failure")] {
+            f.ci(ci);
+            let (_, prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+            assert!(prompts.iter().all(|prompt| prompt.merge_alert.is_none()));
+        }
+        f.ci(Some("success"));
+        let (_, mut prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert_eq!(prompts.len(), 1, "{status:?}");
+        let prompt = &mut prompts[0];
+        // pin: this heading is the supervisor's immediate merge trigger.
+        assert!(prompt.text.contains("READY TO MERGE"), "{}", prompt.text);
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch, branch);
+        // pin: merge guidance must identify the resolved target and executable action.
+        assert!(prompt.text.contains("epic/test"), "{}", prompt.text);
+        // pin: the supervisor merges directly without a worker relay.
+        assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
+        assert!(f.app.refresh_prompt_for_delivery(prompt));
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
+        std::fs::write(f.repo.path().join("delivery.rs"), "// next delivery\n").unwrap();
+        git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
+        let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
+        assert!(!f.app.refresh_prompt_for_delivery(prompt));
+        git(f.repo.path(), &["push", "-q", "origin", &branch]);
+        let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+        assert_eq!(newer.len(), 1);
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
+        git(f.repo.path(), &["push", "-q", "origin", "HEAD:epic/test"]);
+        assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
+    }
+}
+
+#[test]
 fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
     let mut f = Fixture::new();
     let now = Utc::now();
@@ -241,6 +302,8 @@ fn cas_9efb_pending_ci_suppresses_worker_idle_merge_relay() {
 fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
+    // Exercise idle/wait recovery, rather than the independent green merge signal.
+    f.ci(Some("failure"));
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     use cas_store::ReminderStore;
@@ -308,6 +371,8 @@ fn cas_74b8_in_progress_worker_waits_on_self_reminder_build_or_ci_cas_e390() {
 fn cas_74b8_idle_delivery_coalesces_repeats_until_state_changes_or_long_backoff_cas_e390() {
     let mut f = Fixture::new();
     f.in_progress();
+    // Green delivery tips have a one-shot merge signal, not an idle backoff.
+    f.ci(Some("failure"));
     let now = Utc::now();
     f.app.merge_alert_retries.now = Some(now);
     assert_eq!(f.relay().len(), 1, "a stuck worker with no pending wake still alerts");

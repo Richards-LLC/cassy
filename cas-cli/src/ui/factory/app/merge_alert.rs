@@ -34,6 +34,32 @@ pub(super) struct Retries {
 }
 
 impl Retries {
+    /// Probe deliveries even while their workers execute or a close gate refuses
+    /// to park. This only schedules external reads; it performs no Git/CI I/O.
+    fn discover(&mut self, data: &DirectorData, workers: &[String], now: DateTime<Utc>) {
+        for task in data.in_progress_tasks.iter().chain(&data.ready_tasks) {
+            if !matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked) {
+                continue;
+            }
+            let Some(assignee) = task.assignee.as_deref() else { continue; };
+            let Some(agent) = data.agents.iter().find(|agent| agent.id == assignee || agent.name == assignee) else {
+                continue;
+            };
+            if !workers.contains(&agent.name) { continue; }
+            self.entries.entry(task.id.clone()).or_insert_with(|| Retry {
+                event: DirectorEvent::WorkerIdle {
+                    worker: agent.name.clone(),
+                    active_task: Some(cas_factory::ActiveLeaseSummary {
+                        task_id: task.id.clone(), task_title: task.title.clone(),
+                        task_status: task.status, close_rejected_reason: None, pending_qa: None,
+                    }),
+                },
+                next_probe: now,
+                unknown_since: None,
+            });
+        }
+    }
+
     pub fn waiting(&mut self, worker: &str) {
         // A later completed wait is a changed state, even at the same tip.
         self.idle_signals.remove(worker);
@@ -103,9 +129,9 @@ impl Retries {
             let DirectorEvent::WorkerIdle { worker, .. } = &retry.event else {
                 return false;
             };
-            data.in_progress_tasks.iter().any(|task| {
+            data.in_progress_tasks.iter().chain(&data.ready_tasks).any(|task| {
                 task.id == *task_id
-                    && matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge)
+                    && matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::AwaitingMerge | cas_types::TaskStatus::Blocked)
                     && task.assignee.as_deref().is_some_and(|assignee| {
                         assignee == worker || data.agent_id_to_name.get(assignee) == Some(worker)
                     })
@@ -126,6 +152,8 @@ impl Retries {
 
 impl super::FactoryApp {
     pub(crate) fn merge_alert_retry_events_at(&mut self, now: DateTime<Utc>) -> Vec<DirectorEvent> {
+        // Only this supervisor's session workers may seed a delivery probe.
+        self.merge_alert_retries.discover(&self.director_data, &self.worker_names, now);
         self.merge_alert_retries
             .due(now, &self.unfiltered_director_data)
     }
@@ -135,6 +163,33 @@ pub(super) struct Ready {
     pub evidence: MergeAlertEvidence,
     pub tip: String,
     pub ci: &'static str,
+    /// Present for an active delivery whose readiness does not depend on idle/park.
+    pub worker: Option<String>,
+}
+
+pub(super) fn ready_prompt(
+    ready: &Ready, data: &DirectorData, supervisor: &str, cli: cas_mux::SupervisorCli,
+) -> Option<crate::ui::factory::director::Prompt> {
+    let worker = ready.worker.as_deref()?;
+    let (_, target, _) = crate::ui::factory::director::resolve_merge_target_for_task(data, &ready.evidence.task_id);
+    let target = target?;
+    let prefix = cli.backend().capabilities().tool_prefix;
+    let action = if crate::ui::factory::director::target_is_protected_default(&target) {
+        format!("Open a pull request from {} to {target} and queue it through the protected merge path.", ready.evidence.factory_branch)
+    } else {
+        format!("Merge now: `{prefix}factory action=worktree_merge id={worker} task_id={}` into {target}.", ready.evidence.task_id)
+    };
+    Some(crate::ui::factory::director::Prompt {
+        merge_alert: Some(ready.evidence.clone()), target: supervisor.to_string(),
+        text: format!(
+            "READY TO MERGE — pushed delivery {} has green lane CI.\nTask {} on {}.\nMerge target: {target}.\nLive evidence: {} unmerged commit(s) on {} vs {target} (checked {} at {}).\n{action}\nDo not wait for park or a merge request; the merge needs no worker action. Existing CI and QA merge gates still apply.",
+            ready.tip, ready.evidence.task_id, ready.evidence.factory_branch,
+            ready.evidence.unmerged_count, ready.evidence.factory_branch,
+            ready.evidence.checked_epic_ref, ready.evidence.epic_sha,
+        ),
+        retract_task: Some(ready.evidence.task_id.clone()), retract_worker: None,
+        retract_epic: None, drop_if_worker_assigned: None, stall_nudge_task: None, durable_retry: false,
+    })
 }
 
 pub(super) fn task_id(event: &DirectorEvent) -> Option<&str> {
@@ -254,6 +309,13 @@ pub(super) fn read_worker_wait(
 
 /// Runs off the loop. No result means defer; it never consumes the dedupe key.
 pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<Ready> {
+    if let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event {
+        let summary = data.in_progress_tasks.iter().chain(&data.ready_tasks)
+            .find(|task| task.id == active.task_id)?;
+        if matches!(summary.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked) {
+            return read_active(worker, &active.task_id, data, repo);
+        }
+    }
     let MergeAlertFreshness::Fresh(evidence) = check_merge_alert_freshness(event, data, repo)
     else {
         return None;
@@ -276,5 +338,38 @@ pub(super) fn read(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> O
                 &format!("origin/{}", evidence.factory_branch),
             )
         })?;
-    (tip == evidence.factory_tip && tip == current).then_some(Ready { evidence, tip, ci })
+    (tip == evidence.factory_tip && tip == current).then_some(Ready { evidence, tip, ci, worker: None })
+}
+
+/// The same worker-owned pushed delivery as worktree_merge, with the stricter
+/// signal requirement that origin and the observed lane tip still agree.
+fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path) -> Option<Ready> {
+    use crate::git_evidence::{BoundedFetch, fetch_parent_branch_result, resolve_ref_commit_sha};
+    use crate::ui::factory::director::{fresh_merge_alert_tip_evidence, resolve_merge_target_for_task};
+    let task = crate::store::open_task_store_local(&repo.join(".cas")).ok()?.get(task_id).ok()?;
+    if !matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked) {
+        return None;
+    }
+    let (_, target, _) = resolve_merge_target_for_task(data, task_id);
+    let target = target?;
+    let resolve = |branch: &str| resolve_ref_commit_sha(repo, branch)
+        .or_else(|| resolve_ref_commit_sha(repo, &format!("origin/{branch}")));
+    let (branch, tip) = crate::ui::factory::director::task_delivery_ref(
+        task_id, worker, task.deliverables.parked_branch.as_deref(), None, resolve, |_, _| false,
+    );
+    let tip = tip?;
+    if task.deliverables.declined_factory_anchors().contains(&tip)
+        || fetch_parent_branch_result(repo, &branch) != BoundedFetch::Succeeded
+        || resolve_ref_commit_sha(repo, &format!("origin/{branch}")).as_deref() != Some(&tip)
+    { return None; }
+    crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
+        repo, &task, &branch, &tip,
+    ).ok()?;
+    let ci = crate::mcp::tools::core::workflow::delivery_tip_ci_conclusion(&tip, repo);
+    if ci != "success" || resolve(&branch).as_deref() != Some(&tip) { return None; }
+    // Re-fetch the target after CI, just as the parked delivery path does.
+    let MergeAlertFreshness::Fresh(evidence) = fresh_merge_alert_tip_evidence(
+        repo, task_id, &branch, &target, Some(&tip),
+    ) else { return None; };
+    Some(Ready { evidence, tip, ci, worker: Some(worker.to_string()) })
 }

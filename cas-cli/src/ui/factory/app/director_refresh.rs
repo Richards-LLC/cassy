@@ -848,7 +848,11 @@ impl FactoryApp {
         events.extend(timed("supervisor stall", || self.detect_supervisor_stall()));
         let retries = self.merge_alert_retry_events_at(self.merge_alert_retries.clock());
         for retry in retries {
-            if !events.iter().any(|event| super::merge_alert::task_id(event) == super::merge_alert::task_id(&retry)) {
+            if !events.iter().any(|event| match (event, &retry) {
+                (DirectorEvent::WorkerIdle { active_task: Some(a), .. },
+                 DirectorEvent::WorkerIdle { active_task: Some(b), .. }) => a.task_id == b.task_id,
+                _ => false,
+            }) {
                 events.push(retry);
             }
         }

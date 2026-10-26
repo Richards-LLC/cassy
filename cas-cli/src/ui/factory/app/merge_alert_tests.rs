@@ -28,7 +28,7 @@ pub(crate) struct Fixture {
     remote: tempfile::TempDir,
     pub(crate) app: FactoryApp,
     pub(crate) event: DirectorEvent,
-    _env: crate::test_support::TestEnvGuard,
+    pub(crate) _env: crate::test_support::TestEnvGuard,
 }
 
 impl Fixture {

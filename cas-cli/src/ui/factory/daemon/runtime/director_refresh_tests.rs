@@ -96,6 +96,9 @@ async fn answered_blocker_stays_quiet_across_verifier_reject_and_reblock_cas_4e8
     use cas_types::{Agent, AgentRole, TaskStatus, Verification, VerificationStatus};
     use rmcp::handler::server::wrapper::Parameters;
     let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
+    // Explicit reply validation recognizes the supervisor's registered name
+    // through its normal factory environment as well as the logical alias.
+    fixture._env.set("CAS_AGENT_NAME", fixture.app.supervisor_name());
     let root = fixture.app.cas_dir().to_path_buf();
     let agents = crate::store::open_agent_store(&root).unwrap();
     let lead = Agent::new_with_role("lead-id".into(), fixture.app.supervisor_name().into(), AgentRole::Supervisor);

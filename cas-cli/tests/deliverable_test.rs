@@ -191,6 +191,9 @@ fn deliverable_finalize_customer_hygiene_refuses_a_planted_ticket_label() {
     assert_eq!(receipt["findings"][0]["code"], "hygiene", "{receipt}");
     let message = receipt["findings"][0]["message"].as_str().unwrap();
     assert!(message.contains("ticket label 'cas-1a2b'"), "{message}");
+    // A refused customer file never sits at the deliverable path.
+    assert_eq!(receipt["html"], Value::Null, "{receipt}");
+    assert!(!project.path().join("report/customer.html").exists());
 
     let internal = run("internal").success();
     let receipt: Value = serde_json::from_slice(&internal.get_output().stdout).unwrap();
@@ -253,6 +256,59 @@ fn deliverable_finalize_drops_the_lowest_priority_pair_over_budget() {
         "{html}"
     );
     assert_eq!(html.matches("data:image/png;base64,").count(), 4);
+}
+
+/// The customer release-notes skeleton, shipped with its skill, finalizes for a
+/// customer: the client's DESIGN.md colours, its PROFILE.md mark, its pair
+/// inlined, and no internal vocabulary in the template itself.
+#[test]
+fn deliverable_finalize_brands_the_customer_release_notes_skeleton() {
+    let skeleton = include_str!(
+        "../src/builtins/skills/cas-customer-release-notes/references/notes-skeleton.html"
+    );
+    let project = finalize_fixture(
+        "",
+        &[
+            ("weekly-plan.before.jpg", 3_000),
+            ("weekly-plan.after.jpg", 3_000),
+        ],
+    );
+    let root = project.path();
+    fs::write(root.join("report/draft.html"), skeleton).unwrap();
+    fs::create_dir_all(root.join("docs/deliverables")).unwrap();
+    fs::write(
+        root.join("logo.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("docs/deliverables/PROFILE.md"),
+        "---\ncustomer: Northwind\nprepared_by: Planner team\ndesign: DESIGN.md\nmark: logo.svg\n---\n",
+    )
+    .unwrap();
+    let output = cas_cmd(root)
+        .args([
+            "--json",
+            "deliverable",
+            "finalize",
+            "report/draft.html",
+            "--audience",
+            "customer",
+        ])
+        .args(["--out", "report/notes.html"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let receipt: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(receipt["inlined"], 2, "{receipt}");
+    let html = fs::read_to_string(root.join("report/notes.html")).unwrap();
+    assert!(html.contains("--verdict:#ff682f"), "{html}");
+    assert!(
+        html.contains("<img class=\"mark\" src=\"data:image/svg+xml;base64,"),
+        "{html}"
+    );
 }
 
 /// cas-feature-report ships no render code: its template, filled with a

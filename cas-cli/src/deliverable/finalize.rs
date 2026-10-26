@@ -97,7 +97,8 @@ pub struct FinalizeRequest {
     pub budget: Budget,
     /// Paper formats to print; empty prints nothing.
     pub papers: Vec<Paper>,
-    /// Where `<out stem>-<paper>.pdf` files go (default: beside `out`).
+    /// Where `<out stem>-<paper>.pdf` files go (default: beside `out`); they
+    /// are written only when the deliverable passes.
     pub pdf_dir: Option<PathBuf>,
     /// Where check-pdf writes page PNGs and its receipt (default: discarded).
     pub check_dir: Option<PathBuf>,
@@ -118,7 +119,8 @@ pub struct FinalizeReceipt {
     pub schema: &'static str,
     pub audience: Audience,
     pub draft: String,
-    /// The written HTML; absent when a finding stopped before writing it.
+    /// The delivered HTML; absent when a finding refused the deliverable, in
+    /// which case neither it nor its PDFs were written.
     pub html: Option<String>,
     pub bytes: u64,
     pub image_bytes: u64,
@@ -198,6 +200,15 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
     let workspace = Workspace::materialize(&[INLINE, HYGIENE, PRINT, CHECK_PDF])?;
     let staged = workspace.path("filled.html");
     fs::write(&staged, filled)?;
+    // The deliverable is built in the workspace under its final name and
+    // moved into place only when nothing refused it, so a refused file never
+    // sits at the deliverable path.
+    let name = request
+        .out
+        .file_name()
+        .ok_or_else(|| UsageError(format!("--out {} names no file", request.out.display())))?;
+    let candidate = workspace.path("deliverable").join(name);
+    let pdf_stage = workspace.path("deliverable-pdf");
     let base = request
         .draft
         .parent()
@@ -208,7 +219,7 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
         INLINE.path,
         [
             staged.as_os_str().to_owned(),
-            request.out.as_os_str().to_owned(),
+            candidate.as_os_str().to_owned(),
             "--base".into(),
             base.as_os_str().to_owned(),
             "--max-image-bytes".into(),
@@ -221,7 +232,6 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
         &base,
         SCRIPT_TIMEOUT,
     )?;
-    receipt.html = Some(request.out.display().to_string());
     receipt.bytes = inlined["bytes"].as_u64().unwrap_or(0);
     receipt.image_bytes = inlined["image_bytes"].as_u64().unwrap_or(0);
     receipt.inlined = inlined["inlined"].as_array().map_or(0, Vec::len);
@@ -230,7 +240,7 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
     receipt.findings.extend(findings(&inlined["findings"]));
 
     let mut args = vec![
-        request.out.as_os_str().to_owned(),
+        candidate.as_os_str().to_owned(),
         "--audience".into(),
         request.audience.as_str().into(),
     ];
@@ -240,13 +250,16 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
     let hygiene = workspace.python(HYGIENE.path, args, &base, SCRIPT_TIMEOUT)?;
     receipt.findings.extend(findings(&hygiene["findings"]));
 
-    if request.papers.is_empty() {
+    if !receipt.findings.is_empty() {
+        if !request.papers.is_empty() {
+            receipt
+                .warnings
+                .push("not printed: resolve the findings first".to_string());
+        }
         return Ok(receipt);
     }
-    if !receipt.findings.is_empty() {
-        receipt
-            .warnings
-            .push("not printed: resolve the findings first".to_string());
+    if request.papers.is_empty() {
+        deliver(&candidate, &request.out, &mut receipt)?;
         return Ok(receipt);
     }
     require_print_tools()?;
@@ -258,7 +271,7 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
             .unwrap_or(Path::new("."))
             .to_path_buf()
     });
-    let printed = print(&workspace, request, &pdf_dir)?;
+    let printed = print(&workspace, request, &candidate, &pdf_stage)?;
     if let Some(blocked) = printed {
         receipt.findings.push(Finding {
             code: "network-request".to_string(),
@@ -271,7 +284,7 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
         .and_then(|stem| stem.to_str())
         .unwrap_or("report");
     for paper in &request.papers {
-        let pdf = pdf_dir.join(format!("{stem}-{}.pdf", paper.as_str()));
+        let pdf = pdf_stage.join(format!("{stem}-{}.pdf", paper.as_str()));
         if !pdf.is_file() {
             return Err(UsageError(format!(
                 "print completed without creating {}",
@@ -311,12 +324,39 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
         }
         receipt.pdf.push(PdfReceipt {
             paper: *paper,
-            path: pdf.display().to_string(),
+            path: pdf_dir
+                .join(format!("{stem}-{}.pdf", paper.as_str()))
+                .display()
+                .to_string(),
             pages: check["pages"].as_u64(),
             check,
         });
     }
+    if receipt.findings.is_empty() {
+        fs::create_dir_all(&pdf_dir)?;
+        for paper in &request.papers {
+            let file = format!("{stem}-{}.pdf", paper.as_str());
+            fs::copy(pdf_stage.join(&file), pdf_dir.join(&file)).map_err(|error| {
+                UsageError(format!(
+                    "could not write {}: {error}",
+                    pdf_dir.join(&file).display()
+                ))
+            })?;
+        }
+        deliver(&candidate, &request.out, &mut receipt)?;
+    }
     Ok(receipt)
+}
+
+/// Move a passing deliverable into place and record where it went.
+fn deliver(candidate: &Path, out: &Path, receipt: &mut FinalizeReceipt) -> anyhow::Result<()> {
+    if let Some(parent) = out.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(candidate, out)
+        .map_err(|error| UsageError(format!("could not write {}: {error}", out.display())))?;
+    receipt.html = Some(out.display().to_string());
+    Ok(())
 }
 
 fn strings(value: &Value) -> Vec<String> {
@@ -361,6 +401,7 @@ fn require_print_tools() -> anyhow::Result<()> {
 fn print(
     workspace: &Workspace,
     request: &FinalizeRequest,
+    html: &Path,
     pdf_dir: &Path,
 ) -> anyhow::Result<Option<String>> {
     let papers: Vec<&str> = request.papers.iter().map(|paper| paper.as_str()).collect();
@@ -368,7 +409,7 @@ fn print(
         let mut command = Command::new("node");
         command
             .arg(workspace.path(PRINT.path))
-            .arg(&request.out)
+            .arg(html)
             .arg(pdf_dir)
             .arg(papers.join(","));
         if let Some(author) = &request.author {

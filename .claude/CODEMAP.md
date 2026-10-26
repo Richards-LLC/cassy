@@ -139,7 +139,7 @@
 - **Contributor policy / Rust proof:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`, and capped named `cargo nextest` / `cargo check` commands.
 - **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs` (ANSI capture parser and checks); **release records:** `docs/release-notes/` Slack drafts, `docs/release-reports/` per-version Markdown, brief, HTML, PDF and visual-QA reports.
 - **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs (e.g. `violet-channel-diagnostics.brief.md`), locale/width captures and `docs/design/cli/captures/`.
-- **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/find-release-prebuild.sh`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`, `cas-cli/src/builtins/skills/cas-release-report/scripts/check-pdf.py`.
+- **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/find-release-prebuild.sh`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`, `cas-cli/src/deliverable/assets/check-pdf.py`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py`, `scripts/fast-rows-pre-push.sh`.
 - **Terminal regression routing:** `scripts/terminal-qa.test.mjs`, `scripts/ci-script-tests-for-diff.py`, `.github/workflows/lane.yml` - changed-input Node suite selection in normal fast rows and slim CI.
 - **Runner setup:** `scripts/install-cassy-actions-runner.sh`, `scripts/cassy-actions-runner-registration.sh`, `scripts/test-cassy-actions-runner-registration.sh`, and `ops/systemd/` runner units.

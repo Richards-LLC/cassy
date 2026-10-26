@@ -1151,6 +1151,16 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
             assert!(sow.join(file).is_file(), "missing installed sow {file}");
             println!("installed {directory}/skills/cas-sow-delivery-report/{file}");
         }
+        // cas-d1dc: customer release notes install beside them.
+        let notes = destination.join("skills/cas-customer-release-notes");
+        for file in [
+            "SKILL.md",
+            "references/PROFILE-template.md",
+            "references/notes-contract.md",
+            "references/notes-skeleton.html",
+        ] {
+            assert!(notes.join(file).is_file(), "missing installed customer notes {file}");
+        }
         let gap_check = fixture.path().join("GAP-CHECK.md");
         fs::write(&gap_check, "| R# | SOW | Status | Evidence | Owner |\n| --- | --- | --- | --- | --- |\n| R1 | \"Export.\" | Gap | not built | us |\n").unwrap();
         let gate = Command::new("python3")

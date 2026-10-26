@@ -285,6 +285,22 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
     },
     BuiltinFile {
+        path: "skills/cas-customer-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/PROFILE-template.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/PROFILE-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/notes-contract.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/notes-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/notes-skeleton.html",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/notes-skeleton.html"),
+    },
+    BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
         content: include_str!("builtins/skills/cas-sow-delivery-report/SKILL.md"),
     },
@@ -1010,6 +1026,22 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/PROFILE-template.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/PROFILE-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/notes-contract.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/notes-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/notes-skeleton.html",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/notes-skeleton.html"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
@@ -1784,6 +1816,22 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-release-report/scripts/render.py",
         content: include_str!("builtins/skills/cas-release-report/scripts/render.py"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/SKILL.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/SKILL.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/PROFILE-template.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/PROFILE-template.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/notes-contract.md",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/notes-contract.md"),
+    },
+    BuiltinFile {
+        path: "skills/cas-customer-release-notes/references/notes-skeleton.html",
+        content: include_str!("builtins/skills/cas-customer-release-notes/references/notes-skeleton.html"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/SKILL.md",
@@ -7019,6 +7067,7 @@ This is the body content."#;
             "skills/cas-html-reports/SKILL.md",
             "skills/cas-release-report/SKILL.md",
             "skills/cas-sow-delivery-report/SKILL.md",
+            "skills/cas-customer-release-notes/SKILL.md",
             "skills/cas-feature-report/SKILL.md",
             "skills/cas-dataviz/SKILL.md",
             "skills/cas-ui-craft/SKILL.md",

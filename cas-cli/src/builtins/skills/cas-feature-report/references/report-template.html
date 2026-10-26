@@ -81,11 +81,14 @@ footer { padding: 32px 0 48px; border-top: 1px solid var(--line); font-size: 14p
   h2 { font-size: 18pt; margin-bottom: 8pt; break-after: avoid; }
   /* A full-width pair may exceed a sheet: keep each image with its caption. */
   .pair { break-inside: auto; margin-bottom: 16pt; }
-  .pair > figcaption { break-inside: avoid; margin-bottom: 4pt; }
+  .pair > figcaption { break-inside: avoid; break-after: avoid; margin-bottom: 4pt; }
+  .meta { break-inside: avoid; margin-top: 8pt; }
   .side { break-inside: avoid; }
   .side + .side { margin-top: 12pt; }
-  ol.steps { display: block; }
-  ol.steps li { break-inside: avoid; margin-bottom: 8pt; }
+  /* Both sides of a pair fit one sheet with its heading, at full width. */
+  .shot { width: fit-content; max-width: 100%; }
+  .shot img { width: auto; max-width: 100%; max-height: 80mm; }
+  ol.steps li { break-inside: avoid; }
   tr { break-inside: avoid; }
   thead { display: table-header-group; }
   /* Good-to-know and provenance print as one block: a footer-only last page is a defect. */

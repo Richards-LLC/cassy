@@ -45,6 +45,7 @@ owner_groups:
     - hub-web/e2e/journeys/receipt-directory.mjs
     - hub-web/src/cloud-brand.ts
     - hub-web/src/render-model.ts
+    - hub-web/src/usage.ts
 invariants:
   HUB-J1-GOAL:
     statement: my machine's supervisor appears and I can open its conversation

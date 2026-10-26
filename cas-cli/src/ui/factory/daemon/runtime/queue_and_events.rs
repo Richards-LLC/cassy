@@ -8670,12 +8670,9 @@ impl FactoryDaemon {
             // re-read, transport claim) runs as the `ClaimForInject` job just
             // before transport, and the row is injected only on a later pass
             // once that claim came back.
-            let mut queued = selected;
+            let queued = selected;
             if queued.processed_at.is_some() { continue; }
             let mut facts = row_facts.get(&queued.id).cloned().unwrap_or_default();
-            if facts.answered_blocker && !crate::supervisor_message_wakes::quiet(&queued.prompt) {
-                queued.prompt = format!("{}\n{}", crate::supervisor_message_wakes::QUIET, queued.prompt);
-            }
             let batch_len = facts.message_batch.len();
             let leader_held = facts.deferred_inbox.is_some()
                 || self.inbox_deferred_writes.contains_key(&queued.id);
@@ -8710,6 +8707,18 @@ impl FactoryDaemon {
                     target: "cas::coordination",
                     message_id = queued.id,
                     "row still in flight from an earlier inject; skipped this pass"
+                );
+                continue;
+            }
+            if facts.answered_blocker {
+                // Keep the committed body and its delivery identity intact.
+                // The answer withdraws the wake, not the readable alert.
+                self.queue_jobs.stamp(
+                    self.app.cas_dir(), queued.id, &queued.target,
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "answered blocker; readable without another supervisor wake".into(),
+                        recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                    },
                 );
                 continue;
             }

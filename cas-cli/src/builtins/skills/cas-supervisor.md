@@ -29,6 +29,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** `qa.user_facing_labels` require `demo_statement`: `As a <user>, I <do X> and see <Y>`; epics/internal tasks exempt.
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
+- **Platform proof:** Linux-only proof is insufficient for a script used on multiple platforms unless a fixture covers the platform difference.
 - **Full Rust gate:** the merge queue proves the final tree; no second assembly run. Without queue proof, use [workflow.md](references/workflow.md) for close-gate assembly proof.
 - **Lessons remove causes:** [ladder and tags](references/workflow.md#lessons-must-remove-causes).
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.

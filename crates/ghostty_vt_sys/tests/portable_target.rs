@@ -124,6 +124,17 @@ fn linked_worktree_finds_main_checkout_zig_without_env_or_local_install() {
         assert!(error.contains(diagnostic), "{error}");
         assert!(error.contains("./scripts/bootstrap-zig.sh"), "{error}");
     }
+    // In the main checkout, the local and Git-common-dir candidate coincide.
+    let error = build_support::find_zig(&main, None, Some(OsStr::new(""))).unwrap_err();
+    let candidate = format!("  - {}:", zig.display());
+    assert_eq!(
+        error
+            .lines()
+            .filter(|line| line.starts_with(&candidate))
+            .count(),
+        1,
+        "{error}"
+    );
 }
 
 // Moved from factory_worker_check: discovery belongs to the build script,

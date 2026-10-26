@@ -216,6 +216,76 @@ impl Fixture {
 }
 
 #[test]
+fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut second = store.get("cas-9efb-test").unwrap();
+    second.id = "cas-second".into();
+    second.assignee = Some("merge-v".into());
+    second.deliverables.factory_branch_anchor = None;
+    store.add(&second).unwrap();
+    let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+    let mut worker = cas_types::Agent::new("merge-v".into(), "merge-v".into());
+    worker.role = cas_types::AgentRole::Worker;
+    agents.register(&worker).unwrap();
+    assert!(agents.try_claim(&second.id, &worker.id, 600, None).unwrap().is_success());
+    git(f.repo.path(), &["branch", "factory/merge-v"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-v"]);
+    f.app.add_worker_name_for_test("merge-v");
+    let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
+    f.app.set_director_data_for_test(data);
+    let events = vec![f.event.clone(), DirectorEvent::WorkerIdle {
+        worker: worker.name,
+        active_task: Some(ActiveLeaseSummary {
+            task_id: second.id, task_title: second.title, task_status: second.status,
+            close_rejected_reason: None, pending_qa: None,
+        }),
+    }];
+    let trace = f.app.cas_dir.join("git-trace.log");
+    f._env.set("GIT_TRACE", &trace);
+    let counts = |f: &Fixture| {
+        let fetches = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("built-in: git fetch ")).count();
+        let ci = std::fs::read_to_string(f.app.cas_dir.join("gh-requests")).unwrap_or_default().lines().count();
+        (fetches, ci)
+    };
+    f.ci(Some("failure"));
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    let settled = counts(&f);
+    assert!(settled.0 > 0 && settled.1 > 0);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(counts(&f), settled);
+
+    std::fs::write(f.repo.path().join("delivery.rs"), "// new pushed tip\n").unwrap();
+    git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
+    git(f.repo.path(), &["push", "-q", "origin", "factory/merge-w"]);
+    f.ci(None);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    let pending = counts(&f);
+    assert_eq!(pending.1 - settled.1, 1);
+    f.ci(Some("success"));
+    let (_, ready, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(ready.iter().filter(|prompt| prompt.merge_alert.is_some()).count(), 1);
+    let signalled = counts(&f);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(counts(&f), signalled);
+
+    let data = DirectorData::load_with_stores_for_project(&f.app.cas_dir, None, false, None, None).unwrap();
+    f.app = FactoryApp::for_test_at(f.app.cas_dir.clone());
+    for name in ["merge-w", "merge-v"] { f.app.add_worker_name_for_test(name); }
+    f.app.set_director_data_for_test(data);
+    let (_, restarted, _) = f.app.revalidate_and_prompt_for_delivery(&events);
+    assert!(restarted.iter().all(|prompt| prompt.merge_alert.is_none()));
+    // The red lane may need its first observation in the new process, but the
+    // already-signalled green lane must not contact Git or GitHub again.
+    let after_restart = counts(&f);
+    assert_eq!(after_restart.1 - signalled.1, 1);
+    f.app.revalidate_and_prompt_for_delivery(&events);
+    assert_eq!(counts(&f), after_restart);
+}
+
+#[test]
 fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
     for status in [TaskStatus::InProgress, TaskStatus::Blocked] {
         let mut f = Fixture::new();

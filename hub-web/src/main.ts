@@ -2585,13 +2585,10 @@ function rememberComposerDraft(): void {
 // reload between renders loses nothing.
 document.addEventListener("input", (event) => { if ((event.target as Element | null)?.id === "message-text") rememberComposerDraft(); });
 /** cas-0b3d: every live paired machine takes the usage days it has not accepted yet. */
-let usageFlush: Promise<void> | undefined;
 function flushUsage(): Promise<void> {
-  usageFlush ??= usage.flush([...connections]
+  return usage.flushQueued(() => [...connections]
     .filter(([id]) => connectionStates.get(id)?.phase === "live")
-    .map(([id, connection]) => ({ id, post: (entries) => connection.postUsage(entries) })))
-    .finally(() => { usageFlush = undefined; });
-  return usageFlush;
+    .map(([id, connection]) => ({ id, post: (entries) => connection.postUsage(entries) })));
 }
 window.setInterval(() => { void flushUsage(); }, 5 * 60_000);
 window.addEventListener("pagehide", () => { void flushUsage(); });

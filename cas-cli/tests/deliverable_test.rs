@@ -85,6 +85,63 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
     assert_eq!(receipt["pairs"].as_array().unwrap().len(), 1, "{receipt}");
     assert_eq!(receipt["pairs"][0]["id"], "roster");
     assert_eq!(receipt["unpaired"].as_array().unwrap().len(), 1);
+    // Resolve the actual commit range through the shared provenance resolver.
+    // A subject that merely looks like a task is deliberately left unlinked.
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["commit", "--allow-empty", "-q", "-m", "base"]);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    git(
+        root,
+        &["commit", "--allow-empty", "-q", "-m", "anchored delivery"],
+    );
+    let anchored = git(root, &["rev-parse", "HEAD"]);
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "looks like cas-fiction but has no provenance",
+        ],
+    );
+    let unlinked = git(root, &["rev-parse", "HEAD"]);
+    let cas_root = root.join(".cas");
+    fs::create_dir_all(&cas_root).unwrap();
+    let mut config = cas::config::Config::default();
+    config
+        .set(
+            "factory.artifacts_root",
+            &root.join("artifacts").display().to_string(),
+        )
+        .unwrap();
+    config.save(&cas_root).unwrap();
+    let tasks = cas::store::open_task_store(&cas_root).unwrap();
+    let mut task = cas::types::Task::new("cas-fixture".into(), "Anchored delivery".into());
+    task.deliverables.factory_branch_anchor = Some(anchored);
+    tasks.add(&task).unwrap();
+    let scoped = cas::deliverable::pairs::task_dir(&config, &cas_root, "cas-fixture");
+    fs::create_dir_all(&scoped).unwrap();
+    for entry in fs::read_dir(&dir).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            fs::copy(entry.path(), scoped.join(entry.file_name())).unwrap();
+        }
+    }
+    let output = cas_cmd(root)
+        .args([
+            "--json",
+            "deliverable",
+            "pairs",
+            "--range",
+            &format!("{base}..HEAD"),
+        ])
+        .assert()
+        .code(1);
+    let ranged: Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(ranged["pairs"].as_array().unwrap().len(), 1, "{ranged}");
+    assert_eq!(ranged["pairs"][0]["task_id"], "cas-fixture");
+    assert_eq!(ranged["unlinked"], serde_json::json!([unlinked]));
     fs::write(dir.join("roster.after.jpg"), b"changed after capture").unwrap();
     let receipt = invoke();
     assert!(receipt["pairs"].as_array().unwrap().is_empty(), "{receipt}");
@@ -96,6 +153,80 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
             .any(|finding| finding["code"] == "capture-digest"),
         "{receipt}"
     );
+}
+
+/// A failed serve command still tears down its whole process group and the
+/// private checkout. A checkout command may modify only the cloned source.
+#[test]
+#[cfg(unix)]
+fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
+    let project = TempDir::new().unwrap();
+    let root = project.path();
+    fs::create_dir_all(root.join("docs/qa")).unwrap();
+    fs::write(
+        root.join("docs/qa/shots.json"),
+        r#"[{"id":"goal","path":"/"}]"#,
+    )
+    .unwrap();
+    fs::write(root.join("source.txt"), "delivered source").unwrap();
+    fs::write(root.join("serve.py"), "import os,time,pathlib,subprocess\npathlib.Path('source.txt').write_text('private mutation')\nchild=subprocess.Popen(['sleep','60'])\npathlib.Path(os.environ['CAPTURE_TEST_PID']).write_text(str(os.getpid())+' '+str(child.pid))\ntime.sleep(60)\n").unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", "docs", "source.txt", "serve.py"]);
+    git(root, &["commit", "-q", "-m", "capture fixture"]);
+    let cas_root = root.join(".cas");
+    fs::create_dir_all(&cas_root).unwrap();
+    fs::write(
+        cas_root.join("config.toml"),
+        "[qa.capture]\nserve = 'python3 serve.py {port}'\ntimeout_secs = 2\n",
+    )
+    .unwrap();
+    let pid_file = root.join("started.pids");
+    let output = cas_cmd(root)
+        .env("CAPTURE_TEST_PID", &pid_file)
+        .args([
+            "--json",
+            "deliverable",
+            "capture",
+            "--task",
+            "cas-fixture",
+            "--target",
+            "main",
+            "--dir",
+        ])
+        .arg(root.join("pairs"))
+        .assert()
+        .code(1);
+    let receipt: Value = serde_json::from_slice(&output.get_output().stdout).unwrap();
+    assert_eq!(receipt["pairs"], 0, "{receipt}");
+    assert!(
+        receipt["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "capture-timeout"),
+        "{receipt}"
+    );
+    assert!(receipt["elapsed_ms"].as_u64().unwrap() < 8000, "{receipt}");
+    assert_eq!(
+        fs::read_to_string(root.join("source.txt")).unwrap(),
+        "delivered source"
+    );
+    assert!(!fs::read_dir(cas_root.join("tmp")).unwrap().any(|e| {
+        let e = e.unwrap();
+        e.file_type().unwrap().is_dir()
+            && e.file_name().to_string_lossy().starts_with("capture-")
+            && e.file_name() != "capture-ports"
+    }));
+    // The lease directory remains as reusable lock files, without held locks.
+    for pid in fs::read_to_string(pid_file).unwrap().split_whitespace() {
+        let proc = std::path::PathBuf::from(format!("/proc/{pid}/stat"));
+        if let Ok(stat) = fs::read_to_string(proc) {
+            assert!(
+                stat.split_whitespace().nth(2) == Some("Z"),
+                "capture process still running: {stat}"
+            );
+        }
+    }
 }
 
 /// Pulse Card's shape: DESIGN.md under apps/frontend, SCSS sources (no CSS

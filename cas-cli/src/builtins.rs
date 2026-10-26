@@ -309,10 +309,6 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
     },
     BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
-    },
-    BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
         content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/check-sow.py"),
     },
@@ -1022,10 +1018,6 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
         content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",
@@ -1784,10 +1776,6 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/references/report-skeleton.html",
         content: include_str!("builtins/skills/cas-sow-delivery-report/references/report-skeleton.html"),
-    },
-    BuiltinFile {
-        path: "skills/cas-sow-delivery-report/scripts/capture.mjs",
-        content: include_str!("builtins/skills/cas-sow-delivery-report/scripts/capture.mjs"),
     },
     BuiltinFile {
         path: "skills/cas-sow-delivery-report/scripts/check-sow.py",

@@ -481,7 +481,12 @@ fn reuse_dependencies(source: &Path, target: &Path) -> anyhow::Result<()> {
             !matches!(
                 e.file_name().to_str(),
                 Some(".git" | ".cas" | "target" | "dist")
-            )
+            ) && !e
+                .path()
+                .strip_prefix(source)
+                .ok()
+                .and_then(Path::parent)
+                .is_some_and(|p| p.components().any(|c| c.as_os_str() == "node_modules"))
         });
     while let Some(entry) = entries.next() {
         let entry = entry?;

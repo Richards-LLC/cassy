@@ -183,7 +183,7 @@ fn run(
         }
         let plan: Value = serde_json::from_slice(&output.stdout)?;
         let ids: Vec<String> = serde_json::from_value(plan["selection_ids"].clone())?;
-        if ids.is_empty() || ids.len() > usize::from(config.max_shots) {
+        if ids.is_empty() || ids.len() > config.max_shots as usize {
             return Err(UsageError("Affected journeys are empty or exceed max_shots; configure a representative qa.capture.shots catalog".into()).into());
         }
         if selected.as_ref().is_some_and(|previous| *previous != ids) {

@@ -52,19 +52,33 @@ impl QaCaptureConfig {
     /// Validate hand-edited configuration with the same metadata as config set.
     /// Call before consuming any field or starting capture resources.
     pub fn validate(&self) -> Result<(), String> {
+        if !self.login_path.is_empty() && self.success_url.is_empty() {
+            return Err("qa.capture.success_url is required for login (anchor it with ^)".into());
+        }
         let config = super::Config {
-            qa: Some(super::QaConfig { capture: Some(self.clone()), ..Default::default() }),
+            qa: Some(super::QaConfig {
+                capture: Some(self.clone()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
-        if self.mask.iter().any(|selector| selector.trim().is_empty()) {
+        if self
+            .mask
+            .iter()
+            .any(|selector| selector.trim().is_empty() || selector != selector.trim())
+        {
             return Err("qa.capture.mask requires nonempty selectors".into());
         }
         for meta in super::registry().configs_in_section("qa.capture") {
             let value = config.get(meta.key).expect("registered capture accessor");
             if value != value.trim() {
-                return Err(format!("{} has surrounding whitespace; reset it with cas config set", meta.key));
+                return Err(format!(
+                    "{} has surrounding whitespace; reset it with cas config set",
+                    meta.key
+                ));
             }
-            meta.validate(&value).map_err(|error| format!("{}: {error}", meta.key))?;
+            meta.validate(&value)
+                .map_err(|error| format!("{}: {error}", meta.key))?;
         }
         Ok(())
     }
@@ -76,9 +90,6 @@ impl QaCaptureConfig {
             return Ok(false);
         }
         self.validate()?;
-        if !self.login_path.trim().is_empty() && self.success_url.trim().is_empty() {
-            return Err("qa.capture.success_url is required for login (anchor it with ^)".into());
-        }
         self.credential_file()?;
         Ok(true)
     }
@@ -146,12 +157,16 @@ pub(super) fn validate_value(key: &str, raw: &str) -> Result<(), String> {
         }
         "qa.capture.serve" => value.is_empty() || value.contains("{port}"),
         "qa.capture.ready_path" => local_path(value),
-        "qa.capture.login_path" => {
-            value.is_empty() || local_path(value)
+        "qa.capture.login_path" => value.is_empty() || local_path(value),
+        "qa.capture.shots" => {
+            !value.is_empty()
+                && std::path::Path::new(value)
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
         }
-        "qa.capture.shots" => !value.is_empty() && std::path::Path::new(value).components()
-            .all(|part| matches!(part, std::path::Component::Normal(_))),
-        "qa.capture.email_sel" | "qa.capture.password_sel" | "qa.capture.submit_sel" => !value.is_empty(),
+        "qa.capture.email_sel" | "qa.capture.password_sel" | "qa.capture.submit_sel" => {
+            !value.is_empty()
+        }
         "qa.capture.viewports" => {
             !value.is_empty()
                 && value
@@ -174,7 +189,9 @@ pub(super) fn validate_value(key: &str, raw: &str) -> Result<(), String> {
         "qa.capture.serve" => "a serve command containing {port}, or empty to clear",
         "qa.capture.viewports" => "1280x800 and optionally 390x844, comma-separated",
         "qa.capture.shots" => "a project-relative shot catalog path",
-        "qa.capture.email_sel" | "qa.capture.password_sel" | "qa.capture.submit_sel" => "a nonempty CSS selector",
+        "qa.capture.email_sel" | "qa.capture.password_sel" | "qa.capture.submit_sel" => {
+            "a nonempty CSS selector"
+        }
         _ => "a local path beginning with /",
     };
     // Invalid values may be mistaken secrets; never echo them in findings.
@@ -182,8 +199,11 @@ pub(super) fn validate_value(key: &str, raw: &str) -> Result<(), String> {
 }
 
 fn local_path(value: &str) -> bool {
-    value.starts_with('/') && !value.starts_with("//")
-        && !value.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+    value.starts_with('/')
+        && !value.starts_with("//")
+        && !value
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
 }
 
 fn anchored_pattern(pattern: &str) -> bool {

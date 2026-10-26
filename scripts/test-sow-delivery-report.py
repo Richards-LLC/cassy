@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Gate checks of cas-sow-delivery-report: python3 scripts/test-sow-delivery-report.py."""
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -13,7 +14,7 @@ CHECK = ROOT / 'cas-cli/src/builtins/skills/cas-sow-delivery-report/scripts/chec
 SPEC = importlib.util.spec_from_file_location('deliverable_hygiene', ROOT / 'cas-cli/src/deliverable/assets/hygiene.py')
 hygiene = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(hygiene)
-CAPTURE = CHECK.with_name('capture.mjs')
+CAPTURE = ROOT / 'cas-cli/src/deliverable/assets/capture.mjs'
 HEADER = '| R# | The SOW says | Status | Evidence | Owner or open decision |\n| --- | --- | --- | --- | --- |\n'
 
 
@@ -52,17 +53,18 @@ class SowGateTests(unittest.TestCase):
             with self.subTest(prose=prose):
                 self.assertEqual(hygiene.scan(f'# Northwind round 1\n\n{prose}\n', 'customer'), [])
 
-    def test_login_requires_a_success_url_before_reading_credentials_or_launching_a_browser(self):
+    def test_catalog_budget_fails_before_credentials_or_browser(self):
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / 'shots.json').write_text('[]')
-            result = subprocess.run(['node', str(CAPTURE), '--shots', str(Path(tmp) / 'shots.json'),
-                                     '--base', 'https://example.invalid', '--out', tmp,
-                                     '--login', '--credentials', str(Path(tmp) / 'not-a-credential-file')],
+            plan = Path(tmp) / 'plan.json'
+            plan.write_text(json.dumps({'root': tmp, 'config': {
+                'max_shots': 6, 'viewports': ['1280x800'], 'mask': []},
+                'shots': [{'id': 'R1', 'path': '/', 'viewport': [9999, 9999]}],
+                'credentials_file': str(Path(tmp) / 'absent')}))
+            result = subprocess.run(['node', str(CAPTURE), str(plan), '--validate'],
                                     capture_output=True, text=True)
-            self.assertEqual(result.returncode, 2)
-            self.assertIn('login failed:', result.stderr)
-            self.assertIn('--success-url', result.stderr)
-            self.assertFalse((Path(tmp) / 'manifest.json').exists())
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(json.loads(result.stdout)['code'], 'capture-catalog')
+            self.assertFalse((Path(tmp) / 'pairs.json').exists())
 
 
 if __name__ == '__main__':

@@ -32,7 +32,7 @@ export function validateShots(shots, config) {
   const ids = new Set();
   const bounds = config.viewports.map(v => v.split('x').map(Number));
   return shots.map(s => {
-    if (!s || typeof s !== 'object' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(s.id ?? '') || ids.has(s.id)) throw new Error('shot-id');
+    if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$/.test(s.id ?? '') || ids.has(s.id)) throw new Error('shot-id');
     ids.add(s.id);
     const viewport = s.viewport ?? [1280, 800];
     if (!Array.isArray(viewport) || viewport.length !== 2 || !viewport.every(Number.isSafeInteger)

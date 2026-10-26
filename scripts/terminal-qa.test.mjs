@@ -50,6 +50,8 @@ test("parseAnsi preserves CRCRLF rows and overwrites from column zero after bare
   ]);
   assert.deepEqual(parseAnsi("Violet project\rX\r\n").map(lineText), ["Xiolet project"]);
   assert.deepEqual(parseAnsi("long text\r\u001b[2Kshort").map(lineText), ["short"]);
+  assert.deepEqual(parseAnsi("abc\rX\bY").map(lineText), ["Ybc"]);
+  assert.equal(parseAnsi("capture\r\r\n")[0].redraws, 0);
 });
 
 // ---------------------------------------------------------------------------

@@ -705,6 +705,60 @@ pub fn create_metadata(
 mod tests {
     use crate::ui::factory::session::*;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() {
+        use crate::store::AgentStore;
+        use crate::ui::factory::{DaemonConfig, FactoryConfig, FactoryDaemon};
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let original_home = env.home().to_path_buf();
+        let project = original_home.join("project");
+        fs::create_dir_all(&project).unwrap();
+        let own = crate::store::init_cas_dir(&project).unwrap();
+        let foreign = original_home.join("foreign/.cas");
+        fs::create_dir_all(&foreign).unwrap();
+        let agents = crate::store::SqliteAgentStore::open(&foreign).unwrap();
+        agents.init().unwrap();
+        let bin = original_home.join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();
+        fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(std::iter::once(bin).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+        )).unwrap();
+        env.set("PATH", path);
+        env.set("CAS_ROOT", &foreign);
+        env.set("CAS_SKIP_FACTORY_TOOLING", "1");
+        env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config --strict-mcp-config");
+        let spawned = original_home.join("spawned");
+        env.set("CAS_4927_SPAWN_MARKER", &spawned);
+        env.set_current_dir(&project);
+        let config = || DaemonConfig {
+            session_name: "rig-supervisor".into(), foreground: true, boot_progress: false, phone_home: false,
+            factory_config: FactoryConfig {
+                cwd: project.clone(), workers: 0, enable_worktrees: false,
+                supervisor_name: Some("rig-supervisor".into()), ..Default::default()
+            },
+        };
+        for capacity in [104, 108] {
+            let home = original_home.join(format!("long-{capacity}")).join("h".repeat(capacity));
+            env.set("HOME", &home);
+            let error = FactoryDaemon::new(config()).err().expect("oversized socket must refuse startup");
+            assert!(agents.list(None).unwrap().is_empty(),
+                "a failed {capacity}-byte socket launch must not register into inherited CAS_ROOT: {error:#}");
+            assert!(!home.exists(), "socket refusal must precede home/session writes");
+            assert!(!spawned.exists(), "socket refusal must precede supervisor spawning");
+            assert!(error.to_string().contains("Unix socket path"), "{error:#}");
+        }
+        env.set("HOME", &original_home);
+        let error = FactoryDaemon::new(config()).err().expect("foreign CAS_ROOT must refuse startup");
+        assert!(error.to_string().contains("CAS_ROOT"), "{error:#}");
+        assert!(agents.list(None).unwrap().is_empty());
+        assert!(!spawned.exists());
+        assert!(!metadata_path("rig-supervisor").exists());
+        assert!(crate::store::SqliteAgentStore::open(&own).unwrap().list(None).unwrap().is_empty());
+    }
+
     /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
     /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander
     /// launches take, saved metadata without one, so a CAS_ROOT daemon's

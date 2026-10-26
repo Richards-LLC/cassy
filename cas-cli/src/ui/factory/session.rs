@@ -104,6 +104,46 @@ pub fn panic_log_path(session_name: &str) -> PathBuf {
     session_log_dir(session_name).join("panic.log")
 }
 
+/// Native pathname address capacity, including the terminating NUL.
+/// Linux supplies 108 bytes and macOS 104; derive it from the target ABI.
+fn unix_socket_capacity() -> usize {
+    std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+}
+
+fn validate_socket_path(path: &Path, capacity: usize, label: &str) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= capacity || bytes.contains(&0) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!(
+            "Factory startup refused: {label} Unix socket path is invalid.\nUse a shorter HOME or session name, then retry.\nPath: {} bytes; maximum: {} bytes (address capacity {capacity}).",
+            bytes.len(), capacity.saturating_sub(1),
+        )));
+    }
+    Ok(())
+}
+
+/// An inherited override must belong to the declared launch project. Git and
+/// Cassy worktree aliases still resolve to their shared main-project store.
+pub(crate) fn validate_factory_project(cwd: &Path) -> anyhow::Result<()> {
+    let Some(selected) = cas_core::env_overlay::var("CAS_ROOT").ok().map(PathBuf::from)
+        .filter(|path| path.is_dir()) else { return Ok(()); };
+    let own = crate::store::find_cas_root_ignoring_env(cwd).ok()
+        .and_then(|path| path.canonicalize().ok());
+    if !selected.canonicalize().ok().is_some_and(|root| Some(root) == own) {
+        anyhow::bail!("Factory startup refused: CAS_ROOT selects another project.\nRetry after running: unset CAS_ROOT\nThe --cwd project must own its store before agents can start.");
+    }
+    Ok(())
+}
+
+/// Read-only admission shared by CLI, fork-first and legacy startup paths.
+/// Run before logging, directory creation, process spawn or registration.
+pub(crate) fn validate_daemon_start(session: &str, cwd: &Path) -> anyhow::Result<()> {
+    let capacity = unix_socket_capacity();
+    validate_socket_path(&gui_socket_path(session), capacity, "GUI")?;
+    validate_socket_path(&socket_path(session), capacity, "TUI")?;
+    validate_factory_project(cwd)
+}
+
 /// Get the socket path for a session
 pub fn socket_path(session_name: &str) -> PathBuf {
     dirs::home_dir()
@@ -124,6 +164,7 @@ pub fn gui_socket_path(session_name: &str) -> PathBuf {
 pub(super) fn bind_factory_socket(
     path: &Path,
 ) -> std::io::Result<std::os::unix::net::UnixListener> {
+    validate_socket_path(path, unix_socket_capacity(), "Factory")?;
     let base = sessions_dir();
     if path.parent() != base.parent()
         || !path
@@ -740,6 +781,18 @@ mod tests {
                 String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
             return;
         }
+        // Explicit ABI rows catch both the macOS 104-byte and Linux
+        // 108-byte address, including the required terminating NUL.
+        for (capacity, bytes, allowed) in [(104, 103, true), (104, 104, false), (108, 107, true), (108, 108, false)] {
+            assert_eq!(validate_socket_path(Path::new(&"s".repeat(bytes)), capacity, "fixture").is_ok(), allowed,
+                "{capacity}-byte address with {bytes} pathname bytes");
+        }
+        assert!(validate_socket_path(Path::new(&"é".repeat(52)), 104, "fixture").is_err(),
+            "socket limits count bytes, not Unicode characters");
+        assert_eq!(unix_socket_capacity(), if cfg!(target_os = "macos") { 104 } else { 108 });
+        let native = PathBuf::from("s".repeat(unix_socket_capacity() - 1));
+        drop(std::os::unix::net::UnixListener::bind(&native).unwrap());
+        fs::remove_file(native).unwrap();
         env.set("CAS_ROOT", &foreign);
         env.set("CAS_SKIP_FACTORY_TOOLING", "1");
         env.set("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config --strict-mcp-config");
@@ -763,13 +816,36 @@ mod tests {
             assert!(!spawned.exists(), "socket refusal must precede supervisor spawning");
             assert!(error.to_string().contains("Unix socket path"), "{error:#}");
         }
+        // TUI fits but GUI does not: no first listener or partial home may survive.
+        let short = tempfile::Builder::new().prefix("c4927").tempdir_in("/tmp").unwrap();
+        env.set("HOME", short.path());
+        use std::os::unix::ffi::OsStrExt;
+        let padding = unix_socket_capacity() - gui_socket_path("rig-supervisor").as_os_str().as_bytes().len() - 1;
+        let home = short.path().join("g".repeat(padding));
+        env.set("HOME", &home);
+        assert!(socket_path("rig-supervisor").as_os_str().as_bytes().len() < unix_socket_capacity());
+        assert_eq!(gui_socket_path("rig-supervisor").as_os_str().as_bytes().len(), unix_socket_capacity());
+        let error = FactoryDaemon::new(config()).err().expect("GUI boundary must refuse before the TUI bind");
+        assert!(error.to_string().contains("GUI Unix socket path"), "{error:#}");
+        assert!(!home.exists());
+        assert!(agents.list(None).unwrap().is_empty());
         env.set("HOME", &original_home);
         let error = FactoryDaemon::new(config()).err().expect("foreign CAS_ROOT must refuse startup");
         assert!(error.to_string().contains("CAS_ROOT"), "{error:#}");
         assert!(agents.list(None).unwrap().is_empty());
         assert!(!spawned.exists());
         assert!(!metadata_path("rig-supervisor").exists());
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "cas", "factory", "daemon", "--session", "rig-supervisor", "--cwd", project.to_str().unwrap(),
+            "--workers", "0", "--no-worktrees", "--foreground", "--no-phone-home",
+        ]).unwrap();
+        let error = crate::cli::run(cli).unwrap_err();
+        assert!(error.to_string().contains("CAS_ROOT"), "{error:#}");
+        assert!(!original_home.join(".cas/logs").exists(), "CLI admission precedes logging/telemetry");
         assert!(crate::store::SqliteAgentStore::open(&own).unwrap().list(None).unwrap().is_empty());
+        env.set("CAS_ROOT", &own);
+        validate_daemon_start("rig-supervisor", &project.join(".")).unwrap();
     }
 
     /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store

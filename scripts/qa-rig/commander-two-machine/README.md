@@ -28,7 +28,9 @@ The live hubs keep `127.0.0.1:4173`-style listeners and Tailscale Serve
   paired to both hubs.
 
 Keep `RIG` short: the daemon's socket is `$RIG/home/.cas/factory-commander-rig.gui.sock`
-and must fit the 104-byte Unix socket limit. `rig.sh` clears every inherited
+and must leave room for the terminating NUL in the OS address (104 bytes on
+macOS, 108 on Linux). Startup now refuses oversized paths before logging,
+spawning a supervisor or registering agents. `rig.sh` clears every inherited
 `CAS_*` variable, so a factory shell's `CAS_ROOT` can never point the rig
 daemon at a live store.
 

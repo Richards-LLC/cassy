@@ -668,7 +668,19 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
 }
 
 /// Run the CLI with the given arguments
+/// Read-only factory daemon admission, called before process-wide startup
+/// logging/telemetry and again for library callers of `run`.
+pub fn validate_process_startup(cli: &Cli) -> anyhow::Result<()> {
+    if let Some(Commands::Factory(args)) = &cli.command
+        && let Some(factory::FactoryCommands::Daemon { session, cwd, .. }) = &args.command
+    {
+        crate::ui::factory::session::validate_daemon_start(session, cwd)?;
+    }
+    Ok(())
+}
+
 pub fn run(cli: Cli) -> anyhow::Result<()> {
+    validate_process_startup(&cli)?;
     let tracer_timer = std::time::Instant::now();
     let dev_tracing_enabled = initialize_dev_tracer();
     let command_name = get_command_name(&cli.command);

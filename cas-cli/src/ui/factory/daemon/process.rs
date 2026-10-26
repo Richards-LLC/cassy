@@ -3,6 +3,7 @@ use crate::ui::factory::daemon::imports::*;
 /// Daemonize and run factory daemon (legacy - spawns subprocess)
 #[cfg(unix)]
 pub fn daemonize(config: DaemonConfig) -> anyhow::Result<()> {
+    crate::ui::factory::session::validate_daemon_start(&config.session_name, &config.factory_config.cwd)?;
     // Get current executable
     let exe = std::env::current_exe()?;
 
@@ -466,6 +467,7 @@ pub async fn run_daemon_after_fork(
 
 /// Run the factory daemon (called by the daemon subprocess - legacy mode)
 pub async fn run_daemon(config: DaemonConfig) -> anyhow::Result<()> {
+    crate::ui::factory::session::validate_daemon_start(&config.session_name, &config.factory_config.cwd)?;
     // A client that vanishes mid-write must not kill the daemon (cas-5918).
     crate::server_signals::ignore_sigpipe_for_server();
     let trace_path = daemon_trace_log_path(&config.session_name);
@@ -488,6 +490,7 @@ pub async fn run_daemon_with_boot_progress(
     supervisor_name: String,
     worker_names: Vec<String>,
 ) -> anyhow::Result<()> {
+    crate::ui::factory::session::validate_daemon_start(&config.session_name, &config.factory_config.cwd)?;
     // Boot progress goes to a parent that may exit first (cas-5918).
     crate::server_signals::ignore_sigpipe_for_server();
     let trace_path = daemon_trace_log_path(&config.session_name);

@@ -380,7 +380,9 @@ fn print(
         command
     };
     let mut output = asset::run(&mut command(None), PDF_TIMEOUT, "node")?;
-    if !output.status.success() && playwright_module_missing(&asset::last_line(&output)) {
+    if !output.status.success()
+        && playwright_module_missing(&String::from_utf8_lossy(&output.stderr))
+    {
         let mut install = Command::new("npm");
         install
             .current_dir(workspace.path(""))

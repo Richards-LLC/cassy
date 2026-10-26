@@ -20,7 +20,8 @@ short pages by shrinking the whole document or cropping text.
 
 ## Render every page back to PNG and check bounds
 
-`finalize` runs the PDF check on every printed format and fails on a finding.
+`finalize` runs the PDF check (`check-pdf.py`, embedded in the `cas` binary)
+on every printed format and fails on a finding.
 To keep its page PNGs for inspection, finalize the report's HTML yourself:
 
 ```bash

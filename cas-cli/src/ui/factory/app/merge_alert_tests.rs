@@ -236,17 +236,19 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         // No WorkerIdle, close, or merge_request event precedes this probe.
         let events = f.app.merge_alert_retry_events_at(now);
         let (_, mut prompts, _) = f.app.revalidate_and_prompt_for_delivery(&events);
-        assert_eq!(prompts.len(), 1, "{status:?}: pushed green delivery owes a signal");
+        assert_eq!(prompts.len(), 1, "{status:?}");
         let prompt = &mut prompts[0];
+        // pin: this heading is the supervisor's immediate merge trigger.
         assert!(prompt.text.contains("READY TO MERGE"), "{}", prompt.text);
-        assert!(prompt.text.contains("factory/merge-w"), "{}", prompt.text);
+        assert_eq!(prompt.merge_alert.as_ref().unwrap().factory_branch, "factory/merge-w");
+        // pin: merge guidance must identify the resolved target and executable action.
         assert!(prompt.text.contains("epic/test"), "{}", prompt.text);
+        // pin: the supervisor merges directly without a worker relay.
         assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
-        assert!(f.app.refresh_prompt_for_delivery(prompt), "pre-park signal must survive release");
-        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty(),
-            "the same pushed green tip signals exactly once");
+        assert!(f.app.refresh_prompt_for_delivery(prompt));
+        assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
         f.advance_target(true);
-        assert!(!f.app.refresh_prompt_for_delivery(prompt), "a merged tip is no longer actionable");
+        assert!(!f.app.refresh_prompt_for_delivery(prompt));
     }
 }
 

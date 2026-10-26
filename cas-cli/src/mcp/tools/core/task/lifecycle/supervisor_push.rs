@@ -1406,7 +1406,7 @@ fn deliver_lifecycle_outbox_row_with_agents(
         payload.get("verification_wait").and_then(|value| value.as_bool()).unwrap_or(false)
             && kind == LifecycleTransition::Blocked
             && recipient.as_ref().is_none_or(|current| {
-                payload.get("recipient_target").and_then(|value| value.as_str()) == Some(current.name.as_str())
+                payload.get("supervisor_id").and_then(|value| value.as_str()) == Some(current.id.as_str())
             }),
     )
     .map_err(|error| error.to_string())?;

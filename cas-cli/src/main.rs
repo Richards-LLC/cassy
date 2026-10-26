@@ -154,10 +154,11 @@ fn main() -> ExitCode {
     // those failures machine-readable on stdout when their caller requested
     // JSON; stderr keeps the human diagnostic either way.
     let json_refusal = cli.json
-        && (startup.is_err() || matches!(
-            cli.command.as_ref(),
-            Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
-        ));
+        && (startup.is_err()
+            || matches!(
+                cli.command.as_ref(),
+                Some(cas::cli::Commands::Config(_) | cas::cli::Commands::Hub(_))
+            ));
     let init_command = matches!(cli.command.as_ref(), Some(cli::Commands::Init(_)));
     let outcome = startup.and_then(|()| cli::run(cli));
     // Unresolved/failed paths replay before the final exit-reason line.

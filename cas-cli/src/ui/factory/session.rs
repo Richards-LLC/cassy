@@ -125,9 +125,15 @@ fn validate_socket_path(path: &Path, capacity: usize, label: &str) -> std::io::R
 /// An inherited override must belong to the declared launch project. Git and
 /// Cassy worktree aliases still resolve to their shared main-project store.
 pub(crate) fn validate_factory_project(cwd: &Path) -> anyhow::Result<()> {
-    let Some(selected) = cas_core::env_overlay::var("CAS_ROOT").ok().map(PathBuf::from)
-        .filter(|path| path.is_dir()) else { return Ok(()); };
-    let own = crate::store::find_cas_root_ignoring_env(cwd).ok()
+    let Some(selected) = cas_core::env_overlay::var("CAS_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+    else {
+        return Ok(());
+    };
+    let own = crate::store::find_cas_root_ignoring_env(cwd)
+        .ok()
         .and_then(|path| path.canonicalize().ok());
     if !selected.canonicalize().ok().is_some_and(|root| Some(root) == own) {
         anyhow::bail!("Factory startup refused: CAS_ROOT selects another project.\nRetry after running: unset CAS_ROOT\nThe --cwd project must own its store before agents can start.");

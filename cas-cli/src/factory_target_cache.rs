@@ -3,8 +3,8 @@
 //! Factory worktrees intentionally keep independent Cargo target directories:
 //! sharing one target directory across concurrently-mutating branches is not a
 //! correctness boundary Cassy can currently prove. This module therefore
-//! reclaims only regenerable `target/` trees belonging to known factory
-//! worktrees, and only after conservative liveness, recency, containment, and
+//! reclaims only regenerable targets with proven factory ownership, including
+//! durable output from removed checkouts, after liveness, recency, containment, and
 //! filesystem-watermark checks.
 
 use std::collections::{HashMap, HashSet};
@@ -2033,6 +2033,18 @@ mod tests {
             targets[2].1.exists(),
             "live output must survive a missing checkout"
         );
+        // Idle workers may release their build lease while their registered
+        // process remains alive. Session age never removes that protection.
+        drop(_live_lease);
+        let mut registered = cas_types::Agent::new("live-id".into(), "live".into());
+        registered.pid = Some(std::process::id());
+        registered.pid_starttime = crate::mcp::daemon::read_pid_starttime(std::process::id());
+        registered.metadata.insert("clone_path".into(), targets[2].0.display().to_string());
+        registered.metadata.insert("factory_session".into(), "previous-session".into());
+        crate::store::open_agent_store(&cas).unwrap().register(&registered).unwrap();
+        let mut live_missing = inspect_with_probe(&cas, policy, &[], &[], false, probe).unwrap();
+        cleanup_selected(&cas, &mut live_missing, policy, &[]).unwrap();
+        assert!(targets[2].1.exists(), "a registered live owner must retain its unleased target");
         // An expired inventory budget retains every unmeasured cache.
         let partial = discover_caches_scoped(&repo, &cas, &[], false, Some(Instant::now()));
         assert!(!partial.is_empty());

@@ -32,8 +32,9 @@ struct ReadyReceipt {
 }
 
 fn ready_receipt_path(cas_dir: &Path, task: &str, tip: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
     let key = serde_json::to_vec(&(task, tip)).expect("string receipt key");
-    cas_dir.join("receipts/merge-ready").join(format!("{}.json", blake3::hash(&key).to_hex()))
+    cas_dir.join("receipts/merge-ready").join(format!("{:x}.json", Sha256::digest(&key)))
 }
 
 fn prior_ready(cas_dir: &Path, task: &str, tip: &str) -> Option<Ready> {

@@ -242,6 +242,14 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
             close_rejected_reason: None, pending_qa: None,
         }),
     }];
+    // The second lane retains its failed SHA while only the corrected SHA's
+    // GitHub run changes. Keep this at the real external-service boundary.
+    let old_tip = git(f.repo.path(), &["rev-parse", "factory/merge-v"]);
+    f.ci(Some("failure"));
+    std::fs::copy(f.app.cas_dir.join("ci.json"), f.app.cas_dir.join("old-ci.json")).unwrap();
+    crate::test_paths::warm_stub(&f.app.cas_dir.join("gh-fixture"), &format!(
+        "#!/bin/sh\nif [ \"$1 $2\" = 'repo view' ]; then printf '%s\\n' '{{\"nameWithOwner\":\"acme/cas\"}}'; else printf '%s\\n' \"$*\" >> .cas/gh-requests; case \"$*\" in *{old_tip}*) cat .cas/old-ci.json;; *) cat .cas/ci.json;; esac; fi\n"
+    ));
     let trace = f.app.cas_dir.join("git-trace.log");
     f._env.set("GIT_TRACE", &trace);
     let counts = |f: &Fixture| {

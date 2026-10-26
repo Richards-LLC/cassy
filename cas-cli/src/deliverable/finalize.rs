@@ -286,7 +286,9 @@ pub fn finalize(request: &FinalizeRequest) -> anyhow::Result<FinalizeReceipt> {
         let mut command = Command::new("python3");
         command
             .current_dir(&base)
-            .arg("-I")
+            // Not -I: PyMuPDF is often a user-site install. -P still keeps
+            // the workspace directory off the import path.
+            .arg("-P")
             .arg(workspace.path(CHECK_PDF.path))
             .arg(&pdf)
             .arg(&check_dir);

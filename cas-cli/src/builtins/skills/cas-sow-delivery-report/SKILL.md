@@ -45,7 +45,8 @@ explicit go. Client messages carry commitments the operator owns.
    length, the round counts and the approval threshold are business terms, so
    do not infer them from code. Commit the file. Done when
    `grep -nE '<<[^>]+>>' docs/sow/DELIVERY.md` prints nothing.
-2. **Confirm the brand source.** Open the `DESIGN.md` that `DELIVERY.md` names.
+2. **Confirm the brand source.** Open the `DESIGN.md` that `DELIVERY.md` names
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)).
    Compare its primary colour and font family with one live screen of the
    environment. If it is missing or disagrees, refresh it with `design-spec`
    first. A report branded from stale tokens looks foreign to the client. Done

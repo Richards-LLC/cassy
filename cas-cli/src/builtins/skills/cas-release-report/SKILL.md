@@ -35,7 +35,8 @@ metadata:
    project tokens from the root `DESIGN.md` when its frontmatter names CSS
    `source` files and `maps` roles (exemplar.md), else `design-tokens.json` or
    `docs/design/design-tokens.json`, else the bundled Petrastella defaults.
-   Record which in the brief.
+   Record which in the brief. A project with no `DESIGN.md` gets one first
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)).
 5. Preserve the identity: a serif verdict, a change map of equal-area dots (one
    per shipped change) in named product areas, a quiet numbered folio and one
    decorative row of dots at install. The project's tokens decide palette,

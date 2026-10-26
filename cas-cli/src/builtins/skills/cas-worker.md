@@ -49,8 +49,7 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
    once) or reopens it with findings. Don't re-close or block on it. Read [recovery.md](references/recovery.md)
    for the waiting rule and for rejection or crossed-message handling.
 
-One event gets one message. A successful `task action=start` is its own
-acceptance receipt. A close is the lifecycle report; never send a post-close
+One event gets one message. A close is the lifecycle report; never send a post-close
 summary or echo the close relay. After a merge request, wait for the supervisor's
 response instead of sending a second update about the same request.
 
@@ -73,7 +72,6 @@ use assigned work; `ready` and `available` are backlog
 - Stop only the PID you started (capture `$!` or use your own PID file); never use `pkill`, `killall`, or process-name searches to send signals on the shared host.
 - Checkpoint, never compact: at ~80% context, commit, push, write
   [HANDOFF.md](references/recovery.md), then request a respawn.
-- When close says verification required, quote its guidance in `need:`.
 
 ## Blockers and review waits
 
@@ -112,7 +110,8 @@ replace the selected journeys.
 
 - Detached work or checkpoint timing: [reminders.md](../cas-supervisor/references/reminders.md)
   for the push-first table and cleanup contract.
-
+- Human-facing output (report, page, chart, notes, UI, CLI, drawing, image):
+  [DESIGN.md first](../design-spec/references/design-md-first.md); close records it.
 - Check/test work: [discipline.md](references/discipline.md) for capped commands,
   clean-commit receipts and the supervisor's full assembly proof.
 - Evidence/report task, sync or resume: [details.md](references/details.md) for

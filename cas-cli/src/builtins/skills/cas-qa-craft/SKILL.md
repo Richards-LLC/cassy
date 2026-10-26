@@ -112,8 +112,8 @@ missing.
 
 ## Boundaries
 
-Keep this skill focused on user-flow evidence. The worked matrix is in
-[references/exemplar.md](references/exemplar.md); `cas-playwright-debug` owns framework-specific
-diagnosis, `cas-servers` owns process lifecycle, and the task verifier owns judgment. Add
-automation-caused artifacts to the ledger's honesty section. Do not modify the verifier to make a
-missing or failing capture pass.
+Keep this skill focused on user-flow evidence; the worked matrix is in
+[references/exemplar.md](references/exemplar.md). Check output against the delivery's `design:` line
+([DESIGN.md first](../design-spec/references/design-md-first.md)). `cas-playwright-debug` owns
+diagnosis, `cas-servers` process lifecycle, the task verifier judgment. Log automation-caused
+artifacts in the ledger's honesty section; never modify the verifier to pass a missing capture.

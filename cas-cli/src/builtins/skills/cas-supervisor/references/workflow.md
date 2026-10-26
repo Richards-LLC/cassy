@@ -70,6 +70,10 @@ first. A worker cannot recover a goal or a proof method the brief never named.
 | Acceptance: the observable pass condition | `acceptance_criteria` |
 | Proof expected: how the result will be checked | `proof_targets`, `demo_statement`, or the named command or grep in `acceptance_criteria` |
 
+Human-facing output follows [DESIGN.md first](../../design-spec/references/design-md-first.md)
+without being told; the brief adds only the target project when it is not the
+checkout the worker runs in. Review the close's `design:` line against the output.
+
 Workers report in one shape: the close reason starts `PASS`, or `ISSUES`
 plus the known non-blocking defects, then the commit SHA and how it was
 checked. A blocked worker does not close: it sets `status=blocked` and

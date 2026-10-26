@@ -59,12 +59,12 @@ Contents: 1 One file · 2 JavaScript · 3 Semantic HTML · 4 Theme and design la
 
 ## 4. Theme and design language
 
-- **The palette is the project's `DESIGN.md` or the Petrastella tokens.** Read `DESIGN.md` first when
-  it exists and take the tokens it names. Without one, paste `design-spec/references/tokens.css`
-  (generated from `design-tokens.json`; rationale in `petrastella-design-language.md`): warm
-  stone paper, a sandstone hero surface, serif display for the verdict and title, body sans, tabular
-  mono for numbers, and semantic color roles. Neutral grey is the white-label fallback; a brief that
-  chooses it names the brand reason in its *omitted* field.
+- **The palette is the target project's `DESIGN.md`**, resolved by
+  [DESIGN.md first](../../design-spec/references/design-md-first.md). A project created through
+  `design-spec` inherits the Petrastella language (rationale in `petrastella-design-language.md`):
+  warm stone paper, a sandstone hero surface, serif display for the verdict and title, body sans,
+  tabular mono for numbers, and semantic color roles. Neutral grey is the white-label fallback; a
+  brief that chooses it names the brand reason in its *omitted* field.
 - **Colors are semantic roles, declared once in `:root`** by the token names — `bg`, `surface`,
   `surface-hero`, `line`, `line-strong`, `ink`, `ink-muted`, `verdict`, `verdict-soft`, `evidence`,
   `action`, `good`, `warning`, `danger` — and referenced everywhere; no rule carries a hex value the

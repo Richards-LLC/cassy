@@ -615,6 +615,10 @@ pub const BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/tokens.css",
         content: include_str!("builtins/skills/design-spec/references/tokens.css"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/design-md-first.md",
+        content: include_str!("builtins/skills/design-spec/references/design-md-first.md"),
+    },
     // cas-ui-craft skill (cas-d967) : concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -1335,6 +1339,10 @@ pub const CODEX_BUILTIN_SKILLS: &[BuiltinFile] = &[
         path: "skills/design-spec/references/tokens.css",
         content: include_str!("builtins/skills/design-spec/references/tokens.css"),
     },
+    BuiltinFile {
+        path: "skills/design-spec/references/design-md-first.md",
+        content: include_str!("builtins/skills/design-spec/references/design-md-first.md"),
+    },
     // cas-ui-craft skill (cas-d967) — codex mirror: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
     // merge floor, and four annotated exemplars.
@@ -2049,6 +2057,10 @@ pub const GROK_BUILTIN_SKILLS: &[BuiltinFile] = &[
     BuiltinFile {
         path: "skills/design-spec/references/tokens.css",
         content: include_str!("builtins/skills/design-spec/references/tokens.css"),
+    },
+    BuiltinFile {
+        path: "skills/design-spec/references/design-md-first.md",
+        content: include_str!("builtins/skills/design-spec/references/design-md-first.md"),
     },
     // cas-ui-craft skill (cas-d967) — grok twin: concept brief before any render,
     // first-three-seconds rule, form vocabulary, scored critique rubric with a
@@ -6996,6 +7008,52 @@ This is the body content."#;
                     "add {name:?} to SHIPPED_NON_CAS_SKILL_DIRS"
                 );
             }
+        }
+    }
+
+    /// cas-adb0: every role, craft and report skill that shapes human-facing
+    /// output links the one DESIGN.md-first rule, and only the rule states
+    /// its close record, so branding never depends on a brief saying so.
+    #[test]
+    fn design_md_first_rule_is_linked_from_every_reader_and_stated_once() {
+        const RULE: &str = "skills/design-spec/references/design-md-first.md";
+        const READERS: &[&str] = &[
+            "skills/cas-worker/SKILL.md",
+            "skills/cas-worker/references/close-gate.md",
+            "skills/cas-supervisor/SKILL.md",
+            "skills/cas-supervisor/references/workflow.md",
+            "skills/cas-release-notes/SKILL.md",
+            "skills/cas-cli-craft/SKILL.md",
+            "skills/cas-technical-drawing/SKILL.md",
+            "skills/cas-frontend-engineering/SKILL.md",
+            "skills/cas-image-generate/SKILL.md",
+            "skills/cas-qa-craft/SKILL.md",
+            "skills/cas-html-reports/SKILL.md",
+            "skills/cas-release-report/SKILL.md",
+            "skills/cas-sow-delivery-report/SKILL.md",
+            "skills/cas-dataviz/SKILL.md",
+            "skills/cas-ui-craft/SKILL.md",
+            "skills/design-spec/SKILL.md",
+        ];
+        for (label, catalog, checklist) in [
+            ("claude", BUILTIN_SKILLS, "skills/cas-supervisor-checklist/SKILL.md"),
+            ("codex", CODEX_BUILTIN_SKILLS, "skills/cas-codex-supervisor-checklist/SKILL.md"),
+            ("grok", GROK_BUILTIN_SKILLS, "skills/cas-supervisor-checklist/SKILL.md"),
+        ] {
+            for reader in READERS.iter().chain([&checklist]) {
+                let body = catalog
+                    .iter()
+                    .find(|b| b.path == *reader)
+                    .unwrap_or_else(|| panic!("{label} catalog lacks {reader}"))
+                    .content;
+                assert!(body.contains("design-md-first.md"), "{label} {reader} must link {RULE}");
+            }
+            let stating: Vec<&str> = catalog
+                .iter()
+                .filter(|b| b.content.contains("none: created via design-spec at"))
+                .map(|b| b.path)
+                .collect();
+            assert_eq!(stating, [RULE], "{label}: only the rule states its close record");
         }
     }
 

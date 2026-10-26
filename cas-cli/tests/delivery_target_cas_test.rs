@@ -870,6 +870,11 @@ async fn cassy_closes_green_merged_delivery_on_approval_cas_eda0() {
             !worker_prompts.iter().any(|p| p.contains("Retry task close")),
             "{row}: Cassy closes or reopens; the worker never re-closes: {worker_prompts:?}"
         );
+        assert_eq!(
+            worker_prompts.iter().filter(|p| p.contains("Cassy parked it")).count(),
+            usize::from(row == "unparked"),
+            "{row}: a worker parked by the merge hears it once (cas-e9d6): {worker_prompts:?}"
+        );
         if verdict == Some("rejected") {
             assert_eq!(
                 worker_prompts.iter().filter(|p| p.contains(&format!("rejected {row}"))).count(),

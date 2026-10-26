@@ -740,17 +740,24 @@ async fn widening_covered_by_worker_receipts_keeps_the_parked_delivery_cas_d6eb(
 }
 
 /// cas-e9d6: the 14:01 divergence. Cassy's post-merge close of a parked
-/// blast-radius delivery must judge the same evidence the worker's own close
-/// judges: the worker's receipts at its delivered tip cover the crate, so the
-/// verdict close succeeds without any worker turn.
+/// blast-radius delivery judges the worker's receipts at the delivered tip,
+/// exactly as the worker's own close does. A gate that truly fails on the
+/// verdict is the supervisor's: no worker retry, the worker hold is restored
+/// and no close-authority note is written until a close commits.
 #[tokio::test]
 async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     let mut env = TestEnvGuard::temp_home();
     let f = fixture(&mut env);
+    std::fs::write(
+        f.cas_dir().join("config.toml"),
+        format!("[project]\ncanonical_id=\"{PROJECT}\"\n"),
+    )
+    .unwrap();
     let tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
-    crate::factory_worker_check::record_passing_test_for_tests(
+    let record = || crate::factory_worker_check::record_passing_test_for_tests(
         &f.cas_dir(), &f.worker_path, &tip, "widget", "test(gear)",
     );
+    record();
     let parked = call(&f.worker, serde_json::json!({"action": "close", "id": ID, "reason": "gear turns"})).await;
     assert!(parked.contains("MERGE REQUIRED"), "{parked}");
 
@@ -758,19 +765,58 @@ async fn cassy_merge_close_judges_the_workers_receipt_scope_cas_e9d6() {
     git(repo, &["merge", "-q", "--no-ff", LANE, "-m", "merge lane"]);
     git(repo, &["push", "-q", "origin", "main"]);
     let merge = git(repo, &["rev-parse", "HEAD"]);
-    open_task_store(&f.cas_dir())
-        .unwrap()
-        .record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green)
-        .unwrap();
+    let tasks = open_task_store(&f.cas_dir()).unwrap();
+    tasks.record_merge_admission(ID, &merge, cas_types::MergeCiAdmission::Green).unwrap();
 
     env.set("CAS_AGENT_ROLE", "supervisor");
     let cassy = CasCore::with_daemon(f.cas_dir(), None, None);
     cassy.set_agent_id_for_testing("br-supervisor-session".into());
-    let outcome = cassy.close_green_merged_delivery(ID).await;
+    // The worker's receipts cover `widget`, so Cassy's close reaches the
+    // verification gate instead of refusing the proof scope.
+    let first = cassy.close_green_merged_delivery(ID).await.receipt(ID);
+    assert!(first.contains("VERIFICATION REQUIRED"), "{first}");
+    let dispatch = cas_store::get_latest_verification_dispatch(&f.cas_dir(), ID).unwrap().unwrap();
+
+    // The worker blocks on that dispatch; then the receipts disappear, so a
+    // proof gate truly fails when the verdict arrives.
+    env.set("CAS_AGENT_ROLE", "worker");
+    call(&f.worker, serde_json::json!({"action": "update", "id": ID, "status": "blocked"})).await;
+    assert_eq!(f.task().status, TaskStatus::Blocked);
+    std::fs::remove_dir_all(f.cas_dir().join("worker-checks")).unwrap();
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let verdict = f
+        .supervisor
+        .verification(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "add", "task_id": ID, "dispatch_id": dispatch.id,
+            "status": "approved", "summary": "gear turns", "confidence": 1.0,
+        })).unwrap()))
+        .await
+        .expect("verdict");
+    let verdict = verdict.content.iter().filter_map(|c| match &c.raw {
+        rmcp::model::RawContent::Text(text) => Some(text.text.clone()),
+        _ => None,
+    }).collect::<Vec<_>>().join("\n");
+    assert!(verdict.contains("narrower than its delivery diff"), "the gate is reported: {verdict}");
+    assert!(verdict.contains("No worker close retry"), "{verdict}");
+    let held = f.task();
+    assert_eq!(held.status, TaskStatus::Blocked, "the worker hold is restored");
+    assert!(crate::mcp::tools::core::task::block_hold::read(tasks.as_ref(), ID).unwrap().is_some());
+    assert!(!held.notes.contains("Cassy close authority"), "{}", held.notes);
+    let worker_prompts = crate::store::open_prompt_queue_store(&f.cas_dir()).unwrap()
+        .peek_all(50).unwrap().into_iter().filter(|p| p.target == WORKER)
+        .map(|p| p.prompt).collect::<Vec<_>>();
+    assert!(!worker_prompts.iter().any(|p| p.contains("Retry task close")), "{worker_prompts:?}");
+
+    // With the worker's receipts back, the recorded verdict closes it.
+    record();
+    let verification = cas_store::get_verification_for_dispatch(&f.cas_dir(), &dispatch.id).unwrap().unwrap();
+    let closed = cassy.close_green_merged_delivery_after_verdict(ID, Some(&verification.id)).await;
     assert!(
-        matches!(outcome, super::super::merge_close::CassyMergeClose::Closed { .. }),
+        matches!(closed, super::super::merge_close::CassyMergeClose::Closed { .. }),
         "{}",
-        outcome.receipt(ID)
+        closed.receipt(ID)
     );
-    assert_eq!(f.task().status, TaskStatus::Closed);
+    let closed = f.task();
+    assert_eq!(closed.status, TaskStatus::Closed);
+    assert!(closed.notes.contains("Cassy close authority"), "{}", closed.notes);
 }

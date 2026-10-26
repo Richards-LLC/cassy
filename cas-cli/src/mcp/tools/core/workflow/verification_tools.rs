@@ -1018,6 +1018,13 @@ impl CasCore {
                 .await;
             let worker_retry = match &cassy_close {
                 CassyMergeClose::Closed { .. } | CassyMergeClose::AlreadyClosed => String::new(),
+                // cas-e9d6: Cassy's close of a merged delivery runs the
+                // worker close's gates on the same evidence, so a worker
+                // retry cannot pass where it held. The gate is the
+                // supervisor's to resolve; never relay it to the worker.
+                CassyMergeClose::Held(_) if cassy_merged => {
+                    "\nNo worker close retry was queued: the gate above is the supervisor's to resolve before this merged delivery can close.".to_string()
+                }
                 CassyMergeClose::NotEligible | CassyMergeClose::Held(_) => match task_store.get(&req.task_id) {
                     Ok(current) => match crate::mcp::tools::core::task::lifecycle::supervisor_push::queue_approved_verification_close_retry(
                         &self.cas_root,

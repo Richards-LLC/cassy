@@ -98,6 +98,7 @@ pub mod qa_registry;
 pub mod qa_impact;
 pub mod qa_seed;
 pub mod qa_post_release;
+pub mod qa_traffic;
 /// cas-e8d1 (GH #1233): open work the record says is done.
 pub(crate) mod backlog_hygiene;
 pub(crate) mod qa_batch;

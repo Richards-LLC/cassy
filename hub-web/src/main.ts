@@ -31,7 +31,7 @@ import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifa
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
 import { syncContextRail, waitingOnOperator } from "./context-rail";
-import { applyScheme, markAppearanceCommands, setScheme, type SchemePreference } from "./scheme";
+import { applyScheme, markAppearanceCommands, schemePreference, setScheme, type SchemePreference } from "./scheme";
 import { applyAttentionEnrichment, attentionUrl, coalesceAttention, createAttentionItem, dismissableInfoItems, groupAttention, machineEventAttention, mergeAttentionItem, type AttentionAction, type AttentionContent, type AttentionEnrichment } from "./attention";
 import { renderAttentionPanel } from "./attention-view";
 import { HubConnectionSupervisor, HubRequestError, type ConnectionState, type HubMachineInfo } from "./connection";
@@ -83,6 +83,7 @@ import { enrollPairedInstallation } from "./inbox/hub-enrollment";
 import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
+import { countUsage, usage, type UsageAction } from "./usage";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -330,6 +331,8 @@ let speechInputState: SpeechInputState = "idle";
 let speechInputDetail = "";
 /** Dictation wrote into the composer during the current listening run (cas-71f4). */
 let speechWroteThisRun = false;
+/** cas-0b3d: dictation wrote the current draft, so its send counts as a voice reply. */
+let draftDictated = false;
 let messageDelivery: { session: string; target: string; clientRef: string } | undefined;
 /** The refused send whose text Edit put back in the composer (F6): the next
  * composer send in that thread is its edited version and retires it. */
@@ -660,8 +663,16 @@ watchPairingFragment(window, pendingPairingStore, (fragment) => {
 function createConnection(machine: StoredMachine): HubConnectionSupervisor {
   restoreStoredSends(machine);
   return new HubConnectionSupervisor(machine, {
+    // cas-0b3d: one count per network change, from the open conversation's machine.
+    onNetworkChange: () => { if (machine.id === selectedMachineId && selectedSession !== undefined) countUsage("network.switch"); },
     onState: (state) => {
       const wasLive = connectionStates.get(machine.id)?.phase === "live";
+      if (state.phase === "live" && !wasLive) {
+        // cas-0b3d: back to live after an outage of the open conversation's
+        // machine is a recovery; any machine coming online takes its counts.
+        if (lastLiveAt.has(machine.id) && machine.id === selectedMachineId) countUsage("connection.recovered");
+        void flushUsage();
+      }
       connectionStates.set(machine.id, state);
       // cas-0e14 F30: an open New session follows the machine's connection.
       launchSheet.refresh();
@@ -902,6 +913,8 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
     onConversationHistory: (session, page: ConversationHistoryPage, frameFence) => {
       const key = sessionKey(machine.id, session);
       const cursor = conversationHistoryPage(key);
+      // Only "Load earlier" sets loading; the first page is not a look back.
+      if (cursor.loading) countUsage("history.older");
       applyHistoryCursor(cursor, page);
       const history = conversationHistory(key, session);
       // cas-55a4: the thread is this session's own turns. Other sessions'
@@ -1171,6 +1184,7 @@ function settleLaunchDropped(machineId: string): void {
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
   const acknowledgedAt = new Date().toISOString();
   const pending = items.filter((item) => !item.acknowledgedAt);
+  if (pending.some((item) => item.kind === NOTICE_KIND)) countUsage("attention.delivery");
   for (const item of pending) item.acknowledgedAt = acknowledgedAt;
   await Promise.all(pending.map((item) => attentionStore.put(item)));
   render();
@@ -1329,6 +1343,7 @@ async function pairMachine(form: HTMLFormElement): Promise<StoredMachine | false
   pairingDraft = createPairingDraft(location.origin);
   const previousScopes = machines.get(machine.id)?.scopes;
   machines.set(machine.id, machine);
+  countUsage(invitation.relay ? "pair.code" : "pair.link");
   // cas-0e14 F29: a code re-pair can't carry session launch. Say plainly that
   // starting sessions needs allowing again, rather than letting New session
   // quietly open the permission view again (its label stays "New session", cas-865c).
@@ -1607,6 +1622,7 @@ function syncPairingCountdown(): void {
 }
 
 async function openSession(machineId: string, session: string): Promise<void> {
+  if (selectedSession !== undefined && selectedMachineId !== undefined && selectedMachineId !== machineId) countUsage("machine.switch");
   commitSelection({ machineId, session });
   await attachSelectedSession(machineId, session);
 }
@@ -2159,6 +2175,7 @@ async function interruptSupervisor(): Promise<void> {
       if (took) toast(`${took}The interrupt didn't go through; try again once the conversation is live.`, { thread: key });
       return;
     }
+    countUsage("supervisor.control");
     toast(`${took}Interrupted ${supervisorPhrase(machine.id, session)}.`, { thread: key });
   } finally {
     interruptsInFlight.delete(key);
@@ -2214,7 +2231,7 @@ function openRawOutput(): void {
   rawOutputThread = sessionKey(selectedMachineId, selectedSession);
   const phrase = supervisorPhrase(selectedMachineId, selectedSession);
   dialog.querySelector<HTMLElement>("#raw-output-subject")!.textContent = `What ${phrase}'s terminal shows, as text. Read-only.`;
-  if (!dialog.open) dialog.showModal();
+  if (!dialog.open) { countUsage("supervisor.control"); dialog.showModal(); }
   document.querySelector<HTMLButtonElement>("#conversation-raw-output")?.setAttribute("aria-expanded", "true");
   syncRawOutput();
 }
@@ -2567,6 +2584,17 @@ function rememberComposerDraft(): void {
 // Typing is stored as it happens, and once more as the page goes away, so a
 // reload between renders loses nothing.
 document.addEventListener("input", (event) => { if ((event.target as Element | null)?.id === "message-text") rememberComposerDraft(); });
+/** cas-0b3d: every live paired machine takes the usage days it has not accepted yet. */
+let usageFlush: Promise<void> | undefined;
+function flushUsage(): Promise<void> {
+  usageFlush ??= usage.flush([...connections]
+    .filter(([id]) => connectionStates.get(id)?.phase === "live")
+    .map(([id, connection]) => ({ id, post: (entries) => connection.postUsage(entries) })))
+    .finally(() => { usageFlush = undefined; });
+  return usageFlush;
+}
+window.setInterval(() => { void flushUsage(); }, 5 * 60_000);
+window.addEventListener("pagehide", () => { void flushUsage(); });
 window.addEventListener("pagehide", () => { rememberComposerDraft(); persistPendingSends(); persistArrivals(); });
 
 function captureMessageDraft(): void {
@@ -2735,6 +2763,7 @@ function createSpeechController(capability: SpeechInputCapability): SpeechDictat
       composer.value = value;
       composer.setSelectionRange(messageDraftSelection, messageDraftSelection);
       speechWroteThisRun = true;
+      draftDictated = true;
       const delivery = document.querySelector<HTMLElement>("#message-delivery");
       if (delivery) delivery.hidden = true;
     },
@@ -3479,17 +3508,17 @@ function supervisorPhrase(machineId: string, session: string): string {
   return project ? `the ${project} supervisor` : "the supervisor";
 }
 
-async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): Promise<void> {
+async function deliverSupervisorMessage(machine: StoredMachine, session: string, supervisor: string, text: string, replyTo?: number, retryOf?: string, editOf?: string): Promise<boolean> {
   await restoredMachines.get(machine.id);
   if (!sessionIsUp(machine.id, session) && !machineWillReconnect(machine.id)) {
     showComposerStatus(connectionStates.get(machine.id)?.authFailure ? `${pairingRefusal(machine.label)} Your message is kept; re-pair, then send it.` : outageRefusal(machine.label), "error", true);
-    return;
+    return false;
   }
   const key = sessionKey(machine.id, session);
   const history = conversationHistory(key, session);
   if (pendingThreadScopes.has(key) && pendingThreadScopes.get(key) !== scopeKey(deliveryScope(machine, session))) {
     showComposerStatus("This conversation's kept messages belong to another pairing. Reopen it before sending from this device.", "error");
-    return;
+    return false;
   }
   pendingThreadScopes.set(key, scopeKey(deliveryScope(machine, session)));
   await journalWrites;
@@ -3500,7 +3529,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);
     if (previous?.kind !== "send" || !history.canRetrySend(previous.value)) {
       updateConversationViews(); renderConversationList();
-      return;
+      return false;
     }
   }
   const clientRef = retryOf ?? crypto.randomUUID();
@@ -3513,20 +3542,20 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     const snapshot = await sendJournal.read(scope);
     history.synchronizePending(snapshot.sends, Date.now(), snapshot.receipts);
     updateConversationViews(); renderConversationList();
-    return;
+    return false;
   }
   if (result !== "kept") {
     showComposerStatus(retryOf ? "This message's delivery state could not be confirmed for a retry. Wait for its receipt before retrying."
       : journalRefusal(result, machine), "error");
-    return;
+    return false;
   }
-  if (conversationPersistenceBlocked.has(machine.id)) return;
+  if (conversationPersistenceBlocked.has(machine.id)) return false;
   if (retryOf) {
     // A live receipt can arrive while the Retry transaction commits.
     const previous = history.events.find(event => event.kind === "send" && event.value.id === retryOf);
     if (previous?.kind !== "send" || !history.canRetrySend(previous.value)) {
       updateConversationViews(); renderConversationList();
-      return;
+      return false;
     }
     history.discardRefused(retryOf);
   }
@@ -3552,6 +3581,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
     composer?.focus();
   }
   if (sessionIsUp(machine.id, session)) await flushHeldSends(machine, session);
+  return true;
 }
 
 /**
@@ -3604,7 +3634,12 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
     // reply beside a Delivered message.
     if (messageStatus?.text === plan.notice) clearComposerStatus();
   }
-  await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
+  // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
+  // wrote its draft. A Retry resends and is not counted again.
+  const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
+  const sent = await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
+  if (sent && usageAction) countUsage(usageAction);
+  if (sent && !quick) draftDictated = false;
   } finally {
     pendingSubmissions.delete(submissionKey);
   }
@@ -3983,6 +4018,7 @@ async function endConversationSession(row: ConversationRow): Promise<void> {
   const connection = connections.get(row.machineId);
   if (!connection) throw new Error("this machine is not connected");
   await connection.endSession(row.session);
+  countUsage("session.end");
   endedSessions.add(sessionKey(row.machineId, row.session));
   if (selectedMachineId === row.machineId && selectedSession === row.session) commitSelection({ machineId: row.machineId });
   await connection.refreshSessions().catch(() => undefined);
@@ -4144,6 +4180,8 @@ function renderConversationList(): void {
     // cas-537f: a result opened from the list search is a jump, as Enter is:
     // the full list is back for the next visit.
     if (conversationSearchQuery) clearConversationSearch();
+    countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
+    if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
   }, endConversationSession);
   keepConversationListPlace(container, shown.find((row) => row.selected)?.key);
@@ -4563,6 +4601,7 @@ async function runFleetAction(rowKey: string, action: FleetAction): Promise<void
     fleetFocusNext = `${rowKey}:progress`;
     renderStatus(statuses.get(sessionKey(machineId, session)));
   });
+  if (result === "succeeded") countUsage("fleet.operation");
   if (!result || fleetOps.selectionEpoch !== epoch || selectedMachineId !== machineId || selectedSession !== session) return;
   if (result === "succeeded") {
     if (action.request.op.kind === "request_merge") fleetAsked.set(fleetAskedKey(machineId, session, String(action.request.op.task_id)), Date.now());
@@ -4652,6 +4691,7 @@ async function runWriteGrant(): Promise<void> {
   fleetFocusNext = "header:grant-go";
   renderStatus(statuses.get(sessionKey(machineId, session)));
   await sending;
+  if (kind === "grant" && writeGrant.result?.tone === "ok") countUsage("write-grant");
   if (writeGrant.result) fleetAnnounce(writeGrant.result.text, { repeat: true });
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   fleetFocusNext = focusAfterResult(writeGrant, kind);
@@ -5094,7 +5134,11 @@ function bindEvents(): void {
   }
   markAppearanceCommands(palette);
   for (const command of palette.querySelectorAll<HTMLButtonElement>("[data-palette-scheme]")) {
-    command.onclick = () => { setScheme(command.dataset.paletteScheme as SchemePreference); markAppearanceCommands(palette); closePalette(); };
+    command.onclick = () => {
+      const next = command.dataset.paletteScheme as SchemePreference;
+      if (next !== schemePreference()) countUsage("scheme.change");
+      setScheme(next); markAppearanceCommands(palette); closePalette();
+    };
   }
   const paletteDormant = palette.querySelector<HTMLButtonElement>("[data-palette-action='dormant']");
   if (paletteDormant) paletteDormant.onclick = () => { closePalette(); setDormantRevealed(!revealDormant); };
@@ -5105,7 +5149,7 @@ function bindEvents(): void {
   const paletteDismiss = palette.querySelector<HTMLButtonElement>("[data-palette-action='dismiss-info']");
   if (paletteDismiss) paletteDismiss.onclick = () => { closePalette(); void acknowledgeAttentionGroup(dismissableInfoItems(attention)); };
   if (document.querySelector<HTMLButtonElement>("#pair-toggle")) document.querySelector<HTMLButtonElement>("#pair-toggle")!.onclick = () => (document.querySelector<HTMLDialogElement>("#pair-dialog")!).showModal();
-  for (const button of document.querySelectorAll<HTMLButtonElement>("#inbox-toggle, #empty-inbox")) button.onclick = () => void inboxView.open();
+  for (const button of document.querySelectorAll<HTMLButtonElement>("#inbox-toggle, #empty-inbox")) button.onclick = () => { countUsage("inbox.open"); void inboxView.open(); };
   const skip = document.querySelector<HTMLButtonElement>("#skip-to-conversation");
   if (skip) skip.onclick = skipToConversation;
   for (const pair of document.querySelectorAll<HTMLButtonElement>("#empty-pair")) {
@@ -5255,7 +5299,7 @@ app.addEventListener("focusout", () => {
 });
 
 // cas-2a26: following Explorer from the app switcher closes the menu here.
-app.addEventListener("click", (event) => { closeAppSwitcherAfterFollow(event.target); });
+app.addEventListener("click", (event) => { if (closeAppSwitcherAfterFollow(event.target)) countUsage("app-switch.explorer"); });
 
 // A tap on any artifact (the thread's sheet, the context rail, the operator
 // thread) opens the hosted copy through a signed view URL (cassy issue 910).

@@ -350,6 +350,35 @@ as an array in the same document. Tracked registry enforcement remains authorita
 `cas doctor` includes a journey-registry row; a missing registry points to the seed
 command. Neither status nor doctor runs journey specs or installs gates.
 
+## Measured traffic
+
+Commander counts how often each journey's defining act happens, so traffic
+shares come from use instead of guesses. `hub-web/src/usage.ts` maps each counted
+action to one journey (for example `reply.typed` to HUB-J5), and its test fails
+when a live Commander journey has no counted action. Counts stay in the browser
+as per-day totals of action names, with no session, project, machine or message
+content. They are sent only to the operator's paired machines: each machine gets
+every changed day, and its hub keeps the highest count per device, day and action
+in `~/.cas/hub/commander-usage.json`, so a repeated post never double counts and
+one machine's ledger covers every browser that reached it. Days older than
+400 are pruned.
+
+```bash
+cas qa journeys --traffic              # shares over the last 30 days
+cas qa journeys --traffic --days 14 --json
+cas qa journeys --traffic --write      # record them in the registry
+```
+
+A journey's share is its count divided by the counted actions of every live
+registry journey in the window; ids the registry does not list are reported
+separately. `--write` refuses an empty window. Otherwise it sets each live
+journey's `traffic` to `{share_pct, basis, source}`, sets `updated`, and writes
+`traffic_snapshot: {as_of, window_days, actions, source}`, leaving every other
+line unchanged. `cas qa impact` already lists affected journeys highest share
+first, and `cas qa post-release start` records the release's affected journeys in
+that order; post-release status and its gate message show them as "Watch first".
+That list is display only and never changes the verdict.
+
 ## Registry upkeep at task park
 
 G1–G3 run before the merge request, using the committed delivery head and the task's

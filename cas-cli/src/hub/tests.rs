@@ -77,6 +77,50 @@ async fn installation_revoke_sse(drain_replay: bool) {
     assert_eq!(app.oneshot(request("/v1/auth/devices")).await.unwrap().status(), StatusCode::UNAUTHORIZED);
 }
 
+/// cas-0b3d: a paired browser's usage post is kept under its device, a
+/// repeat replaces rather than adds, and a batch with one bad row is refused.
+#[tokio::test]
+async fn commander_usage_post_is_device_keyed_idempotent_and_validated() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), Utc::now()).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let post = |body: String| Request::post("/v1/usage")
+        .header("origin", "https://controller.example")
+        .header("content-type", "application/json")
+        .header("authorization", format!("DPoP {}", credential.credential))
+        .header("dpop", sign_dpop(&signing, &credential.credential, "POST", "/v1/usage", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        .body(Body::from(body)).unwrap();
+    let today = Utc::now().date_naive().format("%Y-%m-%d").to_string();
+    let row = |action: &str, journey: &str, count: u64| serde_json::json!({"day": today, "action": action, "journey": journey, "count": count});
+    let batch = serde_json::json!({"entries": [row("reply.typed", "HUB-J5", 3)]}).to_string();
+    for _ in 0..2 {
+        assert_eq!(app.clone().oneshot(post(batch.clone())).await.unwrap().status(), StatusCode::OK);
+    }
+    let bad = serde_json::json!({"entries": [row("reply.typed", "HUB-J5", 9), row("Reply typed", "HUB-J5", 1)]}).to_string();
+    let refused = app.clone().oneshot(post(bad)).await.unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    let ledger = super::usage::read_ledger(&root).unwrap().unwrap();
+    assert_eq!(ledger.devices.keys().collect::<Vec<_>>(), vec![&credential.device_id]);
+    assert_eq!(super::usage::journey_totals(&ledger, Utc::now().date_naive(), 1).get("HUB-J5"), Some(&3));
+    let unsigned = Request::post("/v1/usage").header("origin", "https://controller.example")
+        .header("content-type", "application/json").body(Body::from(batch)).unwrap();
+    assert_eq!(app.oneshot(unsigned).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+}
+
 /// cas-4634: the account challenge is issued to an authenticated device,
 /// and an enrollment assertion on a hub with no operator-inbox principal is
 /// refused with a closed code, leaving the installation unenrolled.

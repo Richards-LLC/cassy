@@ -13,6 +13,7 @@ import { escapeHtml, projectTitle } from "./cloud-brand";
 import { LAUNCH_SCOPE, canEnableSessionLaunch, launchGrantCommand } from "./pairing-scopes";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import type { Scope } from "./types";
+import { countUsage } from "./usage";
 
 /** The supervisors POST /v1/sessions accepts (hub/server.rs launch_session_blocking). */
 export type SupervisorCli = "claude" | "codex" | "grok";
@@ -848,6 +849,7 @@ export class LaunchSheet {
       if (result.code === "invalid_profile" || result.code === "not_logged_in") void this.loadProfiles(machine.id);
       return;
     }
+    countUsage("session.launch");
     if (result.attached) { this.land(machine.id, result.session); return; }
     // cas-cee5 (journey F34): the project the operator chose, never the
     // generated codename they never saw (the cas-71f4 rule).

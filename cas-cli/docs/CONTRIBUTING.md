@@ -1466,6 +1466,31 @@ produce `FAST ROWS REQUIRED`; missing crate tests produce `FOCUSED PROOF
 REQUIRED`. Park executes neither checks nor tests. Hook restoration does not
 waive these refusals or the merge queue's final-tree proof.
 
+## Project capture configuration
+
+`cas config list --section qa.capture` lists the project capture settings.
+Use `cas config set qa.capture.base_url http://localhost:3000` for an existing
+target, or set `qa.capture.serve` to a checkout server command with `{port}`.
+`ready_path` defaults to `/`; `shots` defaults to `docs/qa/shots.json`.
+`mask` is a comma-separated selector list. `viewports` defaults to `1280x800`;
+`390x844` is available for shots that request mobile. `max_shots` defaults to 6
+and `timeout_secs` to 240. `max_html_mb` is a capture-side ceiling of 8 MB;
+report embedding budgets belong to finalize.
+
+For authenticated surfaces, set `login_path`, an anchored `success_url` such as
+`^https://[^/]+/dashboard`, and `credentials_env` to an environment-variable
+**name**, for example `PROJECT_QA_CREDENTIALS`. Optional `email_sel`,
+`password_sel` and `submit_sel` override the standard form selectors. The named
+variable must resolve to an existing readable credentials file at capture time.
+Set validates the variable name without requiring it in the setting shell;
+neither secrets nor resolved file paths are stored in project configuration.
+
+Consumers use `QaCaptureConfig::is_configured() -> Result<bool, String>`:
+`Ok(false)` means both `base_url` and `serve` are empty. Budget and login
+settings alone do not enable capture. A configured target with broken runtime
+credentials returns a finding in `Err`; evidence gates must refuse that finding.
+`credential_file()` checks the pointer without reading its contents.
+
 ## Build, assembly and CI policy
 
 This section moved here from the repository `CLAUDE.md`, where it loaded into every session.

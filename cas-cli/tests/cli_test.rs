@@ -1635,6 +1635,29 @@ fn test_config_get_set() {
         .success()
         .stdout(predicate::str::contains("false"));
 
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "qa.capture.success_url", "^https?://[^/]+/dashboard"])
+        .assert()
+        .success();
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "get", "qa.capture.success_url"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("^https?://[^/]+/dashboard"));
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "list", "--section", "qa.capture"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("qa.capture.credentials_env"));
+    cas_cmd(temp.path())
+        .current_dir(&temp)
+        .args(["config", "set", "qa.capture.success_url", "/dashboard"])
+        .assert()
+        .failure();
+
     // Hub policy is consumed by the host daemon, even from an initialized
     // project with a conflicting value (cas-e3ed).
     let host = temp.path().join(".test-home/.cas");

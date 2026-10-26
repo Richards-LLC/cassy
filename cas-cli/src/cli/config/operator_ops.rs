@@ -349,6 +349,7 @@ mod tests {
         if let crate::config::Constraint::OneOf(values) = &meta.constraint {
             candidates.extend(values.iter().cloned());
         }
+        candidates.extend(meta.examples().into_iter().map(str::to_owned));
         candidates.extend(
             [
                 "roundtrip-value",

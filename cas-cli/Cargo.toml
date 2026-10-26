@@ -124,6 +124,7 @@ urlencoding = "2.1"
 
 # Text Processing
 regex = "1.11"
+regex-syntax = "0.8"
 unicode-normalization = "0.1"
 similar = "2.7"
 pulldown-cmark = "0.13"

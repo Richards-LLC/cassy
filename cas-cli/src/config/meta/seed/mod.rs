@@ -10,6 +10,7 @@ mod llm;
 mod memory;
 mod notifications;
 mod qa;
+mod qa_capture;
 mod release;
 mod sections;
 mod skill_validation;
@@ -26,6 +27,7 @@ pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     issues::register_issues(registry);
     notifications::register_notifications(registry);
     qa::register_qa(registry);
+    qa_capture::register_capture(registry);
     coordination::register_coordination_lease_telemetry_and_missing(registry);
     llm::register_llm(registry);
     memory::register_memory(registry);

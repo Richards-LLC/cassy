@@ -971,6 +971,7 @@ function markdownReport(result) {
   for (const finding of result.findings) {
     const location = `${finding.url}${finding.state ? ` · state ${finding.state}` : ''} · ${finding.scheme} · ${finding.viewport.name}`;
     lines.push(`- **${finding.type}** — \`${finding.elementPath}\` — ${finding.textSample ? JSON.stringify(finding.textSample) : finding.reason || 'see JSON'} (${location})`);
+    if (finding.type === 'image-not-decoded') lines.push(`  - ${finding.reason}`);
     if (finding.ratio !== undefined) lines.push(`  - Contrast: ${finding.ratio}:1 (required ${finding.threshold}:1); foreground ${finding.foreground?.join(', ')}; background ${finding.background?.join(', ')}`);
   }
   lines.push('', '## Informational checks', '');
@@ -1189,6 +1190,89 @@ async function settlePage(page) {
   }, { quietMs: SETTLE_QUIET_MS, maxMs: SETTLE_MAX_MS });
 }
 
+/** Decode the rendered images before either full-page capture, after any
+ * print/screen switch. Network load/complete alone does not mean an async image
+ * is ready to paint. All frames share one concurrent, bounded wait. */
+async function capturePage(page, path, timeoutMs, recordFinding) {
+  const frames = await Promise.all(page.frames().map(async (frame, frameIndex) => {
+    try { return await frame.evaluate(async ({ timeoutMs, frameIndex }) => {
+    const images = [...document.images].filter(image => {
+      const rect = image.getBoundingClientRect();
+      if (image.checkVisibility && !image.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      // Root captures include the whole document, but an iframe only paints
+      // its viewport. Intersect with clipping ancestors before considering
+      // decode readiness; sr-only helpers and tracking pixels are not evidence.
+      let left = Math.max(rect.left, frameIndex ? 0 : -scrollX), top = Math.max(rect.top, frameIndex ? 0 : -scrollY);
+      let right = Math.min(rect.right, frameIndex ? innerWidth : document.documentElement.scrollWidth - scrollX);
+      let bottom = Math.min(rect.bottom, frameIndex ? innerHeight : document.documentElement.scrollHeight - scrollY);
+      for (let element = image; element; element = element.parentElement) {
+        const style = getComputedStyle(element), box = element.getBoundingClientRect();
+        if (element !== image) {
+          if (/^(hidden|clip|auto|scroll)$/.test(style.overflowX)) {
+            left = Math.max(left, box.left + element.clientLeft);
+            right = Math.min(right, box.left + element.clientLeft + element.clientWidth);
+          }
+          if (/^(hidden|clip|auto|scroll)$/.test(style.overflowY)) {
+            top = Math.max(top, box.top + element.clientTop);
+            bottom = Math.min(bottom, box.top + element.clientTop + element.clientHeight);
+          }
+        }
+        const clip = style.clip.match(/^rect\(([^)]+)\)$/);
+        if (clip && /^(absolute|fixed)$/.test(style.position)) {
+          const [t, r, b, l] = clip[1].split(/[,\s]+/).map(value => value === 'auto' ? null : parseFloat(value));
+          if (l != null) left = Math.max(left, box.left + l);
+          if (r != null) right = Math.min(right, box.left + r);
+          if (t != null) top = Math.max(top, box.top + t);
+          if (b != null) bottom = Math.min(bottom, box.top + b);
+        }
+        // Modern sr-only helpers commonly replace clip:rect with inset(50%).
+        if (/^inset\(\s*50%\s*(?:round\b[^)]*)?\)$/.test(style.clipPath)) return false;
+      }
+      return right - left > 1 && bottom - top > 1;
+    });
+    const identity = image => {
+      const parts = [];
+      for (let element = image; element; element = element.parentElement) {
+        if (element.id) { parts.unshift('#' + CSS.escape(element.id)); break; }
+        const peers = [...element.parentElement?.children || []].filter(peer => peer.localName === element.localName);
+        parts.unshift(element.localName + (peers.length > 1 ? `:nth-of-type(${peers.indexOf(element) + 1})` : ''));
+      }
+      const selector = (frameIndex ? `frame[${frameIndex}] ` : '') + parts.join(' > ');
+      return { type: 'image-not-decoded', selector, elementPath: selector, textSample: image.alt.slice(0, 96) };
+    };
+    const pending = new Set(images), findings = [];
+    let timer;
+    try {
+      await Promise.race([
+        Promise.all(images.map(async image => {
+          try {
+            // A full-page capture includes images below the initial fold too.
+            if (image.loading === 'lazy') image.loading = 'eager';
+            await image.decode();
+            if (!image.complete || !image.naturalWidth || !image.naturalHeight) throw new Error('empty image');
+          } catch {
+            findings.push({ ...identity(image), reason: 'image decoding failed before capture' });
+          } finally { pending.delete(image); }
+        })),
+        new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
+    for (const image of pending) findings.push({ ...identity(image), reason: `image decoding exceeded ${timeoutMs} ms before capture` });
+    return findings;
+    }, { timeoutMs, frameIndex });
+    } catch (error) {
+      // A child removed or navigated by the page cannot contribute its old
+      // document to this screenshot. Keep genuine evaluation failures visible.
+      if (frameIndex && (frame.isDetached() || /Execution context was destroyed|Frame was detached|Cannot find context with specified id/.test(error.message))) return [];
+      throw error;
+    }
+  }));
+  for (const finding of frames.flat()) recordFinding(finding);
+  // decode resolves before the next paint; flush that paint without a sleep.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  return page.screenshot({ path, fullPage: true });
+}
+
 /**
  * Render and inspect one or more HTML URLs.
  * With `journey` (a journey file path or object, see loadJourney), its
@@ -1196,7 +1280,8 @@ async function settlePage(page) {
  * Authenticated callers pass storageState (seeded before tracing), optional
  * extraHTTPHeaders, and secrets for any opaque credential values.
  * readySelector optionally identifies the real shell; readyTimeoutMs bounds
- * the wait (default 5000 ms). A loader/empty resting page always fails readiness.
+ * the shell and image decode waits (default 5000 ms each). Undecoded images fail
+ * every capture; a loader/empty resting page always fails readiness.
  * Declared journey states may intentionally exercise loading after startup.
  * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object, readySelector?: string, readyTimeoutMs?: number}} options
  */
@@ -1255,7 +1340,7 @@ async function inspectVisualQa(options) {
               const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
               if (seen.has(key)) return;
               seen.add(key);
-              const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+              const exception = enriched.type === 'image-not-decoded' ? null : enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
                 (entry.type === '*' || entry.type === enriched.type)
                 && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
               if (exception) suppressed.push({ ...enriched, reason: exception.reason });
@@ -1291,7 +1376,7 @@ async function inspectVisualQa(options) {
             }
             await page.emulateMedia({ media: 'screen' });
 
-            const screenshotBuffer = await page.screenshot({ path: join(artifactDir, `${slug(source)}-${scheme}-${viewport.name}.png`), fullPage: true });
+            const screenshotBuffer = await capturePage(page, join(artifactDir, `${slug(source)}-${scheme}-${viewport.name}.png`), readyTimeoutMs, recordFinding);
             for (const info of inspection.infos) {
               const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
               const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
@@ -1334,7 +1419,7 @@ async function inspectVisualQa(options) {
               const key = [informational ? 'info' : 'finding', `state:${state.name}`, enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
               if (seen.has(key)) return;
               seen.add(key);
-              const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+              const exception = enriched.type === 'image-not-decoded' ? null : enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
                 (entry.type === '*' || entry.type === enriched.type)
                 && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
               if (exception) suppressed.push({ ...enriched, reason: exception.reason });
@@ -1391,7 +1476,7 @@ async function inspectVisualQa(options) {
               const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
               for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
               for (const finding of inspection.findings) recordFinding(finding);
-              const screenshotBuffer = await page.screenshot({ path: join(artifactDir, run.screenshot), fullPage: true });
+              const screenshotBuffer = await capturePage(page, join(artifactDir, run.screenshot), readyTimeoutMs, recordFinding);
               for (const info of inspection.infos) {
                 const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
                 const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
@@ -1491,7 +1576,7 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
           continue;
         }
         const colors = finding.foreground && finding.background ? ` foreground=${finding.foreground.join(',')} background=${finding.background.join(',')} ratio=${finding.ratio ?? 'n/a'}` : '';
-        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`));
+        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}${finding.type === 'image-not-decoded' ? `\n  ${finding.reason}` : ''}`));
       }
       for (const page of result.readiness) console.log(redactQaText(`CONTENT ${page.scheme}/${page.viewport.name}: text nodes=${page.textNodes} characters=${page.textCharacters}\n  main landmarks=${page.mainLandmarks} content elements=${page.contentElements} loading indicators=${page.loadingIndicators}`));
       console.log(`Playwright ${result.playwrightVersion}`);

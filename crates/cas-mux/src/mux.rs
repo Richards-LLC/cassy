@@ -966,6 +966,19 @@ impl Mux {
         teams: Option<&TeamsSpawnConfig>,
         spec: Option<WorkerSpec>,
     ) -> Result<PaneId> {
+        self.add_worker_resuming(name, cwd, cas_root, supervisor_name, teams, spec, None)
+    }
+
+    pub fn add_worker_resuming(
+        &mut self,
+        name: &str,
+        cwd: PathBuf,
+        cas_root: Option<&PathBuf>,
+        supervisor_name: &str,
+        teams: Option<&TeamsSpawnConfig>,
+        spec: Option<WorkerSpec>,
+        resume_session: Option<&str>,
+    ) -> Result<PaneId> {
         // Check if pane with this name already exists
         if self.panes.contains_key(name) {
             return Err(Error::pty(format!("Pane '{name}' already exists")));
@@ -993,7 +1006,7 @@ impl Mux {
         // number is exact at the moment the env is built, with nothing to
         // thread through the caller.
         let fleet_size = self.worker_count() + 1;
-        let pane = Pane::worker(
+        let pane = Pane::worker_resuming(
             name,
             cwd,
             cas_root,
@@ -1010,6 +1023,7 @@ impl Mux {
             teams,
             self.factory_session.as_deref(),
             Some(fleet_size),
+            resume_session,
         )?;
         let id = pane.id().to_string();
         // Persist the resolved spec so `effective_worker_spec(name, None)` is
@@ -1262,7 +1276,9 @@ impl Mux {
 
     /// Whether a command owns this pane through payload and submit completion.
     pub fn inject_pending(&self, pane_id: &str) -> bool {
-        self.pending_injects.iter().any(|inject| inject.pane_id == pane_id)
+        self.pending_injects
+            .iter()
+            .any(|inject| inject.pane_id == pane_id)
     }
 
     /// Observe writes beyond the owner's bound once per original ticket.
@@ -1371,7 +1387,9 @@ impl Mux {
         // held and delivered after it (review M3): a destructive inject
         // never absorbs a half-typed draft, and a draft never lands inside
         // the payload. Before C4a the inline settle had the same effect.
-        self.held_input_lock().entry(pane_id.to_string()).or_default();
+        self.held_input_lock()
+            .entry(pane_id.to_string())
+            .or_default();
         self.next_inject_ticket += 1;
         let ticket = InjectTicket(self.next_inject_ticket);
         let now = std::time::Instant::now();
@@ -1402,17 +1420,15 @@ impl Mux {
     }
 
     /// Advance using the same monotonic clock snapshot as the owning handler.
-    pub async fn advance_injects_at(
-        &mut self,
-        now: std::time::Instant,
-    ) -> Vec<InjectCompletion> {
+    pub async fn advance_injects_at(&mut self, now: std::time::Instant) -> Vec<InjectCompletion> {
         let mut done = Vec::new();
         let mut index = 0;
         while index < self.pending_injects.len() {
             let pane_id = self.pending_injects[index].pane_id.clone();
-            let same_pane = self.panes.get(&pane_id).filter(|pane| {
-                pane.spawned_at() == self.pending_injects[index].pane_spawned_at
-            });
+            let same_pane = self
+                .panes
+                .get(&pane_id)
+                .filter(|pane| pane.spawned_at() == self.pending_injects[index].pane_spawned_at);
             let Some(pane) = same_pane else {
                 // Closed, or respawned under the same name (review L3).
                 let inject = self.pending_injects.remove(index);
@@ -1503,7 +1519,11 @@ impl Mux {
 
     /// Hold `input` for `pane_id` when its urgent inject is in progress.
     /// Returns the input back when it is not held.
-    fn hold_input(&self, pane_id: &str, input: HeldInput) -> std::result::Result<Result<()>, HeldInput> {
+    fn hold_input(
+        &self,
+        pane_id: &str,
+        input: HeldInput,
+    ) -> std::result::Result<Result<()>, HeldInput> {
         let mut held = self.held_input_lock();
         let Some(queue) = held.get_mut(pane_id) else {
             return Err(input);

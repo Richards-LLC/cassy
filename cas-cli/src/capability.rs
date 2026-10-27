@@ -829,7 +829,10 @@ mod tests {
         env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
         let after_login = fixture_claude_probe(&env, None, 301_010, false);
         let login_advice_matches = after_login == refreshed
-            && after_login.remediation.as_deref().is_some_and(|advice| advice.contains("one minute"));
+            && after_login
+                .remediation
+                .as_deref()
+                .is_some_and(|advice| advice.contains("one minute"));
         let logged_in = fixture_claude_probe(&env, None, 360_010, false);
         assert_eq!(logged_in.availability, CapabilityAvailability::Available);
         env.set("CLAUDE_TEST_STATUS", "unrecognized failure");
@@ -848,7 +851,9 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .find(|path| {
                 serde_json::from_slice::<CapabilityEvidence>(&std::fs::read(path).unwrap())
-                    .unwrap().observed_at_ms == failed.observed_at_ms
+                    .unwrap()
+                    .observed_at_ms
+                    == failed.observed_at_ms
             })
             .unwrap();
         let mut forged = failed.clone();

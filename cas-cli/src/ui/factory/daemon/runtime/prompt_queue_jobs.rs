@@ -300,6 +300,7 @@ pub(crate) struct StampDone {
     pub(crate) recipient: String,
     pub(crate) generation: u64,
     pub(crate) stamp: &'static str,
+    pub(crate) operator_message: Option<crate::ui::factory::ConversationHistoryMessage>,
     pub(crate) error: Option<String>,
 }
 
@@ -904,6 +905,7 @@ pub(crate) struct QueueJobs {
     retractions: HashMap<String, (InboxPruner, PathBuf, u64)>,
     /// Finished jobs other children submitted to this runtime, until taken.
     external: Vec<JobResult<ExternalOutcome>>,
+    operator_messages: Vec<crate::ui::factory::ConversationHistoryMessage>,
     /// The owner of each refresh key with a result still to come, by key.
     /// A key is forgotten once nothing is outstanding (cas-4272).
     job_owners: HashMap<String, KeyOwner>,
@@ -998,6 +1000,7 @@ impl QueueJobs {
             submitted_stamps: HashSet::new(),
             retractions: HashMap::new(),
             external: Vec::new(),
+            operator_messages: Vec::new(),
             job_owners: HashMap::new(),
             dropped: Vec::new(),
             mirror_in_flight: false,
@@ -1171,11 +1174,21 @@ impl QueueJobs {
                     defer_stamp(&cas_dir, row, &recipient, &stamp, error);
                 })
             };
+            // Publish a verified operator turn only after its transport stamp
+            // committed. This read stays on the store lane, never the loop.
+            let operator_message = if error.is_none() && stamp == QueueStamp::TransportDelivered {
+                job_thread_prompt_queue(&cas_dir).ok().and_then(|queue| {
+                    queue.queued_prompt(row).ok().flatten().and_then(|prompt| {
+                        super::queue_and_events::commander_history_send(queue.as_ref(), prompt, "")
+                    })
+                }).filter(|message| message.state == "delivered")
+            } else { None };
             QueueJobOutcome::Stamped(StampDone {
                 row,
                 recipient,
                 generation,
                 stamp: stamp.label(),
+                operator_message,
                 error,
             })
         });
@@ -1490,6 +1503,9 @@ impl QueueJobs {
                 }
                 QueueJobOutcome::Stamped(done) => {
                     self.stamp_landed(&done);
+                    if let Some(message) = done.operator_message {
+                        self.operator_messages.push(message);
+                    }
                     if let Some(error) = &done.error {
                         tracing::warn!(
                             target: "cas::coordination",
@@ -1771,6 +1787,11 @@ impl QueueJobs {
         self.job_owners.values().any(|owner| {
             owner.external && owner.kind == kind && !owner.outstanding.is_empty()
         })
+    }
+
+    /// Accepted operator sends whose actual transport stamp just committed.
+    pub(crate) fn take_operator_messages(&mut self) -> Vec<crate::ui::factory::ConversationHistoryMessage> {
+        std::mem::take(&mut self.operator_messages)
     }
 
     /// Finished external jobs, including ones that panicked (`outcome` Err).

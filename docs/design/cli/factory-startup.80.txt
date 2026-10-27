@@ -1,0 +1,7 @@
+[ERROR] Factory startup refused: GUI Unix socket path is invalid.
+Use a shorter HOME or session name, then retry.
+Path: 166 bytes; maximum: 107 bytes (address capacity 108).
+
+[ERROR] Factory startup refused: CAS_ROOT selects another project.
+Retry after running: unset CAS_ROOT
+The --cwd project must own its store before agents can start.

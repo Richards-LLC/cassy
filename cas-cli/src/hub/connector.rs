@@ -166,7 +166,6 @@ impl DaemonConnector {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let receiver = self.mux.subscribe(session, panes).await;
         let slot = {
             let mut slots = self.slots.lock().await;
             slots
@@ -180,6 +179,10 @@ impl DaemonConnector {
                 })
                 .clone()
         };
+        // Subscribe and retire under the same per-session lock: retirement
+        // must never remove a replacement's fanout or strand a new viewer.
+        let mut upstream_sender = slot.sender.lock().await;
+        let receiver = self.mux.subscribe(session, panes).await;
         if slot
             .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -187,7 +190,8 @@ impl DaemonConnector {
         {
             slot.starts.fetch_add(1, Ordering::Relaxed);
             let (sender, receiver) = mpsc::channel(64);
-            *slot.sender.lock().await = Some(sender);
+            *upstream_sender = Some(sender);
+            drop(upstream_sender);
             let session = session.to_owned();
             let mux = self.mux.clone();
             let events = self.events.clone();
@@ -200,11 +204,17 @@ impl DaemonConnector {
                 // idle, so a send in the gap fails fast as unavailable
                 // instead of writing into a receiver nobody drains, and the
                 // next attach installs a fresh sender.
-                *slot.sender.lock().await = None;
-                slot.running.store(false, Ordering::Release);
+                let mut upstream_sender = slot.sender.lock().await;
+                *upstream_sender = None;
+                // Dropping every viewer sender makes the hub emit Closed,
+                // so an open phone reattaches instead of retaining stale Live.
+                mux.retire_session(&session).await;
                 let diagnostic =
                     diagnose_disconnect(identity.as_ref(), exit_evidence.as_ref()).await;
                 events.daemon_disconnected(&session, diagnostic);
+                // Publish the old outage before a replacement can send its
+                // fresh Welcome and settle the phone's retained attention.
+                slot.running.store(false, Ordering::Release);
             });
         }
         Ok(receiver)
@@ -498,6 +508,126 @@ mod tests {
                 reason: "session upstream is not ready"
             })
         );
+    }
+
+    /// cas-d53c: a daemon replacement must end the old viewer stream, not
+    /// leave a browser reading Live on a dead upstream and replay its Welcome.
+    #[tokio::test]
+    async fn daemon_replacement_closes_old_viewers_and_replays_only_fresh_welcome_cas_d53c() {
+        use super::super::{MachineEventKind, ViewerRecvError};
+        use tokio::sync::oneshot;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let daemon = tokio::spawn(async move {
+            let mut stop_rx = Some(stop_rx);
+            for title in ["original", "replacement"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let welcome = DaemonMessage::Welcome {
+                    session_name: "factory-a".into(),
+                    state: SessionState {
+                        focused_pane: Some(title.into()),
+                        panes: vec![PaneInfo {
+                            id: title.into(),
+                            kind: PaneKind::Supervisor,
+                            focused: true,
+                            title: title.into(),
+                            exited: false,
+                        }],
+                        epic_id: None,
+                        epic_title: None,
+                        cols: 120,
+                        rows: 40,
+                    },
+                    scrollback: None,
+                    protocol_version: crate::ui::factory::PROTOCOL_VERSION,
+                    capabilities: crate::ui::factory::daemon_capabilities(),
+                    pane_bootstrap: vec![],
+                };
+                socket
+                    .send(Message::Binary(serde_json::to_vec(&welcome).unwrap()))
+                    .await
+                    .unwrap();
+                if let Some(stop) = stop_rx.take() {
+                    stop.await.unwrap();
+                    socket.close(None).await.unwrap();
+                } else {
+                    futures_util::future::pending::<()>().await;
+                }
+            }
+        });
+        let events = MachineEventBus::new(16);
+        events.reconcile_sessions(["factory-a"]).await;
+        let mut event_rx = events.subscribe();
+        let mux = SessionMultiplexer::new(8);
+        let mut unrelated = mux
+            .subscribe("other-session", std::iter::empty::<String>())
+            .await;
+        let connector = DaemonConnector::new(mux.clone(), events.clone());
+        let mut first = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        let welcome = first.recv().await.unwrap();
+        let mut second = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        assert_eq!(second.recv().await.unwrap(), welcome);
+
+        // The actual observed lifecycle: Welcome, removed, disconnected,
+        // added. The hub must also end both old viewer streams so browsers
+        // subscribe again and receive the replacement's authoritative state.
+        events.reconcile_sessions(std::iter::empty::<&str>()).await;
+        assert_eq!(
+            event_rx.recv().await.unwrap().kind,
+            MachineEventKind::SessionRemoved
+        );
+        stop_tx.send(()).unwrap();
+        let disconnected = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(disconnected.kind, MachineEventKind::DaemonDisconnected);
+        events.reconcile_sessions(["factory-a"]).await;
+        assert_eq!(
+            event_rx.recv().await.unwrap().kind,
+            MachineEventKind::SessionAdded
+        );
+        for viewer in [&mut first, &mut second] {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), viewer.recv())
+                    .await
+                    .expect("dead upstream must close its viewer stream"),
+                Err(ViewerRecvError::Closed),
+            );
+        }
+        let mut fresh = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        let fresh = tokio::time::timeout(std::time::Duration::from_secs(5), fresh.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let DaemonMessage::Welcome { state, .. } = serde_json::from_slice(&fresh.bytes).unwrap()
+        else {
+            panic!("replacement must send a fresh Welcome");
+        };
+        assert_eq!(
+            state.focused_pane.as_deref(),
+            Some("replacement"),
+            "never replay a dead daemon's snapshot"
+        );
+        mux.publish("other-session", fresh.clone()).await.unwrap();
+        assert_eq!(
+            unrelated.recv().await.unwrap(),
+            fresh,
+            "retiring one session must preserve others"
+        );
+        daemon.abort();
     }
 
     #[test]

@@ -45,8 +45,8 @@ survives every override. Add `inherits: petrastella` to the frontmatter.
 
 **Token source found:** add `inherits: petrastella | neutral | none` to the frontmatter and, in
 Colors and Typography, name each Petrastella role the project overrides and what it keeps.
-`neutral` is the design language's documented white-label fallback and requires the brand reason
-in Overview; it is never chosen for lack of a decision. `cas-ui-craft` reads this file before
+`neutral` is the design language's white-label palette, a brand choice that requires the brand
+reason in Overview; it is never chosen for lack of a decision. `cas-ui-craft` reads this file before
 any render, so an override recorded here is an override every surface will honour.
 
 ### 2. Read canonical components (for the Components section)
@@ -122,7 +122,8 @@ Follow [../codemap/references/doc-hygiene.md](../codemap/references/doc-hygiene.
 
 ## When to run
 
-- **Missing:** no `DESIGN.md` → generate from scratch before any significant UI work.
+- **Missing:** no `DESIGN.md` → generate from scratch before any significant UI work, or when
+  any human-facing output finds none ([DESIGN.md first](references/design-md-first.md)).
 - **Drift:** the token source has commits newer than `DESIGN.md`'s last commit → regenerate; keep-blocks survive. You have to look; nothing announces it.
 - **Manual:** user invokes `/design-spec` or asks for a design spec / DESIGN.md.
 - **After a re-theme:** palette, type stack, or spacing unit changed.

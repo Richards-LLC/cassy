@@ -1,0 +1,29 @@
+[WARN] 5 accounts, 1 flagged
+claude
+  ACCOUNT                            PLAN         LOGIN
+  main                               unknown      logged in
+    folder: ~/.claude
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+  real@example.com                   unknown      logged in
+    folder: ~/.claude-real@example.com-2
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+  real@example.com                   unknown      logged in
+    folder: ~/.claude-renamed@example.com
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+    flag: disabled
+
+codex
+  ACCOUNT                            PLAN         LOGIN
+  real@example.com                   unknown      logged in
+    folder: ~/.codex-real@example.com
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+  real@example.com                   unknown      logged in
+    folder: ~/.codex-real@example.com-2
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+
+Full values: cas accounts list --json

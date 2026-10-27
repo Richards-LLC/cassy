@@ -290,6 +290,7 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
   const kind = connectionKind(label);
   const none = `No messages from ${subject} in this session yet`;
   if (!input.resolved) {
+    if (label === "Waiting for supervisor") return { state: "waiting", said: `${where} is connected. Waiting for ${subject} to take the queued message.` };
     if (kind === "live" || kind === "degraded" || label === "Connecting" || label === "Idle") return { state: "loading", said: "" };
     if (kind === "pairing") return { state: "waiting", said: `${subjectMachine} needs pairing again before messages from ${subject} can load.` };
     if (kind === "blocked") return { state: "waiting", said: `This browser is blocking its connection to ${where}. Allow Local network access for this site, and messages from ${subject} will load.` };
@@ -297,6 +298,7 @@ export function emptyThreadCopy(input: { project?: string; machine?: string; con
     if (kind === "reconnecting") return { state: "waiting", said: `Reconnecting to ${where} — messages from ${subject} will load once it's back.` };
     return { state: "waiting", said: `${subjectMachine} can't be reached — messages from ${subject} will load once it's back.` };
   }
+  if (label === "Waiting for supervisor") return { state: "empty", said: `${none}. ${where} is connected; waiting for the supervisor to take the queued message.` };
   if (kind === "live") return { state: "empty", said: `${none} — nothing is waiting on you.` };
   if (kind === "degraded") return { state: "empty", said: `${none}. The connection is unsteady, so a new one may arrive late.` };
   if (kind === "pairing") return { state: "empty", said: `${none}. ${subjectMachine} needs pairing again before new ones can arrive.` };
@@ -986,7 +988,7 @@ export class ConversationView {
     const pinned = reply?.kind === "ask" ? this.history.pinnedAsk()?.notification_id === reply.notification_id : undefined;
     // A question that stops waiting (dismissed, or its session ended) repaints quiet (cas-16eed).
     const retired = reply?.kind === "ask" || reply?.kind === "blocker" ? this.history.retirement(reply.notification_id) : undefined;
-    const delivered = turn.event.kind === "send" ? this.history.showsDelivered(turn.event.value) : undefined;
+    const delivered = turn.event.kind === "send" ? this.history.showsDeliveryStatus(turn.event.value) : undefined;
     // A refused send repaints when control changes hands (cas-8e0a).
     const held = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHeld?.() === true : undefined;
     const holder = turn.event.kind === "send" && turn.event.value.state === "error" ? this.options.controlHolder?.() : undefined;
@@ -1285,16 +1287,18 @@ export class ConversationView {
         cancel.onclick = () => this.options.cancelMessage?.(send);
         bubble.append(cancel);
       }
-    } else if (this.history.showsDelivered(send)) {
-      // F5: the receipt is the difference between a delivered message and a
-      // lost one, so a delivered send says so until the reply linked to it
-      // lands (then the answer itself is the evidence). Journey F4: an
-      // unrelated supervisor turn crossing it no longer hides the tick.
+    } else if (this.history.showsDeliveryStatus(send)) {
+      // A MessageQueued receipt proves durable acceptance, not a supervisor
+      // handoff. Only the daemon's transport evidence earns Delivered/the tick.
       const state = document.createElement("span");
       state.className = "conversation-delivery conversation-delivered"; state.setAttribute("role", "status");
-      const tick = document.createElement("template"); tick.innerHTML = TICK;
-      const label = document.createElement("span"); label.textContent = "Delivered";
-      state.append(tick.content.firstElementChild!, label);
+      const delivered = send.state === "delivered";
+      if (delivered) {
+        const tick = document.createElement("template"); tick.innerHTML = TICK;
+        state.append(tick.content.firstElementChild!);
+      }
+      const label = document.createElement("span"); label.textContent = delivered ? "Delivered" : "Queued for supervisor";
+      state.append(label);
       bubble.append(state);
     } else if (send.state === "unconfirmed" && run && !run.expanded) {
       // cas-b00c: one notice for the run, on its last message; the earlier

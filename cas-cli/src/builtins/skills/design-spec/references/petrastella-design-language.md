@@ -4,7 +4,7 @@ The house visual language for every surface Petrastella ships: HTML reports, das
 pages, docs, and application UI. `design-tokens.json` beside this file is the machine-readable
 twin; the values here and there are identical by test. A project inherits this language through
 the `design-spec` skill and overrides it in its own `DESIGN.md`. A neutral grey-and-blue palette
-is a documented fallback for white-label work, never the default.
+is the white-label palette, a brand choice for white-label work, never the default.
 
 The name is the brief: *Petra* — cut sandstone, warm, ruled, permanent; *Stella* — one bright
 point that tells you where to look. Warm paper, one indigo mark, and typography that argues.
@@ -177,7 +177,7 @@ connected by a hairline. Status colors mark only events that were failures or re
   the same value as `danger`, and it may not give `warning` a job other than status.
 - The type pairing (serif argument, sans reading, mono numbers) survives every override. A project
   may swap the specific stacks; a project that wants an all-sans page is choosing the neutral
-  fallback and must say so in its `DESIGN.md` Overview.
-- The neutral fallback is: `bg` #F5F6F8 / #0F1117, `surface` #FFFFFF / #161A24, `verdict` and
+  white-label palette and must say so in its `DESIGN.md` Overview.
+- The neutral white-label palette is: `bg` #F5F6F8 / #0F1117, `surface` #FFFFFF / #161A24, `verdict` and
   `action` #2F5FD8 / #7AA2FF, status trio unchanged, display family = body family. It exists for
   clients whose brand must lead; it is never chosen for lack of a decision.

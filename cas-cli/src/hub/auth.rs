@@ -820,6 +820,11 @@ impl DerefMut for LockedState<'_> {
 pub struct AuthStore(Arc<AuthInner>);
 
 impl AuthStore {
+    /// The hub state directory this store lives in.
+    pub(crate) fn root(&self) -> &Path {
+        &self.0.root
+    }
+
     pub fn open(root: impl AsRef<Path>, machine_id: impl Into<String>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         super::ensure_private_dir(&root)?;
@@ -1497,14 +1502,16 @@ impl AuthStore {
     ) -> Result<()> {
         let mut state = self.lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
-        let lease = state
+        // A departing view may have missed another device's takeover, or
+        // already released this lease. Cleanup is idempotent after validating
+        // the credential; it must never remove another device's control.
+        if !state
             .leases
             .get(session)
-            .context("controller lease unavailable")?;
-        anyhow::ensure!(
-            lease.device_id == context.device_id,
-            "authorization refused"
-        );
+            .is_some_and(|lease| lease.device_id == context.device_id)
+        {
+            return Ok(());
+        }
         state.leases.remove(session);
         self.persist(&state)
     }
@@ -1655,11 +1662,12 @@ impl AuthStore {
     }
 
     /// Content-free connection evidence. Caller supplies fixed route/refusal
-    /// categories and a server-generated UUID, never raw headers or paths.
+    /// categories and a server-generated UUID, never raw headers or paths. The
+    /// row names the hub like every other audit row (cas-db44).
     pub(crate) fn audit_connection(&self, category: &str, preflight: bool, status: u16, request_id: &str, reason: Option<&str>, count: u64) -> Result<()> {
         let now = Utc::now();
         let row = serde_json::json!({
-            "timestamp": now, "action": "connection_recovery", "request_id": request_id,
+            "timestamp": now, "machine_id": self.0.machine_id, "action": "connection_recovery", "request_id": request_id,
             "category": category, "preflight": preflight, "status": status,
             "reason": reason, "count": count,
         });

@@ -743,51 +743,6 @@ fn isolated_test_path(
     Ok((bin, path))
 }
 
-fn worker_zig(
-    repo: &Path,
-    configured: Option<&OsStr>,
-    search_path: Option<&OsStr>,
-) -> Result<Option<PathBuf>> {
-    let common = PathBuf::from(git(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?);
-    let source = common
-        .parent()
-        .context("Git common directory has no parent")?;
-    // The runner also serves projects which do not consume the Zig toolchain.
-    if !repo.join("crates/ghostty_vt_sys/build.rs").is_file()
-        && !source.join("crates/ghostty_vt_sys/build.rs").is_file()
-    {
-        return Ok(None);
-    }
-    let mut candidates = Vec::new();
-    if let Some(configured) = configured.filter(|value| !value.is_empty()) {
-        candidates.push(PathBuf::from(configured));
-    }
-    if let Some(search_path) = search_path {
-        candidates.extend(std::env::split_paths(search_path).map(|dir| dir.join("zig")));
-    }
-    candidates.extend([
-        repo.join(".context/zig/zig"),
-        source.join(".context/zig/zig"),
-    ]);
-    for candidate in candidates {
-        // Relative ZIG/PATH entries must be bound before Cargo changes cwd.
-        let candidate = if candidate.is_absolute() {
-            candidate
-        } else {
-            repo.join(candidate)
-        };
-        if executable(&candidate) {
-            return Ok(Some(candidate.canonicalize()?));
-        }
-    }
-    bail!(
-        "Missing Zig compiler in ZIG, PATH or source/main checkout .context.\nRun ./scripts/bootstrap-zig.sh in the source repo, or set an absolute ZIG."
-    )
-}
-
 fn clean_head(repo: &Path) -> Result<String> {
     if !git(repo, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         bail!("Commit the worker change before checking; worker PASS must name a clean commit");
@@ -1836,11 +1791,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let zig = worker_zig(
-        &repo,
-        std::env::var_os("ZIG").as_deref(),
-        std::env::var_os("PATH").as_deref(),
-    )?;
     let admission = lock_file(&slots.join("admission.lock"))?;
     admission.lock_exclusive()?;
     let snapshot = crate::factory_build_guard::inspect(&cas_root, &config, 1);
@@ -1968,9 +1918,6 @@ fn execute_at_with_scope(cas_root: &Path, args: &[String], cwd: &Path, cargo: &P
     #[cfg(unix)]
     if let Some((_, path)) = &test_path {
         command.env("PATH", path);
-    }
-    if let Some(zig) = zig {
-        command.env("ZIG", zig);
     }
     let mut cargo_args = args.to_vec();
     // An omitted harness means library tests; do not build every test binary.
@@ -3589,54 +3536,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
 
     #[cfg(unix)]
     #[test]
-    fn zig_resolution_precedence_and_unrelated_project() {
-        let dir = tempfile::tempdir().unwrap();
-        let repo = dir.path().join("repo with spaces");
-        fixture_commit(&repo);
-        let repo = repo.canonicalize().unwrap();
-        let empty_path = OsStr::new("");
-        assert!(worker_zig(&repo, None, Some(empty_path)).unwrap().is_none());
-        let consumer = repo.join("crates/ghostty_vt_sys/build.rs");
-        std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
-        std::fs::write(consumer, "// Zig consumer").unwrap();
-        let fallback = repo.join(".context/zig/zig");
-        std::fs::create_dir_all(fallback.parent().unwrap()).unwrap();
-        fake_cargo(&fallback, "exit 0");
-        let configured = repo.join("configured-zig");
-        fake_cargo(&configured, "exit 0");
-        let bin = dir.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let on_path = bin.join("zig");
-        fake_cargo(&on_path, "exit 0");
-        assert_eq!(
-            worker_zig(
-                &repo,
-                Some(OsStr::new("configured-zig")),
-                Some(bin.as_os_str())
-            )
-            .unwrap(),
-            Some(configured)
-        );
-        assert_eq!(
-            worker_zig(&repo, Some(OsStr::new("missing")), Some(bin.as_os_str())).unwrap(),
-            Some(on_path.canonicalize().unwrap())
-        );
-        assert_eq!(
-            worker_zig(&repo, None, Some(empty_path)).unwrap(),
-            Some(fallback.clone())
-        );
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fallback, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let error = worker_zig(&repo, None, Some(empty_path))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Missing Zig compiler"));
-        assert!(error.contains("bootstrap-zig.sh"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn zig_runner_exports_main_checkout_toolchain_and_refuses_before_cargo() {
+    fn runner_leaves_zig_discovery_to_the_build_script() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
         fixture_commit(&source);
@@ -3658,10 +3558,6 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
             ],
         )
         .unwrap();
-        let zig = source.join(".context/zig/zig");
-        std::fs::create_dir_all(zig.parent().unwrap()).unwrap();
-        fake_cargo(&zig, "exit 0");
-        let zig = zig.canonicalize().unwrap();
         let root = source.join(".cas");
         let repo = root.join("worktrees/preview");
         std::fs::create_dir_all(repo.parent().unwrap()).unwrap();
@@ -3697,7 +3593,7 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#
         let fake = dir.path().join("fake-cargo");
         fake_cargo(
             &fake,
-            r#"[ "$ZIG" = "$(cd "$PWD/../../.." && pwd)/.context/zig/zig" ] || exit 9
+            r#"[ -z "${ZIG:-}" ] || exit 9
 printf 'called\n' >> "$PWD/target/called"
 printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         );
@@ -3716,12 +3612,6 @@ printf '     Summary [ 0.01s] 1 test run: 1 passed, 0 skipped\n'"#,
         execute_at(&root, &test_args, &repo, &fake).unwrap();
         let head = fixture_head(&repo);
         assert!(passing_receipt(&root, &repo, &head).is_some());
-        std::fs::remove_file(zig).unwrap();
-        let error = execute_at(&root, &args, &repo, &fake)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("Missing Zig compiler"), "{error}");
-        assert!(passing_receipt(&root, &repo, &head).is_none());
         assert_eq!(
             std::fs::read_to_string(repo.join("target/called")).unwrap(),
             "called\ncalled\n"

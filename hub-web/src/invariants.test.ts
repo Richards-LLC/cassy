@@ -316,7 +316,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // must still state it with aria-disabled rather than the disabled property.
     const regions = await readFile(new URL("live-regions.ts", import.meta.url), "utf8");
     expect(main).toContain("...(sendReason ? { sendReason } : {}),");
-    expect(regions).toContain('setDisabledReason(root.querySelector<HTMLElement>("#message-send"), view.sendReason);');
+    expect(regions).toContain('setDisabledReason(send, view.sendReason);');
     expect(regions).toContain('element.setAttribute("aria-disabled", "true");');
     expect(regions).not.toMatch(/\.disabled\s*=\s*true/);
     expect(main).toContain('<p id="message-status" class="message-status');
@@ -329,24 +329,15 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".message-status.error {");
   });
 
-  // Contract: takes control to deliver an observed message instead of dropping it.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("takes control to deliver an observed message instead of dropping it", async () => {
+  // Legacy hubs can still refuse control; the message keeps the recovery action and focus.
+  it("keeps control-refusal recovery on the message", async () => {
     const source = await readSource("main.ts");
-    // The hub refuses SendMessage without this device's session lease
-    // (hub/server.rs handle_client_message), so observe-mode sends need the
-    // lease the operator would otherwise have to take by hand.
-    expect(source).toContain('if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {');
-    expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string, force = false): Promise<boolean> {");
-    expect(source).toContain("await connections.get(machine.id)?.requestControl(session, force);");
-    expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
-    expect(source).toContain("Could not take control of ${session}");
     // cas-3433: the conversation header has no Take control, so no copy may
     // send the operator there; a refused message carries the control itself.
     expect(source).not.toContain("Take control from the header");
     expect(source).toContain("takeControl: () => { void takeControlForRefused(threadMachineId, threadSession); },");
-    expect(source).toContain("await connections.get(machineId)?.requestControl(session, force);");
+    // pin: refused-message recovery must use the departure-fenced lease mutation.
+    expect(source).toContain("await requestPaneControl(machineId, session, force);");
     // cas-8e0a: only a control refusal makes the cached lease stale; an
     // in_reply_to refusal must not bring Take control back on another message.
     expect(source).toContain('if (refusal(detail).action === "take-control") controlTakenAfterRefusal.delete(key);');
@@ -548,9 +539,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).not.toContain("selectedPanes");
   });
 
-  // Contract: Interrupt takes control the way a send does, and never silently from another device (cas-0546).
+  // Contract: Interrupt takes terminal control, never silently from another device (cas-0546).
   // Consumer: Commander application render and event handlers (main.ts), operating the conversation header.
-  it("takes control for an interrupt as a send does, and says when it took it from another device", async () => {
+  it("takes terminal control for an interrupt and says when it took it from another device", async () => {
     const source = await readSource("main.ts");
     const interrupt = source.match(/async function interruptSupervisor\(\): Promise<void> \{[\s\S]*?\n\}/)?.[0] ?? "";
     const recovery = source.match(/async function takeControlForInterrupt\([\s\S]*?\n\}/)?.[0] ?? "";
@@ -573,7 +564,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // pin: the forced retry is allowed only after a holder is confirmed on hub-admin.
     expect(recovery).toContain('if (!holder || !machine.scopes.includes("hub-admin")) return { taken: false, holder };');
     // pin: the confirmed administrator takeover must actually use force.
-    expect(recovery).toContain("requestControl(session, true);");
+    expect(recovery).toContain("requestPaneControl(machine.id, session, true);");
     // pin: successful recovery returns the holder so Interrupt can name it.
     expect(recovery).toContain("return { taken: leases.get(key)?.held_by_me === true, holder };");
   });

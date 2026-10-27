@@ -82,6 +82,10 @@ make. The reviewer and QA see each escape, so a vague reason costs a round.
   compile of your own (cas-qa-craft's evidence-ledger names the sources). Terminal
   paths also need `cas-cli-craft`'s `terminal-qa: PASS` receipt. Docs/test/CI-only
   deliveries do not trigger visual QA.
+- Human-facing output (a user-facing label, a demo, or a deliverable a person
+  reads): put the `design:` line from
+  [DESIGN.md first](../../design-spec/references/design-md-first.md#5-record-it)
+  in the close reason.
 - Risk: read task `risk` and `proof_targets`. Name the supervisor's
   `ASSEMBLY_PROOF` for full Rust execution. Non-Rust platform risk needs a
   `platform_proof` note with the actual platform, command and passing result.
@@ -149,3 +153,8 @@ Record applicable evidence and the reason for each inapplicable surface:
 Close with `PASS <sha>` or `ISSUES <sha>` plus known non-blocking defects,
 criterion evidence, safety facts and deferred proof ownership. Read actual tool
 rejections as state; forward verification-required guidance once to the supervisor.
+
+To wait blocked on a pending verification dispatch without waking the
+supervisor, set `status=blocked` and record exactly one blocker note:
+`Verification required: exact dispatch <dispatch-id> must record a verdict before close.`
+A note with any other text or extra lines is a real blocker and wakes the supervisor.

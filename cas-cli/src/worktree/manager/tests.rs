@@ -235,7 +235,7 @@ fn worker_project_mcp_is_private_and_filtered_without_mutating_supervisor_gh_104
 
 #[cfg(unix)]
 #[test]
-fn worker_project_support_symlinks_carry_codex_hooks_and_zig_toolchain() {
+fn worker_project_support_shares_codex_hooks_without_copying_zig() {
     let (temp, repo_path) = create_test_repo();
     let source_codex = repo_path.join(".codex");
     std::fs::create_dir_all(&source_codex).unwrap();
@@ -262,17 +262,9 @@ fn worker_project_support_symlinks_carry_codex_hooks_and_zig_toolchain() {
         "{\"hooks\": {}}\n"
     );
 
-    let worker_zig = worktree.join(".context").join("zig");
     assert!(
-        std::fs::symlink_metadata(&worker_zig)
-            .unwrap()
-            .file_type()
-            .is_symlink(),
-        "factory workers must inherit the primary checkout's pinned Zig toolchain"
-    );
-    assert_eq!(
-        std::fs::read_to_string(worker_zig.join("zig")).unwrap(),
-        "pinned zig binary"
+        !worktree.join(".context").exists(),
+        "compiler discovery belongs to the build script, not worktree provisioning"
     );
 }
 

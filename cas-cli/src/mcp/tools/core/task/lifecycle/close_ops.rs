@@ -6556,6 +6556,16 @@ impl CasCore {
         }
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
+        // cas-43d2: a pushed delivery is what origin holds. An unpushed local
+        // rebase must not replace it, or the pushed tip reads as superseded.
+        let lane = task.deliverables.parked_branch.clone().or_else(|| {
+            task.assignee.as_deref().map(crate::factory_isolation::expected_worker_branch)
+        });
+        if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+            && commit_is_absent_from_origin(repo_path, &candidate, lane.as_deref())
+        {
+            return None;
+        }
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
         let rebase_target = if task.delivery_mode == cas_types::DeliveryMode::LocalMerge {
             parent_branch.to_string()
@@ -6751,9 +6761,6 @@ impl CasCore {
             return false;
         };
         let branch = branch.strip_prefix("origin/").unwrap_or(branch);
-        let Ok(others) = task_store.list(None) else {
-            return false;
-        };
         let own_task_branch = match task.assignee.as_deref() {
             Some(assignee) => branch == crate::factory_isolation::worker_task_branch(assignee, &task.id),
             // A released per-task branch still identifies the task. Keep the
@@ -6768,20 +6775,26 @@ impl CasCore {
         // park, a RED commit may be the recorded anchor and GREEN the pushed
         // tip. Require positive ownership here: an unnamed continuation on
         // a mutable lane may belong to the worker's next task (cas-f1f4).
-        let own_active_lane = task.assignee.as_deref().is_some_and(|assignee| {
+        let plain_lane = task.assignee.as_deref().is_some_and(|assignee| {
             branch == crate::factory_isolation::expected_worker_branch(assignee)
                 && matches!(task.status, TaskStatus::InProgress | TaskStatus::Blocked)
-                && !others.iter().any(|other| {
+        });
+        // cas-43d2: decide on the branch names before reading every task.
+        if !own_task_branch && !plain_lane {
+            return false;
+        }
+        let Ok(others) = task_store.list(None) else {
+            return false;
+        };
+        let own_active_lane = plain_lane && task.assignee.as_deref().is_some_and(|assignee| {
+            !others.iter().any(|other| {
                     other.id != task.id
                         && other.status == TaskStatus::InProgress
                         && other.assignee.as_deref()
                             .is_some_and(|name| name.eq_ignore_ascii_case(assignee))
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
-                && git_stdout_lines(
-                    repo_path,
-                    &["log", "--format=%s", &format!("{recorded}..{tip}"), "--"],
-                ).is_ok_and(|subjects| {
+                && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
                     !subjects.is_empty()
                         && subjects.iter().all(|subject| message_references_task(subject, &task.id))
                 })
@@ -8640,7 +8653,12 @@ impl CasCore {
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices = notices,
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => {
+                    let recovery = self.return_merged_delivery_for_source_fix(
+                        &task, &evidence_repo, &resolved_parent_branch, &message,
+                    );
+                    return Ok(Self::tool_error(format!("{message}{recovery}")));
+                }
             }
             match docs_upkeep::at_park(
                 &mut close_notes, &mut task, &self.cas_root, &evidence_repo,
@@ -8648,7 +8666,12 @@ impl CasCore {
                 supervisor_override.then(|| req.reason.as_deref().unwrap_or("")),
             ) {
                 Ok(notices) => registry_upkeep_notices.extend(notices),
-                Err(message) => return Ok(Self::tool_error(message)),
+                Err(message) => {
+                    let recovery = self.return_merged_delivery_for_source_fix(
+                        &task, &evidence_repo, &resolved_parent_branch, &message,
+                    );
+                    return Ok(Self::tool_error(format!("{message}{recovery}")));
+                }
             }
             let qa_base = qa_window.and_then(|window| {
                 let head = super::qa_evidence_gate::delivered_head(
@@ -9620,6 +9643,18 @@ impl CasCore {
                                         anchor_commits,
                                     )
                                 }
+                                .and_then(|proof| {
+                                    // cas-defb: a no-code delivery is its external
+                                    // proof; pin the reviewed commit so a sibling
+                                    // merge or the lane's next task cannot stale it.
+                                    if epic_proof_ref.is_none()
+                                        && task.execution_note.as_deref() == Some("no-code")
+                                    {
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
+                                    } else {
+                                        Ok(proof)
+                                    }
+                                })
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,
                                     message: Cow::from(format!(
@@ -11798,6 +11833,14 @@ impl CasCore {
                 ),
                 None => resolve_system_b_worktree_path(&self.cas_root, assignee),
             });
+        // cas-43d2: with no worktree for the worker, close gates run in the
+        // project root; say so, since a removed worktree looks the same.
+        if system_a.is_none() && system_b.is_none() && let Some(assignee) = task.assignee.as_deref() {
+            tracing::info!(
+                task_id = %task.id, %assignee,
+                "close gates fall back to the project root: the worker has no worktree"
+            );
+        }
         let Some(expected) = declared_repo_context else {
             return Ok(system_b);
         };
@@ -21361,6 +21404,57 @@ impl BranchContentDirection {
 }
 
 /// Run `git` in `repo_path`, returning trimmed stdout on success.
+/// cas-43d2: subjects of the commits a worker added to its plain lane
+/// between `recorded` and `tip`. A worker that merges its target (or the
+/// default branch) mid-task brings in commits that are not its own, so
+/// commits reachable from those branches and the merge commits are left out.
+fn own_lane_subjects(
+    repo_path: &std::path::Path,
+    task: &Task,
+    recorded: &str,
+    tip: &str,
+) -> Result<Vec<String>, String> {
+    let mut excluded: Vec<String> = task.deliverables.work_target.as_ref()
+        .map(|target| preferred_live_target_ref_for_delivery(repo_path, &target.target_branch, task.delivery_mode).0)
+        .into_iter()
+        .collect();
+    if git_ref_exists(repo_path, "refs/remotes/origin/HEAD") {
+        excluded.push("refs/remotes/origin/HEAD".to_string());
+    }
+    let range = format!("{recorded}..{tip}");
+    let mut args = vec!["log", "--no-merges", "--format=%s", range.as_str()];
+    let negated: Vec<String> = excluded.iter().map(|target| format!("^{target}")).collect();
+    args.extend(negated.iter().map(String::as_str));
+    args.push("--");
+    git_stdout_lines(repo_path, &args)
+}
+
+/// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
+/// without an origin remote has nothing to compare, so it answers false.
+/// cas-16e1: the delivery lane's own `origin/<lane>` answers first; only a
+/// commit it lacks pays for the scan of every remote ref.
+fn commit_is_absent_from_origin(repo_path: &std::path::Path, commit: &str, lane: Option<&str>) -> bool {
+    let has_origin = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !has_origin {
+        return false;
+    }
+    if let Some(lane) = lane {
+        let remote = format!("refs/remotes/origin/{}", lane.strip_prefix("origin/").unwrap_or(lane));
+        if git_ref_exists(repo_path, &remote) && git_commit_is_ancestor(repo_path, commit, &remote) {
+            return false;
+        }
+    }
+    git_stdout_lines(
+            repo_path,
+            &["for-each-ref", "--format=%(refname)", "--contains", commit, "refs/remotes/origin"],
+        )
+        .is_ok_and(|refs| refs.is_empty())
+}
+
 fn git_stdout_lines(repo_path: &std::path::Path, args: &[&str]) -> Result<Vec<String>, String> {
     use std::process::Command;
 
@@ -32276,6 +32370,71 @@ esac
         );
     }
 
+    /// cas-43d2: a worker that merges its target between RED and GREEN keeps
+    /// its plain-lane lineage; the target's commits are not its subjects.
+    #[test]
+    fn target_merge_between_red_and_green_keeps_own_lane_lineage_cas_43d2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let red = commit_local(p, "a.rs", "test(cas-a0a0): red");
+        git(p, &["checkout", "-q", "main"]);
+        commit_local(p, "m.rs", "unrelated target work");
+        git(p, &["checkout", "-q", "factory/worker"]);
+        git(p, &["merge", "-q", "--no-ff", "-m", "Merge main into factory/worker", "main"]);
+        let green = commit_local(p, "b.rs", "fix(cas-a0a0): green");
+        let mut task = worker_task("worker");
+        task.id = "cas-a0a0".to_string();
+        task.deliverables.work_target = Some(cas_types::WorkTarget {
+            repo_selector: "project:fixture".into(),
+            target_branch: "main".into(),
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![task.clone()]);
+        assert!(core.tip_is_own_task_lineage(
+            &store, &task, p, Some("factory/worker"), &red, Some(&green),
+        ));
+    }
+
+    /// cas-43d2: a parked push delivery never advances to a commit origin
+    /// lacks; once that commit is pushed, the same advance succeeds.
+    #[test]
+    fn parked_anchor_never_advances_to_an_unpushed_commit_cas_43d2() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let bare = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(p, &["remote", "add", "origin", bare.path().to_str().unwrap()]);
+        let parked_at = commit_local(p, "a.rs", "task A delivery");
+        git(p, &["push", "-q", "origin", "main", "factory/worker"]);
+        let mut parked = worker_task("worker");
+        parked.id = "cas-a0a0".to_string();
+        parked.status = TaskStatus::AwaitingMerge;
+        parked.deliverables.factory_branch_anchor = Some(parked_at.clone());
+        let own = commit_local(p, "a2.rs", "fix(cas-a0a0): review follow-up");
+        let temp = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(temp.path().join(".cas"), None, None);
+        let store = crate::store::mock::MockTaskStore::with_tasks(vec![parked.clone()]);
+        let anchor = |store: &crate::store::mock::MockTaskStore| {
+            use cas_store::TaskStore;
+            store.get(&parked.id).unwrap().deliverables.factory_branch_anchor
+        };
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
+        assert_eq!(anchor(&store), Some(parked_at), "an unpushed commit is not the delivery");
+        git(p, &["push", "-q", "origin", "factory/worker"]);
+        // cas-16e1: the lane's own origin branch answers before any scan of
+        // every remote ref.
+        let trace = temp.path().join("git-trace.log");
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("GIT_TRACE", &trace);
+        core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
+        drop(env);
+        assert_eq!(anchor(&store), Some(own), "the pushed continuation advances it");
+        let scans = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("for-each-ref") && line.contains("refs/remotes/origin")).count();
+        assert_eq!(scans, 0);
+    }
+
     /// cas-ba4a: a parked task resolves to its anchor; an anchor that cannot
     /// be resolved (and cannot be fetched) refuses with a named reason
     /// instead of substituting the live lane.
@@ -36329,6 +36488,30 @@ mod system_b_worktree_resolution_tests {
             None,
             "a genuinely non-isolated task (no directory at all) must not resolve"
         );
+    }
+
+    /// cas-43d2: a close whose worker has no worktree runs its gates in the
+    /// project root, and the log says so.
+    #[test]
+    fn missing_worker_worktree_logs_the_project_root_fallback_cas_43d2() {
+        let cas_root = tempfile::tempdir().unwrap();
+        let core = CasCore::with_daemon(cas_root.path().join(".cas"), None, None);
+        let mut task = cas_types::Task::new("cas-43d2".into(), "close".into());
+        task.assignee = Some("gone-worker".into());
+        let log = tempfile::tempfile().unwrap();
+        let capture = log.try_clone().unwrap();
+        let subscriber = tracing_subscriber::fmt().without_time().with_ansi(false)
+            .with_writer(move || capture.try_clone().unwrap()).finish();
+        let resolved = tracing::subscriber::with_default(subscriber, || {
+            core.resolve_worker_worktree_path(&task, None)
+        });
+        assert_eq!(resolved, Ok(None));
+        use std::io::{Read, Seek};
+        let mut log = log;
+        log.rewind().unwrap();
+        let mut text = String::new();
+        log.read_to_string(&mut text).unwrap();
+        assert!(text.contains("fall back to the project root") && text.contains("gone-worker"), "{text}");
     }
 
     #[test]
@@ -40481,6 +40664,81 @@ mod zero_change_close_tests {
         service.task(Parameters(request)).await.unwrap();
         let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id).unwrap().unwrap();
         assert_eq!(retry.id, dispatch.id, "close retries must reuse the release dispatch");
+    }
+
+    /// cas-defb: a no-code delivery is its validated external proof, not the
+    /// moving epic head. A sibling merge into the epic during review must not
+    /// stale its dispatch (three re-dispatches in 20 minutes on 2026-10-27).
+    #[tokio::test]
+    async fn no_code_dispatch_survives_a_sibling_merge_into_its_epic_cas_defb() {
+        use crate::mcp::CasService;
+        use crate::test_support::TestEnvGuard;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, _origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "epic/live", "main"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"cas-defb-fixture\"\n[verification]\nenabled = true\n").unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-defb-supervisor";
+        agents.register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        let worker = "cas-defb-worker";
+        agents.register(&Agent::new_with_role(
+            worker.into(), "qa-worker".into(), AgentRole::Worker,
+        )).unwrap();
+        let mut task = Task::new("cas-defb-qa".into(), "no-code QA pass".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.into());
+        task.task_type = TaskType::Chore;
+        task.risk = vec![TaskRisk::None];
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.test/qa/ledger".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-defb-fixture".into(),
+            target_branch: "epic/live".into(),
+        });
+        store.add(&task).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "QA ledger published",
+        })).unwrap();
+        let response = service.task(Parameters(request.clone())).await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
+            .unwrap().unwrap_or_else(|| panic!("close must dispatch verification: {response:?}"));
+        let repository = dispatch.repository.clone().expect("dispatch binds a repository proof");
+
+        git(p, &["checkout", "-q", "-b", "factory/sibling", "epic/live"]);
+        commit_file(p, "sibling.rs", "feat: an unrelated sibling task");
+        git(p, &["checkout", "-q", "epic/live"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling", "-m", "merge sibling"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
+            .expect("a sibling merge into the epic must not stale a no-code dispatch");
+        service.task(Parameters(request)).await.unwrap();
+        let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
+        assert_eq!(retry.id, dispatch.id, "close retries must reuse the no-code dispatch");
     }
 
     #[test]

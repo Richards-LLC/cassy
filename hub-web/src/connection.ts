@@ -76,6 +76,8 @@ export interface HubCallbacks {
   onState(state: ConnectionState): void;
   onAttachState?(session: string, state: AttachSnapshot): void;
   onLatency?(latencyMs: number): void;
+  /** The browser hinted at a changed network: back online, a new connection type, or woken from sleep (cas-0b3d). */
+  onNetworkChange?(): void;
   onAuthFailure?(kind: AuthFailureKind, detail: string): void;
   onCredentialRefreshed?(machine: StoredMachine): Promise<void> | void;
   onMachineInfo?(machine: HubMachineInfo | undefined): void;
@@ -223,7 +225,21 @@ export class HubConnectionSupervisor {
     if (!this.desired || this.lifecycle.phase !== "live") return;
     const stream = this.eventAbort;
     try {
-      await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+      const signal = anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]);
+      // A heartbeat/manual read may predate this event. Joining that flight
+      // alone swallows the invalidation (a stopped worker stays in the roster).
+      // Drain it first, then read the changed catalog within the same deadline.
+      // A drained read that fails or times out is the older read's loss, not
+      // this event's (cas-1966): only a refused pairing skips the fresh read.
+      if (this.catalogRequest) {
+        try {
+          await this.refreshSessions(signal);
+        } catch (error) {
+          if (error instanceof AuthenticationError) throw error;
+        }
+      }
+      if (!this.desired || this.lifecycle.phase !== "live" || stream !== this.eventAbort) return;
+      await this.refreshSessions(signal);
     } catch (error) {
       // cas-eefe: event delivery never waits on this read, and every
       // heartbeat reads the catalog too, so a failed or timed-out read is the
@@ -836,6 +852,11 @@ export class HubConnectionSupervisor {
     await this.request("DELETE", `/v1/sessions/${encodeURIComponent(session)}/lease`);
   }
 
+  /** Report this browser's usage counts (cas-0b3d); the hub keeps the highest count per day and action. */
+  async postUsage(entries: readonly { day: string; action: string; journey: string; count: number }[]): Promise<void> {
+    await this.request("POST", "/v1/usage", { entries });
+  }
+
   async diagnose(): Promise<Record<string, unknown>> {
     let report: unknown;
     try { report = await this.request<Record<string, unknown>>("GET", "/v1/diagnostics"); }
@@ -1056,6 +1077,8 @@ export class HubConnectionSupervisor {
   private listenForNetworkChanges(): void {
     if (typeof window === "undefined" || typeof window.addEventListener !== "function" || typeof document === "undefined" || this.removeNetworkListeners) return;
     const changed = () => this.networkChanged();
+    // pageshow also fires on every load, so only these say the network moved.
+    const hinted = () => { this.callbacks.onNetworkChange?.(); this.networkChanged(); };
     const offline = () => { if (this.desired && this.lifecycle.phase === "live") this.connectionLostNow("The network went offline"); };
     // A tab switch is not a network change; coming back after long enough to
     // have slept (or had the radio change) is treated as one.
@@ -1063,7 +1086,7 @@ export class HubConnectionSupervisor {
       if (document.visibilityState === "hidden") { this.hiddenAt = Date.now(); return; }
       const hiddenFor = this.hiddenAt === undefined ? 0 : Date.now() - this.hiddenAt;
       this.hiddenAt = undefined;
-      if (hiddenFor >= HEARTBEAT_INTERVAL_MS) this.networkChanged();
+      if (hiddenFor >= HEARTBEAT_INTERVAL_MS) hinted();
     };
     const connection = (navigator as Navigator & { connection?: EventTarget & { type?: string } }).connection;
     let networkType = connection?.type;
@@ -1074,16 +1097,16 @@ export class HubConnectionSupervisor {
       // not turn one missed heartbeat into four (cas-eefe).
       if (typeof nextType !== "string" || nextType === networkType) return;
       networkType = nextType;
-      changed();
+      hinted();
     };
-    window.addEventListener("online", changed);
+    window.addEventListener("online", hinted);
     window.addEventListener("offline", offline);
     window.addEventListener("pageshow", changed);
     document.addEventListener("resume", changed);
     document.addEventListener("visibilitychange", visibility);
     connection?.addEventListener?.("change", transportChanged);
     this.removeNetworkListeners = () => {
-      window.removeEventListener("online", changed);
+      window.removeEventListener("online", hinted);
       window.removeEventListener("offline", offline);
       window.removeEventListener("pageshow", changed);
       document.removeEventListener("resume", changed);
@@ -1780,7 +1803,11 @@ export class HubConnectionSupervisor {
       this.callbacks.onFlowControlReset?.(session);
       return;
     }
-    if (envelope.closed) {
+    // A replacement may not be in the catalog when this session re-subscribes.
+    // These subscribe refusals establish no stream, so release the local claim
+    // just as Closed does; the next attempt must actually write a subscription.
+    if (envelope.closed || envelope.error?.code === "session_not_found" || envelope.error?.code === "daemon_offline") {
+      this.clearAttachTimeouts(session);
       this.machineSubscriptions.delete(session);
       this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed", sessionOnly: true });
       this.callbacks.onSocketError(session, "Session daemon stream closed. Retrying…");
@@ -1960,6 +1987,7 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
     target: value.target,
     stamped: value.stamped === true,
     ...(typeof value.device_label === "string" ? { device_label: value.device_label } : {}),
+    ...(typeof value.operator_label === "string" ? { operator_label: value.operator_label } : {}),
   };
 }
 

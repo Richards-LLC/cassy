@@ -21,19 +21,21 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
     // drawing the standard focus ring whole rather than two bars (cas-b2e4 F03).
     await expectWholeFocusRing(dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }));
     await expect(dialog.getByRole("heading", { name: "Pair a machine" })).toBeInViewport({ ratio: 1 });
-    // cas-b52d (journey F26): what the link withholds, in plain words, and the
-    // command that grants it, with its Copy, are on screen without scrolling
-    // inside the dialog, beside what this browser will be able to do. That is
-    // the dialog as it opens: once Technical details is opened, the operator
-    // keeps their place there rather than jumping back up (cas-207a).
-    await expect(dialog.getByRole("button", { name: "Copy command" })).toBeInViewport({ ratio: 1 });
+    // cas-b52d (journey F26): what the link withholds, in plain words, is on
+    // screen without scrolling inside the dialog, beside what this browser will
+    // be able to do. cas-b7c0: the person holding the browser is told whom to
+    // ask; the command that mints a wider link waits in Technical details for
+    // the machine's owner. Once Technical details is opened, the operator keeps
+    // their place there rather than jumping back up (cas-207a).
     const withheld = dialog.locator(".pair-withheld");
     await expect(withheld).toContainText("This link does not let it: Type, send messages and interrupt");
+    await expect(withheld).toContainText("To send messages from this browser, ask whoever runs Studio Mac for a link that can, then open it here.");
+    await expect(withheld).not.toContainText("cas hub");
     await expect(withheld).toBeInViewport({ ratio: 1 });
-    await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
-    await expect(dialog.locator(".pair-withheld-command code")).toBeInViewport({ ratio: 1 });
     // A read-only invitation cannot offer a control grant in the real bundle.
     await dialog.getByText("Technical details").click();
+    await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
+    await expect(dialog.getByRole("button", { name: "Copy command" })).toBeVisible();
     for (const scope of ["machine:read", "session:read", "pane:read"]) {
       const checkbox = dialog.getByRole("checkbox", { name: scope, exact: true });
       await expect(checkbox).toBeEnabled();
@@ -113,6 +115,9 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
       }).map((h) => h.textContent?.trim());
     });
     expect(covered, "headings under the toast").toEqual([]);
+    // cas-0b3d: the machine takes this browser's usage counts as it comes
+    // online, not only when another machine does or five minutes pass.
+    await expect.poll(() => hub.usagePosts.filter((post) => post.machine === "atlas").flatMap((post) => post.entries.map((entry) => entry.action)), { timeout: 15_000 }).toContain("pair.link");
   });
 });
 

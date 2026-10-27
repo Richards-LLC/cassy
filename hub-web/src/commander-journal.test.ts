@@ -1,6 +1,6 @@
 import { IDBFactory } from "fake-indexeddb";
 import { describe, expect, it } from "vitest";
-import { CommanderJournal, deliveryScope, DELIVERY_DB, type CredentialFence, type DeliveryScope } from "./commander-journal";
+import { CommanderJournal, deliveryScope, DELIVERY_DB, scopeKey, type CredentialFence, type DeliveryScope, type StoredReply } from "./commander-journal";
 import type { PendingSend } from "./conversation-store";
 import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
 
@@ -121,7 +121,7 @@ describe("atomic Commander journal", () => {
     expect(history.events).toHaveLength(1);
     expect(writes).toBe(1);
     const event = history.events[0];
-    expect(event.kind === "send" && history.showsDelivered(event.value)).toBe(true);
+    expect(event.kind === "send" && history.showsDeliveryStatus(event.value)).toBe(true);
   });
   it("an authoritative no-delivery refusal makes Cancel durable and strips the private payload", async () => {
     const { a, b, make, db } = journals();
@@ -196,14 +196,15 @@ describe("atomic Commander journal", () => {
     first.restorePending((await a.read(scope)).sends, 1_000);
     second.restorePending((await b.read(scope)).sends, 1_000);
     await a.dispatch(scope, item.id, fence, () => true);
-    const receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true };
+    const receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true, operator_label: "Ben", device_label: "Phone" };
     expect(await a.acknowledge(scope, receipt, fence)).toBe(true);
     for (const [journal, history] of [[a, first], [b, second]] as const) {
       const snapshot = await journal.read(scope);
       expect(snapshot.sends).toEqual([]);
+      expect(snapshot.receipts[0]).toMatchObject({ operator_label: "Ben", device_label: "Phone" });
       history.synchronizePending(snapshot.sends, 1_000, snapshot.receipts);
       const event = history.events[0];
-      expect(event?.kind === "send" && history.showsDelivered(event.value)).toBe(true);
+      expect(event?.kind === "send" && history.showsDeliveryStatus(event.value)).toBe(true);
       expect(event?.kind === "send" && history.isFailedSend(event.value)).toBe(false);
     }
     const request = db.open(DELIVERY_DB, 1);
@@ -542,11 +543,24 @@ describe("journal privacy and immutable replay", () => {
     expect(JSON.stringify(records)).not.toContain("Never reached it");
   });
   it("the newly committed reply remains durable at the cap even when all timestamps tie", async () => {
-    const { a } = journals();
-    for (let id = 101; id <= 500; id++) expect(await a.persistReply(scope, { ...reply, notification_id: id }, fence)).toBe(true);
+    const { a, db, make } = journals();
+    await a.read(scope); // Open the real schema before the batched fixture write.
+    // cas-694f: seed the existing cap once, instead of revalidating the growing
+    // journal in 400 separate persistReply transactions. The boundary write below stays real.
+    await seedRows(db, { replies: Array.from({ length: 400 }, (_, index) => {
+      const notification_id = 101 + index;
+      return { key: JSON.stringify([scopeKey(scope), notification_id]), scope,
+        reply: { ...reply, notification_id }, persistedAt: 1_000 } satisfies StoredReply;
+    }) });
+    const existing = (await a.read(scope)).replies;
+    expect(existing).toHaveLength(400);
+    expect(existing.every(row => row.persistedAt === 1_000)).toBe(true);
     expect(await a.persistReply(scope, { ...reply, notification_id: 9 }, fence)).toBe(true);
-    const rows = (await a.read(scope)).replies;
-    expect(rows).toHaveLength(400); expect(rows.some(row => row.reply.notification_id === 9)).toBe(true);
+    const reload = make();
+    const rows = (await reload.read(scope)).replies;
+    expect(rows).toHaveLength(400);
+    expect(rows.find(row => row.reply.notification_id === 9)).toMatchObject({ persistedAt: 1_000 });
+    a.close(); reload.close();
   });
   it("future account enrollment fails closed until the enrolled journal contract exists", async () => {
     const { a } = journals();

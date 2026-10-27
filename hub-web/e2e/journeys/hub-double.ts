@@ -234,6 +234,7 @@ export class HubDouble {
    * holds, unless forced by a hub-admin pairing, which takes it over.
    */
   private readonly leaseHolders = new Map<string, string>();
+  private readonly releasedLeases = new Set<string>();
   /** One lease read can be held at the wire boundary to exercise stale-cache races. */
   private readonly leaseReadGates = new Map<string, { wait: Promise<void>; started: () => void }>();
   /** POST /v1/sessions/<s>/lease calls, in order, with whether they forced. */
@@ -554,6 +555,8 @@ export class HubDouble {
   private readonly proofRefusals = new Map<string, { count: number; reason: string; retryable: boolean }>();
   /** Authenticated HTTP requests the double refused with a reasoned 401 (cas-d636). */
   readonly refusedProofs: Array<{ machine: string; path: string; reason: string }> = [];
+  /** Usage counts each machine accepted from the browser (cas-0b3d). */
+  readonly usagePosts: Array<{ machine: string; entries: Array<{ day: string; action: string; journey: string; count: number }> }> = [];
 
   /**
    * Refuse a machine's next `count` authenticated HTTP requests with the real
@@ -670,14 +673,29 @@ export class HubDouble {
     return clientRef;
   }
 
-  /** Acknowledge the latest send (MessageQueued) without answering it yet. */
-  deliverLatest(session: string): number {
+  /** Accept into the durable queue; this is not a supervisor handoff. */
+  queueLatest(session: string): number {
     const sent = this.sends.at(-1);
     if (!sent) throw new Error("hub double: nothing was sent");
     const queued = this.nextId++;
     this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
     this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: this.machineNow(session) });
     return queued;
+  }
+
+  /** Model an actual supervisor transport receipt, independently of queue acceptance. */
+  deliverQueued(session: string, notificationId: number): void {
+    const message = this.remember(session).messages.find((row) => row.notification_id === notificationId);
+    if (!message) throw new Error("hub double: queued message missing");
+    message.state = "delivered";
+    this.send(session, { OperatorMessage: message });
+  }
+
+  /** Queue the latest send and then prove its supervisor transport handoff. */
+  deliverLatest(session: string): number {
+    const id = this.queueLatest(session);
+    this.deliverQueued(session, id);
+    return id;
   }
 
   /** Answer an already-acknowledged send as the supervisor. */
@@ -827,6 +845,11 @@ export class HubDouble {
         json: { error: "unauthorized", reason: refusal.reason, retryable: refusal.retryable, server_time: Math.floor(this.now() / 1000) },
       });
     }
+    if (path === "/v1/usage" && method === "POST") {
+      this.usagePosts.push({ machine: machineId, entries: (route.request().postDataJSON() as { entries: HubDouble["usagePosts"][number]["entries"] }).entries });
+      this.observed();
+      return route.fulfill({ json: { recorded: 1 } });
+    }
     if (path === "/v1/machine") {
       this.machineProbes.set(machineId, (this.machineProbes.get(machineId) ?? 0) + 1);
       this.observed();
@@ -920,6 +943,12 @@ export class HubDouble {
         if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
         if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
         this.leaseHolders.delete(session);
+        this.releasedLeases.delete(session);
+      } else if (method === "DELETE") {
+        // Match the authenticated hub's idempotent cleanup contract, including
+        // its empty 204 response; never release another device's control.
+        if (!holder) this.releasedLeases.add(session);
+        return route.fulfill({ status: 204, body: "" });
       } else if (method === "GET") {
         const gate = this.leaseReadGates.get(session);
         if (gate) {
@@ -930,7 +959,8 @@ export class HubDouble {
         const currentHolder = this.leaseHolders.get(session);
         if (currentHolder) return route.fulfill({ json: { held_by_me: false, controller_label: currentHolder } });
       }
-      return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
+      const held = !this.releasedLeases.has(session);
+      return route.fulfill({ json: { held_by_me: held, controller_label: held ? "Journey browser" : null } });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");

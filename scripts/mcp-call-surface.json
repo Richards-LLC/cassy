@@ -55,6 +55,7 @@
         "message",
         "name",
         "notification_id",
+        "options",
         "parent_id",
         "remind_delay_secs",
         "remind_event",

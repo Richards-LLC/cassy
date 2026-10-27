@@ -33,6 +33,8 @@ export CAS_RELEASE_GATE_HOME_DIR
 export CAS_RELEASE_ENV_FILE="$tmp/no-release.env"
 export CAS_RELEASE_ENV_SCRATCH_ROOT=""
 export CAS_RELEASE_ENV_FACTORY_SCRATCH_ROOT=""
+# Fixture Cargo stubs must never write into a worker or operator build cache.
+unset CARGO_TARGET_DIR CAS_RELEASE_BINARY_TARGET_DIR
 mkdir -p "$CAS_RELEASE_GATE_HOME_DIR"
 
 # Fail loudly rather than silently reintroducing the same class: if the chosen
@@ -1185,6 +1187,10 @@ if [[ "$1" == run && "${2:-}" == build ]]; then
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  [[ "$*" != *--package* ]] || {
+    printf 'browser install must use the locked local Playwright CLI\n' >&2
+    exit 1
+  }
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then
@@ -1212,7 +1218,7 @@ output="$(
 )"
 if grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
    grep -qF 'ci --no-audit --no-fund' "$tmp/npm.log" && \
-   grep -qF 'exec --yes --package=playwright -- node scripts/visual-qa.mjs' "$tmp/npm.log" && \
+   grep -qF 'exec -- node scripts/visual-qa.mjs' "$tmp/npm.log" && \
    [[ -f "$tmp/npm-ci.marker" ]]; then
     ok 'hub-web-visual-qa installs dependencies before invoking the runner'
 else
@@ -1247,6 +1253,10 @@ if [[ "$1" == run && "${2:-}" == build ]]; then
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  [[ "$*" != *--package* ]] || {
+    printf 'browser install must use the locked local Playwright CLI\n' >&2
+    exit 1
+  }
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then

@@ -7,8 +7,9 @@ exported by hand. Resolution is deterministic and takes milliseconds, so it
 runs every time and nothing is persisted beyond creating
 <factory.scratch_root>/<project-key>/release-gate when that root is set.
 
-Zig: $ZIG; the checkout's .context/zig/zig; the main checkout's (symlinked in
-with --link-zig); `zig` on PATH. Otherwise the fix is ./scripts/bootstrap-zig.sh.
+Zig: $ZIG; `zig` on PATH; the checkout's .context/zig/zig; the main checkout's
+(optionally symlinked in with --link-zig). This order matches ghostty_vt_sys's
+build script. Otherwise the fix is ./scripts/bootstrap-zig.sh.
 
 Scratch base: an exported CAS_RELEASE_GATE_HOME_DIR;
 <factory.scratch_root>/<project-key>/release-gate/base; <staging.scratch_root>/
@@ -114,6 +115,30 @@ def resolve_zig(checkout: Path, env=os.environ, *, link: bool = False) -> ZigRes
         if executable(path):
             return ZigResolution(str(path.resolve()), "ZIG (environment)", tried)
         tried.append(f"ZIG={configured} is not an executable file")
+    # Same version authority as ghostty_vt_sys/build_support.rs, read once
+    # for every PATH candidate (cas-43d2).
+    required, pin_error = None, None
+    try:
+        manifest = Path(__file__).resolve().parent.parent / "crates/ghostty_vt_sys/zig/build.zig.zon"
+        required = manifest.read_text().split('.minimum_zig_version = "', 1)[1].split('"', 1)[0]
+    except (OSError, IndexError) as error:
+        pin_error = error
+    for directory in env.get("PATH", "").split(os.pathsep):
+        on_path = checkout / directory / "zig"
+        if not executable(on_path):
+            continue
+        if pin_error is not None:
+            tried.append(f"{on_path} cannot validate pinned version: {pin_error}")
+            continue
+        try:
+            version = subprocess.run([str(on_path), "version"], cwd=checkout, env=env,
+                                     capture_output=True, text=True, timeout=5)
+            if version.returncode == 0 and version.stdout.strip() == required:
+                return ZigResolution(str(on_path.resolve()), "PATH", tried)
+            tried.append(f"{on_path} version {version.stdout.strip()!r} (exit {version.returncode}), expected {required}")
+        except (OSError, IndexError, subprocess.TimeoutExpired) as error:
+            tried.append(f"{on_path} cannot validate pinned version: {error}")
+    tried.append("no compatible zig on PATH")
     local = checkout / ".context/zig/zig"
     if executable(local):
         return ZigResolution(str(local.resolve()), "checkout .context/zig", tried)
@@ -126,10 +151,6 @@ def resolve_zig(checkout: Path, env=os.environ, *, link: bool = False) -> ZigRes
                 link_zig(checkout, main)
             return ZigResolution(str(shared.resolve()), "main checkout .context/zig", tried)
         tried.append(f"{shared} missing")
-    on_path = shutil.which("zig", path=env.get("PATH", ""))
-    if on_path:
-        return ZigResolution(str(Path(on_path).resolve()), "PATH", tried)
-    tried.append("no zig on PATH")
     root = shlex.quote(str(main or checkout))
     return ZigResolution("", "", tried, f"(cd {root} && ./scripts/bootstrap-zig.sh)")
 

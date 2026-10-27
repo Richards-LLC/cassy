@@ -531,6 +531,9 @@ impl Default for QaRegistryConfig {
 /// User-facing QA gate configuration. Lives at `[qa]` in `.cas/config.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QaConfig {
+    /// Optional project before/after capture settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture: Option<crate::config::QaCaptureConfig>,
     /// Journey registry location and staged upkeep enforcement.
     #[serde(default)]
     pub registry: QaRegistryConfig,
@@ -701,6 +704,7 @@ pub fn default_user_facing_labels() -> Vec<String> {
 impl Default for QaConfig {
     fn default() -> Self {
         Self {
+            capture: None,
             post_release: None,
             mode: QaMode::PerTask,
             registry: QaRegistryConfig::default(),
@@ -852,8 +856,9 @@ pub struct FactoryConfig {
     /// Operator-only: set with `cas config set factory.write_roots`, which
     /// stores canonical absolute paths. `Config::set` refuses the key, so MCP,
     /// the config editor and imports cannot widen it, and the PreToolUse hook
-    /// refuses agent writes to `.cas/config.toml`. Empty keeps the default
-    /// workspace contract.
+    /// refuses agent writes to `.cas/config.toml`. In the user-level
+    /// `~/.cas/config.toml` the list applies to every project (cas-f0ea0);
+    /// the Downloads folder is always a root and needs no entry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
 

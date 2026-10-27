@@ -1,4 +1,5 @@
 import { cloudBrand, escapeHtml } from "./cloud-brand";
+import { pairingShareText } from "./pair-share";
 import { cleanupStepCopy, type CleanupStepContext } from "./pairing-cleanup";
 import type { PairingDraft, PairingStep } from "./pairing-draft";
 import { DEFAULT_PAIRING_SCOPES } from "./pairing-relay";
@@ -123,6 +124,14 @@ export function pairCommandMarkup(command: string): string {
 }
 
 /**
+ * The second person's path (cas-a56c): someone pairing a phone to a machine they
+ * do not run sends the code to whoever does, in plain words and one tap.
+ */
+function pairShareMarkup(userCode: string): string {
+  return `<div class="pair-share"><p class="scope-hint" id="pair-share-hint">Not your machine? Send this code to whoever runs it. It works for 10 minutes; they approve this browser with the command above.</p><button id="pair-share" type="button" data-share-text="${escapeAttr(pairingShareText(userCode))}" aria-describedby="pair-share-hint">Send the code</button><span class="sr-only pair-share-status" role="status"></span></div>`;
+}
+
+/**
  * The pairing dialog for one pairing state. main.ts renders it from its live
  * state; the visual-QA fixtures render it from a fixture state, so the gate
  * measures the production dialog — the email field included (D11).
@@ -152,7 +161,7 @@ export function pairDialogMarkup(state: PairDialogState): string {
   }
   if (pendingPairing?.kind === "relay-request") {
     const scopes = pendingPairing.requestedScopes;
-    return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow"><h2 id="pair-title">Pair a machine</h2>${capabilityLead(scopes)}<p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">${escapeHtml(state.countdown ?? "10:00")}</strong></p>${technicalDetails("code", pairingDraft, detailRow("Cassy Cloud origin", pendingPairing.controllerOrigin) + detailRow("Exact scopes", exactScopes(scopes)))}${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow"><h2 id="pair-title">Pair a machine</h2>${capabilityLead(scopes)}<p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">${escapeHtml(state.countdown ?? "10:00")}</strong></p>${pairShareMarkup(pendingPairing.userCode)}${technicalDetails("code", pairingDraft, detailRow("Cassy Cloud origin", pendingPairing.controllerOrigin) + detailRow("Exact scopes", exactScopes(scopes)))}${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "invitation") {
     const relay = Boolean(pendingPairing.relay);
@@ -167,10 +176,10 @@ export function pairDialogMarkup(state: PairDialogState): string {
     const adminMachine = invitationScopes?.includes(HUB_ADMIN_SCOPE) ? (relayVerified ? pendingPairing.machineLabel ?? "" : pairingDraft.machineLabel) : undefined;
     const machine = relayVerified && hubUrl && origin && invitationScopes
       ? `${capabilityLead(invitationScopes, adminMachine)}<p>Check this is your machine.</p><dl class="pair-details pair-machine"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div></dl><p class="pair-expiry">Invitation expires in <strong id="pair-countdown">${escapeHtml(state.countdown ?? "10:00")}</strong></p>${technicalDetails("authorized", pairingDraft, detailRow("Machine's hub address", hubUrl) + detailRow("Cassy Cloud origin", origin) + detailRow("Granted scopes", exactScopes(invitationScopes)))}`
-      : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes, adminMachine)}${withheldLead(pageOrigin, invitationScopes)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
+      : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes, adminMachine)}${withheldLead(invitationScopes, pairingDraft.machineLabel)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
     // The link form keeps its scope boxes (and the command that widens them)
     // with the other technical details, after the fields everyone fills in.
-    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset class="pair-scope-list"><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes.filter((scope) => scope !== HUB_ADMIN_SCOPE), invitationScopes?.filter((scope) => scope !== HUB_ADMIN_SCOPE))}</fieldset>`);
+    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset class="pair-scope-list"><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes.filter((scope) => scope !== HUB_ADMIN_SCOPE), invitationScopes?.filter((scope) => scope !== HUB_ADMIN_SCOPE))}</fieldset>${widerLinkCommand(pageOrigin, invitationScopes)}`);
     // cas-5e53 F08: hub:admin is consent, so it sits in plain view beside the
     // name fields, unticked, never folded into Technical details.
     const adminConsent = invitationScopes?.includes(HUB_ADMIN_SCOPE)
@@ -184,7 +193,7 @@ export function pairDialogMarkup(state: PairDialogState): string {
   // One state, one next action. Without an invitation there is nothing to
   // Pair, so no Pair control exists here at all; a link printed by the machine
   // opens the confirmation form directly and never passes through this step.
-  return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2 id="pair-title">Pair a machine</h2>${capabilityLead(DEFAULT_PAIRING_SCOPES)}<p>Create a ten-minute code, then approve it on the machine you want to pair.</p><label>Email me the code too (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="you@example.com" value="${escapeAttr(pairingDraft.email)}"><small class="field-hint">Handy when you approve it on the machine from another screen.</small></label>${technicalDetails("create", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin) + detailRow("Exact scopes", exactScopes(DEFAULT_PAIRING_SCOPES)))}${pairStatusMarkup(pairingStatus)}${state.repairCommand ? pairCommandMarkup(state.repairCommand) : ""}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2 id="pair-title">Pair a machine</h2>${capabilityLead(DEFAULT_PAIRING_SCOPES)}<p>Create a ten-minute code, then approve it on the machine you want to pair. Not your machine? Create the code anyway; you can send it to whoever runs it.</p><label>Email me the code too (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="you@example.com" value="${escapeAttr(pairingDraft.email)}"><small class="field-hint">Handy when you approve it on the machine from another screen.</small></label>${technicalDetails("create", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin) + detailRow("Exact scopes", exactScopes(DEFAULT_PAIRING_SCOPES)))}${pairStatusMarkup(pairingStatus)}${state.repairCommand ? pairCommandMarkup(state.repairCommand) : ""}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
 }
 
 
@@ -199,14 +208,28 @@ function scopeChecks(selectedScopes: readonly Scope[], grantedScopes: readonly S
 
 /**
  * What a read-only (or otherwise narrowed) invitation withholds, in plain
- * words beside what it grants, with the exact command that mints a wider link
- * and its Copy (cas-b52d, journey F26). It used to sit under the scope boxes
- * at the bottom of Technical details, below the dialog's fold.
+ * words beside what it grants (cas-b52d, journey F26), and whom to ask for
+ * more. The person holding the phone is often not the one who runs the
+ * machine (cas-b7c0), so this names no scope and no command: those wait in
+ * Technical details for the machine's owner.
  */
-function withheldLead(pageOrigin: string, grantedScopes: readonly Scope[] | undefined): string {
+function withheldLead(grantedScopes: readonly Scope[] | undefined, machineLabel: string): string {
   const missing = ungrantedScopes(grantedScopes);
   if (!missing.length) return "";
+  const machine = machineLabel.trim() || "the machine";
+  const ask = missing.includes("message-send")
+    ? `To send messages from this browser, ask whoever runs ${machine} for a link that can, then open it here.`
+    : `For more, ask whoever runs ${machine} for a link that allows it, then open it here.`;
+  return `<div class="pair-withheld"><p class="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><p class="scope-hint pair-withheld-ask">${escapeHtml(ask)}</p></div>`;
+}
+
+/**
+ * The exact command that mints a link granting what this one withholds, with
+ * its Copy, for the machine's owner (Technical details). The scope list breaks
+ * after its commas, never inside a scope name.
+ */
+function widerLinkCommand(pageOrigin: string, grantedScopes: readonly Scope[] | undefined): string {
+  if (!ungrantedScopes(grantedScopes).length) return "";
   const command = pairCommand(pageOrigin, PAIRING_SCOPES);
-  // The scope list breaks after its commas, never inside a scope name.
-  return `<div class="pair-withheld"><p class="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><div class="pair-withheld-command"><p class="scope-hint" id="pair-withheld-hint">Run this on the machine for a link that does:</p><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-withheld-hint">Copy command</button><code>${escapeHtml(command).replaceAll(",", ",<wbr>")}</code></div></div>`;
+  return `<div class="pair-withheld-command"><p class="scope-hint" id="pair-withheld-hint">On the machine, this prints a link that can also send messages:</p><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-withheld-hint">Copy command</button><code>${escapeHtml(command).replaceAll(",", ",<wbr>")}</code></div>`;
 }

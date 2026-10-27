@@ -8,7 +8,7 @@
     "test": "node scripts/generate-tokens.mjs --check && node scripts/build-cassy-tokens.mjs --check && node --test scripts/operator-inbox-live-safety.test.mjs && npm run tokens && node scripts/run-verified-tests.mjs vitest",
     "typecheck": "tsc --noEmit && tsc --noEmit -p e2e",
     "tokens": "node scripts/generate-tokens.mjs && node scripts/build-cassy-tokens.mjs",
-    "visual-qa": "npm exec --yes --package=playwright -- node scripts/visual-qa.mjs",
+    "visual-qa": "npm exec -- node scripts/visual-qa.mjs",
     "check:journey-clock": "node --test scripts/check-journey-clock.test.mjs && node scripts/check-journey-clock.mjs",
     "check:journey-receipts": "node --test e2e/journeys/receipt-directory.test.mjs",
     "prejourneys": "npm run check:journey-clock && npm run check:journey-receipts",
@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@actions/glob": "0.5.0",
-    "@playwright/test": "1.63.0",
+    "@playwright/test": "1.64.1",
     "@types/node": "^24.2.1",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^26.1.0",

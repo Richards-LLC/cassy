@@ -872,6 +872,12 @@ impl CasCore {
         // this validation while holding its write lock, so a malformed patch
         // cannot corrupt an existing state even if another writer races us.
         if let Some(patch) = state_patch.as_ref() {
+            if patch.as_object().is_some_and(|object| ["answered_blocker", "blocker_ask"].iter()
+                .any(|key| object.get(*key).is_some_and(|value| !value.is_null())))
+            {
+                return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                    "TASK EXECUTION STATE REJECTED: blocker answers and asks are managed by authenticated coordination messages."));
+            }
             if patch.as_object().is_some_and(|object| object.contains_key("qa_impact")) {
                 return Err(McpError {
                     code: ErrorCode::INVALID_PARAMS,
@@ -2358,6 +2364,7 @@ impl CasCore {
         // explicit status=blocked request records a hold even if dependencies
         // also block the task; clearing those dependencies must preserve it.
         if explicit_open_status {
+            set_execution_state_patch_field(&mut execution_state_patch, "answered_blocker", serde_json::Value::Null);
             set_execution_state_patch_field(
                 &mut execution_state_patch,
                 "blocked_hold",

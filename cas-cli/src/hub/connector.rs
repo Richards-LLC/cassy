@@ -166,7 +166,6 @@ impl DaemonConnector {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let receiver = self.mux.subscribe(session, panes).await;
         let slot = {
             let mut slots = self.slots.lock().await;
             slots
@@ -180,6 +179,10 @@ impl DaemonConnector {
                 })
                 .clone()
         };
+        // Subscribe and retire under the same per-session lock: retirement
+        // must never remove a replacement's fanout or strand a new viewer.
+        let mut upstream_sender = slot.sender.lock().await;
+        let receiver = self.mux.subscribe(session, panes).await;
         if slot
             .running
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -187,7 +190,8 @@ impl DaemonConnector {
         {
             slot.starts.fetch_add(1, Ordering::Relaxed);
             let (sender, receiver) = mpsc::channel(64);
-            *slot.sender.lock().await = Some(sender);
+            *upstream_sender = Some(sender);
+            drop(upstream_sender);
             let session = session.to_owned();
             let mux = self.mux.clone();
             let events = self.events.clone();
@@ -200,11 +204,17 @@ impl DaemonConnector {
                 // idle, so a send in the gap fails fast as unavailable
                 // instead of writing into a receiver nobody drains, and the
                 // next attach installs a fresh sender.
-                *slot.sender.lock().await = None;
-                slot.running.store(false, Ordering::Release);
+                let mut upstream_sender = slot.sender.lock().await;
+                *upstream_sender = None;
+                // Dropping every viewer sender makes the hub emit Closed,
+                // so an open phone reattaches instead of retaining stale Live.
+                mux.retire_session(&session).await;
                 let diagnostic =
                     diagnose_disconnect(identity.as_ref(), exit_evidence.as_ref()).await;
                 events.daemon_disconnected(&session, diagnostic);
+                // Publish the old outage before a replacement can send its
+                // fresh Welcome and settle the phone's retained attention.
+                slot.running.store(false, Ordering::Release);
             });
         }
         Ok(receiver)

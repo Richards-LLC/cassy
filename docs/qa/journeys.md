@@ -711,9 +711,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Steps
 
-1. Paste plain text inline and retain its line breaks.
-2. Preview long text, a screenshot and a picked file together in the composer.
-3. Lose an upload response, keep the files visibly, retry the same upload identity and send the stored paths.
+1. Paste plain text inline
+2. Preview a long paste, screenshot and picked file together
+3. A connection loss keeps the files visibly, then reuses the upload identity
 
 #### Expected experience
 

@@ -1962,7 +1962,7 @@ candidates = ["primary", "fallback"]
 
     #[test]
     fn exhausted_lane_names_each_skipped_recipe_cas_cba9() {
-        let mut registry = embedded_registry().unwrap();
+        let mut registry = embedded_registry().unwrap().clone();
         registry.recipes.get_mut("codex_sol_6").unwrap().status = RecipeStatus::Suspended;
         registry.recipes.get_mut("codex_sol_6").unwrap().reason = Some("maintenance".into());
         let mut snapshot = CapabilitySnapshot::default();

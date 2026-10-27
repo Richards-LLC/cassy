@@ -34,33 +34,80 @@ pub fn recommend<'a>(
     let mut result = Selection::default();
     let mut candidates = Vec::new();
     for account in accounts.iter().filter(|a| a.provider == provider) {
+        if let Some(folder) = &account.flags.duplicate_of {
+            let alias = accounts
+                .iter()
+                .find(|a| a.provider == provider && &a.folder == folder)
+                .map(|a| a.name.as_str())
+                .or_else(|| {
+                    folder
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| n.strip_prefix(provider.prefix()).unwrap_or("main"))
+                })
+                .unwrap_or("main");
+            result
+                .excluded
+                .push((account, format!("duplicate of {alias}")));
+            continue;
+        }
         match capacity(account, now, threshold) {
             Ok((reset, weekly, five)) => candidates.push((account, reset, weekly, five)),
             Err(reason) => result.excluded.push((account, reason)),
         }
     }
-    let Some(earliest) = candidates.iter().map(|(_, reset, _, _)| *reset).min() else {
-        return result;
-    };
-    if config.selection == AccountSelection::SoonestReset {
-        candidates.retain(|(_, reset, _, _)| *reset <= earliest + chrono::Duration::hours(24));
+    let earliest = candidates
+        .iter()
+        .filter_map(|(_, reset, _, _)| *reset)
+        .min();
+    let mut later = Vec::new();
+    if config.selection == AccountSelection::SoonestReset
+        && let Some(earliest) = earliest
+    {
+        candidates.retain(|candidate| {
+            if candidate
+                .1
+                .is_some_and(|reset| reset > earliest + chrono::Duration::hours(24))
+            {
+                later.push(candidate.0);
+                false
+            } else {
+                true
+            }
+        });
     }
     candidates.sort_by(|a, b| {
-        a.2.total_cmp(&b.2)
+        // An unknown weekly reset is eligible, after every known reset.
+        a.1.is_none()
+            .cmp(&b.1.is_none())
+            .then(a.2.total_cmp(&b.2))
             .then(a.3.total_cmp(&b.3))
             .then(a.1.cmp(&b.1))
             .then(a.0.folder.cmp(&b.0.folder))
     });
-    let (account, reset, weekly, _) = candidates[0];
-    let minutes = (reset - now).num_minutes().max(1);
-    let interval = if minutes < 60 {
-        format!("{minutes}m")
-    } else {
-        format!("{}h", (minutes + 59) / 60)
+    let Some(&(account, reset, weekly, _)) = candidates.first() else {
+        return result;
+    };
+    for skipped in later {
+        result
+            .excluded
+            .push((skipped, format!("resets later than {}", account.name)));
+    }
+    let reset_reason = match reset {
+        Some(reset) => {
+            let minutes = (reset - now).num_minutes().max(1);
+            let interval = if minutes < 60 {
+                format!("{minutes}m")
+            } else {
+                format!("{}h", (minutes + 59) / 60)
+            };
+            format!("resets in {interval}")
+        }
+        None => "weekly reset unknown".to_string(),
     };
     result.recommended = Some(Recommendation {
         account,
-        reason: format!("resets in {interval}, {:.0}% left", 100.0 - weekly),
+        reason: format!("{reset_reason}, {:.0}% left", 100.0 - weekly),
     });
     result
 }
@@ -69,7 +116,7 @@ fn capacity(
     account: &Account,
     now: DateTime<Utc>,
     threshold: u8,
-) -> Result<(DateTime<Utc>, f64, f64), String> {
+) -> Result<(Option<DateTime<Utc>>, f64, f64), String> {
     if account.flags.disabled {
         return Err("disabled".into());
     }
@@ -79,24 +126,34 @@ fn capacity(
     if account.login_state != LoginState::LoggedIn {
         return Err("not logged in or login unknown".into());
     }
-    let window = |name: &str| -> Result<(DateTime<Utc>, f64), String> {
-        let w = account
-            .windows
-            .iter()
-            .find(|w| w.name == name)
-            .ok_or_else(|| format!("{name} usage unknown"))?;
+    // A successful usage response can omit an unopened window. No usage data
+    // at all is different: never interpret a failed probe as spare capacity.
+    if !account.windows.iter().any(|w| {
+        matches!(w.name.as_str(), "5h" | "weekly")
+            && (w.used_percent.is_some() || w.resets_at.is_some())
+    }) {
+        return Err("usage unknown".into());
+    }
+    let window = |name: &str| -> Result<(Option<DateTime<Utc>>, f64), String> {
+        let Some(w) = account.windows.iter().find(|w| w.name == name) else {
+            return Ok((None, 0.0));
+        };
+        // Past timestamps remain evidence of rollover even when the registry
+        // clears the stale percentage. Null reset + known usage is unopened.
+        if w.resets_at.is_none_or(|reset| reset <= now) {
+            return Ok((None, 0.0));
+        }
         let used = w
             .used_percent
             .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
             .ok_or_else(|| format!("{name} usage unknown"))?;
-        let reset = w.resets_at.ok_or_else(|| format!("{name} reset unknown"))?;
-        if reset <= now {
-            return Err(format!("{name} usage stale"));
-        }
+        let Some(reset) = w.resets_at else {
+            return Ok((None, 0.0));
+        };
         if used >= f64::from(threshold) {
             return Err(format!("{name} at {used:.0}% (threshold {threshold}%)"));
         }
-        Ok((reset, used))
+        Ok((Some(reset), used))
     };
     let (_, five) = window("5h")?;
     let (reset, weekly) = window("weekly")?;
@@ -193,8 +250,34 @@ pub(crate) mod tests {
             stale.login_state = LoginState::StaleLogin;
             let mut unknown = a.clone();
             unknown.windows[0].used_percent = None;
-            let mut expired = a.clone();
-            expired.windows[1].resets_at = Some(now);
+            let mut idle = row(provider, "idle", 6, 10.0, 0.0);
+            idle.windows.remove(0);
+            let busy = row(provider, "busy", 6, 70.0, 20.0);
+            let mut null_reset = idle.clone();
+            null_reset.windows.insert(
+                0,
+                UsageWindow {
+                    name: "5h".into(),
+                    used_percent: Some(0.0),
+                    resets_at: None,
+                },
+            );
+            let mut unopened_without_percent = null_reset.clone();
+            unopened_without_percent.windows[0].used_percent = None;
+            let mut expired_five = null_reset.clone();
+            expired_five.windows[0].used_percent = Some(100.0);
+            expired_five.windows[0].resets_at = Some(now);
+            let mut cleared_expired = expired_five.clone();
+            cleared_expired.windows[0].used_percent = None;
+            let mut unknown_weekly_reset = a.clone();
+            unknown_weekly_reset.windows[1].resets_at = None;
+            let mut expired_weekly = a.clone();
+            expired_weekly.windows[1].resets_at = Some(now);
+            expired_weekly.windows[1].used_percent = None;
+            let mut no_data = a.clone();
+            no_data.windows.clear();
+            let mut duplicate = row(provider, "duplicate", 6, 0.0, 0.0);
+            duplicate.flags.duplicate_of = Some(a.folder.clone());
             let mut invalid = a.clone();
             invalid.windows[0].used_percent = Some(f64::NAN);
             let mut other_provider = a.clone();
@@ -265,6 +348,69 @@ pub(crate) mod tests {
                     Some("b"),
                 ),
                 (
+                    "idle without 5h window beats busy",
+                    vec![busy.clone(), idle],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("idle"),
+                ),
+                (
+                    "idle Claude null 5h reset",
+                    vec![busy.clone(), null_reset],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("idle"),
+                ),
+                (
+                    "unopened 5h without percentage",
+                    vec![busy.clone(), unopened_without_percent],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("idle"),
+                ),
+                (
+                    "expired Codex 5h snapshot",
+                    vec![busy.clone(), expired_five],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("idle"),
+                ),
+                (
+                    "expired Codex cleared percentage",
+                    vec![busy, cleared_expired],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("idle"),
+                ),
+                (
+                    "unknown weekly reset eligible",
+                    vec![unknown_weekly_reset.clone()],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("a"),
+                ),
+                (
+                    "known weekly reset before unknown",
+                    vec![unknown_weekly_reset, b.clone()],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("b"),
+                ),
+                (
+                    "expired weekly window eligible",
+                    vec![expired_weekly],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("a"),
+                ),
+                (
+                    "duplicate routes to canonical",
+                    vec![duplicate, a.clone()],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("a"),
+                ),
+                (
                     "no eligible account",
                     vec![
                         five_full,
@@ -272,7 +418,7 @@ pub(crate) mod tests {
                         logged_out,
                         stale,
                         unknown,
-                        expired,
+                        no_data,
                         invalid,
                         other_provider,
                     ],
@@ -293,7 +439,37 @@ pub(crate) mod tests {
                     "{provider:?}: {case}"
                 );
                 if let Some(r) = result.recommended {
-                    assert!(r.reason.contains("resets in"), "{case}: {}", r.reason);
+                    if case == "unknown weekly reset eligible"
+                        || case == "expired weekly window eligible"
+                    {
+                        assert!(
+                            r.reason.contains("weekly reset unknown"),
+                            "{case}: {}",
+                            r.reason
+                        );
+                    } else {
+                        assert!(r.reason.contains("resets in"), "{case}: {}", r.reason);
+                    }
+                    if case == "soonest reset" {
+                        assert_eq!(
+                            result
+                                .excluded
+                                .iter()
+                                .find(|(a, _)| a.name == "b")
+                                .map(|(_, reason)| reason.as_str()),
+                            Some("resets later than a")
+                        );
+                    }
+                    if case == "duplicate routes to canonical" {
+                        assert_eq!(
+                            result
+                                .excluded
+                                .iter()
+                                .find(|(a, _)| a.name == "duplicate")
+                                .map(|(_, reason)| reason.as_str()),
+                            Some("duplicate of a")
+                        );
+                    }
                     assert!(r.reason.contains("% left"));
                 } else {
                     assert_eq!(

@@ -642,6 +642,21 @@ mod tests {
             let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, exclusion: None }];
             mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             assert_eq!(rows[0].recommendation.as_deref(), Some("resets in 6h, 41% left"), "{cli:?}");
+            let mut idle_accounts = accounts.clone();
+            idle_accounts[0].windows.remove(0);
+            idle_accounts[0].windows[0].used_percent = Some(10.0);
+            let later = crate::account_selection::tests::row(provider, "later", 60, 0.0, 0.0);
+            let mut duplicate = idle_accounts[0].clone();
+            duplicate.name = "duplicate".into();
+            duplicate.folder = "/fixture/duplicate".into();
+            duplicate.flags.duplicate_of = Some(idle_accounts[0].folder.clone());
+            idle_accounts.extend([later, duplicate]);
+            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, exclusion: None }));
+            mark_recommendation(&mut rows, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert_eq!(rows[0].recommendation.as_deref(), Some("resets in 6h, 90% left"));
+            assert_eq!(rows[1].exclusion.as_deref(), Some("resets later than chosen"));
+            assert_eq!(rows[2].exclusion.as_deref(), Some("duplicate of chosen"));
+            assert!(rows[1].logged_in && rows[2].logged_in, "exclusions stay manually selectable");
             assert_eq!(choose_profile_name(Some("other"), None, Some("chosen")), "other");
         }
 

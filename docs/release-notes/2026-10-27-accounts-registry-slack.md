@@ -6,30 +6,40 @@ No screenshots are attached: these are terminal and JSON changes.
 
 ## User top-level
 
-Live on production · User · Account choices now distinguish folders sharing one login.
+```text
+*Live on production — User — Cassy*
+Was: shared logins looked identical. → Now: account choices show folder aliases beside their emails.
+```
 
 ## User reply
 
-Was: accounts sharing a login appeared with the same email and no folder alias.
-→ Now: the picker shows the alias beside the email so you can tell them apart.
+```text
+• *Account choices* — Was: folders sharing one login showed the same email.
+→ Now: the picker shows each folder's alias beside the email.
 
-Was: choosing a displayed email or a mistyped name could start an empty account folder.
-→ Now: unique emails resolve to existing accounts; ambiguous emails and unknown names stop with an alias or login command.
+• *Account launch* — Was: choosing a displayed email or a mistyped name could create an empty folder.
+→ Now: unique emails select existing accounts; ambiguous emails and unknown names stop with an alias or login command.
 
-Was: expired or duplicate account snapshots could show misleading usage.
+• *Usage* — Was: expired or duplicate snapshots could show misleading usage.
 → Now: expired windows say usage is unknown, and folders sharing a subscription use the newest snapshot.
 
-Was: an account stored in a linked folder could disappear from the picker.
+• *Linked folders* — Was: an account stored in a linked folder could disappear.
 → Now: linked account folders appear, and unreadable entries are skipped.
+```
 
 ## Dev top-level
 
-Live on production · Dev · Account identity and reset times have structured JSON values.
+```text
+*Live on production — Dev — Cassy*
+Was: account identity and reset times were text. → Now: JSON exposes typed identity and timestamp values.
+```
 
 ## Dev reply
 
-Was: `cas limits --json` returned local display text in each window's `reset_at`.
-→ Now: `reset_at` is an RFC3339 datetime with an explicit zero offset; parse it as a datetime. Human output still uses local time.
+```text
+• *Reset timestamps* — Was: cas limits --json returned local display text in each window's reset_at.
+→ Now: reset_at is an RFC3339 datetime with an explicit zero offset; parse it as a datetime. Human output still uses local time.
 
-Was: the registry encoded identity as JSON text, and stale detection matched error prose.
+• *Account identity* — Was: identity was JSON text, and stale detection matched error prose.
 → Now: identity is an object with account, workspace and email-fallback fields; stale detection uses the structured authentication state.
+```

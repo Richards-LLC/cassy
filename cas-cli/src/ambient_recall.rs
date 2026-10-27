@@ -2580,10 +2580,42 @@ fn requests_code_recall(prompt: &str) -> bool {
         return false;
     }
     let lower = prompt.to_ascii_lowercase();
-    ["code recall", "code search", "code symbols", "search code"]
-        .iter()
-        .any(|phrase| lower.contains(phrase))
-        || lower.contains("::")
+    let mut request = lower.trim_start();
+    for _ in 0..3 {
+        if let Some(rest) = ["please ", "can you ", "could you "]
+            .iter()
+            .find_map(|prefix| request.strip_prefix(prefix))
+        {
+            request = rest.trim_start();
+        } else {
+            break;
+        }
+    }
+    // Mentioning Code recall (including asking to suppress it) is not an
+    // opt-in. Require an affirmative lookup command or a concrete reference.
+    [
+        "search code",
+        "search the code",
+        "find code",
+        "find the code",
+        "show code",
+        "show the code",
+        "inspect code",
+        "inspect the code",
+        "trace code",
+        "trace the code",
+        "recall code",
+        "look up code",
+        "explain code",
+    ]
+    .iter()
+    .any(|phrase| {
+        request.strip_prefix(phrase).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|ch| ch.is_whitespace() || ch == ':')
+        })
+    }) || lower.contains("::")
         || lower.split_whitespace().any(|token| {
             let token = token.trim_matches(|ch: char| {
                 !ch.is_ascii_alphanumeric() && !matches!(ch, '/' | '.' | '_' | '-' | '(' | ')')

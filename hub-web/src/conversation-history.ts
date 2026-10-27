@@ -466,7 +466,11 @@ export class ConversationHistory {
     if (existing?.kind === "send") {
       existing.value.target = message.target;
       existing.value.text = message.text;
-      existing.value.state = message.state;
+      // History may race a live receipt or reply. Keep the furthest evidence
+      // already seen instead of replaying an older Sending/Delivered state.
+      if (existing.value.state !== "replied" && !(existing.value.state === "acknowledged" && message.state === "sending")) {
+        existing.value.state = message.state;
+      }
       existing.value.stamped = message.stamped;
       existing.value.deviceLabel = message.operator_label;
       // A turn already in the thread keeps what it is known to be. A

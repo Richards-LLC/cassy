@@ -11,7 +11,7 @@ import { HubDouble, type HistoryPage } from "./hub-double";
 type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[] };
 const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
 const capture: Capture = JSON.parse(await readFile(process.env.CONVERSATION_PERF_CAPTURE!, "utf8"));
-const dist = resolve("dist");
+const dist = resolve(process.env.CONVERSATION_PERF_DIST ?? "dist");
 let server: Server;
 let origin: string;
 test.beforeAll(async () => {
@@ -241,6 +241,7 @@ for (const profile of [
         long_task_total_ms: probe.long_tasks.reduce((sum: number, entry: any) => sum + entry.ms, 0),
         long_task_max_ms: Math.max(0, ...probe.long_tasks.map((entry: any) => entry.ms)) };
       await writeFile(join(directory, "receipt.json"), JSON.stringify({ status: "PASS", profile, browser: browser.version(), source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        bundle_revision: process.env.CONVERSATION_PERF_BUNDLE_REVISION ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms, pending_replies: capture.pending_replies?.length,
         flow: process.env.CONVERSATION_PERF_FLOW ?? "history", replay_cadence: "history response plus batches of ten pending OperatorReply frames, paced by browser rAF; fastest-case replay, daemon scheduling/network excluded",
         label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));

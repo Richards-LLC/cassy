@@ -39,8 +39,24 @@ It prints the backup and the undo command (`bash <backup>/restore.sh`). A
 second run changes nothing. Run the same command on each machine.
 
 New accounts created with `cas claude` or `cas codex` link to the base
-automatically. `cas doctor` reports an account whose shared items no longer
-link to the base (`account links`); `cas accounts drift` lists them.
+automatically. `cas doctor` reports, per account, shared items that no longer
+link to the base, plus a retired folder (`~/.codex`, say) that a session
+recreated (`account links`). `cas accounts drift` lists the items.
+
+`cas doctor --fix` links every empty shared slot. Replacing a real file or
+folder with a link, or retiring a recreated folder again, is shown as a
+preview; `cas doctor --fix --yes` applies it with the same backup and
+`restore.sh` as `cas accounts link`. Credentials (`.credentials.json`,
+`auth.json`, `.claude.json`) are never shared or touched.
+
+Every launch checks the chosen account first: `cas claude`, `cas codex`,
+`spawn_workers` and a Commander launch link its empty shared slots and print
+one line (`Linked 5 shared items in ~/.codex-<email> from
+~/.cas/codex-base`). A real item in a shared slot is reported with the fix
+command, and the launch goes ahead. An interactive launch offers to repair it
+right away. The `spawn_workers` receipt and the Commander launch response
+record the same lines. Launching a retired folder that came back names the
+account to use instead.
 
 A symlinked account directory represents its target, whether that target is
 inside or outside your home directory. Linking and `cas update --user` follow

@@ -726,6 +726,7 @@ mod tests {
             std::fs::create_dir_all(provider.base_dir(h).join("skills")).unwrap();
             let account = h.join(format!("{}w@x.com", provider.prefix()));
             std::fs::create_dir_all(&account).unwrap();
+            std::fs::write(account.join(provider.credentials()), "{}").unwrap();
             let environment = LaunchEnvironment {
                 executable: PathBuf::from("/bin/true"),
                 set: vec![(key.into(), account.clone().into_os_string())],

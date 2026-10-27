@@ -15292,10 +15292,23 @@ mod tests {
             }
             let label = format!("{}w@x.com", provider.prefix());
             std::fs::create_dir_all(h.join(&label).join("agents")).unwrap();
+            std::fs::write(h.join(&label).join(provider.credentials()), "{}").unwrap();
             // An explicit account and the same account inherited (as ~/...).
-            specs.push(spec_for(cli, Some(h.join(&label).to_str().unwrap())));
-            let mut inherited = spec_for(cli, None);
-            inherited.requester_config_dir = Some(format!("~/{label}"));
+            let spec = cas_mux::WorkerSpec {
+                name: None,
+                cli,
+                model: None,
+                effort: None,
+                config_dir: Some(h.join(&label).to_string_lossy().into_owned()),
+                requester_config_dir: None,
+                requester_secure_storage_dir: None,
+            };
+            specs.push(spec.clone());
+            let inherited = cas_mux::WorkerSpec {
+                config_dir: None,
+                requester_config_dir: Some(format!("~/{label}")),
+                ..spec
+            };
             specs.push(inherited);
             let base = format!("~/.cas/{}-base", provider.name());
             expected.push_str(&format!(

@@ -45,6 +45,18 @@ for (const [name, viewport, colorScheme] of [
       expect(ids).toEqual([...ids].sort((a, b) => a - b));
       expect(new Set(ids).size).toBe(ids.length);
     });
+    await journey.stage("Read cached older windows without getting stuck", async () => {
+      const first = () => log.locator(".conversation-turn").first().getAttribute("data-key");
+      for (let clicks = 0; clicks < 8 && hub.historyRequests.length === 2; clicks++) {
+        const before = await first();
+        await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+        await expect.poll(async () => hub.historyRequests.length > 2 || await first() !== before,
+          { message: "Load earlier reveals another cached window or requests the next page" }).toBe(true);
+      }
+      expect(hub.historyRequests).toHaveLength(3);
+      await page.getByRole("button", { name: "Jump to latest" }).click();
+      await expect(log.locator('[data-key="reply:150"]')).toBeInViewport();
+    });
     await journey.stage("Answer a decision from before the loaded tail", async () => {
       await page.getByRole("button", { name: "Waiting on you: Approve the release plan from earlier history?" }).click();
       const question = log.getByRole("group", { name: `Question from ${PELICAN}` }).filter({ hasText: deepAsk.message });
@@ -52,7 +64,7 @@ for (const [name, viewport, colorScheme] of [
       const sent = hub.nextSend();
       await question.getByRole("button", { name: "Approve", exact: true }).click();
       expect(await sent).toMatchObject({ text: "Approve", in_reply_to: 1 });
-      expect(hub.historyRequests).toHaveLength(2);
+      expect(hub.historyRequests).toHaveLength(3);
     });
   });
 }

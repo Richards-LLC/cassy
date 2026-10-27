@@ -3797,13 +3797,14 @@ impl FactoryDaemon {
         // Review L3: a scan the runtime refused is retried on the next pass.
         let submitted = self.relay_jobs.submit_read(&mut self.queue_jobs, Relay::UsageLimit, move || {
             let active = crate::store::open_agent_store(&cas_dir)
-                .and_then(|agents| Ok(agents.list(Some(cas_types::AgentStatus::Active))?))
+                .and_then(|agents| Ok(agents.list(None)?))
                 .unwrap_or_default();
             RelayOutput::UsageLimitRead(
                 active
                     .iter()
                     .filter(|agent| {
                         agent.role == cas_types::AgentRole::Worker
+                            && matches!(agent.status, cas_types::AgentStatus::Active | cas_types::AgentStatus::Idle)
                             && agent.factory_session.as_deref() == Some(session.as_str())
                             && workers.contains(&agent.name)
                     })
@@ -10771,16 +10772,38 @@ impl FactoryDaemon {
                     }
                 }
                 SpawnAction::Recycle => {
-                    let spec = request.worker_spec.as_deref().and_then(|json| {
-                        serde_json::from_str::<cas_mux::WorkerSpec>(json).ok()
-                    });
+                    let spec = request
+                        .worker_spec
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok());
+                    let limit_recycle = match request
+                        .worker_spec
+                        .as_deref()
+                        .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+                        .and_then(|v| v.get("limit_recycle").cloned())
+                        .map(serde_json::from_value)
+                        .transpose()
+                    {
+                        Ok(meta) => meta,
+                        Err(error) => {
+                            record_terminal_spawn_state(
+                                self.app.cas_dir(),
+                                request.id,
+                                cas_store::SpawnLifecycleState::Failed,
+                                None,
+                                &format!(
+                                    "Invalid limit recycle metadata; nothing stopped: {error}"
+                                ),
+                            );
+                            continue;
+                        }
+                    };
                     for name in request.worker_names {
                         self.pending_spawns.push_back(PendingSpawn::Recycle {
                             request_id: request.id,
                             name,
                             spec: spec.clone(),
-                            limit_recycle: request.worker_spec.as_deref().and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-                                .and_then(|v| v.get("limit_recycle").cloned()).and_then(|v| serde_json::from_value(v).ok()),
+                            limit_recycle: limit_recycle.clone(),
                         });
                     }
                 }
@@ -13303,20 +13326,42 @@ mod tests {
         sq.ack(broken).unwrap();
     }
     use super::{
-        LIFECYCLE_MAX_RENUDGE_ATTEMPTS, WORKER_DEATH_TAIL_MAX_CHARS, append_spawn_audit, append_spawn_audit_line,
-        boot_hook_review_detail, boot_model_error_detail, cancel_targeted_in_flight_spawn, deliver_worker_task_brief,
-        describe_pending_spawn, enqueue_preassign_failure_lifecycle_relay,
-        enqueue_spawn_cancelled_notice, enqueue_spawn_outcome_notice, ensure_worker_preassignment,
-        is_exact_agent_name_match, matches_event_filter, preassign_failure_reason,
-        prompt_poison_sweep_due, prompt_poison_sweep_targets, registered_prompt_sweep_agents,
-        registration_timeout_detail, reminder_matches_factory_session,
-        shutdown_targets, spawn_predates_shutdown,
-        spawn_provisioning_timed_out, spawn_queue_reset_report, stalled_spawn_requests,
-        take_next_pending_spawn, take_spawn_cancellation, take_unverified_spawn_on_exit,
-        timeout_pane_tail, worker_exit_info,
+        LIFECYCLE_MAX_RENUDGE_ATTEMPTS,
         // cas-2ffe (GH #915): exit cause and death correlation.
-        ObservedWorkerExit, WORKER_DEATH_CORRELATION_WINDOW, closed_death_group,
+        ObservedWorkerExit,
+        WORKER_DEATH_CORRELATION_WINDOW,
+        WORKER_DEATH_TAIL_MAX_CHARS,
+        append_spawn_audit,
+        append_spawn_audit_line,
+        boot_hook_review_detail,
+        boot_model_error_detail,
+        cancel_targeted_in_flight_spawn,
+        closed_death_group,
+        deliver_worker_task_brief,
+        describe_pending_spawn,
+        enqueue_preassign_failure_lifecycle_relay,
+        enqueue_spawn_cancelled_notice,
+        enqueue_spawn_outcome_notice,
+        ensure_worker_preassignment,
+        is_exact_agent_name_match,
+        matches_event_filter,
+        preassign_failure_reason,
+        prompt_poison_sweep_due,
+        prompt_poison_sweep_targets,
+        registered_prompt_sweep_agents,
+        registration_timeout_detail,
+        reminder_matches_factory_session,
+        shutdown_targets,
+        spawn_predates_shutdown,
+        spawn_provisioning_timed_out,
+        spawn_queue_reset_report,
+        stalled_spawn_requests,
+        take_next_pending_spawn,
+        take_spawn_cancellation,
+        take_unverified_spawn_on_exit,
+        timeout_pane_tail,
         worker_exit_cause,
+        worker_exit_info,
     };
     use crate::ui::factory::app::render_and_ops::epic_workers::release_preassign_if_bound;
     use crate::ui::factory::daemon::{FactoryDaemon, PendingSpawn, SpawnVerification};
@@ -19798,9 +19843,9 @@ mod supervisor_decision_wake_tests {
 mod declined_wake_retry_tests_cas_913c {
     use super::{
         ClaudeRedelivery, DeferredInboxOutcome, INBOX_DRAIN_TURN_WINDOW, PaneWakeState,
-        ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome, claude_redelivery_decision_after_turn,
-        RecipientWakeEvidence, claude_turn_aware_retry, claude_turn_aware_retry_with_evidence,
-        deferred_inbox_drain_phase, deferred_inbox_outcome,
+        RecipientWakeEvidence, ToolCallEvidence, TurnAwareRetry, UrgentWakeOutcome,
+        claude_redelivery_decision_after_turn, claude_turn_aware_retry,
+        claude_turn_aware_retry_with_evidence, deferred_inbox_drain_phase, deferred_inbox_outcome,
         idle_unacked_relay_due, wake_retry_due_to_turn_end, wake_starved_needs_supervisor,
     };
     use chrono::{Duration as Chrono, TimeZone, Utc};

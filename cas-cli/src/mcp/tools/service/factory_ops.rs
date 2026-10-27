@@ -11514,7 +11514,14 @@ fn worker_status_transcript_path_for_account(
             );
             worker_status_path_from_resolution(cached.resolution, cli)
         }
-        cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
+        cas_mux::SupervisorCli::Claude => match account_dir {
+            Some(account) => {
+                let path = std::path::Path::new(account).join("projects")
+                    .join(escaped_project_slug(clone_path?)).join(format!("{session_id}.jsonl"));
+                path.is_file().then_some(path)
+            }
+            None => transcript_path_fast(clone_path, session_id),
+        },
         // cas-7296 owns OpenCode worker-status session mapping.
         cas_mux::SupervisorCli::OpenCode => None,
     }
@@ -15228,6 +15235,8 @@ mod tests {
         }
         assert!(receipt.contains("resets in 6h, 41% left"));
         assert!(spawn_specs_summary(&specs, &[]).contains("account=/fixture/.codex-chosen"));
+        // Recommendation-populated directories pass through the same final preflight.
+        assert!(preflight_codex_config_dir(specs[3].config_dir.as_deref().unwrap()).unwrap_err().contains("auth.json"));
         specs[0].config_dir = None;
         specs[0].requester_config_dir = Some("/fallback/account".into());
         let fallback = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {

@@ -153,7 +153,13 @@ fn plan_switch(
     let selection = crate::account_selection::recommend(&candidates, provider, now, policy);
     let tasks = meta.task_ids.join(", ");
     let old_name = old_row
-        .map(|a| a.display_name.clone())
+        .map(|a| {
+            if a.display_name == a.name {
+                a.name.clone()
+            } else {
+                format!("{} ({})", a.display_name, a.name)
+            }
+        })
         .unwrap_or_else(|| meta.old_account.display().to_string());
     let Some(next) = selection.recommended else {
         let reset = accounts
@@ -173,6 +179,11 @@ fn plan_switch(
             ),
         );
     };
+    let next_name = if next.account.display_name == next.account.name {
+        next.account.name.clone()
+    } else {
+        format!("{} ({})", next.account.display_name, next.account.name)
+    };
     let mut spec = worker_spec_from_agent(agent);
     spec.config_dir = Some(next.account.folder.to_string_lossy().into_owned());
     if let Err(error) = preflight(&spec) {
@@ -180,7 +191,7 @@ fn plan_switch(
             None,
             format!(
                 "Worker {}, task {tasks}: blocked switch {old_name} -> {} after usage limit: {error}. Existing pane kept.",
-                agent.name, next.account.display_name
+                agent.name, next_name
             ),
         );
     }
@@ -190,7 +201,7 @@ fn plan_switch(
         Some(json.to_string()),
         format!(
             "Worker {}, task {tasks}: usage limit; queued account switch {old_name} -> {} ({}). Worktree, branch and task bindings kept.",
-            agent.name, next.account.display_name, next.reason
+            agent.name, next_name, next.reason
         ),
     )
 }
@@ -253,32 +264,66 @@ pub(crate) fn prepare_limit_resume(
         if episode_key(&meta.session, name, first_evidence) == meta.episode),
         "limit episode changed; nothing stopped"
     );
+    let provider = if spec.cli == cas_mux::SupervisorCli::Claude {
+        crate::accounts::Provider::Claude
+    } else {
+        crate::accounts::Provider::Codex
+    };
+    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("account home unavailable"))?;
+    let selected = spec
+        .config_dir
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("replacement missing"))?;
+    let rows: Vec<_> = crate::account_registry::collect_for(provider, &home, true)?
+        .into_iter()
+        .filter(|row| same_folder(&row.folder, Path::new(selected)))
+        .collect();
+    anyhow::ensure!(
+        crate::account_selection::recommend(
+            &rows,
+            provider,
+            chrono::Utc::now(),
+            &crate::account_selection::load_policy(Some(root))
+        )
+        .recommended
+        .is_some(),
+        "replacement account no longer eligible; nothing stopped"
+    );
     preflight_limit_spec(spec).map_err(anyhow::Error::msg)?;
     anyhow::ensure!(meta.cwd.is_dir(), "worktree missing; nothing stopped");
     spec.cli
         .backend()
         .prepare_workdir(&meta.cwd, spec.config_dir.as_deref())
         .map_err(|e| anyhow::anyhow!("replacement workspace preflight failed before stop: {e}"))?;
-    let status =
-        run_git(&meta.cwd, &["status", "--short"]).unwrap_or_else(|e| format!("unavailable: {e}"));
-    let unpushed = run_git(&meta.cwd, &["log", "--oneline", "@{u}..HEAD"])
-        .unwrap_or_else(|e| format!("upstream unavailable: {e}"));
-    let branch =
-        run_git(&meta.cwd, &["branch", "--show-current"]).unwrap_or_else(|_| "unknown".into());
+    let state = resume_git_state(&meta.cwd);
     let (resume, why) = copy_resume_transcript(root, &agent, meta, spec);
     Ok((
         resume,
         format!(
-            "Account limit recovery: {why}.\nKept worktree: {}\nBranch: {branch}\nUncommitted changes:\n{}\nUnpushed commits:\n{}\nContinue the assigned task; preserve these changes.\n",
-            meta.cwd.display(),
-            if status.is_empty() { "(none)" } else { &status },
-            if unpushed.is_empty() {
-                "(none)"
-            } else {
-                &unpushed
-            }
+            "Account limit recovery: {why}.\n{state}\nContinue the assigned task; preserve these changes.\n"
         ),
     ))
+}
+
+fn resume_git_state(cwd: &Path) -> String {
+    let status = run_git(cwd, &["status", "--short"]);
+    let unpushed = run_git(cwd, &["log", "--oneline", "@{u}..HEAD"])
+        .or_else(|_| run_git(cwd, &["log", "--oneline", "HEAD", "--not", "--remotes"]));
+    let branch = run_git(cwd, &["branch", "--show-current"]).unwrap_or_else(|_| "unknown".into());
+    let render = |result: Result<String, String>| match result {
+        Ok(value) => format!(
+            "{}\n{}",
+            value.lines().count(),
+            if value.is_empty() { "(none)" } else { &value }
+        ),
+        Err(error) => format!("unknown\nunavailable: {error}"),
+    };
+    format!(
+        "Kept worktree: {}\nBranch: {branch}\nUncommitted changes: {}\nUnpushed commits (upstream, or remote refs when unset): {}\n",
+        cwd.display(),
+        render(status),
+        render(unpushed)
+    )
 }
 
 fn copy_resume_transcript(
@@ -355,6 +400,68 @@ fn copy_resume_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paired_provider_transcripts_copy_before_stop_and_existing_targets_are_not_overwritten() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = home.path().join("worktree");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let id = "019f84af-3121-7950-ba14-b01db2dad6c7";
+        for cli in [
+            cas_mux::SupervisorCli::Claude,
+            cas_mux::SupervisorCli::Codex,
+        ] {
+            let old = home.path().join(format!(".{}-old", cli.backend().name()));
+            let next = home.path().join(format!(".{}-next", cli.backend().name()));
+            let relative = if cli == cas_mux::SupervisorCli::Claude {
+                PathBuf::from("projects")
+                    .join(escaped_project_slug(cwd.to_str().unwrap()))
+                    .join(format!("{id}.jsonl"))
+            } else {
+                PathBuf::from(format!("sessions/2026/10/27/rollout-{id}.jsonl"))
+            };
+            let source = old.join(&relative);
+            std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+            let body = format!(
+                "{}\n",
+                serde_json::json!({"type":"session_meta","payload":{"id":id,"cwd":cwd,"timestamp":"2026-10-27T12:00:00Z"}})
+            );
+            std::fs::write(&source, &body).unwrap();
+            let mut agent = cas_types::Agent::new_with_role(
+                "agent".into(),
+                "worker".into(),
+                cas_types::AgentRole::Worker,
+            );
+            agent.cc_session_id = Some(id.into());
+            agent
+                .metadata
+                .insert("worker_cli".into(), cli.backend().name().into());
+            agent
+                .metadata
+                .insert("worker_account_dir".into(), old.to_string_lossy().into());
+            agent
+                .metadata
+                .insert("clone_path".into(), cwd.to_string_lossy().into());
+            let meta = LimitRecycle {
+                agent_id: agent.id.clone(),
+                episode: "episode".into(),
+                session: "session".into(),
+                old_account: old,
+                task_ids: vec!["cas-held".into()],
+                cwd: cwd.clone(),
+            };
+            let mut spec = worker_spec_from_agent(&agent);
+            spec.config_dir = Some(next.to_string_lossy().into());
+            let (resume, why) = copy_resume_transcript(home.path(), &agent, &meta, &spec);
+            assert_eq!(resume.as_deref(), Some(id), "{cli:?}: {why}");
+            assert_eq!(std::fs::read_to_string(next.join(&relative)).unwrap(), body);
+            assert_eq!(std::fs::read_to_string(&source).unwrap(), body);
+            let (resume, why) = copy_resume_transcript(home.path(), &agent, &meta, &spec);
+            assert!(resume.is_none());
+            assert!(why.contains("fresh start on the same task"));
+            assert_eq!(std::fs::read_to_string(next.join(&relative)).unwrap(), body);
+        }
+    }
+
     #[test]
     fn fixture_queue_keeps_dirty_worktree_task_branch_and_dedupes_after_reopen() {
         crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
@@ -435,6 +542,16 @@ mod tests {
             .unwrap();
             assert_eq!(detail, replay);
             assert_eq!(queue.peek(10).unwrap().len(), 1);
+            let state = resume_git_state(&cwd);
+            assert!(state.contains("Uncommitted changes: 1"), "{state}");
+            assert!(
+                state.contains("Unpushed commits (upstream, or remote refs when unset): 1"),
+                "{state}"
+            );
+            assert!(
+                state.contains("uncommitted.txt") && state.contains("unpublished"),
+                "{state}"
+            );
             assert_eq!(
                 std::fs::read(cwd.join("uncommitted.txt")).unwrap(),
                 b"keep every byte\0"

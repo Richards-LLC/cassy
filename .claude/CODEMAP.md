@@ -87,6 +87,7 @@
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry/` - dispatch, reminders, stalls and owned servers.
 - `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_branch_recovery.rs` - durable succession and authenticated worker-branch recovery.
 - `cas-cli/src/factory_session_scope.rs`, `cas-cli/src/mcp/tools/service/factory_ops.rs` - session ownership, adopted-orphan worker routing, reset and fingerprinted shutdown.
+- `cas-cli/src/mcp/tools/service/factory_ops/limit_switch.rs` - durable account-limit recycle decisions, pre-stop validation and transcript continuation.
 - `cas-cli/src/ui/factory/app/merge_alert.rs`, `cas-cli/src/ui/factory/app/director_refresh.rs` - pushed-green signals, shared external probes, readiness cache and durable per-tip admission.
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_review_scratch.rs` - build-pressure admission, review checkouts, inherited flags, target reuse and freeable-inode accounting.

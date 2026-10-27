@@ -25,7 +25,7 @@ export interface WorkerTimelineHandlers {
 }
 
 const STATE_WORDS = { working: "Working", waiting: "Waiting", parked: "Parked", idle: "Idle" } as const;
-const STATE_TONES = { working: "ok", waiting: "warn", parked: "idle", idle: "idle" } as const;
+const STATE_TONES = { working: "active", waiting: "blocked", parked: "idle", idle: "idle" } as const;
 
 /** The one dialog; it lives on document.body so a shell rebuild never closes it. */
 export function workerTimelineDialog(document: Document, handlers: WorkerTimelineHandlers): HTMLDialogElement {

@@ -1502,14 +1502,16 @@ impl AuthStore {
     ) -> Result<()> {
         let mut state = self.lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
-        let lease = state
+        // A departing view may have missed another device's takeover, or
+        // already released this lease. Cleanup is idempotent after validating
+        // the credential; it must never remove another device's control.
+        if !state
             .leases
             .get(session)
-            .context("controller lease unavailable")?;
-        anyhow::ensure!(
-            lease.device_id == context.device_id,
-            "authorization refused"
-        );
+            .is_some_and(|lease| lease.device_id == context.device_id)
+        {
+            return Ok(());
+        }
         state.leases.remove(session);
         self.persist(&state)
     }

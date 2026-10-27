@@ -148,9 +148,9 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
   });
 
   await journey.stage("Read the raw output from the keyboard", async () => {
-    const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
+    const released = page.waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
     await readRawOutput(page, hub, false);
-    await released;
+    expect((await released).status()).toBe(204);
     await expectOnlyTheThread(page);
   });
 

@@ -6,6 +6,8 @@
 the sender; live/history rows use the same stored operator name. Older peers
 without it keep `device_label` as their display fallback. Input leases stop
 renewing and release when their conversation or raw-output view is left.
+Authenticated departure cleanup is idempotent: releasing an absent or foreign
+lease succeeds without removing another device's control or revoking pairing.
 
 A supervisor message requires `message:send`; it does not acquire or require a
 pane input lease. A message-only pairing can therefore send while another

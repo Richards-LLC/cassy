@@ -945,9 +945,10 @@ export class HubDouble {
         this.leaseHolders.delete(session);
         this.releasedLeases.delete(session);
       } else if (method === "DELETE") {
-        // Releasing this browser never releases a different device's control.
+        // Match the authenticated hub's idempotent cleanup contract, including
+        // its empty 204 response; never release another device's control.
         if (!holder) this.releasedLeases.add(session);
-        return route.fulfill({ json: {} });
+        return route.fulfill({ status: 204, body: "" });
       } else if (method === "GET") {
         const gate = this.leaseReadGates.get(session);
         if (gate) {

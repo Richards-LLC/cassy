@@ -125,7 +125,11 @@ fn cas_9021_update_reconciles_violet_mappings_and_names_blockers() {
 fn update_inventory_probes_each_socket_once_cas_9299() {
     use crate::ui::factory::{SessionManager, gui_socket_path};
     let env = crate::test_support::TestEnvGuard::temp_home();
-    SessionManager::new().ensure_dir().unwrap();
+    let manager = SessionManager::new();
+    let mut metadata = crate::ui::factory::create_metadata(
+        "active9299", std::process::id(), "supervisor", &[], None, None, None,
+    );
+    manager.save_metadata(&metadata).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(gui_socket_path("probe9299")).unwrap();
     listener.set_nonblocking(true).unwrap();
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
@@ -160,6 +164,13 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         );
     });
     let inventory = RuntimeSnapshot::capture(false);
+    for index in 0..4 {
+        metadata.epic_id = Some(format!("fixture-epic-{index}"));
+        metadata.last_supervisor_mcp_call_at = Some(chrono::Utc::now());
+        metadata.held_workers = vec![format!("worker-{index}")];
+        manager.save_metadata(&metadata).unwrap();
+    }
+    inventory.validate().expect("routine metadata writes must preserve update inventory");
     for name in ["first", "second"] {
         let root = env.home().join(name).join(".cas");
         std::fs::create_dir_all(&root).unwrap();
@@ -199,6 +210,35 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         inventory.validate().is_err(),
         "a new runtime invalidates cached inventory"
     );
+    manager.remove_metadata("new9299").unwrap();
+    inventory.validate().expect("restored session identities remain valid");
+    let before_removal = RuntimeSnapshot::capture(false);
+    manager.remove_metadata(&metadata.name).unwrap();
+    assert!(before_removal.validate().is_err(), "removing a session must invalidate inventory");
+    manager.save_metadata(&metadata).unwrap();
+    // Each identity component must fence replacement, independently of mutable
+    // progress fields and of whether the process is currently alive.
+    type Replacement = (&'static str, fn(&mut crate::ui::factory::SessionMetadata));
+    let replacements: [Replacement; 7] = [
+        ("name", |m| m.name.push_str("-replacement")),
+        ("created_at", |m| m.created_at.push_str("-replacement")),
+        ("pid", |m| m.daemon_pid += 1),
+        ("process start", |m| m.daemon_pid_starttime = Some(u64::MAX)),
+        ("build", |m| m.daemon_build_hash = Some("replacement".into())),
+        ("project", |m| m.project_dir = Some("/replacement".into())),
+        ("socket", |m| m.socket_path.push_str("-replacement")),
+    ];
+    for (label, replace) in replacements {
+        let inventory = RuntimeSnapshot::capture(false);
+        let mut replacement = metadata.clone();
+        replace(&mut replacement);
+        manager.save_metadata(&replacement).unwrap();
+        assert!(inventory.validate().is_err(), "{label} replacement must invalidate inventory");
+        if replacement.name != metadata.name {
+            manager.remove_metadata(&replacement.name).unwrap();
+        }
+        manager.save_metadata(&metadata).unwrap();
+    }
     let mut probes = 0;
     while let Ok((stream, _)) = listener.accept() {
         probes += 1;

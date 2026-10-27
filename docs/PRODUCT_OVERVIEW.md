@@ -48,7 +48,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change; `cas deliverable finalize --audience customer` brands it, embeds its screenshots, refuses internal vocabulary and prints and checks the A4 and Letter PDFs.
    For a client product, `cas-customer-release-notes` writes the period's customer release notes from its `docs/deliverables/PROFILE.md`; the client's `DESIGN.md` shapes the layout, and the same `finalize --audience customer` call produces the HTML and PDFs.
 7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.
-8. The operator runs `cas accounts list` (or `--json`) to compare Claude and Codex subscriptions by email, usage and reset time, and identify duplicate or dead folders before choosing a session account.
+8. The operator runs `cas accounts list` (or `--json`) to compare Claude and Codex subscriptions by email, usage and reset time, and identify duplicate or dead folders before choosing a session account. Claude/Codex pickers and Commander highlight a recommended subscription with reset/headroom reasons; operators can choose another account. Workers use the same recommendation when neither an explicit nor requester account is supplied.
 9. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 
 ## Authoritative Sources

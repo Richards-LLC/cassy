@@ -63,3 +63,18 @@ folder names its full path and cause on separate lines, says login continues,
 and proceeds to other folders and auth. Fresh, symlinked and locked folders stay
 protected. The duplicate question reads the same stdin buffer as earlier prompts
 and remains cancellable. Machine mutation receipts and stdout stay unchanged.
+
+### Recovery critique
+
+terminal-qa: PASS accounts-recovery · 11 runs · 0 fail · 0 warn · 0 allowed
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The warning says login continues; refused removal says account kept then gives `cas update`. |
+| Fit | 4 | Folder and cause occupy separate lines; both-provider recovery captures pass 80 and 120 columns. |
+| Craft | 4 | Each failed folder has one warning; repair command remains copyable on its own line. |
+| Theme safety | 5 | Plain ASCII and default foreground pass four palettes, NO_COLOR and C locale. |
+| Machine contract | 5 | Diagnostics stay on stderr and leave mutation JSON intact. |
+
+Scored by warm-crane-68 on 2026-10-27. The exact-build candidate, captures and
+receipt are in cas-f140's delivery evidence; live macOS Keychain is unexercised.

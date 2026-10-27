@@ -39,7 +39,9 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
           image.items.add(new File([Uint8Array.from(atob(png), c => c.charCodeAt(0))], "screenshot.png", { type: "image/png" }));
           element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: image, bubbles: true, cancelable: true }));
         }, PNG);
-        await page.locator("#message-files").setInputFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Project file from the phone picker") });
+        const chooser = page.waitForEvent("filechooser");
+        await page.getByRole("button", { name: "Attach files", exact: true }).click();
+        await (await chooser).setFiles({ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("Project file from the phone picker") });
         await expect(page.getByRole("button", { name: "Remove pasted-text.txt", exact: true })).toBeVisible();
         await expect(page.getByRole("button", { name: "Remove screenshot.png", exact: true })).toBeVisible();
         await expect(page.locator(".composer-file img")).toBeVisible();

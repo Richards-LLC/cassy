@@ -372,6 +372,7 @@ mod tests {
         assert_eq!(queued[0].target, "bright-cobra-44");
         // The same advisory a Claude worker gets as PreToolUse context.
         assert_eq!(queued[0].prompt, collision_note(path, &holder));
+        // pin: missing session evidence must not invent another supervisor.
         assert!(!queued[0].prompt.contains("other session's supervisor"));
     }
 }

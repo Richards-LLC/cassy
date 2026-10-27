@@ -12943,15 +12943,21 @@ mod tests {
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
         assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
         for row in rows {
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
             assert_eq!(row.target, "supervisor");
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
             assert!(row.prompt.contains("limited"), "account must be named: {}", row.prompt);
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
             if row.prompt.contains("Worker codex") {
                 let reset = chrono::DateTime::from_timestamp(4071038400, 0).unwrap()
                     .with_timezone(&chrono::Local).format("%Y-%m-%d %I:%M %p %Z").to_string();
+                // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
                 assert!(row.prompt.contains(&reset), "absolute local reset missing: {}", row.prompt);
             } else {
+                // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
                 assert!(row.prompt.contains("reset time unavailable"), "{}", row.prompt);
             }
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
             assert!(row.prompt.contains("reassign or recover"), "{}", row.prompt);
         }
         assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());

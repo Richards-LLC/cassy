@@ -55,7 +55,12 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     await expect(dialog.locator(".pair-share")).toContainText("Not your machine? Send this code to whoever runs it.");
     await expect(dialog.getByRole("button", { name: "Send the code" })).toBeVisible();
     await expect(dialog.locator("#pair-status")).toBeVisible();
-    expect(await dialog.locator(".dialog-actions").evaluate((node) => getComputedStyle(node).borderTopWidth), "the waiting line's rule is the only one above the bar").toBe("0px");
+    // cas-f281: the pairing-status poll can replace this dialog subtree after
+    // the status becomes visible; assert the rendered bar as it settles.
+    await expect(
+      dialog.locator(".dialog-actions"),
+      "the waiting line's rule is the only one above the bar",
+    ).toHaveCSS("border-top-width", "0px");
   });
 
   await journey.stage("Approve on the machine", async () => {

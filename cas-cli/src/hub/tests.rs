@@ -5205,3 +5205,66 @@ async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_
         vec![(folder.canonicalize().unwrap().to_string_lossy().into_owned(), Some("factory-a".to_owned()))],
     );
 }
+
+/// Commander uploads use the real authenticated route, host sniffing and durable project storage.
+#[tokio::test]
+async fn composer_upload_is_authenticated_bounded_and_idempotent() {
+    use base64::Engine;
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let root = temp.path().join("project/.cas");
+    std::fs::create_dir_all(&root).unwrap();
+    let artifacts = temp.path().join("artifacts");
+    std::fs::write(root.join("config.toml"), format!("[factory]\nartifacts_root = {:?}\n", artifacts.to_str().unwrap())).unwrap();
+    let auth = AuthStore::open(&temp.path().join("hub"), "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let scopes = [Scope::MessageSend].into_iter().collect();
+    let invitation = auth.mint_pairing("https://controller.example", scopes, Utc::now()).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", [Scope::MessageSend].into_iter().collect());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
+    let mut session = fixture_session("factory-a");
+    session.project_dir = Some(root.parent().unwrap().display().to_string());
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let id = uuid::Uuid::new_v4();
+    let send = |session: &str, name: &str, data: &[u8], signed: bool| {
+        let uri = format!("/v1/sessions/{session}/uploads/{id}");
+        let mut request = Request::post(&uri).header("origin", "https://controller.example").header("content-type", "application/json");
+        if signed {
+            request = request.header("authorization", format!("DPoP {}", credential.credential))
+                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+        }
+        request.body(Body::from(serde_json::json!({"name":name,"data":base64::engine::general_purpose::STANDARD.encode(data)}).to_string())).unwrap()
+    };
+    for (session, signed, expected) in [("factory-a", false, StatusCode::UNAUTHORIZED), ("missing", true, StatusCode::FORBIDDEN)] {
+        assert_eq!(app.clone().oneshot(send(session, "test.txt", b"hello", signed)).await.unwrap().status(), expected);
+        assert!(!artifacts.exists(), "refused requests must not write bytes");
+    }
+    let mut first = None;
+    for name in ["../../outside.txt", "../../outside.txt"] {
+        let response = app.clone().oneshot(send("factory-a", name, b"hello", true)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        let path = std::path::Path::new(body["path"].as_str().unwrap());
+        assert!(path.starts_with(&artifacts));
+        assert_eq!(path.file_name().unwrap(), "outside.txt");
+        assert_eq!(std::fs::read(path).unwrap(), b"hello");
+        assert_eq!(body["mime"], "text/plain");
+        if let Some(first) = &first { assert_eq!(&body, first); } else { first = Some(body); }
+    }
+    assert_eq!(app.clone().oneshot(send("factory-a", "outside.txt", b"different", true)).await.unwrap().status(), StatusCode::CONFLICT);
+    for (data, expected) in [(vec![0,1,2,3], StatusCode::UNSUPPORTED_MEDIA_TYPE), (vec![b'x'; 10*1024*1024+1], StatusCode::PAYLOAD_TOO_LARGE)] {
+        // Invalid uploads must be refused before any idempotent replay lookup.
+        assert_eq!(app.clone().oneshot(send("factory-a", "bad", &data, true)).await.unwrap().status(), expected);
+    }
+    let artifact = first.unwrap();
+    let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
+    assert_eq!(store.get(artifact["artifact_id"].as_str().unwrap()).unwrap().unwrap().mime, "text/plain");
+}

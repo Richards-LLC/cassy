@@ -4,6 +4,9 @@ use crate::accounts::Provider;
 use crate::config::{AccountSelection, AccountsConfig};
 use chrono::{DateTime, Utc};
 
+/// Shared wording for the login-state exclusion already shown by picker labels.
+pub(crate) const LOGIN_UNAVAILABLE_REASON: &str = "not logged in or login unknown";
+
 #[derive(Debug)]
 pub struct Recommendation<'a> {
     pub account: &'a Account,
@@ -124,7 +127,7 @@ fn capacity(
         return Err("stale login".into());
     }
     if account.login_state != LoginState::LoggedIn {
-        return Err("not logged in or login unknown".into());
+        return Err(LOGIN_UNAVAILABLE_REASON.into());
     }
     // A successful usage response can omit an unopened window. No usage data
     // at all is different: never interpret a failed probe as spare capacity.
@@ -169,21 +172,34 @@ pub fn load_policy(cas_root: Option<&std::path::Path>) -> AccountsConfig {
     // Deserialize optional overrides separately: serde defaults in AccountsConfig
     // cannot distinguish an omitted field from an explicit default value.
     #[derive(Default, serde::Deserialize)]
-    struct Overrides { selection: Option<AccountSelection>, threshold: Option<u8> }
+    struct Overrides {
+        selection: Option<AccountSelection>,
+        threshold: Option<u8>,
+    }
     #[derive(Default, serde::Deserialize)]
-    struct Project { accounts: Option<Overrides> }
-    let project = cas_root.and_then(|root| {
-        crate::config::Config::load(root).ok()?;
-        if let Ok(raw) = std::fs::read_to_string(root.join("config.toml")) {
-            toml::from_str::<Project>(&raw).ok()
-        } else {
-            std::fs::read_to_string(root.join("config.yaml")).ok()
-                .and_then(|raw| serde_yaml::from_str::<Project>(&raw).ok())
-        }
-    }).and_then(|p| p.accounts).unwrap_or_default();
+    struct Project {
+        accounts: Option<Overrides>,
+    }
+    let project = cas_root
+        .and_then(|root| {
+            crate::config::Config::load(root).ok()?;
+            if let Ok(raw) = std::fs::read_to_string(root.join("config.toml")) {
+                toml::from_str::<Project>(&raw).ok()
+            } else {
+                std::fs::read_to_string(root.join("config.yaml"))
+                    .ok()
+                    .and_then(|raw| serde_yaml::from_str::<Project>(&raw).ok())
+            }
+        })
+        .and_then(|p| p.accounts)
+        .unwrap_or_default();
     let mut policy = global;
-    if let Some(selection) = project.selection { policy.selection = selection; }
-    if let Some(threshold) = project.threshold { policy.threshold = threshold; }
+    if let Some(selection) = project.selection {
+        policy.selection = selection;
+    }
+    if let Some(threshold) = project.threshold {
+        policy.threshold = threshold;
+    }
     policy
 }
 
@@ -229,9 +245,16 @@ pub(crate) mod tests {
     fn project_policy_merges_only_present_fields() {
         let temp = tempfile::tempdir().unwrap();
         let config_home = temp.path().join("config");
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[("XDG_CONFIG_HOME", config_home.to_str().unwrap())]);
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "XDG_CONFIG_HOME",
+            config_home.to_str().unwrap(),
+        )]);
         let mut global = crate::config::Config::default();
-        global.accounts = Some(AccountsConfig { selection: AccountSelection::MostHeadroom, threshold: 75, disabled: vec!["/disabled".into()] });
+        global.accounts = Some(AccountsConfig {
+            selection: AccountSelection::MostHeadroom,
+            threshold: 75,
+            disabled: vec!["/disabled".into()],
+        });
         crate::config::save_global_config(&global).unwrap();
         let project = temp.path().join(".cas");
         std::fs::create_dir_all(&project).unwrap();

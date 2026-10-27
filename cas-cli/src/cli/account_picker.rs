@@ -242,8 +242,11 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
             let mut label = format!("{display}{alias}{state}");
             let policy_detail = profile.recommendation.as_deref()
                 .map(|reason| format!(", recommended: {reason}"))
-                .or_else(|| profile.exclusion.as_deref().filter(|reason| !profile.disabled && *reason != "not logged in or login unknown")
-                    .map(|reason| format!(", {reason}")));
+                .or_else(|| {
+                    profile.exclusion.as_deref()
+                        .filter(|reason| !profile.disabled && *reason != crate::account_selection::LOGIN_UNAVAILABLE_REASON)
+                        .map(|reason| format!(", {reason}"))
+                });
             if let Some(detail) = policy_detail {
                 label.push_str(&shorten_picker_text(&detail, 76usize.saturating_sub(text_width(&label))));
             } else if let Some(usage) = &profile.usage {

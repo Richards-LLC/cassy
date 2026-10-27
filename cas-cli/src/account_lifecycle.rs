@@ -27,7 +27,7 @@ pub(crate) fn resolve(home: &Path, key: &str) -> Result<Target> {
         .into_iter()
         .filter(|p| provider.is_none_or(|v| v == *p))
     {
-        for dir in accounts::discover(p, home)? {
+        for dir in accounts::discover_aliases(p, home)? {
             let name = dir.label.strip_prefix(p.prefix()).unwrap_or("main");
             if name == key || dir.email.as_deref() == Some(key) {
                 let is_alias = name == key;

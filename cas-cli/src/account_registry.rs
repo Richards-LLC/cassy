@@ -331,7 +331,6 @@ fn refresh(accounts: &mut [Account]) {
     drop(sender);
     receive_updates(accounts, receiver, until);
     mark_duplicates_and_order(accounts);
-
 }
 
 /// Refresh picker capacity through the same identity-sharing path as the list.

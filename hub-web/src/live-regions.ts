@@ -1,3 +1,5 @@
+import { fitComposerPlaceholder } from "./conversation-shell";
+
 /**
  * Everything a hub heartbeat changes, written into nodes that already exist.
  *
@@ -34,6 +36,8 @@ export interface LiveRegionView {
   };
 }
 
+export const READ_ONLY_PLACEHOLDER = "Read only on this browser";
+
 /** A reason that is absent must clear the attributes, not leave a stale one. */
 function setDisabledReason(element: HTMLElement | null, reason: string | undefined): void {
   if (!element) return;
@@ -61,7 +65,13 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
 
   const field = root.querySelector<HTMLTextAreaElement>("#message-text");
   if (field) {
-    field.readOnly = view.readOnlyReason !== undefined;
+    const readOnly = view.readOnlyReason !== undefined;
+    // cas-a56c (QA F01): a read-only field does not invite a message; writable
+    // again, it takes back its fitted wording.
+    const wasReadOnly = field.readOnly;
+    field.readOnly = readOnly;
+    if (readOnly && field.placeholder !== READ_ONLY_PLACEHOLDER) field.placeholder = READ_ONLY_PLACEHOLDER;
+    if (!readOnly && wasReadOnly) fitComposerPlaceholder(field);
     const composer = field.closest<HTMLElement>(".message");
     if (composer) {
       if (view.readOnlyReason === undefined) delete composer.dataset.readOnly;

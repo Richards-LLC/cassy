@@ -50,6 +50,7 @@ import { launchDropped, launchDroppedNotice, preselectedScopes, repairCommand, r
 import { loadLaunchDropped, saveLaunchDropped } from "./launch-dropped";
 import { LaunchSheet, canLaunch } from "./launch-session";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
+import { sendPairingCode } from "./pair-share";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
@@ -65,7 +66,7 @@ import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
-import { planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
+import { planSupervisorSend, sendBlockTone, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { readablePanes } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
 import { setMachineAccentFleet, storageAccentStore } from "./machine-accent";
@@ -3659,7 +3660,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   const editOf = !quick && editingRefused?.threadKey === selectedThread ? editingRefused?.id : undefined;
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
-    showComposerStatus(plan.reason, "error");
+    showComposerStatus(plan.reason, sendBlockTone(plan.block));
     composer.focus();
     return;
   }
@@ -5230,6 +5231,18 @@ function bindEvents(): void {
     void navigator.clipboard.writeText(pairCopy.dataset.pairCommand ?? "")
       .then(() => toast("Command copied"))
       .catch(() => toast("Copy failed — type the command shown above"));
+  };
+  // cas-a56c: the code goes to whoever runs the machine, through the phone's
+  // share sheet or, failing that, the clipboard; the result is said in the dialog.
+  const pairShare = document.querySelector<HTMLButtonElement>("#pair-share");
+  if (pairShare) pairShare.onclick = () => {
+    const status = pairShare.parentElement?.querySelector<HTMLElement>(".pair-share-status");
+    const say = (text: string) => { if (!status) return; status.textContent = ""; window.setTimeout(() => { status.textContent = text; }, 50); };
+    void sendPairingCode(navigator, pairShare.dataset.shareText ?? "").then((outcome) => {
+      if (outcome === "copied") { pairShare.textContent = "Copied — paste it to them"; say("Code copied. Paste it to whoever runs the machine."); }
+      else if (outcome === "failed") { pairShare.textContent = "Copy failed"; say("Copy failed — read them the code shown above"); }
+      if (outcome === "copied" || outcome === "failed") window.setTimeout(() => { pairShare.textContent = "Send the code"; }, 2500);
+    });
   };
   if (pairDialogAutoOpen) {
     pairDialogAutoOpen = false;

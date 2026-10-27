@@ -51,6 +51,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - One obvious "Pair a machine" action on the empty screen, at every width.
 - The code and the exact command to run are shown together; copying the command works.
+- Someone who does not run the machine is told to send the code to whoever does (it works for 10 minutes), with one Send the code action: the phone's share sheet, or the clipboard where there is none (cas-a56c).
 - While waiting, the status says what the machine is doing, with a visible countdown.
 - The confirm step names the machine and the scopes in plain words before anything is stored.
 - After pairing, the user lands on a list with the supervisor in it. No reload and no second step.
@@ -552,6 +553,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
 - A failed end shows its error under the row and offers End session again.
+- A session named from the CLI can be ended under the same name rule, including `q`, `q2`, and `build_dev.v1`; the hub's launch/attach validation uses that rule too. The real authenticated handler regression `hub::tests::end_session_writes_audit_row` covers this boundary (cas-1ce3).
 
 ### HUB-J17 · Run the fleet from a conversation
 

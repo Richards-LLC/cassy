@@ -23,7 +23,7 @@ use super::{
     PairingExchangeError, ProxyFrame, ProxyFrameKind, Scope, SessionCatalog, SessionReadModel,
     TransportSecurity, ViewerRecvError, required_scope,
 };
-use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
+use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid_session_name};
 
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
@@ -932,7 +932,7 @@ async fn end_session<R: SessionReadModel>(
         }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
-    if !valid_launch_name(&session) {
+    if !valid_session_name(&session) {
         return with_cors(generic_not_found(), &headers);
     }
     let device = context
@@ -1663,22 +1663,6 @@ fn launch_error(status: StatusCode, code: &str, detail: &str) -> Response {
         .into_response()
 }
 
-fn valid_launch_name(name: &str) -> bool {
-    name.len() <= 80
-        && name.len() >= 3
-        && name
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && name
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
 fn selected_profile<'a>(
     name: &str,
     profiles: &'a [super::launch_env::LaunchProfile],
@@ -1793,12 +1777,12 @@ fn launch_session_blocking(
     if request
         .name
         .as_deref()
-        .is_some_and(|name| !valid_launch_name(name))
+        .is_some_and(|name| !valid_session_name(name))
     {
         return launch_error(
             StatusCode::BAD_REQUEST,
             "invalid_name",
-            "name must be 3-80 ASCII letters, digits, or hyphens and start and end with a letter or digit",
+            "name must be non-empty, not . or .., and contain no path separators",
         );
     }
 

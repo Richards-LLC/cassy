@@ -132,6 +132,22 @@ describe("pairing dialog in plain words (F3)", () => {
     expect(technical?.textContent).toContain("machine:read");
   });
 
+  it("offers a second person a way to send the code to whoever runs the machine (cas-a56c)", () => {
+    const code = new DOMParser().parseFromString(steps.code, "text/html");
+    const share = code.querySelector(".pair-share")!;
+    expect(share.textContent).toContain("Not your machine?");
+    expect(share.textContent).toContain("whoever runs it");
+    expect(share.textContent).toContain("10 minutes");
+    const button = share.querySelector<HTMLButtonElement>("button#pair-share")!;
+    expect(button.textContent).toBe("Send the code");
+    // What is sent names the code and the command that approves it, never a scope.
+    expect(button.dataset.shareText).toContain("cas hub authorize KQ7M-4XTR");
+    expect(button.dataset.shareText).not.toMatch(/machine:read|pane:/);
+    // The step that creates the code says so before it exists.
+    const create = new DOMParser().parseFromString(steps.create, "text/html");
+    expect(create.querySelector(".pair-flow")?.textContent).toContain("Not your machine?");
+  });
+
   it("names the fields in the operator's words", () => {
     for (const html of [steps.authorized, steps.link]) {
       const doc = new DOMParser().parseFromString(html, "text/html");

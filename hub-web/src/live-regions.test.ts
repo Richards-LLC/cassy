@@ -170,11 +170,14 @@ describe("live region values", () => {
 
   it("keeps a read-only device's composer read-only and says why before anything is typed (cas-b7c0)", () => {
     const reason = "This browser can read this conversation but not send messages.";
+    root.querySelector<HTMLTextAreaElement>("#message-text")!.dataset.placeholders = JSON.stringify(["Message the supervisor"]);
     applyLiveRegions(root, { ...live, sendReason: reason, readOnlyReason: reason });
 
     const field = root.querySelector<HTMLTextAreaElement>("#message-text")!;
     const status = root.querySelector<HTMLElement>("#message-status")!;
     expect(field.readOnly).toBe(true);
+    // cas-a56c (QA F01): the field no longer invites a message it cannot send.
+    expect(field.placeholder).toBe("Read only on this browser");
     expect(field.closest<HTMLElement>(".message")!.dataset.readOnly).toBe("true");
     expect(status.hidden).toBe(false);
     expect(status.textContent).toBe(reason);
@@ -185,6 +188,7 @@ describe("live region values", () => {
     applyLiveRegions(root, live);
 
     expect(field.readOnly).toBe(false);
+    expect(field.placeholder).toBe("Message the supervisor");
     expect(field.closest<HTMLElement>(".message")!.dataset.readOnly).toBeUndefined();
     expect(status.hidden).toBe(true);
   });

@@ -453,6 +453,9 @@ html[data-scheme="dark"] {
      only while fields scroll on beneath it (main.ts marks .fields-beneath),
      so nothing ever shows through it. */
   :root #pair-dialog > :is(.pair-flow, #pair-form) > .dialog-actions:not(.fields-beneath) { background: transparent; -webkit-backdrop-filter: none; backdrop-filter: none; }
+  /* cas-a56c: a status line straight above the bar already draws the rule; a
+     second hairline after a gap read as an empty bordered row. */
+  :root #pair-dialog > :is(.pair-flow, #pair-form) > .pair-status:not([hidden]) + .dialog-actions:not(.fields-beneath) { margin-top: 0; border-top: 0; }
   /* Its plain buttons (Close, Back) read as buttons: an outlined pill on glass. */
   :root dialog .dialog-actions button:not(.primary) { background: var(--look-glass-strong); border: 1px solid var(--line-strong); border-radius: var(--radius-pill); }
 

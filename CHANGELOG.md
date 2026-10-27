@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Visual QA waits for rendered images to decode before resting and journey
+  screenshots. Broken or timed-out images produce a finding instead of a blank
+  capture marked PASS, including when visual exceptions are configured.
+
 ### Added
 
 - Release notes select verified before/after JPGs from the released commit range

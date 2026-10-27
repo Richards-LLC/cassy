@@ -971,6 +971,7 @@ function markdownReport(result) {
   for (const finding of result.findings) {
     const location = `${finding.url}${finding.state ? ` · state ${finding.state}` : ''} · ${finding.scheme} · ${finding.viewport.name}`;
     lines.push(`- **${finding.type}** — \`${finding.elementPath}\` — ${finding.textSample ? JSON.stringify(finding.textSample) : finding.reason || 'see JSON'} (${location})`);
+    if (finding.type === 'image-not-decoded') lines.push(`  - ${finding.reason}`);
     if (finding.ratio !== undefined) lines.push(`  - Contrast: ${finding.ratio}:1 (required ${finding.threshold}:1); foreground ${finding.foreground?.join(', ')}; background ${finding.background?.join(', ')}`);
   }
   lines.push('', '## Informational checks', '');
@@ -1189,6 +1190,53 @@ async function settlePage(page) {
   }, { quietMs: SETTLE_QUIET_MS, maxMs: SETTLE_MAX_MS });
 }
 
+/** Decode the rendered images before either full-page capture, after any
+ * print/screen switch. Network load/complete alone does not mean an async image
+ * is ready to paint. All frames share one concurrent, bounded wait. */
+async function capturePage(page, path, timeoutMs, recordFinding) {
+  const frames = await Promise.all(page.frames().map((frame, frameIndex) => frame.evaluate(async ({ timeoutMs, frameIndex }) => {
+    const images = [...document.images].filter(image => {
+      const rect = image.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0
+        && rect.bottom + scrollY > 0 && rect.top + scrollY < document.documentElement.scrollHeight
+        && (!image.checkVisibility || image.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+    });
+    const identity = image => {
+      const parts = [];
+      for (let element = image; element; element = element.parentElement) {
+        if (element.id) { parts.unshift('#' + CSS.escape(element.id)); break; }
+        const peers = [...element.parentElement?.children || []].filter(peer => peer.localName === element.localName);
+        parts.unshift(element.localName + (peers.length > 1 ? `:nth-of-type(${peers.indexOf(element) + 1})` : ''));
+      }
+      const selector = (frameIndex ? `frame[${frameIndex}] ` : '') + parts.join(' > ');
+      return { type: 'image-not-decoded', selector, elementPath: selector, textSample: image.alt.slice(0, 96) };
+    };
+    const pending = new Set(images), findings = [];
+    let timer;
+    try {
+      await Promise.race([
+        Promise.all(images.map(async image => {
+          try {
+            // A full-page capture includes images below the initial fold too.
+            if (image.loading === 'lazy') image.loading = 'eager';
+            await image.decode();
+            if (!image.complete || !image.naturalWidth || !image.naturalHeight) throw new Error('empty image');
+          } catch {
+            findings.push({ ...identity(image), reason: 'image decoding failed before capture' });
+          } finally { pending.delete(image); }
+        })),
+        new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); }),
+      ]);
+    } finally { clearTimeout(timer); }
+    for (const image of pending) findings.push({ ...identity(image), reason: `image decoding exceeded ${timeoutMs} ms before capture` });
+    return findings;
+  }, { timeoutMs, frameIndex })));
+  for (const finding of frames.flat()) recordFinding(finding);
+  // decode resolves before the next paint; flush that paint without a sleep.
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  return page.screenshot({ path, fullPage: true });
+}
+
 /**
  * Render and inspect one or more HTML URLs.
  * With `journey` (a journey file path or object, see loadJourney), its
@@ -1196,7 +1244,8 @@ async function settlePage(page) {
  * Authenticated callers pass storageState (seeded before tracing), optional
  * extraHTTPHeaders, and secrets for any opaque credential values.
  * readySelector optionally identifies the real shell; readyTimeoutMs bounds
- * the wait (default 5000 ms). A loader/empty resting page always fails readiness.
+ * the shell and image decode waits (default 5000 ms each). Undecoded images fail
+ * every capture; a loader/empty resting page always fails readiness.
  * Declared journey states may intentionally exercise loading after startup.
  * @param {{urls?: string[], artifactDir?: string, schemes?: string[], viewports?: Array<{name?: string,width:number,height:number}|string>, allowlistPath?: string, strict?: boolean, journey?: string | object, readySelector?: string, readyTimeoutMs?: number}} options
  */
@@ -1255,7 +1304,7 @@ async function inspectVisualQa(options) {
               const key = [informational ? 'info' : 'finding', 'rest', enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
               if (seen.has(key)) return;
               seen.add(key);
-              const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+              const exception = enriched.type === 'image-not-decoded' ? null : enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
                 (entry.type === '*' || entry.type === enriched.type)
                 && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
               if (exception) suppressed.push({ ...enriched, reason: exception.reason });
@@ -1291,7 +1340,7 @@ async function inspectVisualQa(options) {
             }
             await page.emulateMedia({ media: 'screen' });
 
-            const screenshotBuffer = await page.screenshot({ path: join(artifactDir, `${slug(source)}-${scheme}-${viewport.name}.png`), fullPage: true });
+            const screenshotBuffer = await capturePage(page, join(artifactDir, `${slug(source)}-${scheme}-${viewport.name}.png`), readyTimeoutMs, recordFinding);
             for (const info of inspection.infos) {
               const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
               const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
@@ -1334,7 +1383,7 @@ async function inspectVisualQa(options) {
               const key = [informational ? 'info' : 'finding', `state:${state.name}`, enriched.type, enriched.selector || enriched.elementPath, enriched.otherElementPath || '', scheme, viewport.name].join('|');
               if (seen.has(key)) return;
               seen.add(key);
-              const exception = enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
+              const exception = enriched.type === 'image-not-decoded' ? null : enriched.allowlistedBy?.[0] ?? allowlist.find((entry) =>
                 (entry.type === '*' || entry.type === enriched.type)
                 && (entry.selector === '*' || (entry.selector === enriched.selector && !enriched.allowlistedBy)));
               if (exception) suppressed.push({ ...enriched, reason: exception.reason });
@@ -1391,7 +1440,7 @@ async function inspectVisualQa(options) {
               const inspection = await page.evaluate(PAGE_INSPECTION, { colorScheme: scheme, contrastLimit: CONTRAST_LIMIT, largeTextLimit: LARGE_TEXT_LIMIT, boxTolerance: BOX_TOLERANCE, allowlistEntries: allowlist });
               for (const invalid of inspection.invalidAllowlistSelectors) recordFinding(invalid, true);
               for (const finding of inspection.findings) recordFinding(finding);
-              const screenshotBuffer = await page.screenshot({ path: join(artifactDir, run.screenshot), fullPage: true });
+              const screenshotBuffer = await capturePage(page, join(artifactDir, run.screenshot), readyTimeoutMs, recordFinding);
               for (const info of inspection.infos) {
                 const sampledBackground = sampleScreenshotBackground(screenshotBuffer, info.box);
                 const sampledRatio = sampledBackground && info.foreground ? rgbContrast(info.foreground, sampledBackground) : undefined;
@@ -1491,7 +1540,7 @@ if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[
           continue;
         }
         const colors = finding.foreground && finding.background ? ` foreground=${finding.foreground.join(',')} background=${finding.background.join(',')} ratio=${finding.ratio ?? 'n/a'}` : '';
-        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}`));
+        console.log(redactQaText(`FAIL ${finding.type}${finding.state ? ` [${finding.state}]` : ''} ${finding.elementPath} text=${JSON.stringify(finding.textSample || (finding.type.startsWith('journey-') ? finding.reason : '') || '')}${colors}${finding.type === 'image-not-decoded' ? `\n  ${finding.reason}` : ''}`));
       }
       for (const page of result.readiness) console.log(redactQaText(`CONTENT ${page.scheme}/${page.viewport.name}: text nodes=${page.textNodes} characters=${page.textCharacters}\n  main landmarks=${page.mainLandmarks} content elements=${page.contentElements} loading indicators=${page.loadingIndicators}`));
       console.log(`Playwright ${result.playwrightVersion}`);

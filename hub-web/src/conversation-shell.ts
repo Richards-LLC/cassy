@@ -159,17 +159,15 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
-/** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
-export const ATTACH_SUPPORTED = false;
-/** The clip's reason, for when it comes back disabled-with-a-reason or enabled. */
-export const ATTACH_DISABLED_REASON = "Attaching files from this device is not supported yet. Supervisors send reports to you; sending files to a supervisor is coming.";
-export const composerClipMarkup = `<button type="button" class="composer-clip" disabled aria-disabled="true" title="${ATTACH_DISABLED_REASON}" aria-label="Attach a file (not yet supported)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></button>`;
+/** Attachments use the authenticated hub upload API before the durable message send. */
+export const ATTACH_SUPPORTED = true;
+export const composerClipMarkup = `<button type="button" id="message-attach" class="composer-clip" title="Attach files" aria-label="Attach files"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></button>`;
 const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg>';
 
 /**
  * Pebble composer (cas-3800): the field is a pill on --panel with --lift, the
  * send button takes the machine accent from the shell root, and the attach
- * clip sits beside the field, present but disabled. Dresses the existing
+ * clip sits beside the field and opens the native file picker. Dresses the existing
  * `.message` region in place so the ids the live-region updater and the send
  * handler bind to are untouched.
  *
@@ -196,8 +194,6 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
     queueMicrotask(() => fitComposerPlaceholder(input));
     watchComposerPlaceholder(input);
     input.rows = 1;
-    // Hidden until attaching works (cas-17e3): a control that can never be
-    // used is noise for every reader, and a dead stop for keyboard users.
     if (ATTACH_SUPPORTED && !composer.querySelector(".composer-clip")) input.insertAdjacentHTML("beforebegin", composerClipMarkup);
     if (!ATTACH_SUPPORTED) composer.querySelector(".composer-clip")?.remove();
   }

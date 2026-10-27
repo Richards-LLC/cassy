@@ -641,7 +641,7 @@ describe('conversation evidence', () => {
     shell.querySelector('#conversation-pane-slot')!.append(view.element);
     expect(shell.querySelectorAll('.thead')).toHaveLength(1);
   });
-  it('dresses the composer as Pebble: pill field, no dead attach clip, send in the accent naming the supervisor', () => {
+  it('dresses the composer as Pebble: pill field, working attach clip, send in the accent naming the supervisor', () => {
     const app = document.createElement('div');
     const template = document.createElement('template');
     template.innerHTML = '<div class="message"><h2><label for="message-text">Talk to x</label></h2><textarea id="message-text" placeholder="old"></textarea><div class="composer-actions"><button id="message-mic" type="button" aria-label="Start listening" aria-pressed="false"><svg class="mic-glyph" aria-hidden="true"></svg></button><button id="message-keyboard" type="button">Keyboard</button><button id="message-send" class="primary">Send message</button></div><p id="message-status" class="message-status" role="status" hidden></p></div>';

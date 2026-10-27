@@ -2894,11 +2894,14 @@ function bindSpeechComposer(): void {
     const root = composer.closest<HTMLElement>(".message")!;
     composerUploads?.draftFor(uploadThread).bind(root);
     const accept = (files: File[], text?: string) => {
-      void loadComposerUploads().then(module => {
+      if (pendingSubmissions.has(uploadThread)) { showComposerStatus("Wait for this send before attaching another file.", "info"); return; }
+      const accepted = (acceptingUploads.get(uploadThread) ?? Promise.resolve()).then(loadComposerUploads).then(module => {
         const draft = module.draftFor(uploadThread);
         if (root.isConnected) draft.bind(root);
         if (files.length) draft.add(files); else if (text) draft.addText(text);
-      }).catch(() => showComposerStatus("Couldn't open attachments. Your paste was not added; try again.", "error"));
+      }).catch(() => showComposerStatus("Couldn't open attachments. Your paste was not added; try again.", "error")); 
+      acceptingUploads.set(uploadThread, accepted);
+      void accepted.finally(() => { if (acceptingUploads.get(uploadThread) === accepted) acceptingUploads.delete(uploadThread); });
     };
     const picker = root.querySelector<HTMLInputElement>("#message-files")!;
     root.querySelector<HTMLButtonElement>("#message-attach")!.onclick = () => picker.click();
@@ -3684,6 +3687,7 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
  * A retry of a refused send is also `quick`: it carries the refused send's own
  * in_reply_to (possibly none) and `retryOf`, the refused send it replaces.
  */
+const acceptingUploads = new Map<string, Promise<void>>();
 let composerUploads: typeof import("./composer-uploads") | undefined;
 async function loadComposerUploads(): Promise<typeof import("./composer-uploads")> {
   return composerUploads ??= await import("./composer-uploads");
@@ -3693,6 +3697,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
   const renderedThread = composer.dataset.threadKey;
+  if (renderedThread) await acceptingUploads.get(renderedThread);
   const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
   if (renderedThread !== selectedThread) {
     showComposerStatus("The selected conversation changed. Reopen the conversation before sending.", "error");
@@ -3726,7 +3731,13 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
     text = await uploads.prepare(text, async (id, name, data) => {
       const connection = connections.get(machine.id);
       if (!connection) throw new Error("The machine is disconnected.");
-      return connection.request("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data });
+      try {
+        return await connection.request<{ path: string; artifact_id: string }>("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data });
+      } catch (error) {
+        const detail = (error as { detail?: string })?.detail;
+        if (detail) throw new Error(detail);
+        throw error;
+      }
     });
   }
   const sent = await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);

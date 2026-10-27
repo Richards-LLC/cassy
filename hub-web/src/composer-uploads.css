@@ -1,4 +1,4 @@
-.composer-uploads { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-2); max-height: 30vh; overflow: auto; color: var(--ink); }
+.composer-uploads { grid-column: 1 / -1; grid-row: 1; display: flex; flex-wrap: wrap; gap: var(--space-2); max-height: 30vh; overflow: auto; color: var(--ink); }
 .composer-uploads[hidden] { display: none; }
 .composer-file { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); min-width: 0; max-width: 100%; padding: var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: 12px; background: var(--bg-panel); color: var(--ink); }
 .composer-file span { overflow-wrap: anywhere; flex: 1; min-width: 0; }
@@ -7,3 +7,5 @@
 .composer-file button { min-height: 44px; }
 .composer-uploads p { flex-basis: 100%; margin: 0; color: var(--ink-mid); font-size: 13px; }
 .composer-uploads .upload-error { color: var(--state-crit); }
+
+.conversation-composer:has(.composer-uploads:not([hidden])) { grid-template-areas: "uploads uploads uploads" "clip field send" "status status status"; }

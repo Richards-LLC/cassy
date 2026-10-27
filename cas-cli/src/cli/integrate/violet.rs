@@ -4953,7 +4953,8 @@ auth = "env:{token}"
                 token_env: Some(TEST_TOKEN_ENV.into()),
                 ..test_args()
             };
-            let outcome = execute(&args, false, true).unwrap();
+            let paths = MachinePaths::from_env(&ProcessEnv).unwrap();
+            let report = run(&args, None, &paths, &ProcessEnv, &FakeProbe(live_tools())).unwrap();
             assert!(
                 !home.join(".codex").exists(),
                 "{mode}: recreated retired default home"
@@ -4965,13 +4966,15 @@ auth = "env:{token}"
                     "arbitrary config symlink target was changed"
                 );
                 assert!(
-                    outcome
-                        .summary
-                        .iter()
-                        .any(|line| line.starts_with("codex: skipped")
-                            && line.contains("not a regular file")),
+                    report.harnesses.iter().any(|entry| entry.harness == "codex"
+                        && entry.state == WriteState::Skipped
+                        && entry
+                            .note
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains("not a regular file")),
                     "{:?}",
-                    outcome.summary
+                    report.harnesses
                 );
                 assert!(
                     fs::symlink_metadata(home.join("selected-codex/config.toml"))
@@ -4983,12 +4986,12 @@ auth = "env:{token}"
             }
             if mode == "none" {
                 assert!(
-                    outcome
-                        .summary
-                        .iter()
-                        .any(|line| line == "codex: no account"),
+                    report.harnesses.iter().any(|entry| entry.harness == "codex"
+                        && entry.path.is_none()
+                        && entry.state == WriteState::Skipped
+                        && entry.note.as_deref() == Some("no account")),
                     "{:?}",
-                    outcome.summary
+                    report.harnesses
                 );
                 continue;
             }
@@ -5027,7 +5030,6 @@ auth = "env:{token}"
             }
         }
     }
-
 
     #[test]
     fn claude_registration_preserves_unrelated_keys() {

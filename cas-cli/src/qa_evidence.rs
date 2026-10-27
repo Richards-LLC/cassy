@@ -59,6 +59,8 @@ pub struct EvidenceContext<'a> {
     /// impossible. Empty means local builds only.
     pub deployed_origins: &'a [String],
     /// Configured registry and this delivery's attributed files, for rebind coverage.
+    /// Capture is configured (including invalid configuration); unavailable remains an escape.
+    pub capture_configured: bool,
     pub rebind_scope: Option<(&'a crate::config::QaConfig, &'a [String])>,
 }
 

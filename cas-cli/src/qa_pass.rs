@@ -928,7 +928,7 @@ pub(crate) fn validate_round_evidence(
                 task_id: &task.id,
                 task_artifacts_dir: ledger_path.parent().ok_or("API ledger has no parent")?,
                 repo: &repo, delivered_head: &pass.bound_head, notes: "",
-                deployed_origins: &qa.deployed_origins, rebind_scope: None,
+                deployed_origins: &qa.deployed_origins, capture_configured: false, rebind_scope: None,
             };
             if verdict == cas_types::QaVerdict::Approved {
                 crate::qa_evidence::validate_ledger(&ctx).map_err(|e| e.problem)?;
@@ -2029,6 +2029,7 @@ mod tests {
             "head_sha aaaa1111",
             "never the production URL",
             "Recording closes this QA task and cannot be revised",
+            "cas deliverable capture --task cas-ui1 --target epic/x --side both",
             "asking for request_changes on cas-ui1",
         ] {
             assert!(text.contains(pinned), "missing {pinned:?} in:\n{text}");

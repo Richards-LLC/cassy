@@ -207,6 +207,9 @@ fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
             .any(|f| f["code"] == "capture-timeout"),
         "{receipt}"
     );
+    let timeout = receipt["findings"].as_array().unwrap().iter().find(|f| f["code"] == "capture-timeout").unwrap();
+    assert!(timeout["message"].as_str().unwrap().contains("budget 2s"), "{timeout}");
+    assert!(timeout["message"].as_str().unwrap().contains("elapsed"), "{timeout}");
     assert!(receipt["elapsed_ms"].as_u64().unwrap() < 8000, "{receipt}");
     assert_eq!(
         fs::read_to_string(root.join("source.txt")).unwrap(),

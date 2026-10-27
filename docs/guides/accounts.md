@@ -44,17 +44,22 @@ link to the base, plus a retired folder (`~/.codex`, say) that a session
 recreated (`account links`). `cas accounts drift` lists the items.
 
 `cas doctor --fix` links every empty shared slot. Replacing a real file or
-folder with a link, or retiring a recreated folder again, is shown as a
-preview; `cas doctor --fix --yes` applies it with the same backup and
-`restore.sh` as `cas accounts link`. Credentials (`.credentials.json`,
+folder with a link, or retiring a recreated folder again, is the full
+`cas accounts link` repair, with its backup and `restore.sh`. In a terminal,
+`cas doctor --fix` asks before applying it. Elsewhere, and with `--json`, it
+only previews, and `cas doctor --fix --yes` applies it. Credentials (`.credentials.json`,
 `auth.json`, `.claude.json`) are never shared or touched.
 
 Every launch checks the chosen account first: `cas claude`, `cas codex`,
 `spawn_workers` and a Commander launch link its empty shared slots and print
 one line (`Linked 5 shared items in ~/.codex-<email> from
 ~/.cas/codex-base`). A real item in a shared slot is reported with the fix
-command, and the launch goes ahead. An interactive launch offers to repair it
-right away. The `spawn_workers` receipt and the Commander launch response
+command, and the launch goes ahead. When only that folder's own items need
+replacing, an interactive launch offers to back them up and link them. Files
+the base lacks are copied into it, and nothing else changes: no folder is
+renamed, retired or moved, and no other account is touched. A folder change
+or a file that differs from the base's copy needs `cas doctor --fix`, and
+the launch only names it. The `spawn_workers` receipt and the Commander launch response
 record the same lines. Launching a retired folder that came back names the
 account to use instead.
 

@@ -240,7 +240,13 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
                 76usize.saturating_sub(text_width(&alias) + text_width(&state)),
             );
             let mut label = format!("{display}{alias}{state}");
-            if let Some(usage) = &profile.usage {
+            let policy_detail = profile.recommendation.as_deref()
+                .map(|reason| format!(", recommended: {reason}"))
+                .or_else(|| profile.exclusion.as_deref().filter(|_| !profile.disabled)
+                    .map(|reason| format!(", {reason}")));
+            if let Some(detail) = policy_detail {
+                label.push_str(&shorten_picker_text(&detail, 76usize.saturating_sub(text_width(&label))));
+            } else if let Some(usage) = &profile.usage {
                 let compact =
                     usage.replace("reset, usage unknown until next session", "reset/unknown");
                 let mut parts: Vec<_> = compact.split(", ").collect();

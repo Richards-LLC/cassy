@@ -23,3 +23,13 @@ terminal-qa: PASS deliverable-capture · 12 runs · 0 fail · 0 warn · 0 allowe
 | Machine contract | 5 | Global JSON is exactly one typed document; no progress on stdout. |
 
 Scored by ready-raven-67 on 2026-10-26 against candidate4ac73527d. Setup failures (wrapper syntax and cwd banner) are retained separately; the final captures start with the command verdict. The CLI implementation is unchanged from the measured candidate.
+
+## Diagnostic findings
+
+Missing masks name the selector and affected sides once. Budget timeouts name
+both the configured seconds and elapsed seconds. The standard 80-column fixtures
+fit with their finding prefix and code; full values remain in `--json`.
+The temporary `deliverable-capture.allowlist.json` matches only the single U+2022
+codepoint from the existing styled bullet at
+`cas-cli/src/ui/components/formatter.rs:423-427` (cas-9f8d). Remove it with the
+shared formatter correction before release; it permits no width exceptions.

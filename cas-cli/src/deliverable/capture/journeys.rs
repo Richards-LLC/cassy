@@ -1,5 +1,6 @@
 //! Goal-stage receipts, never a journey's entry page.
 use super::*;
+use anyhow::Context;
 
 const INSTRUMENTATION: &[&str] = &[
     "scripts/journey-eval.sh",
@@ -40,9 +41,13 @@ pub(super) fn capture(
             "capture-unavailable"
         };
         // Process output is private: it can include application-controlled text.
-        receipt.findings.push(pairs::finding(code, if let Some(usage) = error.downcast_ref::<UsageError>() {
-            usage.0.clone()
-        } else { "Goal-stage journey capture could not complete; inspect its retained receipt or configure qa.capture.shots".into() }));
+        receipt.findings.push(if code == "capture-timeout" {
+            timeout_finding(capture.timeout_secs, started)
+        } else {
+            pairs::finding(code, if let Some(usage) = error.downcast_ref::<UsageError>() {
+                usage.0.clone()
+            } else { "Goal-stage journey capture could not complete; inspect its retained receipt or configure qa.capture.shots".into() })
+        });
     }
     receipt.pairs = manifest.pairs.len();
     receipt.unpaired = manifest.unpaired.len();
@@ -166,7 +171,10 @@ fn run(
                 deadline,
             )?;
             let target = root.join(path);
-            fs::create_dir_all(target.parent().unwrap())?;
+            let parent = target.parent().context("journey instrumentation target has no parent")?;
+            fs::create_dir_all(parent).with_context(|| format!(
+                "cannot create journey instrumentation directory for {path}"
+            ))?;
             fs::write(target, &output.stdout)?;
         }
         let artifacts = run_root.join(side);

@@ -2,6 +2,7 @@
 """Gate checks of cas-sow-delivery-report: python3 scripts/test-sow-delivery-report.py."""
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -65,6 +66,42 @@ class SowGateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(json.loads(result.stdout)['code'], 'capture-catalog')
             self.assertFalse((Path(tmp) / 'pairs.json').exists())
+
+    def test_missing_mask_names_selector_and_sides_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Playwright is the boundary: no browser is needed to prove the
+            # real capture entry point refuses before taking an unmasked shot.
+            module = Path(tmp) / 'playwright.cjs'
+            module.write_text("""
+const page = {
+  setDefaultTimeout() {}, setDefaultNavigationTimeout() {},
+  async setViewportSize() {}, async emulateMedia() {}, async goto() {},
+  url: () => 'http://localhost/', async content() { return '<p>fixture</p>'; },
+  locator: () => ({ async count() { return 0; } }),
+  async screenshot() { throw new Error('unmasked screenshot attempted'); }
+};
+module.exports = { chromium: { async launch() { return {
+  async newContext() { return { async newPage() { return page; }, async close() {} }; },
+  async close() {}
+}; } } };
+""")
+            plan = Path(tmp) / 'plan.json'
+            plan.write_text(json.dumps({'root': tmp, 'out': tmp, 'remaining_ms': 10000,
+                'config': {'max_shots': 6, 'viewports': ['1280x800'], 'mask': ['.private'],
+                           'max_html_mb': 8, 'login_path': ''},
+                'shots': [{'id': 'goal', 'path': '/'}],
+                'phases': [{'side': side, 'base': 'http://localhost/', 'ref': side}
+                           for side in ['before', 'after']]}))
+            result = subprocess.run(['node', str(CAPTURE), str(plan)], capture_output=True,
+                                    text=True, cwd=tmp, env={**os.environ, 'PLAYWRIGHT_MODULE': str(module)})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads(result.stdout)
+            self.assertEqual(receipt['captures'], [])
+            self.assertEqual(len(receipt['failures']), 1, receipt)
+            finding = receipt['failures'][0]
+            self.assertEqual(finding['code'], 'capture-mask')
+            for token in ['.private', 'before', 'after']:
+                self.assertEqual(finding['message'].count(token), 1, finding)
 
 
 if __name__ == '__main__':

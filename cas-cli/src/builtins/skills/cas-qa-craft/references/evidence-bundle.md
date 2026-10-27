@@ -42,7 +42,7 @@ journey uses `journeys/<journey-id>/`, each with the same shape and its own
 | `visual_qa_baseline_json` | `visual-qa-baseline/visual-qa.json` (the same strict run against a local build of the base commit) | `visual_qa_status: "scoped"` |
 | `critique` | `critique.md` (the cas-ui-craft rubric table) | always |
 | `a11y` | `a11y-forced-colors.png`, `a11y-reduced-motion.png`, `a11y-contrast-more.png` | visual change |
-| `pairs` | `pairs/pairs.json` ([before/after pairs](#beforeafter-pairs)) | visual change with a pair |
+| `pairs` | `pairs/pairs.json` ([before/after pairs](#beforeafter-pairs)) | visual change with qa.capture configured, unless reasoned unavailable |
 
 Use the existing `visual_change` flag for changes to rendered appearance:
 layout, colour, typography, imagery or motion. For `visual_change: false`, omit
@@ -128,7 +128,12 @@ Reports and release notes take their screenshots from one place per delivery
 task, so they can find them without asking:
 `~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/`. An independent round or a
 journey that captures a pair writes it there too, not under its own directory.
-Produce pairs for every `visual_change: true` bundle; omit them otherwise.
+For `visual_change: true`, run `cas deliverable capture --task <task-id> --target <target> --side both`.
+Projects with `[qa.capture]` configured require `files.pairs` or `pairs_status: "unavailable"`
+with a one-line `pairs_reason` in the bundle. An unavailable capture always permits close
+when no pairs are cited; a base build that cannot serve does not block delivery.
+Without capture configuration, absence is advisory. On deploy-only projects, run
+`cas deliverable capture --task <task-id> --side before` at task start, before deploying.
 
 1. **Capture both sides in one session.** Before comes from a local build of
    the merge base (`git merge-base <target> <head>`), or, when that cannot be
@@ -140,23 +145,24 @@ Produce pairs for every `visual_change: true` bundle; omit them otherwise.
    captures; `<id>.before.jpg` and `<id>.after.jpg` are the embed copies, at
    most 1440 px wide, quality 80 and 250 KB each. `<id>` is a stable
    kebab-case shot name; reuse it for the same surface in later deliveries.
-3. **Write `pairs.json`.** Each side records its files, the PNG's SHA-256, the
+3. **Write `pairs.json`.** Each side records its files, both PNG and JPG SHA-256 digests, the
    commit or origin it came from, its source and its capture time. A shot with
    only one side goes in `unpaired[]`: it is kept for the record and never rendered.
 
    ```json
    {"schema": 1, "task_id": "<task-id>", "base_sha": "<full SHA>", "head_sha": "<full SHA>", "origin": "<build URL>",
-    "pairs": [{"id": "saved-filters", "surface": "/projects", "viewport": "1280x800", "scheme": "light", "masked": [".avatar"],
-      "before": {"jpg": "saved-filters.before.jpg", "png": "saved-filters.before.png", "sha256": "<hex>", "ref": "<base SHA>", "source": "merge-base", "captured_at": "<RFC 3339>"},
-      "after": {"jpg": "saved-filters.after.jpg", "png": "saved-filters.after.png", "sha256": "<hex>", "ref": "<head SHA>", "source": "delivered-build", "captured_at": "<RFC 3339>"}}],
+    "pairs": [{"id": "saved-filters", "surface": "/projects", "viewport": [1280,800], "scheme": "light", "masked": [".avatar"],
+      "before": {"jpg": "saved-filters.before.jpg", "png": "saved-filters.before.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<base SHA>", "source": "merge-base", "captured_at": "<RFC 3339>"},
+      "after": {"jpg": "saved-filters.after.jpg", "png": "saved-filters.after.png", "sha256": "<PNG hex>", "jpg_sha256": "<JPG hex>", "ref": "<head SHA>", "source": "delivered-build", "captured_at": "<RFC 3339>"}}],
     "unpaired": []}
    ```
 
    Use each stable `id` as the cell identity on both sides. Entries in `unpaired[]`
    use the same row shape, with just `before` or `after`; each present side must
-   name a nonempty `png` resolved relative to, and confined inside, the directory
-   containing `pairs.json`. Keep every baseline cell, including cells with no
-   AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
+   name nonempty `png` and `jpg` files with matching `sha256` and `jpg_sha256`,
+   resolved relative to, and confined inside, the directory containing `pairs.json`.
+   Every `pairs[]` row needs both sides; every `unpaired[]` row needs exactly one.
+   Keep every baseline cell, including cells with no AFTER capture. Close compares `pairs[]` and `unpaired[]` together:
    AFTER must contain every BEFORE id, and may add ids. A partial comparison that
    drops BEFORE cells refuses and names all missing ids, even with no AFTER cells.
    Capture the missing cells, or obtain an existing recorded exact-tip `qa_waive`
@@ -167,8 +173,10 @@ Produce pairs for every `visual_change: true` bundle; omit them otherwise.
 
 4. **Record the status.** In `bundle.json`, set `files.pairs` to
    `pairs/pairs.json` and `pairs_status` to `complete` (every shot paired),
-   `partial` (some shots in `unpaired[]`) or `unavailable` (no pair; give the
-   reason in one sentence in `LEDGER.md`).
+   `partial` (some shots in `unpaired[]` or capture findings) or `unavailable`
+   (no complete pair). A complete status requires at least one pair and no unpaired
+   rows or findings. For unavailable, give a one-line `pairs_reason` in `bundle.json`
+   and the ledger; omit `files.pairs` when the manifest cannot satisfy validation.
 
 Every consumer renders a pair the same way: only `pairs[]` entries, both
 sides labelled Before and After with Before first, from the JPG copies, one

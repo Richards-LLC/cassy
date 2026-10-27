@@ -319,7 +319,15 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
             } else {
                 "capture-server"
             };
-            receipt.findings.push(pairs::finding(code,if code=="capture-dependencies"{"Dependency lockfiles differ; cannot reuse delivered node_modules for the base"}else{"Capture could not complete within its budget; verify serve command and readiness"}));
+            receipt.findings.push(if code == "capture-timeout" {
+                timeout_finding(capture.timeout_secs, started)
+            } else {
+                pairs::finding(code, if code == "capture-dependencies" {
+                    "Dependency lockfiles differ; cannot reuse delivered node_modules for the base"
+                } else {
+                    "Capture server could not start; verify serve command and readiness"
+                })
+            });
             json!({})
         }
     };
@@ -636,3 +644,13 @@ fn lease_port(root: &Path) -> anyhow::Result<(u16, File)> {
 }
 
 mod journeys;
+
+fn timeout_finding(budget_secs: u32, started: Instant) -> Finding {
+    pairs::finding(
+        "capture-timeout",
+        format!(
+            "Exceeded budget {budget_secs}s; elapsed {:.2}s. Check serve",
+            started.elapsed().as_secs_f64()
+        ),
+    )
+}

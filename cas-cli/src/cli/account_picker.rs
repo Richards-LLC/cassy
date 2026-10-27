@@ -480,6 +480,12 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".claude-alt")).unwrap();
 
         let alt = home.path().join(".codex-alt");
+        use base64::Engine as _;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"email":"operator@example.com"}"#);
+        std::fs::write(alt.join("auth.json"), serde_json::json!({
+            "tokens": {"id_token": format!("header.{claims}.signature")}
+        }).to_string()).unwrap();
         let profiles =
             scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
                 if name == "alt" {
@@ -494,6 +500,9 @@ mod tests {
         assert_eq!(names, vec!["main", "alt", "work"]);
         assert!(profiles[1].active);
         assert!(!profiles[0].active);
+        let rows = profile_choices(&profiles);
+        assert!(rows[1].to_string().starts_with("operator@example.com — logged in"));
+        assert!(matches!(&rows[1], ProfileChoice::Existing { name, .. } if name == "alt"));
     }
 
     #[test]

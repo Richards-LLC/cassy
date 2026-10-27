@@ -77,3 +77,8 @@ setting also applies to hub and Commander spawns. A requesting supervisor's
 When the implicit default is unavailable, spawn refuses before creating a
 worktree or assigning a task and lists the registered homes confirmed logged
 in. Cassy does not select a different account automatically.
+
+`cas integrate violet` updates every registered Codex account when `CODEX_HOME`
+is unset, preserving account links into the Codex base. An explicit
+`CODEX_HOME` limits registration to that home. With no registered account, it
+reports `codex: no account` and leaves the retired `~/.codex` absent.

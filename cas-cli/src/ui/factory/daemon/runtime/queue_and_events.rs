@@ -12921,7 +12921,9 @@ mod tests {
         assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
         for row in rows {
             assert_eq!(row.target, "supervisor");
+            // pin: a fallback must preserve the concrete switch error for the supervisor.
             assert!(row.prompt.contains("worker worktree missing; nothing stopped"), "{}", row.prompt);
+            // pin: a failed switch still needs the existing recovery instruction.
             assert!(row.prompt.contains("reassign or recover"), "fallback still needs attention: {}", row.prompt);
         }
         assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());

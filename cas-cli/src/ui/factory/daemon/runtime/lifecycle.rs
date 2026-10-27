@@ -1943,6 +1943,7 @@ mod worker_attention_tests {
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 5, "a persisted occurrence replays idempotently");
         let switched = rows.iter().find(|row| row.prompt.contains("old -> next")).unwrap();
+        // pin: a successfully queued switch must not ask the supervisor to recover it.
         assert!(!switched.prompt.contains("reassign or recover"), "{}", switched.prompt);
         assert!(rows.iter().all(|row| {
             row.target == "supervisor"

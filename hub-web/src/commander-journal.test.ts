@@ -479,15 +479,16 @@ describe("atomic Commander journal", () => {
     });
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let authorized = false;
-    const persisted = a.persistReply(scope, reply, fence).then(saved => { authorized = saved; return saved; });
+    const backlog = Array.from({ length: 24 }, (_, index) => ({ ...reply, notification_id: reply.notification_id + index }));
+    const persisted = Promise.all(backlog.map(item => a.persistReply(scope, item, fence))).then(saved => { authorized = saved.some(Boolean); return saved; });
     try {
       await waiting;
       await vi.advanceTimersByTimeAsync(6_000);
       expect(authorized, "no ACK before the queued write commits").toBe(false);
       release = true;
       await finished;
-      expect(await persisted, "a busy browser must not discard a valid pending reply").toBe(true);
-      expect((await make().read(scope)).replies.map(row => row.reply.notification_id)).toEqual([reply.notification_id]);
+      expect(await persisted, "a busy browser must not discard valid pending replies").toEqual(backlog.map(() => true));
+      expect((await make().read(scope)).replies.map(row => row.reply.notification_id).sort()).toEqual(backlog.map(item => item.notification_id).sort());
     } finally {
       release = true;
       await finished;

@@ -10972,13 +10972,7 @@ pub(crate) fn default_codex_sessions_dir() -> Option<std::path::PathBuf> {
     dirs::home_dir().map(|h| h.join(".codex").join("sessions"))
 }
 
-/// Whether a resolved Codex rollout records the terminal account-limit failure
-/// that leaves its MCP child heartbeating while no harness turn can proceed.
-///
-/// This intentionally requires the exact user-facing terminal error and the
-/// machine-readable exhausted-credit state in the same bounded tail. A generic
-/// error, an old rate-limit record, or an unresolved rollout is not enough to
-/// declare a live worker unavailable.
+/// Render known reset instants without making provider requests during polling.
 fn worker_usage_reset_lines(agent: &cas_types::Agent, transcript: Option<&std::path::Path>, now: chrono::DateTime<chrono::Utc>) -> String {
     let provider = match worker_cli_from_agent(agent) {
         cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
@@ -11004,6 +10998,13 @@ fn worker_usage_reset_lines(agent: &cas_types::Agent, transcript: Option<&std::p
     }).collect::<String>()
 }
 
+/// Whether a resolved Codex rollout records the terminal account-limit failure
+/// that leaves its MCP child heartbeating while no harness turn can proceed.
+///
+/// This intentionally requires the exact user-facing terminal error and the
+/// machine-readable exhausted-credit state in the same bounded tail. A generic
+/// error, an old rate-limit record, or an unresolved rollout is not enough to
+/// declare a live worker unavailable.
 pub(crate) fn worker_reports_usage_limit(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,

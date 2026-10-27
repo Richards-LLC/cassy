@@ -279,7 +279,7 @@ fn format_reset_in<Tz: TimeZone>(reset: Option<DateTime<Utc>>, now: DateTime<Tz>
 where Tz::Offset: fmt::Display {
     let Some(reset) = reset else { return "reset time unknown".into() };
     let local = reset.with_timezone(&now.timezone());
-    let minutes = (local.signed_duration_since(&now).num_seconds() + 59) / 60;
+    let minutes = (reset.signed_duration_since(now.with_timezone(&Utc)).num_seconds() + 59) / 60;
     if local <= now { return "reset, usage unknown until next session".into() }
     let tomorrow = now.date_naive().succ_opt();
     let stamp = if local.date_naive() == now.date_naive() || Some(local.date_naive()) == tomorrow {

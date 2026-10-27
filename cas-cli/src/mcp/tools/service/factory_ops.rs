@@ -5476,7 +5476,10 @@ impl CasService {
                     &agent.name,
                     since,
                     if usage_limited {
-                        " [UNAVAILABLE: Codex usage limit]"
+                        match worker_cli {
+                            cas_mux::SupervisorCli::Claude => " [UNAVAILABLE: Claude usage limit]",
+                            _ => " [UNAVAILABLE: Codex usage limit]",
+                        }
                     } else {
                         liveness_label
                     },

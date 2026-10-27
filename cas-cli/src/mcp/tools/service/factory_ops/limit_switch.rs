@@ -18,13 +18,30 @@ pub(crate) fn episode_key(session: &str, worker: &str, first_evidence: &str) -> 
     serde_json::json!([session, worker, first_evidence]).to_string()
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LimitSwitchDecision {
+    pub detail: String,
+    /// Taken from the durable request id, including when a lifecycle request
+    /// prevented queueing or this episode is replayed after a restart.
+    pub switch_queued: bool,
+}
+
+impl From<(Option<i64>, String)> for LimitSwitchDecision {
+    fn from((request_id, detail): (Option<i64>, String)) -> Self {
+        Self {
+            detail,
+            switch_queued: request_id.is_some(),
+        }
+    }
+}
+
 /// Called on the store worker. A recorded refusal is replayed as well as a
 /// queued switch, so restarts cannot turn a single limit into a retry loop.
 pub(crate) fn queue_limit_switch(
     root: &Path,
     agent_id: &str,
     occurrence: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<LimitSwitchDecision> {
     queue_limit_switch_with(
         root,
         agent_id,
@@ -47,10 +64,10 @@ fn queue_limit_switch_with(
         crate::accounts::Provider,
     ) -> std::io::Result<Vec<crate::account_registry::Account>>,
     preflight: impl FnOnce(&cas_mux::WorkerSpec) -> Result<(), String>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<LimitSwitchDecision> {
     let queue = crate::store::open_spawn_queue_store(root)?;
-    if let Some((_, detail)) = queue.limit_episode(occurrence)? {
-        return Ok(detail);
+    if let Some(recorded) = queue.limit_episode(occurrence)? {
+        return Ok(recorded.into());
     }
     let agents = crate::store::open_agent_store(root)?;
     let agent = agents.get(agent_id)?;
@@ -69,10 +86,10 @@ fn queue_limit_switch_with(
         .map(|t| t.id.clone())
         .collect();
     if task_ids.is_empty() {
-        return Ok(format!(
-            "Worker {} hit its usage limit; no held task to resume",
-            agent.name
-        ));
+        return Ok(LimitSwitchDecision {
+            detail: format!("Worker {} hit its usage limit; no held task to resume", agent.name),
+            switch_queued: false,
+        });
     }
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("account home unavailable"))?;
     let cli = worker_cli_from_agent(&agent);
@@ -115,9 +132,9 @@ fn queue_limit_switch_with(
         &crate::account_selection::load_policy(Some(root)),
         preflight,
     );
-    let (_, persisted) =
-        queue.record_limit_episode(occurrence, &agent.name, session, spec.as_deref(), &detail)?;
-    Ok(persisted)
+    Ok(queue
+        .record_limit_episode(occurrence, &agent.name, session, spec.as_deref(), &detail)?
+        .into())
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {
@@ -161,14 +178,30 @@ fn plan_switch(
                 format!("{} ({})", a.display_name, a.name)
             }
         })
-        .unwrap_or_else(|| meta.old_account.display().to_string());
+        .unwrap_or_else(|| {
+            let folder = meta.old_account.file_name().and_then(|name| name.to_str()).unwrap_or("unknown account");
+            folder.strip_prefix(provider.prefix())
+                .unwrap_or(if folder == ".claude" || folder == ".codex" { "main" } else { folder })
+                .to_owned()
+        });
     let Some(next) = selection.recommended else {
-        let reset = accounts
-            .iter()
-            .filter(|a| a.provider == provider)
-            .flat_map(|a| &a.windows)
-            .filter_map(|w| w.resets_at)
-            .filter(|t| *t > now)
+        // Predict each account's transition through the same policy used to
+        // select it. A stale under-threshold snapshot for the limited account
+        // cannot become eligible because an unrelated account resets.
+        let reset = accounts.iter().filter(|a| a.provider == provider)
+            .filter_map(|account| {
+                let row = std::slice::from_ref(account);
+                if crate::account_selection::recommend(row, provider, now, policy).recommended.is_some() {
+                    return None;
+                }
+                let resets = account.windows.iter()
+                    .filter_map(|window| window.resets_at)
+                    .filter(|at| *at > now)
+                    .collect::<std::collections::BTreeSet<_>>();
+                resets.into_iter().find(|at| {
+                    crate::account_selection::recommend(row, provider, *at, policy).recommended.is_some()
+                })
+            })
             .min()
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "unknown (usage/reset unavailable)".into());
@@ -535,7 +568,8 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
-            assert!(detail.contains("old -> next"));
+            assert!(detail.detail.contains("old -> next"));
+            assert!(detail.switch_queued);
             let queue = crate::store::open_spawn_queue_store(&root).unwrap();
             let rows = queue.peek(10).unwrap();
             assert_eq!(rows.len(), 1);
@@ -606,6 +640,7 @@ mod tests {
 
     #[test]
     fn paired_provider_switch_excludes_limited_identity_and_persists_recipe_or_refusal() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         for (provider, cli) in [
             (crate::accounts::Provider::Claude, "claude"),
             (crate::accounts::Provider::Codex, "codex"),
@@ -652,19 +687,62 @@ mod tests {
                 });
             assert!(json.is_none());
             assert!(detail.contains("blocked switch"));
+            let mut exhausted = accounts[..2].to_vec();
+            for account in &mut exhausted {
+                for window in &mut account.windows { window.used_percent = Some(100.); }
+            }
             let (json, detail) = plan_switch(
                 &agent,
                 &meta,
-                &accounts[..2],
+                &exhausted,
                 now,
                 &Default::default(),
                 |_| panic!("no eligible account must not preflight"),
             );
             assert!(json.is_none());
             assert!(
-                detail.contains("no eligible account until 2026-10-27T13:00:00+00:00"),
+                detail.contains("no eligible account until 2026-10-27T15:00:00+00:00"),
                 "{detail}"
             );
+            // No registered row for the old account: still use its known alias.
+            let mut unregistered = meta.clone();
+            unregistered.old_account = PathBuf::from(format!("/private/account-home/{}legacy@example.invalid", provider.prefix()));
+            let (_, detail) = plan_switch(&agent, &unregistered, std::slice::from_ref(&next), now, &Default::default(), |_| Ok(()));
+            let mut notice_errors = Vec::new();
+            if !detail.contains("legacy@example.invalid -> next") || detail.contains("/private/account-home") {
+                notice_errors.push(detail);
+            }
+
+            // Eligibility needs every blocking window to reset. Ignore accounts
+            // whose login/disabled/duplicate state makes their early reset unusable.
+            let mut early_reset = next.clone();
+            for window in &mut early_reset.windows {
+                window.resets_at = Some(now + chrono::Duration::minutes(30));
+            }
+            let mut disabled = early_reset.clone();
+            disabled.flags.disabled = true;
+            let mut logged_out = early_reset.clone();
+            logged_out.login_state = crate::account_registry::LoginState::LoggedOut;
+            let mut stale = early_reset.clone();
+            stale.flags.stale_login = true;
+            let mut duplicate = early_reset.clone();
+            duplicate.flags.duplicate_of = Some(PathBuf::from("/canonical"));
+            let mut unknown = next.clone();
+            unknown.windows.clear();
+            for (five, weekly, hours, threshold) in [(20., 85., 8, 80), (95., 20., 3, 90), (95., 95., 8, 90)] {
+                let blocked = crate::account_selection::tests::row(provider, "blocked", 8, weekly, five);
+                // The transcript can be newer than the limited account's
+                // under-threshold quota snapshot. It is excluded for switching,
+                // and another account's early reset must not make it "recover".
+                let rows = [blocked, disabled.clone(), logged_out.clone(), stale.clone(), duplicate.clone(), unknown.clone(), accounts[0].clone()];
+                let policy = crate::config::AccountsConfig { threshold, ..Default::default() };
+                let (_, detail) = plan_switch(&agent, &meta, &rows, now, &policy, |_| panic!("none eligible"));
+                let reset = (now + chrono::Duration::hours(hours)).to_rfc3339();
+                if !detail.contains(&format!("no eligible account until {reset}")) {
+                    notice_errors.push(format!("expected {reset}: {detail}"));
+                }
+            }
+            assert!(notice_errors.is_empty(), "{cli}: {notice_errors:#?}");
             // A new registration resuming the same refusal uses the same durable key.
             assert_eq!(episode_key("session", "worker", "first"), meta.episode);
         }

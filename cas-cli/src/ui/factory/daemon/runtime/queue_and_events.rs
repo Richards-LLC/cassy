@@ -3860,11 +3860,18 @@ impl FactoryDaemon {
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let key = format!("usage-limit:{agent_id}");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
-                        let persisted = match crate::mcp::tools::service::factory_ops::limit_switch::queue_limit_switch(&cas_dir, &agent_id, &occurrence) {
-                            Ok(detail) => matches!(super::lifecycle::enqueue_usage_limit_switch_relay(&cas_dir, &worker, &occurrence, &detail),
-                                super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }),
-                            Err(error) => { tracing::warn!(%error, worker, "usage-limit decision not persisted; retry next scan"); false }
+                        let (detail, switch_queued) = match crate::mcp::tools::service::factory_ops::limit_switch::queue_limit_switch(&cas_dir, &agent_id, &occurrence) {
+                            Ok(decision) => (decision.detail, decision.switch_queued),
+                            Err(error) => {
+                                tracing::warn!(%error, worker, "usage-limit decision failed; notifying supervisor");
+                                (format!("Worker {worker} hit its usage limit; blocked switch: {error:#}. Existing pane kept."), false)
+                            }
                         };
+                        // The same durable occurrence key dedupes failures too,
+                        // including a daemon restart after the fallback notice.
+                        let persisted = matches!(super::lifecycle::enqueue_usage_limit_switch_relay(
+                            &cas_dir, &worker, &occurrence, &detail, switch_queued),
+                            super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. });
                         super::relay_jobs::RelayOutput::UsageLimitWritten {
                             agent_id,
                             worker,
@@ -12888,6 +12895,52 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn limit_switch_error_notifies_once_per_episode_even_after_daemon_restart() {
+        use crate::mcp::tools::service::factory_ops::UsageLimitEvidence;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "provision-test");
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role("supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = Some("provision-test".into());
+        agents.register(&supervisor).unwrap();
+        for cli in ["claude", "codex"] {
+            let mut worker = cas_types::Agent::new_with_role(cli.into(), cli.into(), cas_types::AgentRole::Worker);
+            worker.factory_session = Some("provision-test".into());
+            worker.metadata.insert("worker_cli".into(), cli.into());
+            agents.register(&worker).unwrap();
+            let mut task = cas_types::Task::new(format!("cas-{cli}"), "held task".into());
+            task.assignee = Some(cli.into());
+            crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        }
+        for _restart in 0..2 {
+            let mut daemon = super::super::provisioning_tests::daemon(&root);
+            for stamp in ["first", "first", "next"] {
+                daemon.decide_usage_limited_workers(0, ["claude", "codex"].into_iter().map(|cli| (
+                    cli.into(), cli.into(), UsageLimitEvidence::Limited { first_evidence: stamp.into() }
+                )).collect());
+                daemon.drain_relay_jobs();
+            }
+            drop(daemon);
+            // The fixture listeners leave their socket files after drop.
+            for socket in ["test.sock", "gui.sock"] {
+                std::fs::remove_file(root.join(socket)).unwrap();
+            }
+        }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
+        assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
+        for row in rows {
+            assert_eq!(row.target, "supervisor");
+            // pin: a fallback must preserve the concrete switch error for the supervisor.
+            assert!(row.prompt.contains("worker worktree missing; nothing stopped"), "{}", row.prompt);
+            // pin: a failed switch still needs the existing recovery instruction.
+            assert!(row.prompt.contains("reassign or recover"), "fallback still needs attention: {}", row.prompt);
+        }
+        assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history() {
         let _env = crate::test_support::TestEnvGuard::temp_home();

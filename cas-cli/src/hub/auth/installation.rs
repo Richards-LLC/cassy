@@ -663,6 +663,18 @@ mod tests {
         let key = SigningKey::random(&mut OsRng);
         let now = Utc::now();
         let mut prior: Option<DeviceCredential> = None;
+        // cas-fce7: each committed pairing is one durable `pairing_exchange`
+        // audit row, as the legacy exchange writes; a prepare that may still
+        // be cancelled, and a retried commit, write none.
+        let pairings = || {
+            std::fs::read_to_string(root.path().join("hub").join(AUDIT_LOG_FILE))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|row| row["action"] == "pairing_exchange" && row["outcome"] == "allowed")
+                .count()
+        };
+        let mut last_exchange = None;
         for generation in 1..=5 {
             let (exchange, candidate) = prepare(
                 &store,
@@ -670,6 +682,7 @@ mod tests {
                 prior.as_ref(),
                 now + Duration::minutes(generation),
             );
+            assert_eq!(pairings(), generation as usize - 1, "a prepare is not yet a pairing");
             assert!(
                 store
                     .ensure_active_context(&context(&candidate), now)
@@ -690,6 +703,7 @@ mod tests {
             )
             .unwrap();
             assert_eq!(candidate.credential_generation, generation as u64);
+            assert_eq!(pairings(), generation as usize);
             assert!(authenticate(&store, &key, &candidate, now).is_ok());
             if let Some(old) = prior {
                 assert_eq!(old.device_id, candidate.device_id);
@@ -709,7 +723,10 @@ mod tests {
             }
             assert_eq!(store.list_devices().unwrap().len(), 1);
             prior = Some(candidate);
+            last_exchange = Some(exchange);
         }
+        action(&store, &key, &last_exchange.unwrap(), true, now + Duration::minutes(5)).unwrap();
+        assert_eq!(pairings(), 5, "a retried commit is the same pairing");
     }
 
     #[test]

@@ -5138,6 +5138,19 @@ echo SMOKE_DONE
             all_args.contains("Cassy Factory Supervisor"),
             "Codex supervisor should have supervisor instructions"
         );
+        // cas-ae046: Codex's base prompt mandates commentary before tool calls
+        // and skill announcements; "Skip preamble" never names that channel,
+        // so the developer contract must override it explicitly.
+        for required in [
+            "Commentary channel: stay silent on triage turns",
+            "never announce which skill you are using",
+            "a final answer, not commentary",
+        ] {
+            assert!(
+                all_args.contains(required),
+                "Codex supervisor contract must carry the commentary policy: {required}"
+            );
+        }
     }
 
     /// Recognize delivered message framing without promising that ordinary

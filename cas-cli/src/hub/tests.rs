@@ -2702,6 +2702,56 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
     ));
 }
 
+/// cas-8f88: a work-events answer reaches only the socket whose request it
+/// answers. An older Commander never sends that request, so it never sees
+/// the frame, and its own history page still flows as before.
+#[test]
+fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() {
+    use super::server::{PendingRefs, admit_correlated_daemon_frame, client_correlation_ref};
+    let session = |request: &ClientMessage| {
+        let (request_id, kind) = client_correlation_ref(&serde_json::to_vec(request).unwrap()).unwrap();
+        PendingRefs::from([(("factory-1".to_string(), request_id), kind)])
+    };
+    // The exact frame an older Commander sends: no work-event fields.
+    let old_history: ClientMessage = serde_json::from_value(serde_json::json!({
+        "ConversationHistoryRequest": {"request_id": "history-1", "limit": 50}
+    }))
+    .unwrap();
+    let mut old_client = session(&old_history);
+    let mut new_client = session(&ClientMessage::WorkEventsRequest {
+        request_id: "events-1".into(),
+        before: None,
+        limit: 100,
+    });
+    assert_eq!(required_scope(&ClientMessage::WorkEventsRequest { request_id: "e".into(), before: None, limit: 0 }), Some(Scope::PaneRead));
+    assert!(super::server::is_pane_read_message(&ClientMessage::WorkEventDetailRequest {
+        request_id: "d".into(),
+        event_id: "q:1".into(),
+    }));
+    let page = serde_json::to_vec(&DaemonMessage::WorkEvents {
+        request_id: "events-1".into(),
+        schema_version: crate::ui::factory::WORK_EVENT_SCHEMA_VERSION,
+        events: Vec::new(),
+        has_earlier: false,
+        next_before: None,
+    })
+    .unwrap();
+    let history = serde_json::to_vec(&DaemonMessage::ConversationHistory {
+        request_id: "history-1".into(),
+        messages: Vec::new(),
+        replies: Vec::new(),
+        has_earlier: false,
+        next_before: None,
+        earlier_messages: Vec::new(),
+        earlier_replies: Vec::new(),
+    })
+    .unwrap();
+    assert!(!admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &page), "the old client never receives work events");
+    assert!(admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &history), "its history page still arrives");
+    assert!(admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &page));
+    assert!(new_client.is_empty() && old_client.is_empty());
+}
+
 #[test]
 fn hub_history_response_summary_exposes_shape_without_turn_content() {
     let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {

@@ -288,6 +288,8 @@ pub struct FactoryDaemon {
     relay_jobs: crate::ui::factory::daemon::runtime::relay_jobs::RelayJobs,
     /// Bounded supervisor transcript scan for Commander mirroring.
     last_commander_mirror_scan: Option<Instant>,
+    /// cas-8f88: Commander work-event indexes and in-flight requests.
+    work_events: runtime::work_events::WorkEventService,
     /// Factory loop v2 C3 (cas-d2a2): the prompt queue's selection, stamps,
     /// in-flight rows, inbox retraction and Commander mirror scan as jobs.
     queue_jobs: runtime::prompt_queue_jobs::QueueJobs,

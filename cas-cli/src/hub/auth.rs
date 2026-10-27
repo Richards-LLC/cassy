@@ -238,6 +238,8 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         ClientMessage::RequestPaneKeyframe { .. }
         | ClientMessage::ScrollbackRequest { .. }
         | ClientMessage::ConversationHistoryRequest { .. }
+        | ClientMessage::WorkEventsRequest { .. }
+        | ClientMessage::WorkEventDetailRequest { .. }
         | ClientMessage::OperatorReplyPersisted { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),

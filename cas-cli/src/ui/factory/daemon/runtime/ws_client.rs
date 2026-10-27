@@ -302,6 +302,42 @@ impl FactoryDaemon {
         }
     }
 
+    /// Answer a work-events request from the blocking job lane (cas-8f88).
+    fn submit_work_events(
+        &mut self,
+        client_id: usize,
+        request_id: String,
+        request: super::work_events::WorkEventRequest,
+    ) {
+        let refused = self.work_events.submit(
+            &mut self.queue_jobs,
+            client_id,
+            request_id,
+            request,
+            self.app.cas_dir().to_path_buf(),
+            self.app.project_path().to_path_buf(),
+            self.session_name.clone(),
+        );
+        if let Some(reply) = refused {
+            self.send_work_event_reply(reply);
+        }
+    }
+
+    fn send_work_event_reply(&mut self, reply: super::work_events::WorkEventReply) {
+        if let Some(frame) = ws_encode(&reply.message)
+            && let Some(client) = self.ws_clients.get_mut(&reply.client_id)
+        {
+            let _ = client.sink.feed(frame).now_or_never();
+        }
+    }
+
+    /// Hand finished work-event answers to the clients that asked.
+    pub(super) fn deliver_work_events(&mut self) {
+        for reply in self.work_events.take(&mut self.queue_jobs) {
+            self.send_work_event_reply(reply);
+        }
+    }
+
     /// Broadcast a DaemonMessage to all connected WebSocket clients.
     pub(super) fn ws_broadcast(&mut self, msg: &DaemonMessage) {
         if let Some(frame) = ws_encode(msg) {
@@ -401,6 +437,12 @@ impl FactoryDaemon {
                         }
                     }
                 }
+            }
+            ClientMessage::WorkEventsRequest { request_id, before, limit } => {
+                self.submit_work_events(client_id, request_id, super::work_events::WorkEventRequest::Page { before, limit });
+            }
+            ClientMessage::WorkEventDetailRequest { request_id, event_id } => {
+                self.submit_work_events(client_id, request_id, super::work_events::WorkEventRequest::Detail { event_id });
             }
             ClientMessage::Attach { request_scrollback } => {
                 let state = self.build_session_state();

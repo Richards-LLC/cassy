@@ -2807,6 +2807,23 @@ pub trait PromptQueueStore: Send + Sync {
         Ok(0)
     }
 
+    /// cas-d85c3: move a verified phone (`paired_device`) message that never
+    /// reached an ended supervisor to the successor that claimed its handoff,
+    /// including the successor's factory session, so its delivery lane and
+    /// Commander thread carry it. Only an unread row moves: no ack, no
+    /// transport delivery, no recipient receipt beyond an unconfirmed
+    /// transport claim, and no live agent still holding the old name in the
+    /// old session. The move is one conditional UPDATE of the same row, so a
+    /// retry or a rival caller finds nothing left to move and nothing is
+    /// copied. Returns the moved ids.
+    fn retarget_operator_rows_to_successor(
+        &self,
+        predecessor: &str,
+        predecessor_session: Option<&str>,
+        successor: &str,
+        successor_session: Option<&str>,
+    ) -> Result<Vec<i64>>;
+
     /// Atomically reserve the first delivery channel for a recipient.
     /// Hook and poll drains share this receipt table. A stale daemon snapshot
     /// cannot send after either drain won; broadcasts reserve each peer alone.
@@ -7081,6 +7098,74 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             )?;
             Ok(released)
         })
+    }
+
+    fn retarget_operator_rows_to_successor(
+        &self,
+        predecessor: &str,
+        predecessor_session: Option<&str>,
+        successor: &str,
+        successor_session: Option<&str>,
+    ) -> Result<Vec<i64>> {
+        if predecessor.trim().is_empty() || successor.trim().is_empty() || predecessor == successor
+        {
+            return Ok(Vec::new());
+        }
+        let moved = crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            let still_live = if agents_table_exists(&tx)? {
+                "AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.name = q.target
+                     AND a.factory_session IS q.factory_session AND a.status IN ('active', 'idle'))"
+            } else {
+                ""
+            };
+            let ids = tx
+                .prepare(&format!(
+                    "SELECT q.id FROM prompt_queue q
+                     WHERE q.processed_at IS NULL AND q.acked_at IS NULL
+                       AND q.transport_delivered_at IS NULL
+                       AND q.origin_kind = 'paired_device'
+                       AND q.target = ?1 AND q.factory_session IS ?2
+                       AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
+                            WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                              AND NOT (seen.source = 'transport_claimed'
+                                       AND seen.delivered_at IS NULL
+                                       AND seen.teams_body_fallback_at IS NULL))
+                       AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_transport rt
+                            WHERE rt.prompt_id = q.id)
+                       {still_live}
+                     ORDER BY q.id"
+                ))?
+                .query_map(params![predecessor, predecessor_session], |row| row.get::<_, i64>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let detail = format!(
+                "re-routed from ended supervisor {predecessor} to its successor {successor}"
+            );
+            for id in &ids {
+                // The predecessor's unconfirmed claim is the only receipt left;
+                // the predecessor has ended, so nothing it held can be read.
+                tx.execute(
+                    "DELETE FROM prompt_queue_recipient_seen WHERE prompt_id = ? AND recipient = ?",
+                    params![id, predecessor],
+                )?;
+                tx.execute(
+                    "UPDATE prompt_queue
+                     SET target = ?, factory_session = ?, next_attempt_at = NULL,
+                         last_pending_reason = NULL, last_pending_detail = ?,
+                         deferred_inbox_at = NULL, deferred_inbox_bytes = NULL,
+                         wake_gate_declines = 0
+                     WHERE id = ? AND processed_at IS NULL AND target = ?",
+                    params![successor, successor_session, detail, id, predecessor],
+                )?;
+            }
+            tx.commit()?;
+            Ok(ids)
+        })?;
+        if !moved.is_empty() {
+            self.signal_inbox(successor);
+        }
+        Ok(moved)
     }
 
     fn claim_recipient_transport(&self, prompt_id: i64, recipient: &str) -> Result<bool> {

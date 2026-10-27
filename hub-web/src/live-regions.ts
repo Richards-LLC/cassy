@@ -11,6 +11,12 @@ export interface LiveRegionView {
   /** Full sentence, or undefined when the hub is live. */
   readonly staleNotice?: string;
   readonly sendReason?: string;
+  /**
+   * Why this device can never send here (a read-only pairing, cas-b7c0). The
+   * composer is read-only and the sentence stands under it before anything is
+   * typed, instead of appearing only after a tap on Send.
+   */
+  readonly readOnlyReason?: string;
   readonly messageStatus?: { readonly text: string; readonly error: boolean };
   readonly delivery?: string;
   /**
@@ -50,11 +56,24 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
   setNotice(root.querySelector<HTMLElement>(".status-stale"), view.staleNotice);
   setDisabledReason(root.querySelector<HTMLElement>("#message-send"), view.sendReason);
 
+  const field = root.querySelector<HTMLTextAreaElement>("#message-text");
+  if (field) {
+    field.readOnly = view.readOnlyReason !== undefined;
+    const composer = field.closest<HTMLElement>(".message");
+    if (composer) {
+      if (view.readOnlyReason === undefined) delete composer.dataset.readOnly;
+      else composer.dataset.readOnly = "true";
+    }
+  }
+
   const status = root.querySelector<HTMLElement>("#message-status");
   if (status) {
-    status.textContent = view.messageStatus?.text ?? "";
-    status.className = `message-status${view.messageStatus?.error ? " error" : ""}`;
-    status.hidden = view.messageStatus === undefined;
+    // A send result outranks the standing read-only sentence; that sentence is
+    // a fact about this pairing, so it is never styled as an error.
+    const shown = view.messageStatus ?? (view.readOnlyReason === undefined ? undefined : { text: view.readOnlyReason, error: false });
+    status.textContent = shown?.text ?? "";
+    status.className = `message-status${shown?.error ? " error" : ""}`;
+    status.hidden = shown === undefined;
   }
 
   setNotice(root.querySelector<HTMLElement>("#message-delivery"), view.delivery);

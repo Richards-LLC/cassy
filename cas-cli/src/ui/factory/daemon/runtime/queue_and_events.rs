@@ -3677,6 +3677,7 @@ pub(super) fn record_undelivered_relay_alerts(
             device_id: "*".to_string(),
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
         }) {
@@ -7544,6 +7545,7 @@ impl FactoryDaemon {
                 device_id: device_id.clone(),
                 operator_label: payload.operator_label,
                 kind: payload.kind,
+                options: payload.options,
                 attachments: payload.attachments,
                 notice,
                 reply_to_session: payload.reply_to_session,
@@ -12111,6 +12113,7 @@ fn commander_history_turns(
                 operator_label: payload.operator_label,
                 kind: payload.kind,
                 attachments: payload.attachments,
+                options: payload.options,
                 session: row
                     .factory_session
                     .clone()
@@ -16431,6 +16434,7 @@ mod tests {
             device_id: "device-123".to_string(),
             operator_label: Some("Pippenz".to_string()),
             kind: crate::ui::factory::OperatorTurnKind::Ask,
+            options: vec!["Fix in-train".into(), "Ship with allowlist".into()],
             attachments: Vec::new(),
             reply_to_session: None,
         })
@@ -16449,6 +16453,11 @@ mod tests {
             .unwrap()
             .id();
         queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
+        let (_, history) = super::commander_history_turns(
+            vec![queue.queued_prompt(ask_id).unwrap().unwrap()], "factory-1", &Default::default(),
+        );
+        assert_eq!(history[0].options, ["Fix in-train", "Ship with allowlist"]);
+
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
 

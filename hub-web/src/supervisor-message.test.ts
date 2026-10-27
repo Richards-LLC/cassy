@@ -26,7 +26,6 @@ const context = (overrides: Partial<SupervisorSendContext> = {}): SupervisorSend
   scopes: CONTROL_SCOPES,
   leaseHeldByMe: true,
   leaseControllerLabel: undefined,
-  commanderOrigin: "https://hub.example",
   ...overrides,
 });
 
@@ -109,19 +108,19 @@ describe("Cassy Cloud supervisor send plan", () => {
     expect(plan).toMatchObject({ kind: "blocked", block: "empty" });
   });
 
-  it("names the missing message:send scope and the exact re-pairing command", () => {
+  it("tells a read-only device in plain words to ask the machine's owner for a link that can send", () => {
     // The default `cas hub pair` invitation grants read-only scopes, so a device
     // paired by the documented recipe cannot send at all. Silence there reads as
-    // a broken Send button.
+    // a broken Send button; a scope name or a CLI command is no better for the
+    // person holding the phone, who does not run the machine (cas-b7c0).
     const plan = planSupervisorSend(context({
       scopes: ["machine-read", "session-read", "pane-read"],
       leaseHeldByMe: false,
     }));
     expect(plan).toMatchObject({ kind: "blocked", block: "missing-scope" });
     if (plan.kind !== "blocked") return;
-    expect(plan.reason).toContain("message:send");
-    expect(plan.reason).toContain("cas hub pair --origin https://hub.example");
-    expect(plan.reason).toContain("soundwave-linux");
+    expect(plan.reason).toContain("Ask whoever runs soundwave-linux for a link that can send");
+    expect(plan.reason).not.toMatch(/cas hub|--scopes|message:send/);
   });
 
   it("reports a device that can never send before it reports an empty draft", () => {
@@ -140,6 +139,7 @@ describe("Cassy Cloud supervisor send plan", () => {
     if (plan.kind !== "blocked") return;
     expect(plan.reason).toContain("Daniel's phone");
     // Journey F5: plain words, no hub or controller vocabulary.
+    // pin: journey F5's exact plain-words sentence for another device in control.
     expect(plan.reason).toBe("Daniel's phone is in control of this session. Wait for it to release control, or take over with an administrator credential.");
     expect(plan.reason).not.toMatch(/\bhub\b|controller/);
   });

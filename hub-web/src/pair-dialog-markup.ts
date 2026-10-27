@@ -167,10 +167,10 @@ export function pairDialogMarkup(state: PairDialogState): string {
     const adminMachine = invitationScopes?.includes(HUB_ADMIN_SCOPE) ? (relayVerified ? pendingPairing.machineLabel ?? "" : pairingDraft.machineLabel) : undefined;
     const machine = relayVerified && hubUrl && origin && invitationScopes
       ? `${capabilityLead(invitationScopes, adminMachine)}<p>Check this is your machine.</p><dl class="pair-details pair-machine"><div><dt>Machine</dt><dd>${escapeHtml(pendingPairing.machineLabel ?? pendingPairing.hubId)}</dd></div></dl><p class="pair-expiry">Invitation expires in <strong id="pair-countdown">${escapeHtml(state.countdown ?? "10:00")}</strong></p>${technicalDetails("authorized", pairingDraft, detailRow("Machine's hub address", hubUrl) + detailRow("Cassy Cloud origin", origin) + detailRow("Granted scopes", exactScopes(invitationScopes)))}`
-      : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes, adminMachine)}${withheldLead(pageOrigin, invitationScopes)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
+      : `${capabilityLead(leadScopes.length ? leadScopes : invitationScopes ?? pairingDraft.scopes, adminMachine)}${withheldLead(invitationScopes, pairingDraft.machineLabel)}<p>One-time invitation ready. Check the machine, then add your name.</p><label>Machine's hub address<input name="url" type="url" required${focus("url")} placeholder="https://studio.tailnet.ts.net" value="${escapeAttr(pairingDraft.hubUrl)}"></label>${addressHelp(pairingDraft.pageOrigin, pairingDraft.addressHelpOpen)}<label>Machine name<input name="label" required${focus("label")} placeholder="Studio Mac" value="${escapeAttr(pairingDraft.machineLabel)}"></label>`;
     // The link form keeps its scope boxes (and the command that widens them)
     // with the other technical details, after the fields everyone fills in.
-    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset class="pair-scope-list"><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes.filter((scope) => scope !== HUB_ADMIN_SCOPE), invitationScopes?.filter((scope) => scope !== HUB_ADMIN_SCOPE))}</fieldset>`);
+    const linkTechnical = relayVerified ? "" : technicalDetails("link", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin), `<fieldset class="pair-scope-list"><legend>Scopes requested</legend>${scopeChecks(pairingDraft.scopes.filter((scope) => scope !== HUB_ADMIN_SCOPE), invitationScopes?.filter((scope) => scope !== HUB_ADMIN_SCOPE))}</fieldset>${widerLinkCommand(pageOrigin, invitationScopes)}`);
     // cas-5e53 F08: hub:admin is consent, so it sits in plain view beside the
     // name fields, unticked, never folded into Technical details.
     const adminConsent = invitationScopes?.includes(HUB_ADMIN_SCOPE)
@@ -199,14 +199,28 @@ function scopeChecks(selectedScopes: readonly Scope[], grantedScopes: readonly S
 
 /**
  * What a read-only (or otherwise narrowed) invitation withholds, in plain
- * words beside what it grants, with the exact command that mints a wider link
- * and its Copy (cas-b52d, journey F26). It used to sit under the scope boxes
- * at the bottom of Technical details, below the dialog's fold.
+ * words beside what it grants (cas-b52d, journey F26), and whom to ask for
+ * more. The person holding the phone is often not the one who runs the
+ * machine (cas-b7c0), so this names no scope and no command: those wait in
+ * Technical details for the machine's owner.
  */
-function withheldLead(pageOrigin: string, grantedScopes: readonly Scope[] | undefined): string {
+function withheldLead(grantedScopes: readonly Scope[] | undefined, machineLabel: string): string {
   const missing = ungrantedScopes(grantedScopes);
   if (!missing.length) return "";
+  const machine = machineLabel.trim() || "the machine";
+  const ask = missing.includes("message-send")
+    ? `To send messages from this browser, ask whoever runs ${machine} for a link that can, then open it here.`
+    : `For more, ask whoever runs ${machine} for a link that allows it, then open it here.`;
+  return `<div class="pair-withheld"><p class="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><p class="scope-hint pair-withheld-ask">${escapeHtml(ask)}</p></div>`;
+}
+
+/**
+ * The exact command that mints a link granting what this one withholds, with
+ * its Copy, for the machine's owner (Technical details). The scope list breaks
+ * after its commas, never inside a scope name.
+ */
+function widerLinkCommand(pageOrigin: string, grantedScopes: readonly Scope[] | undefined): string {
+  if (!ungrantedScopes(grantedScopes).length) return "";
   const command = pairCommand(pageOrigin, PAIRING_SCOPES);
-  // The scope list breaks after its commas, never inside a scope name.
-  return `<div class="pair-withheld"><p class="pair-lead">This link does not let it: <strong class="pair-summary">${scopeSummary(missing).map(escapeHtml).join(" · ")}</strong></p><div class="pair-withheld-command"><p class="scope-hint" id="pair-withheld-hint">Run this on the machine for a link that does:</p><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-withheld-hint">Copy command</button><code>${escapeHtml(command).replaceAll(",", ",<wbr>")}</code></div></div>`;
+  return `<div class="pair-withheld-command"><p class="scope-hint" id="pair-withheld-hint">On the machine, this prints a link that can also send messages:</p><button id="pair-copy" type="button" data-pair-command="${escapeAttr(command)}" aria-describedby="pair-withheld-hint">Copy command</button><code>${escapeHtml(command).replaceAll(",", ",<wbr>")}</code></div>`;
 }

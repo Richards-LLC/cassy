@@ -2916,7 +2916,6 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
     scopes: machine?.scopes ?? [],
     leaseHeldByMe: lease?.held_by_me === true,
     leaseControllerLabel: lease?.held_by_me ? undefined : lease?.controller_label,
-    commanderOrigin: location.origin,
   };
 }
 
@@ -3777,6 +3776,7 @@ function render(captureDraft = true): void {
   const liveRegions: LiveRegionView = {
     ...(staleStatusText ? { staleNotice: staleStatusText } : {}),
     ...(sendReason ? { sendReason } : {}),
+    ...(sendPlan.kind === "blocked" && sendPlan.block === "missing-scope" ? { readOnlyReason: sendPlan.reason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
     // cas-71f4: no composer "Sending to <codename>…" line; the bubble says it.
     pairing: {

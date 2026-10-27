@@ -355,9 +355,9 @@ for (const width of [1280, 390]) {
               { message: `tap ${tap}: the row under the finger was replaced or moved` }).toBe(true);
           } finally {
             await release();
+            await pressed.dispose();
           }
           await opens(key, target.supervisor, `tap ${tap}`);
-          await pressed.dispose();
         }
       });
       await journey.stage("A machine that has gone quiet still opens its conversations at once", async () => {

@@ -83,7 +83,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - The invitation is recognised at once, with no extra click to start.
-- Scopes the link did not grant are visibly unavailable, with the command to get them.
+- Scopes the link did not grant are visibly unavailable, with whom to ask for a link that grants them; the command that mints one is in Technical details, for the machine's owner (cas-b7c0).
+- A browser paired read-only shows a read-only composer that says, before anything is typed, whom to ask for a link that can send (cas-b7c0).
 - The hub address field says what to type (the placeholder shows a real example).
 
 #### Edge paths
@@ -230,9 +231,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
-- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`
-- **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
-- **Gaps:** none
+- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`, `hub-web/e2e/journeys/real-hub-server.mjs`
+- **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`, `hub-web/e2e/journeys/real-hub.journey.ts` (HUB-J7 real-hub part)
+- **Gaps:** the catalog suite uses a protocol double. The real-hub part proves CLI ask choices through the real daemon, live reply, history reload and the linked phone answer. Its supervisor provider is inert, so actual model action remains unproven.
 
 #### Steps
 

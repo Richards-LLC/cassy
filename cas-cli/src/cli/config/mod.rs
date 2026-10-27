@@ -82,7 +82,7 @@ pub struct ConfigGetArgs {
 #[command(
     after_help = concat!(
         "Project write roots (operator only):\n",
-        "  cas config set factory.write_roots \"~/Downloads,/mnt/models\"\n",
+        "  cas config set factory.write_roots \"/mnt/models,~/.gabber-support\"\n",
         "  cas config set factory.write_roots \"\"    # clear\n",
         "\n",
         "Stored in .cas/config.toml as [factory] write_roots. Each root lets this\n",

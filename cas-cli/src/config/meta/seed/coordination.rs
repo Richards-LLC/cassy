@@ -149,7 +149,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         requires_feature: None,
         keywords: &["factory", "write", "roots", "workspace", "outside", "directories", "operator"],
         use_cases: &[
-            "Let agents save downloads into ~/Downloads or a model store",
+            "Let agents in every project save into a model store or QA rig",
             "Let agents write systemd user units or request files in another repository",
         ],
     });

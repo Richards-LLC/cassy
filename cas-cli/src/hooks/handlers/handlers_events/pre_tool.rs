@@ -8241,7 +8241,8 @@ mod workspace_contract_tests {
     fn gh_1182_config_write_roots_admit_only_their_own_projects_agents() {
         let mut env = TestEnvGuard::temp_home();
         let home = env.home().to_path_buf();
-        let downloads = home.join("Downloads");
+        // Not Downloads: that folder is a root for every project (cas-f0ea0).
+        let downloads = home.join("models");
         let elsewhere = home.join("elsewhere");
         std::fs::create_dir_all(&downloads).unwrap();
         std::fs::create_dir_all(&elsewhere).unwrap();

@@ -53,21 +53,26 @@ pub struct UsageWindow {
 /// one identity, while one email may own several different subscriptions.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Account {
+    /// Provider namespace; identities and duplicate flags never cross it.
     pub provider: Provider,
     /// Existing launch alias: `main`, `alt`, or the suffix of the folder name.
     pub name: String,
     /// Full account directory, also the stable key for mutations and usage.
     pub folder: PathBuf,
+    /// Login email read from provider metadata; never inferred from a folder.
     pub email: Option<String>,
     /// Login email when known, otherwise the folder alias; never a launch key.
     pub display_name: String,
     /// Non-secret account ID plus organization/workspace. Email fallback is
     /// prefixed `email:` and used only when provider IDs are unavailable.
     pub identity: Option<String>,
+    /// Subscription tier from credentials/claims or the usage API, if known.
     pub plan: Option<String>,
+    /// Current probe result, with explicit rejection and missing-login states.
     pub login_state: LoginState,
     /// Empty means usage unknown, not zero usage.
     pub windows: Vec<UsageWindow>,
+    /// Independent findings; selection policies decide which to exclude.
     pub flags: AccountFlags,
 }
 

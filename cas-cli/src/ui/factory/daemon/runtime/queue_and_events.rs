@@ -12840,33 +12840,63 @@ mod tests {
         let mut daemon = super::super::provisioning_tests::daemon(&root);
         let attribution = crate::ui::factory::protocol::MessageAttribution {
             device_id: Some("phone".into()),
+            credential_id: None,
             device_label: Some("Ben's phone".into()),
             operator_label: Some("Ben".into()),
+            controller_origin: None,
+            request_id: None,
             scopes: vec!["message:send".into()],
             operator_verified: true,
-            ..Default::default()
         };
         let id = super::super::delivery::enqueue_commander_message(
-            &root, &daemon.session_name, "supervisor", "Yes please, reconcile it.",
-            None, false, None, &attribution,
-        ).unwrap().id();
+            &root,
+            &daemon.session_name,
+            "supervisor",
+            "Yes please, reconcile it.",
+            None,
+            false,
+            None,
+            &attribution,
+        )
+        .unwrap()
+        .id();
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none()
+        );
         let live = daemon.live_operator_message(id).unwrap().unwrap();
         assert_eq!(live.state, "acknowledged");
         // The inert supervisor has not consumed the row. A reload and another
         // pairing still see the same durable acceptance, not Sending again.
         for device in ["phone", "desktop"] {
             let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
-                .conversation_history_page(format!("history-{device}"), device, None, 20).unwrap()
-            else { panic!("expected conversation history"); };
+                .conversation_history_page(format!("history-{device}"), device, None, 20)
+                .unwrap()
+            else {
+                panic!("expected conversation history");
+            };
             assert_eq!(messages.len(), 1, "{device}'s accepted turn");
             assert_eq!(messages[0].notification_id, live.notification_id);
             assert_eq!(messages[0].text, live.text);
-            assert_eq!(messages[0].state, live.state, "{device}'s receipt regressed on history");
+            assert_eq!(
+                messages[0].state, live.state,
+                "{device}'s receipt regressed on history"
+            );
         }
-        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(),
-            "reading a receipt must not claim supervisor consumption");
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none(),
+            "reading a receipt must not claim supervisor consumption"
+        );
     }
 
     #[tokio::test]

@@ -194,7 +194,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
     let mut output =
         String::from("Usage: cas codex <profile> [factory-args...]\n\nDetected Codex profiles:\n");
 
-    for profile in with_usage(profiles) {
+    for profile in with_usage(home, profiles) {
         let login = super::account_picker::login_state_label(profile.login_state);
         let active = if profile.active { " (active)" } else { "" };
         let usage = profile
@@ -223,21 +223,8 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
 
 /// Usage per logged-in Codex home from its latest rollout, for the picker
 /// (cas-e1f4).
-fn with_usage(mut profiles: Vec<super::account_picker::Profile>) -> Vec<super::account_picker::Profile> {
-    let accounts = profiles
-        .iter()
-        .filter(|profile| matches!(profile.login_state, LoginState::LoggedIn | LoginState::Unknown))
-        .map(|profile| (profile.name.clone(), profile.directory.clone()))
-        .collect();
-    let usage = super::limits::usage_summaries(
-        crate::accounts::Provider::Codex,
-        accounts,
-        crate::account_registry::USAGE_DEADLINE,
-    );
-    for profile in &mut profiles {
-        profile.usage = usage.get(&profile.name).cloned();
-    }
-    profiles
+fn with_usage(home: &Path, profiles: Vec<super::account_picker::Profile>) -> Vec<super::account_picker::Profile> {
+    super::account_picker::with_usage(crate::accounts::Provider::Codex, home, profiles)
 }
 
 /// `<home> (<email>)` for the launch line, or just the home.
@@ -446,7 +433,7 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
                 io::stdin().is_terminal(),
                 io::stdout().is_terminal(),
             ) {
-                let profiles = with_usage(profiles);
+                let profiles = with_usage(&home, profiles);
                 prompt_for_profile(&home, &profiles)?
             } else {
                 // Non-interactive, or only one account exists: leave the

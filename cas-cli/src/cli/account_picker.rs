@@ -46,7 +46,7 @@ pub(crate) fn probe_output(
 }
 
 /// One detected account profile.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Profile {
     pub(crate) name: String,
     pub(crate) display_name: String,
@@ -55,6 +55,8 @@ pub(crate) struct Profile {
     pub(crate) active: bool,
     /// Live usage for the picker, e.g. `5h limit hit, resets 15:00` (cas-e1f4).
     pub(crate) usage: Option<String>,
+    pub(crate) recommendation: Option<String>,
+    pub(crate) exclusion: Option<String>,
 }
 
 /// Sibling directories that share a profile prefix without being accounts.
@@ -139,8 +141,33 @@ pub(crate) fn scan_profiles_with(
             directory: account.folder,
             login_state: account.login_state,
             usage: None,
+            recommendation: None,
+            exclusion: None,
         })
         .collect())
+}
+
+/// Use structured registry usage for both the displayed summary and policy.
+/// Discovery remains selectable even when a provider cannot report capacity.
+pub(crate) fn with_usage(provider: crate::accounts::Provider, home: &Path, mut profiles: Vec<Profile>) -> Vec<Profile> {
+    let Ok(accounts) = crate::account_registry::collect_for(provider, home, true) else { return profiles };
+    let policy = crate::account_selection::load_policy(crate::store::find_cas_root().ok().as_deref());
+    apply_recommendation(&mut profiles, &accounts, provider, chrono::Utc::now(), &policy);
+    profiles
+}
+
+fn apply_recommendation(profiles: &mut [Profile], accounts: &[crate::account_registry::Account], provider: crate::accounts::Provider,
+    now: chrono::DateTime<chrono::Utc>, policy: &crate::config::AccountsConfig) {
+    let selection = crate::account_selection::recommend(accounts, provider, now, policy);
+    for profile in profiles {
+        if let Some(account) = accounts.iter().find(|a| a.folder == profile.directory) {
+            profile.login_state = account.login_state;
+            profile.usage = crate::cli::limits::summarize_windows(&account.windows);
+        }
+        profile.recommendation = selection.recommended.as_ref()
+            .filter(|r| r.account.folder == profile.directory).map(|r| r.reason.clone());
+        profile.exclusion = selection.excluded.iter().find(|(a, _)| a.folder == profile.directory).map(|(_, why)| why.clone());
+    }
 }
 
 /// Return whether a launch should ask the operator to select an account.
@@ -197,10 +224,14 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
         .map(|profile| ProfileChoice::Existing {
             name: profile.name.clone(),
             label: format!(
-                "{} — {}{}{}",
+                "{} — {}{}{}{}",
                 profile.display_name,
                 login_state_label(profile.login_state),
                 if profile.active { ", active" } else { "" },
+                profile.recommendation.as_deref()
+                    .map(|reason| format!(", recommended: {reason}"))
+                    .or_else(|| profile.exclusion.as_deref().map(|reason| format!(", {reason}")))
+                    .unwrap_or_default(),
                 profile
                     .usage
                     .as_deref()
@@ -217,7 +248,8 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
 pub(crate) fn active_choice_index(profiles: &[Profile]) -> usize {
     profiles
         .iter()
-        .position(|profile| profile.active)
+        .position(|profile| profile.recommendation.is_some())
+        .or_else(|| profiles.iter().position(|profile| profile.active))
         .unwrap_or(0)
 }
 
@@ -514,6 +546,8 @@ mod tests {
                 login_state: LoginState::LoggedIn,
                 active: true,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
             Profile {
                 name: "alt".to_string(),
@@ -522,6 +556,8 @@ mod tests {
                 login_state: LoginState::Unknown,
                 active: false,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
         ];
 
@@ -549,6 +585,8 @@ mod tests {
                 login_state: LoginState::LoggedOut,
                 active: true,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
             Profile {
                 name: "alt".to_string(),
@@ -557,6 +595,8 @@ mod tests {
                 login_state: LoginState::Unknown,
                 active: false,
                 usage: None,
+            recommendation: None,
+            exclusion: None,
             },
         ];
 
@@ -566,6 +606,22 @@ mod tests {
         assert_eq!(choices[1].to_string(), "alt — login state unknown");
         assert_eq!(choices[2], ProfileChoice::NewLogin);
         assert_eq!(active_choice_index(&profiles), 0);
+        for provider in crate::accounts::Provider::ALL {
+            let accounts = vec![
+                crate::account_selection::tests::row(provider, "main", 48, 0.0, 0.0),
+                crate::account_selection::tests::row(provider, "alt", 6, 59.0, 20.0),
+            ];
+            let mut profiles = profiles.clone();
+            for (profile, account) in profiles.iter_mut().zip(&accounts) { profile.directory = account.folder.clone(); }
+            apply_recommendation(&mut profiles, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            let choices = profile_choices(&profiles);
+            assert_eq!(active_choice_index(&profiles), 1);
+            assert!(choices[1].to_string().contains("recommended: resets in 6h, 41% left"));
+            assert!(matches!(&choices[0], ProfileChoice::Existing { name, .. } if name == "main"));
+            assert!(matches!(&choices[1], ProfileChoice::Existing { name, .. } if name == "alt"));
+            assert_eq!(choices[2], ProfileChoice::NewLogin);
+        }
+
     }
 
     #[test]

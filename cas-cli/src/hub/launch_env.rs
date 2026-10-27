@@ -28,7 +28,8 @@ pub enum LaunchError {
 }
 
 /// `profile` is the same optional name accepted by `cas claude` / `cas codex`.
-/// `None` uses the provider's machine-default profile.
+/// `None` recommends an eligible account unless a host profile is configured;
+/// unavailable usage retains the machine-default fallback.
 pub fn resolve(
     cli: SupervisorCli,
     profile: Option<&str>,
@@ -78,14 +79,17 @@ pub fn resolve(
     ];
     let mut remove = Vec::new();
     let configured = configured_profile(cli)?;
-    let profile_name = choose_profile_name(profile, configured.as_deref(), None);
+    let recommended = if profile.is_none() && configured.is_none() {
+        recommended_profile(cli, &home)
+    } else { None };
+    let profile_name = choose_profile_name(profile, configured.as_deref(), recommended.as_deref());
     if !valid_profile_name(profile_name) {
         return Err(LaunchError::ProbeFailed {
             cli: name,
             detail: "invalid profile name".into(),
         });
     }
-    let ambient_dir = if profile.is_none() && configured.is_none() {
+    let ambient_dir = if profile.is_none() && configured.is_none() && recommended.is_none() {
         match cli {
             SupervisorCli::Claude => std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             SupervisorCli::Codex => std::env::var_os("CODEX_HOME").map(PathBuf::from),
@@ -238,6 +242,27 @@ fn choose_profile_name<'a>(
     explicit.or(configured).or(ambient).unwrap_or("main")
 }
 
+fn provider(cli: SupervisorCli) -> Option<crate::accounts::Provider> {
+    match cli {
+        SupervisorCli::Claude => Some(crate::accounts::Provider::Claude),
+        SupervisorCli::Codex => Some(crate::accounts::Provider::Codex),
+        _ => None,
+    }
+}
+
+fn recommended_profile(cli: SupervisorCli, home: &Path) -> Option<String> {
+    let provider = provider(cli)?;
+    let accounts = crate::account_registry::collect_for(provider, home, false).ok()?;
+    let policy = crate::account_selection::load_policy(None);
+    let selection = crate::account_selection::recommend(&accounts, provider, chrono::Utc::now(), &policy);
+    if selection.recommended.is_none() {
+        for (account, reason) in &selection.excluded {
+            tracing::info!(account = %account.display_name, %reason, "No eligible account; retaining default profile");
+        }
+    }
+    selection.recommended.map(|r| r.account.name.clone())
+}
+
 pub fn default_profile_name(cli: SupervisorCli) -> Result<String, LaunchError> {
     if let Some(configured) = configured_profile(cli)? {
         return Ok(configured);
@@ -246,6 +271,7 @@ pub fn default_profile_name(cli: SupervisorCli) -> Result<String, LaunchError> {
         cli: cli_name(cli),
         detail: "home directory is unavailable".into(),
     })?;
+    if let Some(recommended) = recommended_profile(cli, &home) { return Ok(recommended) }
     let key = match cli {
         SupervisorCli::Claude => "CLAUDE_CONFIG_DIR",
         SupervisorCli::Codex => "CODEX_HOME",
@@ -325,6 +351,10 @@ pub struct LaunchProfile {
     pub name: String,
     pub logged_in: bool,
     pub is_default: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exclusion: Option<String>,
 }
 
 /// Profiles for Commander account picker; login is checked through
@@ -392,7 +422,7 @@ pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
     .into_iter()
     .map(OsString::from)
     .collect();
-    let rows = std::thread::scope(|scope| {
+    let mut rows: Vec<LaunchProfile> = std::thread::scope(|scope| {
         let handles: Vec<_> = scanned
             .into_iter()
             .map(|p| {
@@ -419,6 +449,8 @@ pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
                         is_default: p.name == default.as_str(),
                         logged_in: probe_login(cli, executable, &set, remove).unwrap_or(false),
                         name: p.name,
+                        recommendation: None,
+                        exclusion: None,
                     }
                 })
             })
@@ -428,7 +460,30 @@ pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
             .map(|handle| handle.join().expect("profile status thread panicked"))
             .collect()
     });
+    if let Some(provider) = provider(cli) {
+        if let Ok(mut accounts) = crate::account_registry::collect_for(provider, &home, true) {
+            // The service's login-shell binary/path above is authoritative for
+            // Codex too; a missing bare CLI on a service PATH is not logout.
+            for account in &mut accounts {
+                if let Some(row) = rows.iter().find(|row| row.name == account.name) {
+                    if row.logged_in && !account.flags.stale_login {
+                        account.login_state = crate::account_registry::LoginState::LoggedIn;
+                    }
+                }
+            }
+            mark_recommendation(&mut rows, &accounts, provider, chrono::Utc::now(), &crate::account_selection::load_policy(None));
+        }
+    }
     Ok(rows)
+}
+
+fn mark_recommendation(rows: &mut [LaunchProfile], accounts: &[crate::account_registry::Account],
+    provider: crate::accounts::Provider, now: chrono::DateTime<chrono::Utc>, policy: &crate::config::AccountsConfig) {
+    let selection = crate::account_selection::recommend(accounts, provider, now, policy);
+    for row in rows {
+        row.recommendation = selection.recommended.as_ref().filter(|r| r.account.name == row.name && row.logged_in).map(|r| r.reason.clone());
+        row.exclusion = selection.excluded.iter().find(|(a, _)| a.name == row.name).map(|(_, reason)| reason.clone());
+    }
 }
 
 fn launch_path(home: &Path) -> Vec<PathBuf> {
@@ -574,6 +629,14 @@ mod tests {
         );
         assert_eq!(choose_profile_name(None, None, Some("other")), "other");
         assert_eq!(choose_profile_name(None, None, None), "main");
+        for (provider, cli) in [(crate::accounts::Provider::Claude, SupervisorCli::Claude), (crate::accounts::Provider::Codex, SupervisorCli::Codex)] {
+            let accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
+            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, exclusion: None }];
+            mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert_eq!(rows[0].recommendation.as_deref(), Some("resets in 6h, 41% left"), "{cli:?}");
+            assert_eq!(choose_profile_name(Some("other"), None, Some("chosen")), "other");
+        }
+
     }
 
     #[test]

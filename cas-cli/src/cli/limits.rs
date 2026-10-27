@@ -249,6 +249,18 @@ fn display_reset(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// Reuse the picker summary without another provider request.
+pub(crate) fn summarize_windows(windows: &[crate::account_registry::UsageWindow]) -> Option<String> {
+    summarize(&AccountLimit {
+        account: String::new(), provider: String::new(), plan: None,
+        state: String::new(), source: String::new(), detail: None,
+        windows: windows.iter().map(|w| LimitWindow {
+            name: w.name.clone(), used_percent: w.used_percent,
+            reset_at: w.resets_at.map(|at| at.to_rfc3339()), spend_dollars: None,
+        }).collect(),
+    })
+}
+
 fn summarize(limit: &AccountLimit) -> Option<String> {
     let windows: Vec<&LimitWindow> = limit
         .windows

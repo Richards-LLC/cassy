@@ -53,7 +53,7 @@ export interface BrowseListing { root: BrowseRoot; path: string; entries: Browse
 export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
 
 /** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
-export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean }
+export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string }
 
 /** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
 export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
@@ -63,10 +63,10 @@ export type LaunchProfiles = Partial<Record<SupervisorCli, CliProfiles>>;
 /** The supervisors that run as a chosen account; Grok has none. */
 const ACCOUNT_CLIS: readonly SupervisorCli[] = ["claude", "codex"];
 
-/** Preselect the machine default when it is logged in, else the first logged-in account. */
+/** Prefer the shared recommendation, then retain the machine default fallback. */
 export function defaultAccount(entry: CliProfiles | undefined): string | undefined {
   const usable = entry?.profiles.filter((profile) => profile.logged_in) ?? [];
-  return (usable.find((profile) => profile.is_default) ?? usable[0])?.name;
+  return (usable.find((profile) => profile.recommendation) ?? usable.find((profile) => profile.is_default) ?? usable[0])?.name;
 }
 
 /** The command that logs an account in on the machine. */
@@ -973,7 +973,8 @@ export function commandTokensMarkup(command: string): string {
 
 function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {
   const name = escapeHtml(profile.name);
-  const tag = profile.is_default ? '<small class="launch-account-tag">Default</small>' : "";
+  const recommendation = profile.recommendation ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(profile.recommendation)}</small>` : profile.exclusion ? `<small class="launch-row-path">${escapeHtml(profile.exclusion)}</small>` : "";
+  const tag = recommendation + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
   if (profile.logged_in) {
     return `<label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>`;
   }

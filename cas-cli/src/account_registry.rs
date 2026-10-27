@@ -252,6 +252,18 @@ pub fn collect(home: &Path) -> std::io::Result<Vec<Account>> {
             LoginState::Unknown
         })?);
     }
+    refresh(&mut accounts);
+    Ok(accounts)
+}
+
+/// Collect only the requested provider for a launch decision, with one deadline.
+pub fn collect_for(provider: Provider, home: &Path, include_main: bool) -> std::io::Result<Vec<Account>> {
+    let mut accounts = discover_with(provider, home, include_main, |_, _| LoginState::Unknown)?;
+    refresh(&mut accounts);
+    Ok(accounts)
+}
+
+fn refresh(accounts: &mut [Account]) {
     let (sender, receiver) = std::sync::mpsc::channel();
     let until = Instant::now() + USAGE_DEADLINE;
     for (i, a) in accounts.iter().enumerate() {
@@ -273,9 +285,8 @@ pub fn collect(home: &Path) -> std::io::Result<Vec<Account>> {
         });
     }
     drop(sender);
-    receive_updates(&mut accounts, receiver, until);
-    mark_duplicates(&mut accounts);
-    Ok(accounts)
+    receive_updates(accounts, receiver, until);
+    mark_duplicates(accounts);
 }
 
 type ProbeUpdate = (

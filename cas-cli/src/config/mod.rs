@@ -264,6 +264,7 @@ impl Config {
                 }
             };
         }
+        merge_option!(accounts);
         merge_option!(cloud);
         merge_option!(skill_validation);
         merge_option!(skills);

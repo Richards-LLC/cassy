@@ -1692,11 +1692,15 @@ mod launch_profile_tests {
                 name: "ready".into(),
                 logged_in: true,
                 is_default: false,
+                recommendation: None,
+                exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
                 name: "signed-out".into(),
                 logged_in: false,
                 is_default: true,
+                recommendation: None,
+                exclusion: None,
             },
         ];
         assert_eq!(selected_profile("ready", &rows), Ok("ready"));
@@ -1728,6 +1732,8 @@ mod launch_profile_tests {
             name: "support@petrastella.io".into(),
             logged_in: true,
             is_default: true,
+            recommendation: None,
+            exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});
         assert_eq!(

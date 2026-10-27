@@ -633,6 +633,7 @@ mod tests {
         }
         // UTC tomorrow can still be local today; keep the local calendar date.
         let late = "2026-10-28T02:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        // pin: the shared local-calendar reset format is the operator contract.
         assert_eq!(format_reset_in(Some(late), now), "resets Tue 22:00 (in 14h)");
     }
 

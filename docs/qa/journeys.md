@@ -193,6 +193,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".
 - Once the supervisor has replied since, a "Not confirmed" message stops offering Retry; only a quiet "Send again" remains.
 - A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
+- Replaying a delivery receipt while reply history rebuilds keeps an answered message answered.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 #### Edge paths

@@ -635,7 +635,8 @@ export class ConversationHistory {
     if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
-    send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
+    // Replayed receipts cannot undo a known answer while reply history is rebuilding.
+    send.value.state = send.value.state === "replied" || this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
     if (send.value.held) send.value.sentAt ??= Date.now();
     delete send.value.held;
     delete send.value.error;

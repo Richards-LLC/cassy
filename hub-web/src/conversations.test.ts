@@ -92,6 +92,11 @@ describe('conversation evidence', () => {
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
     history.acknowledge({ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true });
     expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
+    // A journal receipt can replay while the linked reply is absent during history rebuild.
+    history.events.splice(1);
+    history.synchronizePending([], 2_000, [{ client_ref: 'own', notification_id: 41, target: 'supervisor', stamped: true, sentAt: 1_000 }]);
+    expect(history.events).toHaveLength(1);
+    expect(history.events[0]).toMatchObject({ value: { state: 'replied' } });
   });
   it('gives up on a missing receipt after a bounded wait, sooner once a later reply lands (cas-1622)', () => {
     const history = new ConversationHistory();

@@ -30,3 +30,13 @@ names its rule, location and baseline citation. New head findings still fail.
 Follow-up cas-715d owns contrast and ASCII fallback; no global allowlist changed.
 Full report: `terminal-qa/final/report.json`; detailed critique: `CRITIQUE.md`.
 Design: DESIGN.md@b43940e43; reviewed 2026-10-27.
+
+## Round 2: idle and repeated accounts
+
+Rolled-over capacity windows count as unused; a missing weekly reset is eligible
+behind known weekly resets. Unknown live usage and unusable authentication remain
+excluded. Duplicate folders say `duplicate of <alias>` and only the canonical
+folder can be recommended. A row outside the anchored reset group says
+`resets later than <recommended>`. Each row stays manually selectable. No machine
+schema or interaction changes. Commander profile probing can still take up to
+four seconds (QA F02, deferred by supervisor #4211163).

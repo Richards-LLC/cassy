@@ -193,8 +193,24 @@ pub(crate) mod tests {
             stale.login_state = LoginState::StaleLogin;
             let mut unknown = a.clone();
             unknown.windows[0].used_percent = None;
-            let mut expired = a.clone();
-            expired.windows[1].resets_at = Some(now);
+            let mut idle = row(provider, "idle", 6, 10.0, 0.0);
+            idle.windows.remove(0);
+            let busy = row(provider, "busy", 6, 70.0, 20.0);
+            let mut null_reset = idle.clone();
+            null_reset.windows.insert(0, UsageWindow { name: "5h".into(), used_percent: Some(0.0), resets_at: None });
+            let mut expired_five = null_reset.clone();
+            expired_five.windows[0].used_percent = Some(100.0);
+            expired_five.windows[0].resets_at = Some(now);
+            let mut cleared_expired = expired_five.clone();
+            cleared_expired.windows[0].used_percent = None;
+            let mut unknown_weekly_reset = a.clone();
+            unknown_weekly_reset.windows[1].resets_at = None;
+            let mut expired_weekly = a.clone();
+            expired_weekly.windows[1].resets_at = Some(now);
+            expired_weekly.windows[1].used_percent = None;
+            let mut no_data = a.clone(); no_data.windows.clear();
+            let mut duplicate = row(provider, "duplicate", 6, 0.0, 0.0);
+            duplicate.flags.duplicate_of = Some(a.folder.clone());
             let mut invalid = a.clone();
             invalid.windows[0].used_percent = Some(f64::NAN);
             let mut other_provider = a.clone();
@@ -264,6 +280,14 @@ pub(crate) mod tests {
                     50,
                     Some("b"),
                 ),
+                ("idle without 5h window beats busy", vec![busy.clone(), idle], AccountSelection::SoonestReset, 90, Some("idle")),
+                ("idle Claude null 5h reset", vec![busy.clone(), null_reset], AccountSelection::SoonestReset, 90, Some("idle")),
+                ("expired Codex 5h snapshot", vec![busy.clone(), expired_five], AccountSelection::SoonestReset, 90, Some("idle")),
+                ("expired Codex cleared percentage", vec![busy, cleared_expired], AccountSelection::SoonestReset, 90, Some("idle")),
+                ("unknown weekly reset eligible", vec![unknown_weekly_reset.clone()], AccountSelection::SoonestReset, 90, Some("a")),
+                ("known weekly reset before unknown", vec![unknown_weekly_reset, b.clone()], AccountSelection::SoonestReset, 90, Some("b")),
+                ("expired weekly window eligible", vec![expired_weekly], AccountSelection::SoonestReset, 90, Some("a")),
+                ("duplicate routes to canonical", vec![duplicate, a.clone()], AccountSelection::SoonestReset, 90, Some("a")),
                 (
                     "no eligible account",
                     vec![
@@ -272,7 +296,7 @@ pub(crate) mod tests {
                         logged_out,
                         stale,
                         unknown,
-                        expired,
+                        no_data,
                         invalid,
                         other_provider,
                     ],
@@ -293,7 +317,17 @@ pub(crate) mod tests {
                     "{provider:?}: {case}"
                 );
                 if let Some(r) = result.recommended {
-                    assert!(r.reason.contains("resets in"), "{case}: {}", r.reason);
+                    if case == "unknown weekly reset eligible" || case == "expired weekly window eligible" {
+                        assert!(r.reason.contains("weekly reset unknown"), "{case}: {}", r.reason);
+                    } else {
+                        assert!(r.reason.contains("resets in"), "{case}: {}", r.reason);
+                    }
+                    if case == "soonest reset" {
+                        assert_eq!(result.excluded.iter().find(|(a, _)| a.name == "b").map(|(_, reason)| reason.as_str()), Some("resets later than a"));
+                    }
+                    if case == "duplicate routes to canonical" {
+                        assert_eq!(result.excluded.iter().find(|(a, _)| a.name == "duplicate").map(|(_, reason)| reason.as_str()), Some("duplicate of a"));
+                    }
                     assert!(r.reason.contains("% left"));
                 } else {
                     assert_eq!(

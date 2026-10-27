@@ -3153,3 +3153,5 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .work-chip, .work-detail, .status-timeline, .worker-timeline-older, .worker-timeline-raw { border-color: ButtonText; }
   .work-chip-dot, .work-row.is-failed .work-row-toggle::before, .work-row.is-failed .work-row-line::before { background: CanvasText; }
 }
+.worker-timeline-rows .work-row-toggle, .worker-timeline-rows .work-row-line { width: 100%; }
+.worker-timeline-rows .work-row-time { margin-left: auto; padding-left: var(--space-2); }

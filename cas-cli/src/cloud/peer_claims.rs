@@ -2309,6 +2309,7 @@ mod tests {
                 let note = collision_note(path, &holder);
                 assert!(notify_worker_of_holder(&root, "reader", "reader-worker", Some("session-a"), path, &holder));
                 let queued = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+                // pin: both harnesses must receive the same coordination instructions.
                 assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");
                 assert!(note.contains("holder-worker") && note.contains("cas-real-task"), "{holder_session}: {note}");
                 // pin: the advisory must distinguish local coordination from a different supervisor.

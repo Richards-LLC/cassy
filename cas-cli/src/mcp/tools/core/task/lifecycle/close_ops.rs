@@ -9643,6 +9643,18 @@ impl CasCore {
                                         anchor_commits,
                                     )
                                 }
+                                .and_then(|proof| {
+                                    // cas-defb: a no-code delivery is its external
+                                    // proof; pin the reviewed commit so a sibling
+                                    // merge or the lane's next task cannot stale it.
+                                    if epic_proof_ref.is_none()
+                                        && task.execution_note.as_deref() == Some("no-code")
+                                    {
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
+                                    } else {
+                                        Ok(proof)
+                                    }
+                                })
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,
                                     message: Cow::from(format!(

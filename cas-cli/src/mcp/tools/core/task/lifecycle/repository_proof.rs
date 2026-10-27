@@ -272,6 +272,22 @@ pub(crate) fn capture_repository_proof_at_target(
     })
 }
 
+/// Pin a captured proof to the exact commit it observed (cas-defb).
+///
+/// A no-code delivery is its validated external proof, so no later commit on
+/// the epic or the worker's lane can change what was reviewed. Re-binding at
+/// the immutable head keeps the record of that tree without letting a sibling
+/// merge or the worker's next task end the verification cycle.
+pub(crate) fn pin_repository_proof_to_head(
+    proof: &RepositoryProofBoundary,
+) -> Result<RepositoryProofBoundary, String> {
+    capture_repository_proof_at_target(
+        Path::new(&proof.repository_root),
+        &proof.head_commit,
+        Vec::new(),
+    )
+}
+
 /// Commits whose content this close is really delivering.
 ///
 /// The resolved commit receipt always counts, and so does the task's parked
@@ -510,17 +526,30 @@ pub(crate) fn evaluate_repository_proof(
             }
         }
     };
-    if &current == proof {
+    // cas-defb: the same commit and content digest is the same reviewed
+    // tree, even when a post-merge cleanup made the repository root supply it.
+    if &current == proof
+        || (current.head_commit == proof.head_commit && current.state_digest == proof.state_digest)
+    {
         return Ok(RepositoryProofStatus::Unchanged);
     }
 
     // Nothing delivered was bound, so the whole boundary is the proof and any
     // change ends this cycle — the pre-cas-5c33 contract, unchanged.
     if proof.anchor_commits.is_empty() {
+        let changed = if current.head_commit == proof.head_commit {
+            // cas-defb: "bound head X, current head X" named no cause.
+            format!(
+                "; head unchanged, uncommitted working-tree content changed (state digest {} -> {})",
+                proof.state_digest, current.state_digest
+            )
+        } else {
+            String::new()
+        };
         return Err(TaskLifecycleGateError::RepositoryProof {
             message: format!(
                 "repository proof changed after dispatch; request a fresh verification cycle \
-                 (dispatch bound head {bound}, current head {current_head})",
+                 (dispatch bound head {bound}, current head {current_head}{changed})",
                 bound = proof.head_commit,
                 current_head = current.head_commit,
             ),

@@ -325,6 +325,12 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     std::fs::write(daemon.teams.as_ref().unwrap().teams_dir().join("inboxes/supervisor.json"), "[]").unwrap();
     daemon.inbox_deferred_writes.get_mut(&row.id).unwrap().written_at =
         Instant::now() - Duration::from_secs(16);
+    // The normal Claude retry cadence is durable wall-clock state. Make its
+    // existing next offer due as well, without a 30-second test sleep.
+    rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET wake_attempt_at = ?1 WHERE id = ?2",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(), row.id],
+    ).unwrap();
     daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::from_secs(6));
     let retried = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -337,7 +343,8 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
         }
     }).await;
     assert!(retried.is_ok(), "a ready supervisor must receive its deferred startup wake: {:?}",
-        queue.message_delivery_report(row.id).unwrap());
+        queue.message_delivery_report(row.id).unwrap().map(|report|
+            (report.stage, report.pending_detail, report.recipient_receipt)));
     let typed = retried.unwrap();
     assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
     assert!(typed.contains(&format!("inbox_poll notification_id={}", row.id)), "wake identifies its startup body: {typed:?}");

@@ -342,9 +342,12 @@ esac
         ),
     );
 
-    // cas-1a83: a standalone `release-latency-receipt.sh --run-dir` receipt
-    // lives in a task artifacts directory, not under ~/.cas/artifacts/release.
-    let run_dir = project.path().join("task-artifacts/cas-fixture");
+    // A standalone receipt lives under the artifact root, outside the default
+    // `release/` directory. Its absolute input path must not leak into report
+    // source, where finalize's internal hygiene rejects home paths.
+    let home = TempDir::new_in(std::env::var_os("HOME").map(PathBuf::from).unwrap()).unwrap();
+    let xdg = project.path().join(".test-xdg-config");
+    let run_dir = home.path().join(".cas/artifacts/cas-fixture");
     fs::create_dir_all(&run_dir).unwrap();
     let receipt = run_dir.join("release-latency.receipt");
     fs::write(
@@ -355,7 +358,7 @@ esac
     )
     .unwrap();
 
-    let output = cas_cmd(&project)
+    let output = cas_cmd_at(project.path(), home.path(), &xdg)
         .env("GH_BIN", &fake_gh)
         .env("CAS_RELEASE_REPORT_POLL_SECS", "1")
         .args(["--json", "release", "report", "3.19.0", "--out", "docs/release-reports"])

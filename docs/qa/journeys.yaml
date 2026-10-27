@@ -52,6 +52,10 @@ invariants:
     check: 'Walk HUB-J1 in hub-web/e2e/journeys/pair-code.journey.ts; verify the expected experience and edge paths
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the relay and the machine-side
       `cas hub authorize` are doubled; real pairing is proven by `docs/design/hub-web/pairing-verification.md`'
+  HUB-J1-LANDSCAPE-CODE-ACCESS:
+    statement: The pairing-code dialog fits or scrolls inside a landscape phone viewport; Copy command, Send the code and Cancel remain reachable without clipped content.
+    check: 'Run npm run visual-qa in hub-web (pairing-code, landscape, light and dark) and the landscape pairing-code case in hub-web/e2e/installed-safe-area.spec.ts; every action can receive focus wholly inside the dialog.'
+    bug: {task: cas-f300}
   HUB-J2-GOAL:
     statement: the link pairs this browser and I reach the supervisor
     check: 'Walk HUB-J2 in hub-web/e2e/journeys/pair-link.journey.ts; verify the expected experience and edge paths
@@ -243,6 +247,11 @@ bug_families:
     tasks: [cas-a56c]
     invariants: [HUB-J1-GOAL]
     journeys: [HUB-J1]
+  pairing-code-landscape-clipping:
+    title: Sharing controls made the pairing-code dialog overflow its clipping edge on a sideways phone
+    tasks: [cas-f300]
+    invariants: [HUB-J1-LANDSCAPE-CODE-ACCESS]
+    journeys: [HUB-J1]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code
@@ -314,6 +323,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J1-GOAL
+  - HUB-J1-LANDSCAPE-CODE-ACCESS
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

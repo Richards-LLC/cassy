@@ -169,7 +169,12 @@ test("HUB-J8 switch between machines without losing my place", async ({ page, jo
     // And after a reload, from storage.
     await page.reload();
     await expect(list.getByRole("button", { name: /orion/ })).toBeVisible();
-    expect([await colour(/cas-src/), await colour(/gabber-studio/)]).toEqual([atlas, studio]);
+    // cas-c9a3: rows refill their markup as each machine's catalog lands after
+    // the reload (conversation-list.ts sets innerHTML when it changes), so a
+    // one-shot read can hit an avatar that was just replaced and read "".
+    // The colour is asserted on the avatar as rendered, re-resolved until it is.
+    await expect(avatar(/cas-src/), "Atlas keeps its accent after a reload").toHaveCSS("background-color", atlas);
+    await expect(avatar(/gabber-studio/), "Studio keeps its accent after a reload").toHaveCSS("background-color", studio);
     // cas-7752: the draft started on the Linux machine survived the pair link
     // opened in this tab and the reload: it is there when I return to it...
     await list.getByRole("button", { name: /cas-src/ }).click();

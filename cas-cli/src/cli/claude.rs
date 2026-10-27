@@ -161,7 +161,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
         "Usage: cas claude <profile> [factory-args...]\n\nDetected Claude profiles:\n",
     );
 
-    for profile in with_usage(profiles) {
+    for profile in with_usage(home, profiles) {
         let login = login_state_label(profile.login_state);
         let active = if profile.active { " (active)" } else { "" };
         let usage = profile
@@ -191,21 +191,8 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
 /// Live usage per logged-in account, fetched in parallel for at most four
 /// seconds, so the picker can mark an account whose limit is used up
 /// (cas-e1f4).
-fn with_usage(mut profiles: Vec<Profile>) -> Vec<Profile> {
-    let accounts = profiles
-        .iter()
-        .filter(|profile| matches!(profile.login_state, LoginState::LoggedIn | LoginState::Unknown))
-        .map(|profile| (profile.name.clone(), profile.directory.clone()))
-        .collect();
-    let usage = super::limits::usage_summaries(
-        crate::accounts::Provider::Claude,
-        accounts,
-        crate::account_registry::USAGE_DEADLINE,
-    );
-    for profile in &mut profiles {
-        profile.usage = usage.get(&profile.name).cloned();
-    }
-    profiles
+fn with_usage(home: &Path, profiles: Vec<Profile>) -> Vec<Profile> {
+    super::account_picker::with_usage(crate::accounts::Provider::Claude, home, profiles)
 }
 
 /// `<dir> (<email>)` for the launch line, or just the directory.
@@ -499,7 +486,7 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
                 io::stdin().is_terminal(),
                 io::stdout().is_terminal(),
             ) {
-                let profiles = with_usage(profiles);
+                let profiles = with_usage(&home, profiles);
                 prompt_for_profile(&home, &profiles)?
             } else {
                 // Non-interactive, or only one account exists: leave the

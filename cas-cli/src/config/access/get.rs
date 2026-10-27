@@ -20,6 +20,11 @@ impl Config {
         let memory = self.memory.clone().unwrap_or_default();
         let factory = self.factory();
         match key {
+            "accounts.disabled" => Some(self.accounts.clone().unwrap_or_default().disabled.join(",")),
+            "accounts.selection" => Some(match self.accounts.clone().unwrap_or_default().selection {
+                AccountSelection::SoonestReset => "soonest-reset", AccountSelection::MostHeadroom => "most-headroom",
+            }.into()),
+            "accounts.threshold" => Some(self.accounts.clone().unwrap_or_default().threshold.to_string()),
             "slack.channels" => Some(serde_json::to_string(
                 &self.slack.as_ref().cloned().unwrap_or_default().channels
             ).expect("serializable channel IDs")),

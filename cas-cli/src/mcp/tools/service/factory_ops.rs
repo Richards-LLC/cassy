@@ -1471,6 +1471,36 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
     Ok(Some(values.len()))
 }
 
+/// Fill only unresolved worker accounts. The queue persists the selected directory;
+/// the receipt explains the choice even when no account is eligible.
+fn recommend_spawn_accounts(
+    specs: &mut [cas_mux::WorkerSpec], policy: &crate::config::AccountsConfig,
+    now: chrono::DateTime<chrono::Utc>,
+    mut collect: impl FnMut(crate::accounts::Provider) -> std::io::Result<Vec<crate::account_registry::Account>>,
+) -> String {
+    let mut notices = Vec::new();
+    for (provider, cli) in [(crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
+        (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex)] {
+        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none() && s.requester_config_dir.is_none()) { continue }
+        let accounts = match collect(provider) {
+            Ok(rows) => rows,
+            Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
+        };
+        let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
+        if let Some(recommended) = selection.recommended {
+            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none() && s.requester_config_dir.is_none()) {
+                spec.config_dir = Some(recommended.account.folder.to_string_lossy().into_owned());
+            }
+            notices.push(format!("{} recommended account={} ({}): {}", provider.name(), recommended.account.display_name,
+                recommended.account.folder.display(), recommended.reason));
+        } else {
+            let why = selection.excluded.iter().map(|(a, why)| format!("{}: {why}", a.display_name)).collect::<Vec<_>>().join("; ");
+            notices.push(format!("{}: no eligible account ({}); using default/inherited account", provider.name(), if why.is_empty() { "no accounts found" } else { &why }));
+        }
+    }
+    notices.into_iter().map(|notice| format!("\nAccount selection: {notice}")).collect()
+}
+
 fn spawn_specs_summary(specs: &[cas_mux::WorkerSpec], worker_names: &[String]) -> String {
     specs
         .iter()
@@ -2787,6 +2817,12 @@ impl CasService {
             }
         }
 
+        let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
+        let account_selection_notice = recommend_spawn_accounts(&mut specs, &account_policy, chrono::Utc::now(), |provider| {
+            let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
+            crate::account_registry::collect_for(provider, &home, false)
+        });
+
         // A caller who requested Codex must either receive Codex or an
         // actionable refusal. Rewriting the provider/tier to Claude here is
         // a cost and capability change the supervisor did not approve.
@@ -3094,11 +3130,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -15131,6 +15167,39 @@ mod tests {
         assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert!(spawn_specs_summary(&specs, &[]).contains(": claude model=claude-opus-5-5"));
+    }
+
+    #[test]
+    fn recommended_spawn_accounts_preserve_explicit_and_requester_overrides() {
+        let now = "2026-10-27T12:00:00Z".parse().unwrap();
+        let mut specs = Vec::new();
+        for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
+            let base = build_spawn_specs_with_project_config(1, Some(cli.backend().name()), None, None, None, None, None).unwrap().remove(0);
+            let mut explicit = base.clone(); explicit.config_dir = Some("/explicit/account".into());
+            let mut requester = base.clone(); requester.requester_config_dir = Some("/requester/account".into());
+            specs.extend([base, explicit, requester]);
+        }
+        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| Ok(vec![
+            crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0),
+            crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0),
+        ]));
+        for (offset, provider) in [(0, crate::accounts::Provider::Claude), (3, crate::accounts::Provider::Codex)] {
+            assert_eq!(specs[offset].config_dir.as_deref(), Some(format!("/fixture/{}chosen", provider.prefix()).as_str()));
+            assert_eq!(specs[offset + 1].config_dir.as_deref(), Some("/explicit/account"));
+            assert_eq!(specs[offset + 2].requester_config_dir.as_deref(), Some("/requester/account"));
+            assert!(specs[offset + 2].config_dir.is_none());
+            assert!(receipt.contains(&format!("{} recommended account=chosen", provider.name())));
+        }
+        assert!(receipt.contains("resets in 6h, 41% left"));
+        assert!(spawn_specs_summary(&specs, &[]).contains("account=/fixture/.codex-chosen"));
+        specs[0].config_dir = None;
+        let fallback = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+            let mut row = crate::account_selection::tests::row(provider, "full", 6, 100.0, 100.0);
+            row.login_state = crate::account_registry::LoginState::LoggedIn;
+            Ok(vec![row])
+        });
+        assert!(specs[0].config_dir.is_none());
+        assert!(fallback.contains("full: 5h at 100% (threshold 90%)"));
     }
 
     #[test]

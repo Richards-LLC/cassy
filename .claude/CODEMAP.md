@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map of the assembled 3.83 release source at `48262f3b4`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map of the assembled 3.84 release source (accounts epic + burn-down v66) at `88922c00a`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -48,6 +48,8 @@
 - `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - pure account recommendation policy, capacity exclusions and typed selection/threshold/disabled configuration.
 - `cas-cli/src/account_registry/resolve.rs` - read-only alias/email resolution shared by CLI launch, Commander and worker config_dir validation.
 - `cas-cli/src/account_registry.rs` - shared Claude/Codex identity, login evidence, duplicate flags and structured usage snapshots with a four-second deadline.
+- `cas-cli/src/account_lifecycle.rs` - account remove, rename, disable/enable and staged new-login transactions, with in-use checks and symlink-alias handling.
+- `cas-cli/src/account_links.rs` - shared-link drift detection and repair behind `cas doctor --fix` and launch-time link restoration.
 - `cas-cli/src/cli/accounts.rs`, `cas-cli/src/accounts.rs` - subscription list/JSON, shared account configuration and link/drift operations.
 - `cas-cli/src/cli/limits.rs`, `cas-cli/src/cli/accounts.rs` - shared local reset-date/day-hour formatting, reset-only summaries, provider capacity snapshots, bounded human reports and unchanged RFC3339 JSON instants.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs` - registry-backed account names, legacy profile aliases, profile setup and login commands.

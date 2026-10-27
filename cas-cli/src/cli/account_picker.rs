@@ -704,6 +704,9 @@ mod tests {
             assert_eq!(active_choice_index(&profiles), 1);
             assert!(idle_choices[1].to_string().contains("recommended: resets in 6h, 90% left"));
             assert!(idle_choices[0].to_string().contains("duplicate of alt"));
+            // This block exercises usable rows; the outer fixture also
+            // checks disabled rendering before selection is applied.
+            for profile in &mut profiles { profile.disabled = false; }
             let mut unknown_reset_accounts = accounts.clone();
             unknown_reset_accounts[1].windows[1].resets_at = None;
             apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());

@@ -1061,10 +1061,10 @@ check_hub_web_visual_qa() {
     (cd hub-web && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         PLAYWRIGHT_BROWSERS_PATH="$tmp_dir/playwright" \
-        release_test_child "$npm_bin" exec --yes --package=playwright -- playwright install chromium && \
+        release_test_child "$npm_bin" exec -- playwright install chromium && \
         NPM_CONFIG_CACHE="$tmp_dir/npm-cache" \
         PLAYWRIGHT_BROWSERS_PATH="$tmp_dir/playwright" \
-        release_test_child "$npm_bin" exec --yes --package=playwright -- node scripts/visual-qa.mjs \
+        release_test_child "$npm_bin" exec -- node scripts/visual-qa.mjs \
             --artifact-dir "$artifact_dir")
 }
 
@@ -2275,7 +2275,7 @@ gate_row hub-web-dist-drift \
     'npm ci --no-audit --no-fund && npm run build && git diff --exit-code -- dist' \
     check_hub_web_dist_drift excl=hub-web mem=1 writes-tree
 gate_row hub-web-visual-qa \
-    'npm exec --yes --package=playwright -- node scripts/visual-qa.mjs --artifact-dir <gate-scratch>/hub-web-visual-qa' \
+    'npm exec -- node scripts/visual-qa.mjs --artifact-dir <gate-scratch>/hub-web-visual-qa' \
     check_hub_web_visual_qa excl=hub-web mem=2
 gate_row nextest \
     "$cargo_bin nextest run --workspace (factory environment scrubbed; archive-selected: snapshot complement)" \

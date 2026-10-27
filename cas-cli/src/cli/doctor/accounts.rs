@@ -34,54 +34,49 @@ fn checks_in(home: &Path) -> Vec<Check> {
             return vec![Check::new(NAME, CheckStatus::Warning, format!("could not read accounts: {error:#}"))];
         }
     };
-    let rows: Vec<Check> = survey
+    // One row: the human view folds repeated row names into the first one.
+    let drifted: Vec<String> = survey
         .iter()
         .filter(|(_, _, status)| !status.is_clean())
         .map(|(provider, folder, status)| {
             let here = short(home, folder);
-            let message = if let Some(retired) = &status.retired {
+            if let Some(retired) = &status.retired {
                 let next = match &retired.canonical {
                     Some(canonical) => format!("use {}", short(home, canonical)),
-                    None => "pick a named account (`cas accounts list`)".into(),
+                    None => "pick a named account with `cas accounts list`".into(),
                 };
-                format!(
-                    "{here}: retired account folder recreated ({}); {next}; `cas doctor --fix --yes` retires it again with a backup",
-                    retired.reason
-                )
-            } else {
-                let mut parts = Vec::new();
-                if !status.missing.is_empty() {
-                    parts.push(format!(
-                        "{} ({})",
-                        plural(status.missing.len(), "missing link"),
-                        status.missing.join(", ")
-                    ));
-                }
-                if !status.conflicts.is_empty() {
-                    parts.push(format!(
-                        "{} not linked ({})",
-                        plural(status.conflicts.len(), "real item"),
-                        status.conflicts.join(", ")
-                    ));
-                }
-                let fix = if status.conflicts.is_empty() {
-                    "run `cas doctor --fix`"
-                } else {
-                    "run `cas doctor --fix` to preview, `--fix --yes` to back up and link"
-                };
-                format!(
-                    "{here}: {} to ~/.cas/{}-base; {fix}",
-                    parts.join(", "),
-                    provider.name()
-                )
-            };
-            Check::new(NAME, CheckStatus::Warning, message)
+                return format!("{here}: retired account folder recreated ({}), {next}", retired.reason);
+            }
+            let mut parts = Vec::new();
+            if !status.missing.is_empty() {
+                parts.push(format!(
+                    "{} ({})",
+                    plural(status.missing.len(), "missing link"),
+                    status.missing.join(", ")
+                ));
+            }
+            if !status.conflicts.is_empty() {
+                parts.push(format!(
+                    "{} not linked ({})",
+                    plural(status.conflicts.len(), "real item"),
+                    status.conflicts.join(", ")
+                ));
+            }
+            format!("{here}: {} to ~/.cas/{}-base", parts.join(", "), provider.name())
         })
         .collect();
-    if rows.is_empty() {
+    if drifted.is_empty() {
         return vec![Check::new(NAME, CheckStatus::Ok, "every account links its shared items to the base")];
     }
-    rows
+    let destructive = survey
+        .iter()
+        .any(|(_, _, status)| status.retired.is_some() || !status.conflicts.is_empty());
+    let fix = if destructive {
+        "run `cas doctor --fix` to preview, `--fix --yes` to back up and repair"
+    } else {
+        "run `cas doctor --fix`"
+    };
+    vec![Check::new(NAME, CheckStatus::Warning, format!("{}; {fix}", drifted.join("; ")))]
 }
 
 /// `--fix`: link empty slots, sweep abandoned logins, and preview (or with
@@ -104,6 +99,7 @@ fn autofix_in(home: &Path, mut confirm: impl FnMut(&str) -> bool) -> Vec<Check> 
         }
     };
     let mut rows = Vec::new();
+    let (mut linked, mut linked_count) = (Vec::new(), 0);
     let mut needs_link: Vec<Provider> = Vec::new();
     for (provider, folder, status) in &survey {
         if (status.retired.is_some() || !status.conflicts.is_empty()) && !needs_link.contains(provider) {
@@ -113,17 +109,10 @@ fn autofix_in(home: &Path, mut confirm: impl FnMut(&str) -> bool) -> Vec<Check> 
             continue;
         }
         match account_links::ensure(*provider, home, folder) {
-            Ok(ensured) if !ensured.linked.is_empty() => rows.push(Check::new(
-                "auto-fix",
-                CheckStatus::Ok,
-                format!(
-                    "fixed: account links — linked {} in {} from ~/.cas/{}-base ({})",
-                    plural(ensured.linked.len(), "shared item"),
-                    short(home, folder),
-                    provider.name(),
-                    ensured.linked.join(", ")
-                ),
-            )),
+            Ok(ensured) if !ensured.linked.is_empty() => {
+                linked_count += ensured.linked.len();
+                linked.push(format!("{} ({})", short(home, folder), ensured.linked.join(", ")));
+            }
             Ok(_) => {}
             Err(error) => rows.push(Check::new(
                 "auto-fix",
@@ -132,6 +121,18 @@ fn autofix_in(home: &Path, mut confirm: impl FnMut(&str) -> bool) -> Vec<Check> 
             )),
         }
     }
+    if !linked.is_empty() {
+        rows.push(Check::new(
+            "auto-fix",
+            CheckStatus::Ok,
+            format!(
+                "fixed: account links — linked {} from the base: {}",
+                plural(linked_count, "shared item"),
+                linked.join("; ")
+            ),
+        ));
+    }
+    let (mut previews, mut applied_rows) = (Vec::new(), Vec::new());
     for provider in needs_link {
         let plan = match accounts::plan(provider, home) {
             Ok(plan) if !plan.is_empty() => plan,
@@ -164,33 +165,43 @@ fn autofix_in(home: &Path, mut confirm: impl FnMut(&str) -> bool) -> Vec<Check> 
         let summary = format!(
             "account links ({}): {}; the replaced items are merged into the base and backed up with a restore script.",
             provider.name(),
-            preview.join("; ")
+            preview.join(", ")
         );
         if !confirm(&summary) {
-            rows.push(Check::new(
-                "auto-fix",
-                CheckStatus::Info,
-                format!("{summary} Dry run only; re-run `cas doctor --fix --yes` to apply."),
-            ));
+            previews.push(summary);
             continue;
         }
         let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        rows.push(match accounts::apply(&plan, home, &stamp) {
-            Ok(applied) => Check::new(
+        match accounts::apply(&plan, home, &stamp) {
+            Ok(applied) => applied_rows.push(format!(
+                "{}: {}, {}, {}, backup {}, undo: bash {}",
+                provider.name(),
+                plural(applied.linked, "link"),
+                plural(applied.dir_changes, "folder change"),
+                plural(applied.merged, "file merged"),
+                short(home, &applied.backup),
+                applied.restore.display()
+            )),
+            Err(error) => rows.push(Check::new(
                 "auto-fix",
-                CheckStatus::Ok,
-                format!(
-                    "fixed: account links ({}) — {}, {}, {}; backup {}; undo: bash {}",
-                    provider.name(),
-                    plural(applied.linked, "link"),
-                    plural(applied.dir_changes, "folder change"),
-                    plural(applied.merged, "file merged"),
-                    short(home, &applied.backup),
-                    applied.restore.display()
-                ),
-            ),
-            Err(error) => Check::new("auto-fix", CheckStatus::Warning, format!("account links ({}): {error:#}", provider.name())),
-        });
+                CheckStatus::Warning,
+                format!("account links ({}): {error:#}", provider.name()),
+            )),
+        }
+    }
+    if !applied_rows.is_empty() {
+        rows.push(Check::new(
+            "auto-fix",
+            CheckStatus::Ok,
+            format!("fixed: account links — {}", applied_rows.join("; ")),
+        ));
+    }
+    if !previews.is_empty() {
+        rows.push(Check::new(
+            "auto-fix",
+            CheckStatus::Info,
+            format!("{} Dry run only; re-run `cas doctor --fix --yes` to apply.", previews.join(" ")),
+        ));
     }
     rows
 }
@@ -250,29 +261,30 @@ mod tests {
             let credentials = files(&account);
 
             let rows: Vec<String> = checks_in(h).into_iter().map(|row| row.message).collect();
-            let p = provider.prefix();
+            let (p, name) = (provider.prefix(), provider.name());
             assert_eq!(
                 rows,
-                [
-                    format!(
-                        "~/.{}: retired account folder recreated (it has no login); pick a named account (`cas accounts list`); `cas doctor --fix --yes` retires it again with a backup",
-                        provider.name()
-                    ),
-                    format!(
-                        "~/{p}a@x.com: 1 missing link ({}), 1 real item not linked ({}) to ~/.cas/{}-base; run `cas doctor --fix` to preview, `--fix --yes` to back up and link",
-                        shared[0],
-                        shared[1],
-                        provider.name()
-                    ),
-                ]
+                [format!(
+                    "~/.{name}: retired account folder recreated (it has no login), pick a named account with `cas accounts list`; ~/{p}a@x.com: 1 missing link ({}), 1 real item not linked ({}) to ~/.cas/{name}-base; run `cas doctor --fix` to preview, `--fix --yes` to back up and repair",
+                    shared[0], shared[1]
+                )]
             );
 
             // Plain --fix: the empty slot is linked, the real item only previewed.
             let rows = autofix_in(h, |_| false);
-            assert_eq!(rows.len(), 2, "{:?}", rows.iter().map(|r| &r.message).collect::<Vec<_>>());
-            assert!(rows[0].message.starts_with(&format!("fixed: account links — linked 1 shared item in ~/{p}a@x.com")));
-            assert!(rows[1].message.contains("Dry run only"), "{}", rows[1].message);
-            assert!(rows[1].message.contains(&format!("replace {} in ~/{p}a@x.com with links", shared[1])));
+            let messages: Vec<&str> = rows.iter().map(|row| row.message.as_str()).collect();
+            assert_eq!(messages.len(), 2, "{messages:?}");
+            assert_eq!(
+                messages[0],
+                format!("fixed: account links — linked 1 shared item from the base: ~/{p}a@x.com ({})", shared[0])
+            );
+            assert_eq!(
+                messages[1],
+                format!(
+                    "account links ({name}): retire ~/.{name} (no login), replace {} in ~/{p}a@x.com with links; the replaced items are merged into the base and backed up with a restore script. Dry run only; re-run `cas doctor --fix --yes` to apply.",
+                    shared[1]
+                )
+            );
             assert_eq!(std::fs::read_link(account.join(shared[0])).unwrap(), base.join(shared[0]));
             assert!(account.join(shared[1]).join("mine.md").is_file());
             assert!(!h.join(".cas/accounts-backup").exists());
@@ -281,12 +293,12 @@ mod tests {
             let rows = autofix_in(h, |_| true);
             assert_eq!(rows.len(), 1);
             let applied = &rows[0].message;
-            assert!(applied.starts_with(&format!("fixed: account links ({})", provider.name())), "{applied}");
+            assert!(applied.starts_with(&format!("fixed: account links — {name}: 1 link, 1 folder change")), "{applied}");
             let restore = applied.rsplit("undo: bash ").next().unwrap();
             assert!(Path::new(restore).is_file(), "{applied}");
             assert_eq!(std::fs::read_link(account.join(shared[1])).unwrap(), base.join(shared[1]));
             assert_eq!(std::fs::read_to_string(base.join(shared[1]).join("mine.md")).unwrap(), "mine");
-            assert!(!h.join(format!(".{}", provider.name())).exists());
+            assert!(!h.join(format!(".{name}")).exists());
             assert_eq!(files(&account), credentials, "credentials untouched");
             assert_eq!(
                 checks_in(h).into_iter().map(|row| row.message).collect::<Vec<_>>(),

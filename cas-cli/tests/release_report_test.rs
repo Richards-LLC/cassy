@@ -381,6 +381,13 @@ esac
     assert_eq!(result["issue_count"], 2, "{result}");
     assert_eq!(result["change_count"], 3);
     let source = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();
+    assert!(
+        source.contains(
+            "Release receipt (relative to `~/.cas/artifacts`): `cas-fixture/release-latency.receipt`."
+        ),
+        "{source}"
+    );
+    assert!(!source.contains(home.path().to_str().unwrap()), "{source}");
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| GitHub issues closed | 2 |"), "{source}");
     // pin: generated Markdown rows are render.py's input contract (cas-7860)

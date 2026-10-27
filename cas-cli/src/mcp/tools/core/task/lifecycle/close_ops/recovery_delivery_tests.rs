@@ -1175,6 +1175,9 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
             &manifest,
             serde_json::json!({
                 "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
+                // The bundle states what the pairs file holds: a BEFORE-only
+                // cell is a partial comparison, a matched one complete.
+                "pairs_status": if complete_pairs { "complete" } else { "partial" },
             })
             .to_string(),
         )

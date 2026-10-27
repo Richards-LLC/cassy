@@ -331,14 +331,18 @@ fn prepare_login_profile(
 }
 
 fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String> {
+    crate::account_lifecycle::sweep_stale_logins(home)?;
     let (profile_dir, pending) = prepare_login_profile(home, profile)?;
     let login_args = [OsString::from("auth"), OsString::from("login")]
         .into_iter()
         .chain(args.iter().cloned())
         .collect::<Vec<_>>();
-    let status = build_claude_command(profile, &profile_dir, &login_args)
-        .status()
-        .context("failed to run `claude auth login`")?;
+    let mut command = build_claude_command(profile, &profile_dir, &login_args);
+    let status = match &pending {
+        Some(login) => login.run(&mut command),
+        None => command.status().map_err(Into::into),
+    }
+    .context("failed to run `claude auth login`")?;
     anyhow::ensure!(
         status.success(),
         "Claude login cancelled or failed; account not added"

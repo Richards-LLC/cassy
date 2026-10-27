@@ -34,3 +34,20 @@ Scored by warm-crane-68 on 2026-10-27. Real fixture TTY captures exercise both
 new-account picker paths through a provider cancellation; neither leaves a folder.
 Capture: `accounts-lifecycle.capture.txt`. Durable transcripts and the automated
 receipt live in cas-c96f's published evidence artifact.
+
+## Recovery follow-up (cas-7450)
+
+Remove keeps the login intact if deleting its folder fails. A later Keychain
+failure names the remaining item with one copyable command on its own line:
+`security delete-generic-password -s 'Claude Code-credentials-<hash>'`.
+An unreadable known-repo registry refuses the mutation with `account kept` and
+`Run: cas doctor`; database diagnostics stay in debug logs so the command stays
+copyable. An enabled account's removal leaves the policy bytes unchanged.
+
+New-account auth catches SIGINT and SIGTERM until its staging folder is cleaned,
+including the duplicate-account question. Every login sweeps physical staging
+folders older than one hour; fresh folders, directory symlinks and a still-locked
+auth transaction survive. Signal death is preserved after cleanup.
+
+The cas-7450 ledger records final candidate captures and terminal-qa separately;
+the earlier critique above applies to the original lifecycle delivery.

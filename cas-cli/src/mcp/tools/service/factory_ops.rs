@@ -12574,6 +12574,43 @@ mod spawn_lifecycle_tests {
         assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_spawn_requires_selected_account_cas_cba9() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nif [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in'; else echo 'Not logged in'; exit 1; fi\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::env::var_os("CODEX_SPAWN_FIXTURE_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mcp::tools::service::factory_ops::spawn_lifecycle_tests::codex_spawn_requires_selected_account_cas_cba9", "--nocapture"])
+                .env("PATH", &bin)
+                .env("CODEX_SPAWN_FIXTURE_CHILD", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let logged_in = env.home().join(".codex-b@example.com");
+        std::fs::create_dir_all(&logged_in).unwrap();
+        std::fs::write(logged_in.join("auth.json"), "{}").unwrap();
+        let logged_out = env.home().join(".codex-a@example.com");
+        std::fs::create_dir_all(&logged_out).unwrap();
+        let mut spec = spec_for(cas_mux::SupervisorCli::Codex, None);
+        let error = preflight_account_auth(&[spec.clone()]).expect_err("unselected account must refuse before launch");
+        for detail in ["config_dir", logged_in.to_str().unwrap(), "No worktree was created"] {
+            assert!(error.contains(detail), "missing {detail:?}: {error}");
+        }
+        assert!(!error.contains(logged_out.to_str().unwrap()), "logged-out home must not be offered: {error}");
+        spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
+        preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
+        spec.requester_config_dir = spec.config_dir.take();
+        preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
+        assert!(!env.home().join(".codex").exists());
+    }
+
     #[test]
     fn a_logged_out_account_refuses_the_spawn_by_name_before_any_worktree_exists() {
         let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, Some("~/.codex-alt"))];

@@ -880,7 +880,15 @@ else
 fi
 "#).unwrap();
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
-        env.set("PATH", &bin);
+        if std::env::var_os("CODEX_REGISTRY_FIXTURE_CHILD").is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "capability::tests::codex_registered_accounts_enable_standard_lane_cas_cba9", "--nocapture"])
+                .env("PATH", &bin)
+                .env("CODEX_REGISTRY_FIXTURE_CHILD", "1")
+                .output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
         let logged_out = env.home().join(".codex-a@example.com");
         let logged_in = env.home().join(".codex-b@example.com");
         for dir in [&logged_out, &logged_in] {

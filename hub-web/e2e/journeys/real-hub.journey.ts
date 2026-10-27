@@ -95,6 +95,16 @@ test(
     };
     page.on("requestfinished", (request) => completed(request, false));
     page.on("requestfailed", (request) => completed(request, true));
+    // Observe real daemon state, rather than trusting a possibly stale Live header.
+    const welcomes: number[] = [];
+    const attachments: unknown[] = [];
+    page.on("websocket", (socket) => socket.on("framereceived", ({ payload }) => {
+      if (typeof payload !== "string") return;
+      try {
+        const frame = JSON.parse(payload);
+        if (frame.message?.Welcome) welcomes.push(Date.now());
+      } catch { /* Non-JSON frames are pane output. */ }
+    }));
     const header = page.locator("#conversation-connection");
     const stage = async (title: string, body: () => Promise<void>) =>
       test.step(title, async () => {
@@ -235,16 +245,42 @@ test(
         expect(navigations, "recovery must not reload the browser").toBe(0);
         await expect(page.locator("#pair-dialog")).toBeHidden();
       };
+      const countAttached = async (afterWelcome: number) => {
+        let snapshot: Awaited<ReturnType<typeof command>>;
+        await expect.poll(async () => {
+          snapshot = await command("attachment");
+          return snapshot.loopPid === fixture!.daemonPid && Date.parse(snapshot.last_pass_at ?? "") > afterWelcome;
+        }, { message: "first published completed pass after the real Welcome" }).toBe(true);
+        // The loop records ws_clients immediately before complete_pass. Do not
+        // wait for a later positive count: this first fresh snapshot must count it.
+        expect(snapshot.commander_clients).toBeGreaterThanOrEqual(1);
+        attachments.push({ welcomeAt: afterWelcome, ...snapshot });
+      };
       await stage(
         "Restart the real hub and replay the queued message",
         async () => {
+          const before = welcomes.length;
           await command("stop");
           await expect(header).toContainText("Reconnecting");
           await command("queue", { message: "Queued during the hub restart." });
           await command("start");
           await replay("Queued during the hub restart.");
+          await expect.poll(() => welcomes.length).toBeGreaterThan(before);
+          await countAttached(welcomes.at(-1)!);
         },
       );
+      await stage("Replace the daemon without losing the open phone", async () => {
+        const before = welcomes.length;
+        const stopped = await command("daemon-stop");
+        await expect(header).toContainText("Reconnecting");
+        const replacement = await command("daemon-start");
+        expect(replacement.daemonPid).not.toBe(stopped.daemonPid);
+        fixture!.daemonPid = replacement.daemonPid;
+        await expect.poll(() => welcomes.length, { timeout: 30_000 }).toBeGreaterThan(before);
+        await expect(header).toContainText("Live");
+        await countAttached(welcomes.at(-1)!);
+        expect(navigations, "replacement must not reload the phone").toBe(0);
+      });
       await stage(
         "Wait through a real sixty-second outage with bounded retries",
         async () => {
@@ -436,7 +472,7 @@ test(
         await writeFile(
           join(directory, "hub-evidence.json"),
           JSON.stringify(
-            redactQaValue({ evidence, network }, secrets),
+            redactQaValue({ evidence, network, attachments }, secrets),
             null,
             2,
           ),

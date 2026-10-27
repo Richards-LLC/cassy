@@ -117,6 +117,26 @@ async function cleanup() {
   if (existsSync(join(root, ".real-hub-fixture")))
     await rm(root, { recursive: true, force: true });
 }
+function startDaemon() {
+  state.daemon = launch(
+    [
+      "factory",
+      "daemon",
+      "--session",
+      state.session,
+      "--cwd",
+      state.project,
+      "--workers",
+      "0",
+      "--no-worktrees",
+      "--no-phone-home",
+      "--foreground",
+      "--supervisor-name",
+      "journey-supervisor",
+    ],
+    "daemon-process.log",
+  );
+}
 async function reset({ messageControl = false } = {}) {
   await cleanup();
   const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
@@ -149,24 +169,7 @@ async function reset({ messageControl = false } = {}) {
     join(project, ".cas", "config.toml"),
     "[factory]\nai_enrichment = false\n",
   );
-  state.daemon = launch(
-    [
-      "factory",
-      "daemon",
-      "--session",
-      state.session,
-      "--cwd",
-      project,
-      "--workers",
-      "0",
-      "--no-worktrees",
-      "--no-phone-home",
-      "--foreground",
-      "--supervisor-name",
-      "journey-supervisor",
-    ],
-    "daemon-process.log",
-  );
+  startDaemon();
   const deadline = performance.now() + 20000;
   let meta;
   while (performance.now() < deadline) {
@@ -453,6 +456,19 @@ const server = createServer(async (req, res) => {
         case "/start":
           await startHub();
           return { started: true };
+        case "/daemon-stop":
+          await stop(state.daemon);
+          return { daemonPid: state.daemon.pid };
+        case "/daemon-start":
+          startDaemon();
+          return { daemonPid: state.daemon.pid };
+        case "/attachment": {
+          const path = join(state.project, ".cas", "factory-daemon", state.session + ".loop.json");
+          const loop = existsSync(path) ? JSON.parse(await readFile(path, "utf8")) : {};
+          return { daemonPid: state.daemon.pid, loopPid: loop.pid,
+            commander_clients: loop.commander_clients, passes: loop.passes,
+            written_at: loop.written_at, last_pass_at: loop.last_pass_at };
+        }
         case "/ask":
           return ask();
         case "/answers":

@@ -307,6 +307,7 @@ pub(crate) fn active_choice_index(profiles: &[Profile]) -> usize {
 /// "log in a new account" below the fold — an option you must scroll to find
 /// is an option most people never discover.
 pub(crate) fn picker_page_size(choice_count: usize, option_lines: usize, terminal_rows: usize) -> usize {
+    let terminal_rows = if terminal_rows == 0 { 24 } else { terminal_rows };
     choice_count.clamp(7, 20).min(terminal_rows.saturating_sub(4) / option_lines.max(1)).max(1)
 }
 
@@ -733,6 +734,7 @@ mod tests {
         assert_eq!(picker_page_size(3, 1, 24), 7);
         assert_eq!(picker_page_size(50, 1, 24), 20);
         assert_eq!(picker_page_size(8, 4, 24), 5);
+        assert_eq!(picker_page_size(8, 4, 0), 5);
         assert_eq!(picker_page_size(8, 4, 10), 1);
     }
 

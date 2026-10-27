@@ -279,15 +279,20 @@ fn format_reset_in<Tz: TimeZone>(reset: Option<DateTime<Utc>>, now: DateTime<Tz>
 where Tz::Offset: fmt::Display {
     let Some(reset) = reset else { return "reset time unknown".into() };
     let local = reset.with_timezone(&now.timezone());
-    let minutes = (reset.signed_duration_since(now.with_timezone(&Utc)).num_seconds() + 59) / 60;
+    let seconds = reset.signed_duration_since(now.with_timezone(&Utc)).num_seconds();
+    let minutes = (seconds + 59) / 60;
     if local <= now { return "reset, usage unknown until next session".into() }
     let tomorrow = now.date_naive().succ_opt();
     let stamp = if local.date_naive() == now.date_naive() || Some(local.date_naive()) == tomorrow {
         local.format("%a %H:%M").to_string()
     } else { local.format("%a %b %-d %H:%M").to_string() };
     let relative = if minutes < 60 { format!("{}m", minutes.max(1)) }
-        else if minutes < 24 * 60 { format!("{}h", (minutes + 59) / 60) }
-        else { format!("{}d", minutes / (24 * 60)) };
+        else if seconds < 24 * 3600 { format!("{}h", (minutes + 59) / 60) }
+        else {
+            let days = seconds / (24 * 3600);
+            let hours = seconds / 3600 % 24;
+            if hours == 0 { format!("{days}d") } else { format!("{days}d {hours}h") }
+        };
     format!("resets {stamp} (in {relative})")
 }
 
@@ -303,7 +308,9 @@ pub(crate) fn window_summary(window: &crate::account_registry::UsageWindow, now:
 }
 
 pub(crate) fn summarize_windows_at(windows: &[crate::account_registry::UsageWindow], now: DateTime<Utc>) -> Option<String> {
-    (!windows.is_empty()).then(|| windows.iter().map(|window| window_summary(window, now)).collect::<Vec<_>>().join("; "))
+    let summaries = windows.iter().filter(|window| window.name != "extra usage")
+        .map(|window| window_summary(window, now)).collect::<Vec<_>>();
+    (!summaries.is_empty()).then(|| summaries.join("; "))
 }
 
 pub(crate) fn summarize_windows(windows: &[crate::account_registry::UsageWindow]) -> Option<String> {
@@ -585,7 +592,10 @@ fn render_human(report: &LimitsReport) -> String {
                 name: window.name.clone(), used_percent: window.used_percent,
                 resets_at: window.reset_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)),
             };
-            let text = if account.provider == "exa" {
+            let text = if window.name == "extra usage" {
+                window.spend_dollars.map(|spend| format!("extra usage: ${spend:.2} spent"))
+                    .unwrap_or_else(|| "extra usage: spend unknown".into())
+            } else if account.provider == "exa" {
                 window.spend_dollars.map(|spend| format!("{}: ${spend:.2} spent", window.name)).unwrap_or_else(|| window_summary(&typed, now))
             } else {
                 let mut text = window_summary(&typed, now);
@@ -625,8 +635,12 @@ mod tests {
         let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap().with_timezone(&zone);
         for (reset, expected) in [
             (Some("2026-10-27T18:00:00Z"), "resets Tue 14:00 (in 6h)"),
-            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d)"),
-            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d)"),
+            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d 1h)"),
+            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d 1h)"),
+            (Some("2026-10-28T11:59:00Z"), "resets Wed 07:59 (in 24h)"),
+            (Some("2026-10-28T12:00:00Z"), "resets Wed 08:00 (in 1d)"),
+            (Some("2026-10-29T11:56:00Z"), "resets Thu Oct 29 07:56 (in 1d 23h)"),
+            (Some("2026-11-03T11:00:00Z"), "resets Tue Nov 3 07:00 (in 6d 23h)"),
             (Some("2026-10-27T11:00:00Z"), "reset, usage unknown until next session"),
             (None, "reset time unknown"),
         ] {
@@ -706,6 +720,17 @@ mod tests {
             vec!["5h", "weekly opus", "extra usage"]
         );
         assert_eq!(windows[2].spend_dollars, Some(12.5));
+        let structured = windows.iter().map(|window| crate::account_registry::UsageWindow {
+            name: window.name.clone(), used_percent: window.used_percent, resets_at: None,
+        }).collect::<Vec<_>>();
+        let summary = summarize_windows(&structured).unwrap();
+        assert!(summary.contains("5h") && summary.contains("weekly opus"));
+        assert!(!summary.contains("extra usage"));
+        assert!(summarize_windows(&structured[2..]).is_none());
+        let report = LimitsReport { accounts: vec![AccountLimit { account: "claude".into(), provider: "claude".into(), plan: None, state: "active".into(), source: "fixture".into(), windows, detail: None }] };
+        let human = render_human(&report);
+        let spend = human.lines().find(|line| line.contains("extra usage")).unwrap();
+        assert!(spend.contains("$12.50 spent") && !spend.contains("reset"));
     }
 
     #[test]

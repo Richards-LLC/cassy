@@ -697,15 +697,19 @@ mod tests {
         assert_eq!(choices[2], ProfileChoice::NewLogin);
         assert_eq!(active_choice_index(&profiles), 0);
         for provider in crate::accounts::Provider::ALL {
-            let accounts = vec![
+            let mut accounts = vec![
                 crate::account_selection::tests::row(provider, "main", 48, 0.0, 0.0),
                 crate::account_selection::tests::row(provider, "alt", 6, 59.0, 20.0),
             ];
+            if provider == crate::accounts::Provider::Claude {
+                for account in &mut accounts { account.windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
+            }
             let mut profiles = profiles.clone();
             for (profile, account) in profiles.iter_mut().zip(&accounts) { profile.directory = account.folder.clone(); }
             apply_recommendation(&mut profiles, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             let choices = profile_choices(&profiles);
             assert_eq!(active_choice_index(&profiles), 1);
+            assert!(choices.iter().all(|row| !row.to_string().contains("extra usage")));
             let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
             let reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(6)), now);
             assert!(choices[1].to_string().contains(&format!("recommended: {reset}, 41% left")), "{}", choices[1]);

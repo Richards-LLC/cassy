@@ -159,7 +159,7 @@ async function openLaunchSheet(view: LaunchFixture): Promise<void> {
         // cas-c107: the default account logged out, so one row shows the
         // account's "Default" beside the logged-out Copy control.
         { name: "main", logged_in: view !== "launch-account-default-out", is_default: true },
-        { name: "support@petrastella.io", logged_in: true, is_default: false, recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d)" },
+        { name: "support@petrastella.io", logged_in: true, is_default: false, recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d 1h)" },
         { name: "customer-success-escalations@petrastella-international.example", logged_in: true, is_default: false },
         { name: "old@petrastella.io", logged_in: false, is_default: false },
       ] },

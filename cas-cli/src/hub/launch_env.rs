@@ -717,7 +717,8 @@ mod tests {
         assert_eq!(choose_profile_name(None, None, Some("other")), "other");
         assert_eq!(choose_profile_name(None, None, None), "main");
         for (provider, cli) in [(crate::accounts::Provider::Claude, SupervisorCli::Claude), (crate::accounts::Provider::Codex, SupervisorCli::Codex)] {
-            let accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
+            let mut accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
+            if provider == crate::accounts::Provider::Claude { accounts[0].windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
             let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, exclusion: None }];
             mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 41% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()), "{cli:?}");
@@ -725,6 +726,7 @@ mod tests {
                 assert!(rows[0].usage.as_ref().unwrap().contains(name));
             }
             assert_eq!(rows[0].usage.as_ref().unwrap().matches("(in ").count(), 2);
+            assert!(!rows[0].usage.as_ref().unwrap().contains("extra usage"));
             let mut idle_accounts = accounts.clone();
             idle_accounts[0].windows.remove(0);
             idle_accounts[0].windows[0].used_percent = Some(10.0);

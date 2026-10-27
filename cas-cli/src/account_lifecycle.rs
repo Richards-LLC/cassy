@@ -341,7 +341,17 @@ fn keychain_delete(
 }
 fn keychain_account() -> String {
     // Claude Code 2.1.311 uses USER (or the OS username), restricted to this alphabet.
-    let user = std::env::var("USER").unwrap_or_else(|_| "claude-code-user".into());
+    let user = std::env::var("USER")
+        .ok()
+        .filter(|user| !user.is_empty())
+        .or_else(|| {
+            let output = Command::new("/usr/bin/id").arg("-un").output().ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        })
+        .unwrap_or_else(|| "claude-code-user".into());
     if !user.is_empty()
         && user
             .chars()

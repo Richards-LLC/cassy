@@ -17,6 +17,7 @@ use cas_factory::{CapabilityAvailability, CapabilityEvidence, RouteIdentity};
 use cas_pty::{Harness, HarnessConformanceReceipt};
 use fs2::FileExt;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 

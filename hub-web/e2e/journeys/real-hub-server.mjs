@@ -173,7 +173,7 @@ if sys.argv[1:3] == ['auth','status']: print('{"loggedIn":true}');sys.exit(0)
 if '--version' in sys.argv: print('2.1.47');sys.exit(0)
 if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)
 sid=sys.argv[sys.argv.index('--session-id')+1] if '--session-id' in sys.argv else str(uuid.uuid4())
-transcript=os.path.join(os.environ['HOME'],'.claude','projects','disposable',sid+'.jsonl')
+transcript=os.path.join(os.environ['HOME'],'.claude','projects',os.getcwd().replace('/','-').replace('.','-'),sid+'.jsonl')
 os.makedirs(os.path.dirname(transcript),exist_ok=True)
 open(transcript,'a').close()
 def hook(event):

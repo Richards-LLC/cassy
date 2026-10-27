@@ -635,9 +635,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let home = env.home().to_path_buf();
-        let bin = home.join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        env.set("PATH", &bin);
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
         env.remove("CLAUDE_CONFIG_DIR");
         env.remove("CODEX_HOME");
         for (provider, cli) in [("claude", SupervisorCli::Claude), ("codex", SupervisorCli::Codex)] {

@@ -576,6 +576,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
 - A refused operation shows the hub's detail on the row.
+- A fleet change that overlaps an older catalog heartbeat still refreshes the roster: a stopped worker disappears without waiting for the next heartbeat (cas-66ea).
 - On a phone, a pending operation keeps its notice above the composer through a shell rebuild and Raw output; a completion that lands while Raw output is open keeps its Undo or refusal, reachable by keyboard once the sheet closes (M12).
 
 ### HUB-J18 · Interrupt or read the supervisor from its conversation

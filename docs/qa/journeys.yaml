@@ -144,6 +144,12 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J17-FLEET-INVALIDATION:
+    statement: A fleet change overlapping an older heartbeat obtains a fresh catalog, so a stopped worker disappears
+      without waiting for the next heartbeat.
+    check: 'Run hub-web/src/connection-lifecycle.test.ts case "refreshes a fleet change after an overlapping heartbeat"
+      and HUB-J17; verify Stop removes the row and returns its task to Open.'
+    bug: {task: cas-66ea}
   HUB-J18-GOAL:
     statement: I stop what the supervisor is doing, or read what its terminal shows, without leaving the conversation,
       from the keyboard alone
@@ -1470,6 +1476,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-FLEET-INVALIDATION
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

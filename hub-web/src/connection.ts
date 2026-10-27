@@ -225,7 +225,13 @@ export class HubConnectionSupervisor {
     if (!this.desired || this.lifecycle.phase !== "live") return;
     const stream = this.eventAbort;
     try {
-      await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+      const signal = anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]);
+      // A heartbeat/manual read may predate this event. Joining that flight
+      // alone swallows the invalidation (a stopped worker stays in the roster).
+      // Drain it first, then read the changed catalog within the same deadline.
+      if (this.catalogRequest) await this.refreshSessions(signal);
+      if (!this.desired || this.lifecycle.phase !== "live" || stream !== this.eventAbort) return;
+      await this.refreshSessions(signal);
     } catch (error) {
       // cas-eefe: event delivery never waits on this read, and every
       // heartbeat reads the catalog too, so a failed or timed-out read is the

@@ -195,6 +195,13 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
         .deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
     conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
         rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
+    // Advancing the durable check alone does not advance the typed relay's
+    // daemon-local re-nudge clock. Model the same elapsed hold on both.
+    let held_for = (held.next_attempt_at.unwrap() - report.wake_attempt_at.unwrap())
+        .to_std().unwrap();
+    if let Some(last) = daemon.lifecycle_redelivery_attempts.get_mut(&id) {
+        *last -= held_for;
+    }
     typed_once(&root, &mut daemon, "1 message addressed to you has gone unread").await;
     settle_injected_writes(&mut daemon).await;
     let delivered = queue.message_delivery_report(id).unwrap().unwrap();

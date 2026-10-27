@@ -45,6 +45,8 @@ fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied() {
             "npx playwright test 'qa/walk{1}.spec.js'",
             "npx playwright test 'qa/^walk.spec.tsx'",
             "npx playwright test qa/.walk.spec.ts",
+            "npx playwright test ./qa/real-walk.spec.mjs",
+            "npx playwright test qa/real-walk.spec.mjs '.+.journey.ts'",
             "npm run journeys -- --workers=4",
             "npm run test:journeys",
             "npm exec playwright test -- --project=journeys",

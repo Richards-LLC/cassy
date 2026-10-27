@@ -164,6 +164,9 @@ pub struct OperatorReplyPayload {
     pub kind: OperatorTurnKind,
     #[serde(default)]
     pub attachments: Vec<ArtifactRef>,
+    /// Quick-reply labels for an ask; absent on older peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
     /// The session of the turn `reply_to` answers, when it is not the
     /// session this reply belongs to (cas-e829). The reply stays in its own
     /// thread and only quotes the earlier one.
@@ -227,6 +230,9 @@ pub struct ConversationHistoryReply {
     pub kind: OperatorTurnKind,
     #[serde(default)]
     pub attachments: Vec<ArtifactRef>,
+    /// Quick-reply labels for an ask; absent on older peers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
     /// Factory session that produced this turn.
     #[serde(default)]
     pub session: String,
@@ -508,6 +514,9 @@ pub enum DaemonMessage {
         kind: OperatorTurnKind,
         #[serde(default)]
         attachments: Vec<ArtifactRef>,
+        /// Quick-reply labels for an ask; absent on older peers.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        options: Vec<String>,
         /// Set when the row is a system notice, not a supervisor turn (cas-e829).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         notice: Option<OperatorNotice>,
@@ -1140,6 +1149,7 @@ mod tests {
         assert_eq!(legacy.reply_to, Some(41));
         assert_eq!(legacy.kind, OperatorTurnKind::Answer);
         assert!(legacy.attachments.is_empty());
+        assert!(legacy.options.is_empty());
 
         let current = OperatorReplyPayload {
             schema_version: 2,
@@ -1149,6 +1159,7 @@ mod tests {
             device_id: "*".into(),
             operator_label: None,
             kind: OperatorTurnKind::Status,
+            options: Vec::new(),
             attachments: vec![cas_types::ArtifactRef {
                 artifact_id: "art-1".into(),
                 name: "report.pdf".into(),
@@ -1160,6 +1171,7 @@ mod tests {
         };
         let encoded = serde_json::to_string(&current).unwrap();
         assert!(!encoded.contains("reply_to_session"), "{encoded}");
+        assert!(!encoded.contains("options"), "empty choices stay absent: {encoded}");
         let decoded: OperatorReplyPayload = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, current);
         assert_eq!(legacy.reply_to_session, None);
@@ -1173,6 +1185,22 @@ mod tests {
         let decoded: OperatorReplyPayload =
             serde_json::from_str(&serde_json::to_string(&cross).unwrap()).unwrap();
         assert_eq!(decoded.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
+
+        // cas-7ebc: choices must survive the same payload boundary used by
+        // persisted operator turns, rather than existing only in hub doubles.
+        let ask: OperatorReplyPayload = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "message": "Keep testing or stop?",
+            "summary": "Choose the next step",
+            "device_id": "*",
+            "kind": "ask",
+            "options": ["Keep testing", "Stop testing"]
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&ask).unwrap()["options"],
+            serde_json::json!(["Keep testing", "Stop testing"])
+        );
     }
 
     #[test]

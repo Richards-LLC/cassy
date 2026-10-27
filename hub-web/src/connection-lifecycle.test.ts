@@ -1045,8 +1045,12 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().phase).toBe("backoff");
     const streams = hub.streams.length;
     recovered.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
-    await vi.waitFor(() => expect(hub.streams).toHaveLength(streams + 1), { timeout: 250, interval: 10 });
-    expect(connection.snapshot().phase).toBe("live");
+    // Opening the event response precedes the recovery catalog read and the
+    // live transition; wait for the public outcome as well as the new stream.
+    await vi.waitFor(() => {
+      expect(hub.streams).toHaveLength(streams + 1);
+      expect(connection.snapshot().phase).toBe("live");
+    }, { timeout: 250, interval: 10 });
   });
 
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {

@@ -88,14 +88,22 @@ def bundle_trace(data: dict, bundle: Path, hub: str, target: Path | None) -> dic
             source.unlink(missing_ok=True)
         return {}
 
+    actions = target.with_name("trace-actions.txt")
     if source is None or not source.is_file():
-        return {}
+        # cas-167c: an earlier run already moved this trace to its canonical
+        # path. Rebundling the same run keeps it and its action listing.
+        if not (target.is_file() and actions.is_file()):
+            return {}
+        return {
+            "trace": target.relative_to(bundle).as_posix(),
+            "trace_actions": actions.relative_to(bundle).as_posix(),
+            "reused": True,
+        }
 
     target.parent.mkdir(parents=True, exist_ok=True)
     if source.resolve() != target.resolve():
         target.unlink(missing_ok=True)
         shutil.move(str(source), str(target))
-    actions = target.with_name("trace-actions.txt")
     actions.write_text(trace_actions(target.parent, hub))
     return {
         "trace": target.relative_to(bundle).as_posix(),
@@ -124,6 +132,10 @@ def main(argv: list[str]) -> int:
         files: dict[str, object] = {"cells": [stage["screenshot"] for stage in stages]}
         passing_trace: dict[str, str] = {}
         diagnostics = []
+        # cas-167c: the revision whose browser run produced a reused trace.
+        prior = bundle / "bundle.json"
+        prior = json.loads(prior.read_text()) if prior.is_file() else {}
+        executed = prior.get("executed_head_sha") or prior.get("head_sha")
         if data is not None:
             files.update({"receipt": "receipt.webm", "aria_yaml": "final.aria.yml", "aria_json": "final.aria.json"})
             if is_clean_pass(data):
@@ -168,6 +180,9 @@ def main(argv: list[str]) -> int:
         labels = {item.strip() for row in [data, *folded] for item in row.get("label", "" if row is data and not result.is_file() else "real-bundle, protocol-double").split(",") if item.strip()}
         data["label"] = ", ".join(sorted(labels))
         data["status"] = "PASS" if verdicts and all(verdict == "PASS" for verdict in verdicts) else "FAIL"
+        rebound = files.pop("reused", False) and executed and executed != commit
+        for part_files in [*files.get("parts", []), *files.get("diagnostic_traces", [])]:
+            part_files.pop("reused", None)
         (bundle / "bundle.json").write_text(json.dumps({
             "schema": 1,
             "task_id": artifacts.name,
@@ -177,6 +192,9 @@ def main(argv: list[str]) -> int:
             "verdict": data["status"],
             "label": data.get("label"),
             "head_sha": commit,
+            # Close re-proves executed..head is documentation-only and binds
+            # freshness to the executed run (qa_evidence executed_head_sha).
+            **({"executed_head_sha": executed} if rebound else {}),
             "hub_web_dist": tree,
             "build_url": "hub-web/dist at /commander/; transport: " + data["label"],
             "playwright_version": pw_version,

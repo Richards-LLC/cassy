@@ -240,6 +240,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         wake: None,
         in_reply_to: None,
         kind: None,
+        options: None,
         attachment: None,
         supersede_key: None,
         sticky: None,

@@ -281,11 +281,20 @@ pub(crate) fn capture_repository_proof_at_target(
 pub(crate) fn pin_repository_proof_to_head(
     proof: &RepositoryProofBoundary,
 ) -> Result<RepositoryProofBoundary, String> {
+    // Prefer the durable repository root; a checkout that does not share its
+    // object store is the only place that commit is known.
     capture_repository_proof_at_target(
         Path::new(&proof.repository_root),
         &proof.head_commit,
         Vec::new(),
     )
+    .or_else(|_| {
+        capture_repository_proof_at_target(
+            Path::new(&proof.worktree_root),
+            &proof.head_commit,
+            Vec::new(),
+        )
+    })
 }
 
 /// Commits whose content this close is really delivering.

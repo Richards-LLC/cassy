@@ -40690,7 +40690,13 @@ mod zero_change_close_tests {
         agents.register(&Agent::new_with_role(
             actor.into(), "supervisor".into(), AgentRole::Supervisor,
         )).unwrap();
+        let worker = "cas-defb-worker";
+        agents.register(&Agent::new_with_role(
+            worker.into(), "qa-worker".into(), AgentRole::Worker,
+        )).unwrap();
         let mut task = Task::new("cas-defb-qa".into(), "no-code QA pass".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.into());
         task.task_type = TaskType::Chore;
         task.risk = vec![TaskRisk::None];
         task.execution_note = Some("no-code".into());

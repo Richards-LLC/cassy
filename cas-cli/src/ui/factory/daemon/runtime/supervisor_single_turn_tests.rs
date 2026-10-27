@@ -291,12 +291,21 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
         cas.clone(), daemon.app.project_scope(),
     );
+    // The real incident's startup contained project context (11,962 chars).
+    // A saved handoff exercises the same context builder without copying the
+    // operator's private project text into the regression.
+    let mut handoff = cas_types::Entry::new(
+        "startup-handoff".into(), cas_mux::claude_supervisor_contract("(none)"),
+    );
+    handoff.tags = vec!["handoff".into(), "role:supervisor".into()];
+    crate::store::open_store(&cas).unwrap().add(&handoff).unwrap();
     crate::ui::factory::queue_supervisor_intro_prompt(
         &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
     );
     let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
     let row = queue.peek_for_targets(&[&name], None, 10).unwrap().remove(0);
-    assert!(!cas_store::fits_hook_surface(&row.prompt), "real startup takes the Teams body path");
+    assert!(row.prompt.contains("<cas-session-start-fallback>"), "named-profile startup carries context: {}", row.prompt);
+    assert!(!cas_store::fits_hook_surface(&row.prompt), "startup with its handoff takes the Teams body path ({} chars)", row.prompt.chars().count());
     tokio::time::timeout(Duration::from_secs(4), async {
         loop {
             daemon.process_prompt_queue().await.unwrap();

@@ -103,17 +103,18 @@ fn capacity(
     Ok((reset, weekly, five))
 }
 
-/// Project policy overrides the host policy; unset sections use the defaults.
+/// Project selection/threshold override the global policy. Disabled folders
+/// remain the global lifecycle registry, independent of project overrides.
 pub fn load_policy(cas_root: Option<&std::path::Path>) -> AccountsConfig {
-    cas_root
+    let global = crate::config::load_global_config()
+        .accounts
+        .unwrap_or_default();
+    let mut policy = cas_root
         .and_then(|root| crate::config::Config::load(root).ok())
         .and_then(|c| c.accounts)
-        .or_else(|| {
-            crate::config::Config::load(&crate::config::host_config_dir())
-                .ok()
-                .and_then(|c| c.accounts)
-        })
-        .unwrap_or_default()
+        .unwrap_or_else(|| global.clone());
+    policy.disabled = global.disabled;
+    policy
 }
 
 #[cfg(test)]

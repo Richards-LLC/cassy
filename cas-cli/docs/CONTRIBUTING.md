@@ -1181,15 +1181,16 @@ workers use the shared recommendation. The receipt names the account and reason;
 an explicit directory or requester account wins. `cas claude` / `cas codex`
 and Commander's New-session sheet highlight the recommendation but still ask.
 
-`cas config set accounts.selection soonest-reset` (default) chooses the earliest
+`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
 weekly reset group, within 24 hours of the earliest eligible reset, then the
 most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
 `accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
 above that usage in either window. Disabled, logged-out/stale and unknown or
 stale usage accounts are excluded. No eligible account preserves the existing
-default/inherited behavior, with each exclusion explained. Project policy
-overrides host policy; Commander uses host policy. `accounts.disabled` retains
-the absolute folder list managed by `cas accounts disable` / `enable`.
+default/inherited behavior, with each exclusion explained. Project selection/threshold
+override global policy; Commander uses global policy. `accounts.disabled` retains
+the absolute folder list managed by `cas accounts disable` / `enable` in
+`global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
 ### Operator credential stores are masked from workers
 

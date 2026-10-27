@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(usage.windows[0].resets_at.unwrap().timestamp(), 1787011690);
         assert_eq!(usage.windows[1].used_percent, None);
         assert!(
-            summarize_usage(&usage.windows)
+            summarize_windows(&usage.windows)
                 .unwrap()
                 .contains("reset, usage unknown until next session")
         );

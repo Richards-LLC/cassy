@@ -52,12 +52,10 @@ export type SupervisorSendBlock =
   | "no-session"
   | "no-supervisor"
   | "unsupported-hub"
-  | "missing-scope"
-  | "controlled-elsewhere";
+  | "missing-scope";
 
 export type SupervisorSendPlan =
   | { kind: "send" }
-  | { kind: "take-control-then-send"; notice: string }
   | { kind: "blocked"; block: SupervisorSendBlock; reason: string };
 
 export interface SupervisorSendContext {
@@ -75,8 +73,7 @@ export interface SupervisorSendContext {
  * Every refusal the hub can hand back for a supervisor message, decided before
  * the send so the composer can print the actual reason. A disabled button that
  * explains nothing is why an operator concludes the feature is broken: the hub
- * requires both the message:send scope and this device's session lease, and
- * neither is visible from the button.
+ * requires the message:send scope, independently of terminal input control.
  */
 export function planSupervisorSend(context: SupervisorSendContext): SupervisorSendPlan {
   // Structural refusals come first: they are evaluated to label the Send button
@@ -109,20 +106,5 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
   if (context.text.trim().length === 0) {
     return { kind: "blocked", block: "empty", reason: "Type a message before sending it to the supervisor." };
   }
-  if (context.leaseHeldByMe) return { kind: "send" };
-  if (context.leaseControllerLabel) {
-    return {
-      kind: "blocked",
-      block: "controlled-elsewhere",
-      // Plain words (journey F5): who is in control and what to do next.
-      reason: `${context.leaseControllerLabel} is in control of this session. Wait for it to release control, or take over with an administrator credential.`,
-    };
-  }
-  // The hub treats a supervisor message as a leased mutation, so observing
-  // alone cannot deliver it. Taking control is the operator's own next step;
-  // doing it for them beats a button that does nothing.
-  return {
-    kind: "take-control-then-send",
-    notice: `Taking control of ${context.session} to deliver this message…`,
-  };
+  return { kind: "send" };
 }

@@ -756,7 +756,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
-        void reclaimControlThenFlush(machine, session);
+        void restorePaneControlThenFlush(machine, session);
         if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
@@ -2352,9 +2352,6 @@ function invalidateMachineLeases(machineId: string): void {
     // browser — was holding the session against them.
     leases.set(key, { ...lease, held_by_me: false, controller_label: undefined, controller_device_id: undefined });
   }
-  // cas-7b31 (journey F2): nothing is said here. The header, the banner and
-  // the conversation's controls already say the session is down, and control
-  // comes back by itself.
 }
 
 let toastTimer: number | undefined;
@@ -2919,12 +2916,6 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
 }
 
 /**
- * The hub only accepts a supervisor message from the device holding the session
- * lease (hub/server.rs handle_client_message). Observing operators were left
- * with a dead button; taking the lease is the step they would otherwise perform
- * by hand, and it succeeds only when no one else controls the session.
- */
-/**
  * Threads where this device took control after the hub last refused one of
  * its messages (cas-8e0a). The cached lease can say held while the hub
  * refuses (the refusal is the fresher evidence), so a refused message says
@@ -2936,7 +2927,7 @@ function noteControlTaken(machineId: string, session: string): void {
   if (leases.get(key)?.held_by_me) controlTakenAfterRefusal.add(key); else controlTakenAfterRefusal.delete(key);
 }
 
-async function takeControlForMessage(machine: StoredMachine, session: string, force = false): Promise<boolean> {
+async function restorePaneControl(machine: StoredMachine, session: string, force = false): Promise<boolean> {
   try {
     await connections.get(machine.id)?.requestControl(session, force);
   } catch {
@@ -3437,14 +3428,14 @@ function settleSendsForPairingLoss(machine: StoredMachine): void {
  * refuses (another device took control meanwhile) leaves this browser an
  * observer, as before.
  */
-async function reclaimControlThenFlush(machine: StoredMachine, session: string): Promise<void> {
+async function restorePaneControlThenFlush(machine: StoredMachine, session: string): Promise<void> {
   const key = sessionKey(machine.id, session);
   // While the machine still holds messages (unsteady, or a socket being
   // probed) the take waits: the next live announcement brings it back here.
   if (controlLostToOutage.has(key) && !connections.get(machine.id)?.holdsMessages()) {
     controlLostToOutage.delete(key);
     if (leases.get(key)?.held_by_me !== true) {
-      await takeControlForMessage(machine, session);
+      await restorePaneControl(machine, session);
       if (selectedMachineId === machine.id && selectedSession === session) render();
     }
   }
@@ -3461,16 +3452,6 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     let waiting = false;
     try {
       const history = conversationHistory(key);
-      // The lease lapsed while the machine was away; the hub refuses a message
-      // from an observer, so control is taken back first, as a send does.
-      if (leases.get(key)?.held_by_me !== true && !await takeControlForMessage(machine, session)) {
-        for (const held of heldSends.get(key) ?? []) {
-          clearTimeout(held.expiry);
-          history.reject(held.clientRef, `Could not take control of ${session} after reconnecting. Retry to send it.`);
-        }
-        heldSends.delete(key);
-        return;
-      }
       const queue = heldSends.get(key) ?? [];
       while (queue.length) {
         const held = queue[0]!;
@@ -3622,21 +3603,6 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (pendingSubmissions.has(submissionKey)) return;
   pendingSubmissions.add(submissionKey);
   try {
-    // While the session is down, taking control cannot succeed and its
-    // refusal would blame the lease; the message is held instead and control
-    // is taken when the session is back (cas-0978).
-    if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {
-    showComposerStatus(plan.notice, "info");
-    if (!await takeControlForMessage(machine, session)) {
-      showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Send again to retry; if another device controls the session, wait for it to release control.`, "error");
-      return;
-    }
-    // cas-cff2: control is held now, so "Taking control…" is done. The send
-    // itself speaks next: the bubble's Sending… and Delivered, or the
-    // waiting line if the connection holds it. Left up, it outlived the
-    // reply beside a Delivered message.
-    if (messageStatus?.text === plan.notice) clearComposerStatus();
-  }
   // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");

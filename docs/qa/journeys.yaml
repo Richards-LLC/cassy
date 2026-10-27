@@ -70,6 +70,11 @@ invariants:
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: delivery by a running
       daemon and operator stamping are doubled'
+  HUB-J5-SEND-WITHOUT-PANE-LEASE:
+    statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
+    check: 'Run hub::server::upstream_unavailable_tests and the HUB-J5 message-only/Send again journey parts;
+      verify semantic messages reach the authenticated upstream and raw Input is still forbidden.'
+    bug: {task: cas-d402}
   HUB-J5-RECEIPT-STAGES:
     statement: A send never regresses across reload or paired devices; Queued means durable acceptance, Delivered requires actual transport proof, and a connected machine is never called unreachable because its supervisor has not taken the message.
     check: Send through a real candidate hub and compare live, reloaded and peer-device status with the queue's transport_delivered_at; retain queue-only and actual-delivery evidence separately. Run the correlated history/receipt model and real enqueue-to-history regressions, and HUB-J5/HUB-J12 without inferring supervisor execution from a receipt.
@@ -606,6 +611,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-SEND-WITHOUT-PANE-LEASE
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null

@@ -186,6 +186,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - Enter sends and Shift+Enter adds a new line.
+- A pairing with message:send can send without pane:input or terminal control; another device holding the pane never blocks a supervisor message.
 - The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.

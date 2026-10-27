@@ -20,6 +20,9 @@ use crate::cli::Cli;
 use std::fmt;
 
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+// Keep Keychain interaction inside the picker's four-second usage budget.
+const CLAUDE_KEYCHAIN_TIMEOUT: Duration = Duration::from_secs(2);
+const CLAUDE_USAGE_DEADLINE: Duration = Duration::from_secs(4);
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct LimitsArgs {
@@ -98,7 +101,7 @@ fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
         account,
         config_dir,
         cfg!(target_os = "macos"),
-        Deadline::after(Duration::from_secs(4)),
+        Deadline::after(CLAUDE_USAGE_DEADLINE),
         &mut run_command,
         |request| request.call(),
     )
@@ -107,16 +110,33 @@ fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
 fn collect_claude_with(
     account: &str,
     config_dir: &Path,
-    _macos: bool,
-    _deadline: Deadline,
-    _run: &mut impl FnMut(&mut Command, Deadline, Duration) -> Result<Output, BoundedCommandError>,
+    macos: bool,
+    deadline: Deadline,
+    run: &mut impl FnMut(&mut Command, Deadline, Duration) -> Result<Output, BoundedCommandError>,
     fetch: impl FnOnce(ureq::Request) -> Result<ureq::Response, ureq::Error>,
 ) -> AccountLimit {
     let credentials_path = config_dir.join(".credentials.json");
-    let credentials: ClaudeCredentials = match fs::read_to_string(&credentials_path)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-    {
+    let keychain_credentials = if macos {
+        let is_main = dirs::home_dir().is_some_and(|home| config_dir == home.join(".claude"));
+        let selector = config_dir.to_string_lossy();
+        let service =
+            crate::claude_credentials::keychain_service((!is_main).then_some(selector.as_ref()));
+        let mut command = Command::new("security");
+        command.args(["find-generic-password", "-s", &service, "-w"]);
+        // Never surface security's stdout/stderr or errors: stdout holds the
+        // credential, and locked/denied Keychains are ordinary missing usage.
+        run(&mut command, deadline, CLAUDE_KEYCHAIN_TIMEOUT)
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| serde_json::from_slice::<ClaudeCredentials>(&output.stdout).ok())
+    } else {
+        None
+    };
+    let credentials = match keychain_credentials.or_else(|| {
+        fs::read_to_string(&credentials_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+    }) {
         Some(value) => value,
         None => return unavailable(account, "claude", "absent", "credential file not found"),
     };
@@ -129,12 +149,26 @@ fn collect_claude_with(
         );
     };
     let plan = oauth.subscription_type;
+    let timeout = if macos {
+        deadline.remaining()
+    } else {
+        Duration::from_secs(8)
+    };
+    if timeout.is_zero() {
+        return unavailable_with_plan(
+            account,
+            "claude",
+            plan,
+            "unavailable",
+            "usage endpoint unavailable",
+        );
+    }
     let request = ureq::get(CLAUDE_USAGE_URL)
         .set("Authorization", &format!("Bearer {}", oauth.access_token))
         .set("Accept", "application/json")
         .set("anthropic-version", "2023-06-01")
         .set("anthropic-beta", "oauth-2025-04-20")
-        .timeout(std::time::Duration::from_secs(8));
+        .timeout(timeout);
     let response = fetch(request);
     match response {
         Ok(response) => match response.into_json::<Value>().ok().map(parse_claude_usage) {
@@ -526,7 +560,7 @@ fn print_human(report: &LimitsReport) {
     }
 }
 
-// Holds a live Claude OAuth access token read off disk.
+// Holds a live Claude OAuth access token read from secure storage or disk.
 impl fmt::Debug for ClaudeOauth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ClaudeOauth")
@@ -541,16 +575,25 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
-    #[test]
-    fn cas_3870_main_keychain_usage_reaches_picker() {
+    fn security_output(code: i32, stdout: &[u8]) -> Output {
         use std::os::unix::process::ExitStatusExt;
+        Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: b"fixture-secret".to_vec(),
+        }
+    }
 
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let dir = env.home().join(".claude");
+    #[cfg(unix)]
+    const KEYCHAIN_JSON: &[u8] =
+        br#"{"claudeAiOauth":{"accessToken":"fixture-secret","subscriptionType":"max"}}"#;
+
+    #[cfg(unix)]
+    fn keychain_usage_fixture(dir: &Path, service: &str) {
         let mut called = false;
         let limit = collect_claude_with(
-            "claude-main",
-            &dir,
+            "account",
+            dir,
             true,
             Deadline::after(Duration::from_secs(4)),
             &mut |command, deadline, cap| {
@@ -558,20 +601,11 @@ mod tests {
                 assert_eq!(command.get_program(), "security");
                 assert_eq!(
                     command.get_args().collect::<Vec<_>>(),
-                    [
-                        "find-generic-password",
-                        "-s",
-                        "Claude Code-credentials",
-                        "-w"
-                    ]
+                    ["find-generic-password", "-s", service, "-w"]
                 );
                 assert!(deadline.remaining() <= Duration::from_secs(4));
-                assert!(cap <= Duration::from_secs(4));
-                Ok(Output {
-                    status: std::process::ExitStatus::from_raw(0),
-                    stdout: br#"{"claudeAiOauth":{"accessToken":"fixture-secret","subscriptionType":"max"}}"#.to_vec(),
-                    stderr: Vec::new(),
-                })
+                assert_eq!(cap, Duration::from_secs(2));
+                Ok(security_output(0, KEYCHAIN_JSON))
             },
             |request| {
                 assert_eq!(request.url(), CLAUDE_USAGE_URL);
@@ -581,7 +615,6 @@ mod tests {
                     "OK",
                     r#"{"five_hour":{"utilization":12},"seven_day":{"utilization":34}}"#,
                 )
-                .map_err(Into::into)
             },
         );
         assert!(called);
@@ -595,6 +628,107 @@ mod tests {
         );
         assert!(!format!("{limit:?}").contains("fixture-secret"));
         assert!(!dir.join(".credentials.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cas_3870_main_keychain_usage_reaches_picker() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        keychain_usage_fixture(&env.home().join(".claude"), "Claude Code-credentials");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cas_3870_named_keychain_usage_uses_nfc_selector() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        // pin: Claude's service for this NFC-normalized selector, without
+        // canonicalization (the fixture directory intentionally does not exist).
+        keychain_usage_fixture(
+            Path::new("/Users/fixture/.claude-e\u{301}"),
+            "Claude Code-credentials-4d1fceb7",
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cas_3870_keychain_failures_preserve_fallback_and_states() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = env.home().join(".claude");
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join(".credentials.json");
+        use BoundedCommandError::{Io, TimedOut};
+        // Missing, denied, locked, launch failure, timeout, malformed JSON,
+        // no OAuth, file fallback, and the unchanged Linux file path.
+        for (reply, file_present, macos, expected) in [
+            (
+                Ok(security_output(44, KEYCHAIN_JSON)),
+                false,
+                true,
+                "absent",
+            ),
+            (Ok(security_output(1, KEYCHAIN_JSON)), false, true, "absent"),
+            (
+                Ok(security_output(36, KEYCHAIN_JSON)),
+                false,
+                true,
+                "absent",
+            ),
+            (Err(Io), false, true, "absent"),
+            (Err(TimedOut), false, true, "absent"),
+            (
+                Ok(security_output(0, b"invalid fixture-secret")),
+                false,
+                true,
+                "absent",
+            ),
+            (Ok(security_output(0, b"{}")), false, true, "auth-needed"),
+            (Ok(security_output(44, b"")), true, true, "active"),
+            (Err(Io), true, false, "active"),
+        ] {
+            if file_present {
+                fs::write(&file, KEYCHAIN_JSON).unwrap();
+            }
+            let mut reply = Some(reply);
+            let limit = collect_claude_with(
+                "account",
+                &dir,
+                macos,
+                Deadline::after(Duration::from_secs(4)),
+                &mut |_, _, _| reply.take().unwrap(),
+                |request| {
+                    assert_eq!(
+                        expected, "active",
+                        "missing credentials must skip the usage endpoint"
+                    );
+                    assert!(request.header("Authorization") == Some("Bearer fixture-secret"));
+                    ureq::Response::new(200, "OK", r#"{"five_hour":{"utilization":12}}"#)
+                },
+            );
+            assert_eq!(reply.is_none(), macos, "Linux must not access Keychain");
+            assert_eq!(limit.state, expected);
+            assert_eq!(summarize(&limit).is_some(), expected == "active");
+            assert!(
+                !serde_json::to_string(&limit)
+                    .unwrap()
+                    .contains("fixture-secret")
+            );
+            assert!(!format!("{limit:?}").contains("fixture-secret"));
+            if file_present {
+                fs::remove_file(&file).unwrap();
+            }
+        }
+        // Exercise the real bounded runner with an expired deadline: it must
+        // return before trying to spawn security, even on this Linux host.
+        let expired = collect_claude_with(
+            "account",
+            &dir,
+            true,
+            Deadline::after(Duration::ZERO),
+            &mut run_command,
+            |_| panic!("expired Keychain lookup must not fetch usage"),
+        );
+        assert_eq!(expired.state, "absent");
+        assert_eq!(summarize(&expired), None);
     }
 
     #[test]

@@ -2642,6 +2642,32 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     assert!(!detail.contains(&long_ref) && detail.len() < 1000, "client_ref is capped: {} bytes", detail.len());
 }
 
+/// cas-db44: a connection recovery row names the hub like every other audit
+/// row, so an operator (and real HUB-J11) reads every reconnect under the one
+/// paired machine identity.
+#[test]
+fn connection_recovery_audit_rows_name_the_hub_cas_db44() {
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let store = AuthStore::open(&root, "machine-test").unwrap();
+    store.audit_connection("events", false, 200, "request-db44", Some("viewer_lagged"), 3).unwrap();
+    store.audit(None, "allowed", "pairing_exchange", None, None, chrono::Utc::now()).unwrap();
+    let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
+    let identities: Vec<(String, serde_json::Value)> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|row| (row["action"].as_str().unwrap().to_owned(), row["machine_id"].clone()))
+        .collect();
+    assert_eq!(
+        identities,
+        vec![
+            ("connection_recovery".to_owned(), serde_json::json!("machine-test")),
+            ("pairing_exchange".to_owned(), serde_json::json!("machine-test")),
+        ],
+        "{audit}"
+    );
+}
+
 #[test]
 fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
     let mut pending = super::server::PendingRefs::from([(

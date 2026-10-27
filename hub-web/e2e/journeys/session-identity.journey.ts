@@ -70,7 +70,8 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     // any of them is opened; the heading and footer count the same noun.
     await expect(rows.locator(".conversation-title")).toHaveCount(3);
     for (const title of await rows.locator(".conversation-title").all()) await expect(title).toBeHidden();
-    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Wrote to you"]);
+    await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Mixdown preview rendered: 3 stems."]);
+    await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
     await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
     // Every session of the group is in view at 1280×720.
     for (const node of await rows.all()) await expect(node).toBeInViewport({ ratio: 1 });

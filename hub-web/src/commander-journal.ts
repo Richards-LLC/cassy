@@ -65,13 +65,16 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
     || !["artifact_id", "name", "mime", "sha256"].every(key => boundedText(a[key], 2_000))
     || !Number.isSafeInteger(a.size_bytes) || (a.size_bytes as number) < 0)) return undefined;
   if (value.options !== undefined && (!Array.isArray(value.options) || value.options.some(option => !boundedText(option)))) return undefined;
-  if (value.operator_label !== undefined && !boundedText(value.operator_label, 2_000)) return undefined;
+  // The live daemon encodes an absent Option<String> as null; history omits
+  // it. Canonicalize both before storage and immutable replay comparison.
+  const operatorLabel = value.operator_label ?? undefined;
+  if (operatorLabel !== undefined && !boundedText(operatorLabel, 2_000)) return undefined;
   if (value.reply_to_session !== undefined && value.reply_to_session !== null && !boundedText(value.reply_to_session, 2_000)) return undefined;
   const reply: OperatorReply = {
     notification_id: value.notification_id as number, reply_to: value.reply_to as number | null,
     message: value.message, summary: value.summary, device_id: value.device_id, kind: kind as OperatorReply["kind"],
     attachments: attachments.map(a => ({ artifact_id: a.artifact_id, name: a.name, mime: a.mime, size_bytes: a.size_bytes, sha256: a.sha256 })),
-    ...(value.operator_label === undefined ? {} : { operator_label: value.operator_label as string }),
+    ...(operatorLabel === undefined ? {} : { operator_label: operatorLabel as string }),
     ...(value.options === undefined || !(value.options as string[]).length ? {} : { options: value.options as string[] }),
     ...(value.reply_to_session === undefined || value.reply_to_session === null ? {} : { reply_to_session: value.reply_to_session as string }),
   };

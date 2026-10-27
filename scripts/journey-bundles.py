@@ -113,6 +113,11 @@ def bundle_trace(data: dict, bundle: Path, hub: str, target: Path | None) -> dic
 
 def main(argv: list[str]) -> int:
     artifacts, tree, commit, status, hub, pw_version = Path(argv[0]), argv[1], argv[2], int(argv[3]), argv[4], argv[5]
+    plan_path = artifacts / "journey-selection.json"
+    plan = json.loads(plan_path.read_text()) if plan_path.is_file() else {}
+    # The producer already resolved --task/default/ancestor identity. Retain
+    # the old basename fallback only for legacy or standalone ad-hoc bundles.
+    task_id = plan.get("task_id") or artifacts.name
     journeys = artifacts / "journeys"
     created = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     rows = []
@@ -185,7 +190,7 @@ def main(argv: list[str]) -> int:
             part_files.pop("reused", None)
         (bundle / "bundle.json").write_text(json.dumps({
             "schema": 1,
-            "task_id": artifacts.name,
+            "task_id": task_id,
             "producer": "journey",
             "journey_id": data["id"],
             "journey_receipt": "../../journey-receipt.json",

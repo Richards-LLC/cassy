@@ -30,13 +30,16 @@ def cas_root(repo: Path) -> Path:
     return Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')).parent / '.cas'
 
 
+def artifact_task_id(artifacts: Path | None) -> str | None:
+    return next((p.name for p in [artifacts, *artifacts.parents]
+                 if re.fullmatch(r'cas-[A-Za-z0-9-]+', p.name)), None) if artifacts else None
+
+
 def task_context(repo: Path, artifacts: Path | None, task_id: str | None) -> tuple[dict, Path]:
     root = cas_root(repo)
     with sqlite3.connect((root / 'cas.db').as_uri() + '?mode=ro', uri=True) as db:
         db.row_factory = sqlite3.Row
-        if not task_id and artifacts:
-            task_id = next((p.name for p in [artifacts, *artifacts.parents]
-                            if re.fullmatch(r'cas-[A-Za-z0-9-]+', p.name)), None)
+        task_id = task_id or artifact_task_id(artifacts)
         if task_id:
             rows = db.execute('SELECT id,deliverables,notes FROM tasks WHERE id=?', (task_id,)).fetchall()
         else:
@@ -160,7 +163,10 @@ def plan(args: argparse.Namespace) -> int:
     # specs/parts by actual title ID, not solely the catalog main suite path.
     ids = [r['id'] for r in rows]
     grep = r'\b(?:' + '|'.join(re.escape(i) for i in ids) + r')\b' if ids else None
-    value = {'schema': 1, 'repo': str(repo), 'artifacts': str(artifacts), 'base_sha': base,
+    # Identity belongs to the delivery, not a nested run directory. Explicit
+    # bases bypass the store, but must still preserve --task or the task path.
+    task_id = task['id'] if task else args.task or artifact_task_id(artifacts)
+    value = {'schema': 1, 'repo': str(repo), 'artifacts': str(artifacts), 'task_id': task_id, 'base_sha': base,
              'head_sha': head, 'scope': 'full' if args.full else 'affected',
              'selection_ids': ids, 'journeys': rows, 'workers': args.workers, 'grep': grep}
     if compared:

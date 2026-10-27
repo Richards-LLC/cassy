@@ -161,6 +161,9 @@ invariants:
       and edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double
       records the InterruptPane frame and models another device''s lease (refused unless forced by hub-admin, as
       hub/auth.rs does); that the supervisor''s pane really stops is proven by the hub''s Rust tests'
+  HUB-J18-CONTROL-LIFETIME:
+    statement: Input control is released when I close raw output or leave a conversation; a delayed take cannot renew a departed view. A refused Send explains why visibly and through its accessible description.
+    check: Run HUB-J18 navigation, delayed-take and phone-back stages; verify DELETE lease requests, no abandoned InterruptPane, and the read-only Send visible text plus aria-describedby (cas-5ca4).
   HUB-J19-GOAL:
     statement: I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a
       reply that waits for soundwave until it is back and receives it
@@ -1575,6 +1578,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J18-GOAL
+  - HUB-J18-CONTROL-LIFETIME
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

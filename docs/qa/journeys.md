@@ -594,6 +594,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in a terminal; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
 3. Take control from another device to interrupt — with Studio iPad in control, Interrupt forces the take and says so: "Took control from Studio iPad. Interrupted the cas-src supervisor."
 4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready.") read from the daemon's rendered rows; it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
+5. Closing Raw output, switching conversations or going back to the phone list releases this browser's input lease. A take finishing after the move is released in order and never interrupts the abandoned supervisor (cas-5ca4).
 
 #### Expected experience
 
@@ -605,6 +606,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Another device holds control and this pairing cannot force a take: "Studio iPad is in control of this session. Interrupt works once it releases control.", and nothing is interrupted.
 - On a phone Raw output is a bottom sheet across the width; on a desktop a drawer on the right edge.
+- On the read-only phone, Send's plain explanation is visible before typing and is its accessible description through aria-describedby (cas-5ca4).
 - While the conversation is down both say why and wait (HUB-J11, HUB-J12, HUB-J14).
 
 ### HUB-J19 · Read my inbox on a new phone while the machine is off

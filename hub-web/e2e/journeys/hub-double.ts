@@ -234,6 +234,7 @@ export class HubDouble {
    * holds, unless forced by a hub-admin pairing, which takes it over.
    */
   private readonly leaseHolders = new Map<string, string>();
+  private readonly releasedLeases = new Set<string>();
   /** One lease read can be held at the wire boundary to exercise stale-cache races. */
   private readonly leaseReadGates = new Map<string, { wait: Promise<void>; started: () => void }>();
   /** POST /v1/sessions/<s>/lease calls, in order, with whether they forced. */
@@ -942,6 +943,11 @@ export class HubDouble {
         if (status === 409) return route.fulfill({ status, json: { error: "lease_unavailable" } });
         if (status === 403) return route.fulfill({ status, json: { error: "scope_denied", required_scope: "hub:admin" } });
         this.leaseHolders.delete(session);
+        this.releasedLeases.delete(session);
+      } else if (method === "DELETE") {
+        // Releasing this browser never releases a different device's control.
+        if (!holder) this.releasedLeases.add(session);
+        return route.fulfill({ json: {} });
       } else if (method === "GET") {
         const gate = this.leaseReadGates.get(session);
         if (gate) {
@@ -952,7 +958,8 @@ export class HubDouble {
         const currentHolder = this.leaseHolders.get(session);
         if (currentHolder) return route.fulfill({ json: { held_by_me: false, controller_label: currentHolder } });
       }
-      return route.fulfill({ json: { held_by_me: true, controller_label: "Journey browser" } });
+      const held = !this.releasedLeases.has(session);
+      return route.fulfill({ json: { held_by_me: held, controller_label: held ? "Journey browser" : null } });
     }
     if (path.endsWith("/status")) {
       const session = decodeURIComponent(path.split("/")[3] ?? "");

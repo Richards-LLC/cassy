@@ -163,6 +163,9 @@ describe("live region values", () => {
     // A disabled Send swallows the tap and reads as broken; the block is stated,
     // never enforced by the disabled attribute.
     expect(send.disabled).toBe(false);
+    const reason = root.querySelector<HTMLElement>(`#${send.getAttribute("aria-describedby")}`);
+    expect(reason?.hidden).toBe(false);
+    expect(reason?.textContent).toBe("Take control to send a message");
   });
 
   it("keeps a read-only device's composer read-only and says why before anything is typed (cas-b7c0)", () => {
@@ -177,6 +180,7 @@ describe("live region values", () => {
     expect(status.textContent).toBe(reason);
     // A standing fact, not a failed send.
     expect(status.className).toBe("message-status");
+    expect(root.querySelector("#message-send")!.getAttribute("aria-describedby")).toBe(status.id);
 
     applyLiveRegions(root, live);
 
@@ -192,6 +196,7 @@ describe("live region values", () => {
     const send = root.querySelector<HTMLButtonElement>("#message-send")!;
     expect(send.hasAttribute("aria-disabled")).toBe(false);
     expect(send.hasAttribute("data-disabled-reason")).toBe(false);
+    expect(send.hasAttribute("aria-describedby")).toBe(false);
   });
 
   it("shows a message result and its error tone, then hides it again", () => {

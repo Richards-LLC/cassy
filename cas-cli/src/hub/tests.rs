@@ -751,6 +751,44 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         );
     }
 
+    // cas-397a: built lazy chunks use the same router as fixed assets. The
+    // compile-time fixtures are excluded from production binaries.
+    for (uri, status, mime, cache, body) in [
+        ("/commander/chunk-test-Ab12_cd3.js", StatusCode::OK, Some("text/javascript; charset=utf-8"), Some("public, max-age=31536000, immutable"), Some(&b"export const fixture = true;\n"[..])),
+        ("/commander/chunk-test-Ab12_cd3.css", StatusCode::OK, Some("text/css; charset=utf-8"), Some("public, max-age=31536000, immutable"), Some(&b".fixture { color: red; }\n"[..])),
+        ("/commander/app.js", StatusCode::OK, Some("text/javascript; charset=utf-8"), Some("no-cache, no-store, must-revalidate"), None),
+        ("/commander/", StatusCode::OK, Some("text/html; charset=utf-8"), Some("no-cache, no-store, must-revalidate"), None),
+        ("/chunk-test-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-missing-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js.map", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.html", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.JS", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js/extra", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/../chunk-test-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test..-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/%63hunk-test-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3%2Ejs", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js%00", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js%2Fextra", StatusCode::NOT_FOUND, None, None, None),
+    ] {
+        let response = app.clone().oneshot(Request::get(uri)
+            .header("content-type", "text/html") // Request MIME never controls the response.
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        if let Some(mime) = mime {
+            assert_eq!(response.headers()["content-type"], mime, "{uri}");
+        }
+        if let Some(cache) = cache {
+            assert_eq!(response.headers()["cache-control"], cache, "{uri}");
+        } else {
+            assert!(!response.headers().contains_key("cache-control"), "{uri}");
+        }
+        if let Some(body) = body {
+            assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap(), body, "{uri}");
+        }
+    }
+
     let denied = app
         .clone()
         .oneshot(Request::get("/v1/sessions").body(Body::empty()).unwrap())

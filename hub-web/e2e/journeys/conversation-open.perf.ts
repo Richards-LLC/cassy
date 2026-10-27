@@ -283,7 +283,18 @@ for (const profile of [
     if (!backlog) await measure("accumulated", async () => {
       for (let index = 1; index < capture.pages.length; index++) {
         const count = hub.historyRequests.length;
-        await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+        while (hub.historyRequests.length === count) {
+          const firstItem = () => page.evaluate(() => {
+            const node = document.querySelector<HTMLElement>(".msgs [data-key], .msgs .coalesce");
+            return node?.dataset.key ?? node?.id;
+          });
+          const first = await firstItem();
+          await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+          // A window first reveals cached turns; only its oldest edge asks
+          // the daemon for another page. Both are progress toward the start.
+          await expect.poll(async () => hub.historyRequests.length > count || await firstItem() !== first).toBe(true);
+          await settle(page);
+        }
         await expect.poll(() => hub.historyRequests.length).toBe(count + 1);
         await settle(page);
       }

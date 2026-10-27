@@ -25,8 +25,11 @@ metadata:
    titles. GitHub issues closed is a secondary figure counted by the generator;
    do not hand-correct it. Every user and developer change stays Was → Now. Where
    the delivering task's artifacts hold a real before and after capture of the
-   same surface, add its `Before:`/`After:` pair (exemplar.md); never a lone
-   after shot or a general QA render. Keep
+   same surface, add `Pair: <task-id>/<shot-id>` (exemplar.md). The renderer
+   resolves `qa/pairs/pairs.json` through `cas deliverable pairs`; incomplete,
+   missing or invalid evidence shows no image. Explicit `Before:`/`After:`
+   paragraphs remain supported when both captures exist; never a lone after
+   shot or a general QA render. Keep
    the exact source URLs, retrieval times and full asset digests. Rerun step 2 to
    re-render; an existing Markdown source is kept unless you pass
    `--refresh-sources`.

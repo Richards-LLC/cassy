@@ -2439,6 +2439,8 @@ fn render_html(
         .arg(output)
         .arg("--project-root")
         .arg(project_root)
+        .arg("--cas-bin")
+        .arg(std::env::current_exe()?)
         .arg("--source-href")
         .arg(source_href)
         .arg("--pdf-href")

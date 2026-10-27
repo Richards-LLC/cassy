@@ -38,7 +38,7 @@ function installProbe() {
   const w = window as typeof window & { perfProbe: any };
   const resuming = sessionStorage.getItem("perf:reload") === "1";
   sessionStorage.removeItem("perf:reload");
-  const probe = w.perfProbe = { t0: 0, active: resuming, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], longTasks: [] as any[], tailSamples: [] as any[] };
+  const probe = w.perfProbe = { t0: 0, active: resuming, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], acks: [] as any[], longTasks: [] as any[], tailSamples: [] as any[] };
   const parse = JSON.parse;
   JSON.parse = function (text, reviver) {
     const start = performance.now();
@@ -53,11 +53,20 @@ function installProbe() {
     constructor(url: string | URL, protocols?: string | string[]) {
       super(url, protocols);
       this.addEventListener("message", (event: MessageEvent) => {
-        if (typeof event.data === "string") probe.frames.push({ at: performance.now(), bytes: new TextEncoder().encode(event.data).length, history: event.data.includes('"ConversationHistory":'), live_reply: event.data.includes('"OperatorReply":') });
+        if (typeof event.data === "string") {
+          const live = event.data.includes('"OperatorReply":');
+          const reply = live ? parse(event.data).OperatorReply : undefined;
+          probe.frames.push({ at: performance.now(), bytes: new TextEncoder().encode(event.data).length, history: event.data.includes('"ConversationHistory":'), live_reply: live, notification_id: reply?.notification_id });
+        }
       });
     }
     send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
       if (typeof data === "string" && data.includes('"ConversationHistoryRequest":')) probe.requests.push({ at: performance.now(), bytes: new TextEncoder().encode(data).length });
+      if (typeof data === "string" && data.includes('"OperatorReplyPersisted":')) {
+        const frame = parse(data);
+        const ack = frame.OperatorReplyPersisted ?? frame.message?.OperatorReplyPersisted;
+        if (ack) probe.acks.push({ at: performance.now(), notification_id: ack.notification_id });
+      }
       return super.send(data);
     }
   };
@@ -169,7 +178,7 @@ for (const profile of [
   await cdp.send("Profiler.enable");
   await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
   const hub = new HubDouble(page, {
-    time: { now: Date.now, delay: (callback, ms) => { setTimeout(callback, ms); } },
+    time: { now: () => performance.timeOrigin + performance.now(), delay: (callback, ms) => { setTimeout(callback, ms); } },
     paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" }] }],
     history: { [capture.session]: capture.pages },
   });
@@ -197,6 +206,12 @@ for (const profile of [
       const since = phase === "reload_resume" ? 0 : await page.evaluate((phase) => { const p = (window as any).perfProbe; p.paintEnabled = phase !== "accumulated"; p.active = true; p.t0 = performance.now(); p.firstPaint = 0; p.latestPaint = 0; p.tailSamples = []; return p.t0; }, phase);
       const requestStart = hub.historyRequests.length;
       await action();
+      if (phase === "initial" && process.env.CONVERSATION_PERF_REQUIRE_ALL_ACKED === "1") {
+        await expect.poll(() => {
+          const acked = new Set(hub.persistedReplies.map((reply) => reply.notification_id));
+          return capture.pending_replies!.filter((reply) => !acked.has(reply.notification_id as number)).length;
+        }, { timeout: 30_000, message: "every frozen pending notification must be durably ACKed before reconnect" }).toBe(0);
+      }
       const composer = page.getByRole("textbox", { name: "Your message", exact: true });
       await expect(composer).toBeVisible();
       const interactive = await page.evaluate(async () => {
@@ -217,11 +232,14 @@ for (const profile of [
         return { tap_at: p.t0, first_turn_painted_ms: p.firstPaint ? p.firstPaint - p.t0 : null, latest_turn_painted_ms: p.latestPaint ? p.latestPaint - p.t0 : null,
           parses: p.parse.filter((entry: any) => entry.at >= since), requests: p.requests.filter((entry: any) => entry.at >= since),
           frames: p.frames.filter((entry: any) => entry.at >= since), long_tasks: p.longTasks.filter((entry: any) => entry.at >= since),
+          acknowledgement_timeline: p.acks.filter((entry: any) => entry.at >= since).map((entry: any) => ({ notification_id: entry.notification_id, ms: entry.at - p.t0 })),
           tail_samples: p.tailSamples, dom_elements: document.querySelectorAll("*").length, rendered_turns: document.querySelectorAll(".msgs .conversation-turn").length };
       }, since);
       const costs = await endProfile(cdp, directory, phase);
       const metrics = Object.fromEntries(costs.metrics.metrics.map((m: any) => [m.name, m.value]));
       const before = Object.fromEntries(base.metrics.map((m: any) => [m.name, m.value]));
+      const pendingIds = [...new Set((capture.pending_replies ?? []).map((reply) => reply.notification_id as number))];
+      const ackedIds = new Set(hub.persistedReplies.filter((reply) => reply.session === capture.session).map((reply) => reply.notification_id));
       results[phase] = { ...probe, interactive_upper_bound_ms: interactive.at - probe.tap_at, input_ack_ms: interactive.input_ack_ms,
         history_requests: hub.historyRequests.length - requestStart,
         websocket_payload_bytes: probe.frames.reduce((sum: number, f: any) => sum + f.bytes, 0),
@@ -237,6 +255,8 @@ for (const profile of [
         style_ms: (metrics.RecalcStyleDuration - (phase === "reload_resume" ? 0 : before.RecalcStyleDuration)) * 1000,
         heap_used_bytes: metrics.JSHeapUsedSize, dom_nodes: metrics.Nodes,
         persisted_reply_acks_total: hub.persistedReplies.length,
+        pending_acknowledgements: { expected_ids: pendingIds, acknowledged_ids: pendingIds.filter((id) => ackedIds.has(id)), remaining_ids: pendingIds.filter((id) => !ackedIds.has(id)) },
+        replayed_pending_ids: [...new Set(probe.frames.filter((frame: any) => pendingIds.includes(frame.notification_id)).map((frame: any) => frame.notification_id))],
         heap: await cdp.send("Runtime.getHeapUsage"), cpu: costs.sourceSamples,
         long_task_total_ms: probe.long_tasks.reduce((sum: number, entry: any) => sum + entry.ms, 0),
         long_task_max_ms: Math.max(0, ...probe.long_tasks.map((entry: any) => entry.ms)) };

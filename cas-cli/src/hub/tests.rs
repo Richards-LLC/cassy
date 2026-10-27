@@ -5330,7 +5330,7 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     ] {
         let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/ticket");
         let (status, body) = f.call("POST", &uri, None).await;
-        assert_eq!(status, expected, "{uri}: {body}");
+        assert_eq!(status, expected, "{uri}");
         if expected == StatusCode::OK {
             assert!(!body["ticket"].as_str().unwrap().is_empty());
             tickets.insert(artifact, body["ticket"].as_str().unwrap().to_owned());

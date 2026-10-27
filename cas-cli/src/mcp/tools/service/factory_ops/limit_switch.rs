@@ -403,6 +403,7 @@ mod tests {
     #[test]
     fn paired_provider_transcripts_copy_before_stop_and_existing_targets_are_not_overwritten() {
         let home = tempfile::tempdir().unwrap();
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
         let cwd = home.path().join("worktree");
         std::fs::create_dir_all(&cwd).unwrap();
         let id = "019f84af-3121-7950-ba14-b01db2dad6c7";
@@ -437,10 +438,11 @@ mod tests {
                 .insert("worker_cli".into(), cli.backend().name().into());
             agent
                 .metadata
-                .insert("worker_account_dir".into(), old.to_string_lossy().into());
+                .insert("worker_account_dir".into(), format!("~/.{}-old", cli.backend().name()));
             agent
                 .metadata
                 .insert("clone_path".into(), cwd.to_string_lossy().into());
+            assert!(same_folder(Path::new(agent.metadata.get("worker_account_dir").unwrap()), &old));
             let meta = LimitRecycle {
                 agent_id: agent.id.clone(),
                 episode: "episode".into(),

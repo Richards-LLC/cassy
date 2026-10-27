@@ -171,9 +171,12 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     const unopened = list.getByRole("button", { name: /cas-src/ });
     await expect(unopened.getByLabel("1 unread")).toBeVisible();
     await expect(unopened.locator(".conversation-preview")).toContainText("The bank feed for October is ready.");
+  });
 
+  await journey.stage("Open the conversation, then notice its next reply", async () => {
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toHaveCount(0);
     // The list is on screen beside the thread, so there is no back step (F17):
     // moving to another conversation is one click on its row.
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();

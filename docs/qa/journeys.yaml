@@ -376,7 +376,9 @@ journeys:
     supervisor codename beneath
   - Each row's time is its own session's activity — lighthouse reads "3h" and its row is named with "3 hours ago";
     no time is a catalog check, and across a catalog poll none turns "now" or runs backwards
-  - Notice a new reply while away — the row shows an unread count
+  - Notice a new reply while away — before opening it, the row shows an unread count and the reply's first line
+  - Open the conversation, then notice its next reply — opening clears the unread count; a later reply while away
+    brings it back
   - Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters
     rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active
     descendant; opening a result clears the search and brings the whole list back; the header names the project

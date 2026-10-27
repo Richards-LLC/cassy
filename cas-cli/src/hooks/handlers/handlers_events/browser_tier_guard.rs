@@ -44,9 +44,27 @@ fn selected(args: &[String]) -> bool {
             i += 2;
             continue;
         }
+        let filename = std::path::Path::new(arg)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if !arg.starts_with('-')
-            && (arg.ends_with(".spec.ts") || arg.ends_with(".journey.ts"))
-            && !arg.chars().any(|c| matches!(c, '*' | '$' | '`'))
+            && [
+                ".spec.ts",
+                ".spec.mjs",
+                ".spec.js",
+                ".spec.tsx",
+                ".journey.ts",
+            ]
+            .iter()
+            .any(|suffix| {
+                filename
+                    .strip_suffix(suffix)
+                    .is_some_and(|stem| !stem.is_empty())
+            })
+            && !arg
+                .chars()
+                .any(|c| matches!(c, '*' | '?' | '[' | ']' | '$' | '`'))
         {
             return true;
         }

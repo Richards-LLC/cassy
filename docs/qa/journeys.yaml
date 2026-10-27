@@ -60,6 +60,8 @@ invariants:
     statement: I can tell which conversation has something new and get to it quickly
     check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
       edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
+    bug:
+      task: cas-7c14
   HUB-J4-GOAL:
     statement: I can read what was said before, back to the start
     check: 'Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge

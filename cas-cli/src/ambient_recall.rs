@@ -1635,7 +1635,8 @@ fn read_surface(
         .collect::<Vec<_>>()
         .join(" + ");
     if terms.is_empty() {
-        overlap_score = "0".into();
+        // SQLite interprets ORDER BY (0) as an invalid column ordinal.
+        overlap_score = "0.0".into();
     }
     let team_index = terms.len() + 1;
     let limit_index = terms.len() + 2;
@@ -3819,7 +3820,8 @@ pub(crate) fn retrieve_candidates(
     candidates
         .retain(|candidate| !(candidate.surface == EvidenceSurface::Memory && candidate.stale));
     candidates.retain(|candidate| {
-        !candidate.focus_mismatch
+        (identity.role == RecallRole::Supervisor && candidate.is_operator_context())
+            || !candidate.focus_mismatch
             || candidate
                 .semantic_score
                 .is_some_and(|score| score >= FOCUSED_EPIC_SEMANTIC_FLOOR)
@@ -4512,6 +4514,7 @@ mod tests {
         assert_eq!(request.task_id.as_deref(), Some("cas-target"));
         // Session focus is supplied by the factory metadata resolver in the hook.
         request.focus_epic_id = Some("cas-focus".into());
+        request.focus_epic_title = Some("Token budget".into());
         let query = RecallQuery::build(&identity, &request).unwrap();
         let local = SqliteRecallRetriever::existing(&root).unwrap();
         let mut noisy = candidate("mem-tool-noise", EvidenceScope::Global);

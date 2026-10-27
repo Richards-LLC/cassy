@@ -28,7 +28,10 @@ pub(crate) struct LimitSwitchDecision {
 
 impl From<(Option<i64>, String)> for LimitSwitchDecision {
     fn from((request_id, detail): (Option<i64>, String)) -> Self {
-        Self { detail, switch_queued: request_id.is_some() }
+        Self {
+            detail,
+            switch_queued: request_id.is_some(),
+        }
     }
 }
 
@@ -129,7 +132,9 @@ fn queue_limit_switch_with(
         &crate::account_selection::load_policy(Some(root)),
         preflight,
     );
-    Ok(queue.record_limit_episode(occurrence, &agent.name, session, spec.as_deref(), &detail)?.into())
+    Ok(queue
+        .record_limit_episode(occurrence, &agent.name, session, spec.as_deref(), &detail)?
+        .into())
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {
@@ -180,15 +185,24 @@ fn plan_switch(
                 .to_owned()
         });
     let Some(next) = selection.recommended else {
-        // A reset is useful only once some account passes the entire policy:
-        // every blocking window, login, disabled state and duplicate identity.
-        let resets = accounts.iter().filter(|a| a.provider == provider)
-            .flat_map(|a| &a.windows)
-            .filter_map(|w| w.resets_at)
-            .filter(|t| *t > now)
-            .collect::<std::collections::BTreeSet<_>>();
-        let reset = resets.into_iter()
-            .find(|at| crate::account_selection::recommend(accounts, provider, *at, policy).recommended.is_some())
+        // Predict each account's transition through the same policy used to
+        // select it. A stale under-threshold snapshot for the limited account
+        // cannot become eligible because an unrelated account resets.
+        let reset = accounts.iter().filter(|a| a.provider == provider)
+            .filter_map(|account| {
+                let row = std::slice::from_ref(account);
+                if crate::account_selection::recommend(row, provider, now, policy).recommended.is_some() {
+                    return None;
+                }
+                let resets = account.windows.iter()
+                    .filter_map(|window| window.resets_at)
+                    .filter(|at| *at > now)
+                    .collect::<std::collections::BTreeSet<_>>();
+                resets.into_iter().find(|at| {
+                    crate::account_selection::recommend(row, provider, *at, policy).recommended.is_some()
+                })
+            })
+            .min()
             .map(|t| t.to_rfc3339())
             .unwrap_or_else(|| "unknown (usage/reset unavailable)".into());
         return (

@@ -1391,7 +1391,9 @@ fn enqueue_worker_attention_relay_inner(
     let detail = detail(prefix);
     let recovery = if needs_recovery {
         format!("\nRun `{prefix}factory action=worker_status` and reassign or recover the worker as needed.")
-    } else { String::new() };
+    } else {
+        String::new()
+    };
     let mut body = format!(
         "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
     );

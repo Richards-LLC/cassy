@@ -17,3 +17,5 @@ The key contains factory session, worker name and first evidence, so resuming a 
 ## Evidence
 
 The targeted tests cover both provider parsers, copied transcript bytes, continuation selectors, inherited/explicit/fallback selection, dirty unpublished work, queue deduplication and rollback, supervisor refusal and the existing-database migration. Real subscription exhaustion is not induced: the live continuation row remains NOT EXERCISED because no account can safely be driven to its limit.
+
+A failed switch decision still produces one supervisor notice per durable episode, including after a daemon restart. The notice names the failure and keeps recovery guidance. A queued switch names account aliases or emails and omits that guidance. Worker status names Claude or Codex correctly. “No eligible account until” predicts the earliest account that passes the configured threshold on every window after its blocking resets; disabled, stale, logged-out and duplicate accounts cannot advance that time. An old under-threshold quota snapshot cannot supply a recovery time for a newer transcript refusal.

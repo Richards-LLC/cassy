@@ -165,7 +165,7 @@ struct ReleaseEvidence {
     green_at: Option<String>,
     green_to_published_seconds: Option<i64>,
     main_to_published_seconds: Option<i64>,
-    receipt_path: Option<String>,
+    receipt_reference: Option<ReceiptReference>,
     /// cas-a629: the whole wall clock and what cost it.
     request_to_published_seconds: Option<i64>,
     request_source: Option<String>,
@@ -187,6 +187,12 @@ struct ReleaseEvidence {
     commit_to_main: Option<(u64, i64, String, i64)>,
     /// cas-692a: a latency receipt was read, so its absent fields are its own.
     latency_receipt_read: bool,
+}
+
+#[derive(Debug, Clone)]
+enum ReceiptReference {
+    ArtifactsRootRelative(String),
+    StandaloneInput,
 }
 
 impl ReleaseEvidence {
@@ -2057,10 +2063,14 @@ fn assemble_markdown(
     } else {
         output.push_str("GitHub release: unavailable.\n\n");
     }
-    if let Some(path) = &sources.release_evidence.receipt_path {
-        output.push_str(&format!("Release receipt: `{path}`.\n\n"));
-    } else {
-        output.push_str("Release receipt: unavailable.\n\n");
+    match &sources.release_evidence.receipt_reference {
+        Some(ReceiptReference::ArtifactsRootRelative(path)) => output.push_str(&format!(
+            "Release receipt (relative to `~/.cas/artifacts`): `{path}`.\n\n"
+        )),
+        Some(ReceiptReference::StandaloneInput) => output.push_str(
+            "Standalone release receipt supplied; its parsed measurements are shown below.\n\n",
+        ),
+        None => output.push_str("Release receipt: unavailable.\n\n"),
     }
     // cas-2bef: the renderer fixes the top-level sections, so the stage
     // budgets are a subsection of the evidence.
@@ -2547,11 +2557,14 @@ fn find_release_evidence(
     let Some(home) = dirs::home_dir() else {
         return ReleaseEvidence::default();
     };
+    let artifacts_root = home.join(".cas/artifacts");
+    let release_root = artifacts_root.join("release");
     find_release_evidence_in(
         tag,
         release,
-        &home.join(".cas/artifacts/release"),
+        &release_root,
         latency_receipt.and_then(Path::parent),
+        &artifacts_root,
     )
 }
 
@@ -2561,7 +2574,7 @@ fn find_release_evidence_under(
     release: &Option<ReleaseMetadata>,
     root: &Path,
 ) -> ReleaseEvidence {
-    find_release_evidence_in(tag, release, root, None)
+    find_release_evidence_in(tag, release, root, None, root)
 }
 
 /// Files under `root` count when their path names the tag. A standalone
@@ -2572,6 +2585,7 @@ fn find_release_evidence_in(
     release: &Option<ReleaseMetadata>,
     root: &Path,
     run_dir: Option<&Path>,
+    artifacts_root: &Path,
 ) -> ReleaseEvidence {
     let wanted = tag.to_ascii_lowercase();
     let bare = wanted.trim_start_matches('v');
@@ -2629,7 +2643,12 @@ fn find_release_evidence_in(
         }
         if values.contains_key("PUBLISH_LATENCY_SECONDS") || path_text.contains("published.receipt")
         {
-            evidence.receipt_path = Some(path.display().to_string());
+            evidence.receipt_reference = Some(match path.strip_prefix(artifacts_root) {
+                Ok(relative) => ReceiptReference::ArtifactsRootRelative(
+                    relative.to_string_lossy().replace('\\', "/"),
+                ),
+                Err(_) => ReceiptReference::StandaloneInput,
+            });
         }
     }
     if evidence.publication_start_kind.as_deref() == Some("main-landed") {

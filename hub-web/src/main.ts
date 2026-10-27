@@ -3706,11 +3706,13 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   let text = quick?.text ?? composer.value.trim();
   const originalText = composer.value;
   const uploads = !quick && selectedThread ? composerUploads?.draftFor(selectedThread) : undefined;
+  const hasAttachments = !!uploads?.hasFiles();
   const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
   // A composer send in the thread whose refused message Edit reopened is that
   // message's edited version; a chip or a Retry is not.
   const editOf = !quick && editingRefused?.threadKey === selectedThread ? editingRefused?.id : undefined;
-  const plan = planSupervisorSend(supervisorSendContext(text || (uploads?.hasFiles() ? "Attached files" : "")));
+  if (!text && hasAttachments) text = "Attached files";
+  const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
     showComposerStatus(plan.reason, sendBlockTone(plan.block));
     composer.focus();
@@ -3727,7 +3729,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
-  if (uploads?.hasFiles()) {
+  if (uploads && hasAttachments) {
     text = await uploads.prepare(text, async (id, name, data) => {
       const connection = connections.get(machine.id);
       if (!connection) throw new Error("The machine is disconnected.");
@@ -3741,7 +3743,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
     });
   }
   const sent = await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
-  if (sent && uploads?.hasFiles()) {
+  if (sent && uploads && hasAttachments) {
     uploads.clear();
     if (composer.isConnected && composer.value === originalText) {
       composer.value = ""; messageDraft = ""; messageDraftSelection = 0;
@@ -3749,6 +3751,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
     }
   }
   if (sent && usageAction) countUsage(usageAction);
+  if (sent && hasAttachments) countUsage("reply.attachment");
   if (sent && !quick) draftDictated = false;
   } catch (error) {
     showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");

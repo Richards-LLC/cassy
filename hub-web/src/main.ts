@@ -488,7 +488,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       // cas-ff22: Show work's rows between the turns; undefined while it is off.
       work: () => workPicture.threadWork(threadMachineId, threadSession),
       workRows: workPicture.rows(threadMachineId, threadSession),
-      loadEarlier: () => {
+      loadEarlier: (source) => {
+        if (source === "scroll") countUsage("history.scroll_older");
         const page = conversationHistoryPage(threadKey);
         if (page.loading || page.nextBefore === undefined) return;
         page.loading = true;
@@ -966,13 +967,13 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const history = conversationHistory(key, session);
       if (page.open_attention !== undefined) {
         const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));
-        history.setOpenAttention(page.open_attention, through);
+        history.setOpenAttention(page.open_attention.map(reply => ({ ...reply, device_persisted: false })), through);
       }
       // cas-55a4: the thread is this session's own turns. Other sessions'
       // turns (the page's earlier_* section, or a project-wide page from an
       // older daemon) are filed beside it by session, never into it.
       for (const message of [...page.messages, ...(page.earlier_messages ?? [])]) history.hydrateSend(message);
-      for (const reply of [...page.replies, ...(page.earlier_replies ?? [])]) {
+      for (const reply of [...page.replies, ...(page.open_attention ?? []), ...(page.earlier_replies ?? [])]) {
         // cas-e829: this session's notices raise or retire attention; another
         // session's are its own business.
         if (isOperatorNotice(reply)) {

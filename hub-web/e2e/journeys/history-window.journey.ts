@@ -12,8 +12,9 @@ for (const [name, viewport, colorScheme] of [
       const id = first + index;
       return { notification_id: id, reply_to: null, message: `Turn ${id}: release evidence stays in conversation order.`, summary: "", device_id: "journey-device", kind: "answer", at: journeyStamp((id - 150) * 1000) };
     });
+    const deepAsk = { ...turns(1, 1)[0]!, kind: "ask", message: "Approve the release plan from earlier history?", options: ["Approve"] };
     const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [
-      { has_earlier: true, next_before: 101, messages: [], replies: turns(101, 150) },
+      { has_earlier: true, next_before: 101, messages: [], replies: turns(101, 150), open_attention: [deepAsk] },
       { has_earlier: true, next_before: 51, messages: [], replies: turns(51, 100) },
       { has_earlier: false, messages: [], replies: turns(1, 50) },
     ] } });
@@ -43,6 +44,15 @@ for (const [name, viewport, colorScheme] of [
       const ids = await log.locator(".conversation-turn").evaluateAll(nodes => nodes.map(node => Number((node as HTMLElement).dataset.key!.split(":")[1])));
       expect(ids).toEqual([...ids].sort((a, b) => a - b));
       expect(new Set(ids).size).toBe(ids.length);
+    });
+    await journey.stage("Answer a decision from before the loaded tail", async () => {
+      await page.getByRole("button", { name: "Waiting on you: Approve the release plan from earlier history?" }).click();
+      const question = log.getByRole("group", { name: `Question from ${PELICAN}` }).filter({ hasText: deepAsk.message });
+      await expect(question).toBeInViewport();
+      const sent = hub.nextSend();
+      await question.getByRole("button", { name: "Approve", exact: true }).click();
+      expect(await sent).toMatchObject({ text: "Approve", in_reply_to: 1 });
+      expect(hub.historyRequests).toHaveLength(2);
     });
   });
 }

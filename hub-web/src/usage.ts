@@ -16,6 +16,7 @@ export const USAGE_ACTIONS = {
   "pair.link": "HUB-J2",
   "conversation.open": "HUB-J3",
   "history.older": "HUB-J4",
+  "history.scroll_older": "HUB-J23",
   "reply.typed": "HUB-J5",
   "reply.voice": "HUB-J6",
   "ask.answer": "HUB-J7",

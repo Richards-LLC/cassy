@@ -1944,6 +1944,7 @@ journeys:
   - Open directly at the latest exchange
   - Scroll up to request one older page
   - Return to the latest exchange without fetching history
+  - Answer a decision from before the loaded tail
   owner_groups:
   - commander_runtime
   owners:

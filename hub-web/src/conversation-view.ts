@@ -169,7 +169,7 @@ export interface ConversationViewOptions {
    */
   connection?: () => string | undefined;
   /** Requests the next older durable page when history has more turns. */
-  loadEarlier?: () => void;
+  loadEarlier?: (source?: "scroll") => void;
   /** Whether the daemon reported an older page still available. */
   hasEarlier?: () => boolean;
   /** Keeps the paging control honest while a request is in flight. */
@@ -454,6 +454,7 @@ export class ConversationView {
    * expanded, and dismissing one message keeps the rest of its run open.
    */
   private readonly reviewedRuns = new Set<string>();
+  private unconfirmedByKey = new Map<string, UnconfirmedRun>();
   private following = true;
   /**
    * Where the reader was, by turn, while not following the tail (cas-2093).
@@ -682,13 +683,22 @@ export class ConversationView {
     const working = this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
-    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, groupSize: 4, ...(work ? { work } : {}) });
+    const events = this.history.visibleEvents();
+    const modelOptions = { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) };
+    // A visual chunk boundary must not split a logical unconfirmed run.
+    this.unconfirmedByKey = new Map();
+    for (const item of threadModel(events, modelOptions)) {
+      if (item.type !== "group" || item.side !== "you") continue;
+      for (const [index, run] of this.deriveUnconfirmedRuns(item)) this.unconfirmedByKey.set(item.turns[index]!.key, run);
+    }
+    const model = threadModel(events, { ...modelOptions, groupSize: 4 });
     const focused = documentActiveKey(this.msgs);
     const window = this.window.select(model, this.element.scrollTop, this.element.clientHeight, this.following, focused ?? anchor?.key);
     hasEarlier = this.options.hasEarlier?.() === true || this.window.hasEarlier;
     this.loadEarlier.hidden = !hasEarlier;
     this.loadLater.hidden = !this.window.hasLater;
-    this.above.style.height = `${window.above}px`; this.below.style.height = `${window.below}px`;    const document = this.element.ownerDocument;
+    this.above.style.height = `${window.above}px`; this.below.style.height = `${window.below}px`;
+    const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];
     for (const item of window.items) {
@@ -737,7 +747,7 @@ export class ConversationView {
       if (up && this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)
         && !this.window.hasEarlier && this.options.hasEarlier?.() && !this.options.loadingEarlier?.()) {
         this.earlierIntent = false;
-        this.options.loadEarlier?.();
+        this.options.loadEarlier?.("scroll");
       } else this.update();
     });
   }
@@ -1295,7 +1305,10 @@ export class ConversationView {
     // replacement instead of dropping it to the page body.
     const active = document.activeElement;
     let refocus: { bubble: HTMLElement; className: string } | undefined;
-    const runs = this.unconfirmedRuns(group);
+    const runs = new Map(group.turns.flatMap((turn, index) => {
+      const run = this.unconfirmedByKey.get(turn.key);
+      return run ? [[index, run] as const] : [];
+    }));
     for (const [index, turn] of group.turns.entries()) {
       const run = runs.get(index);
       const signature = this.turnSignature(turn) + (run ? JSON.stringify(run) : "");
@@ -1328,7 +1341,7 @@ export class ConversationView {
    * one notice, not a stack of warning cards each with its own Retry. Maps a
    * turn's index in the group to its place in such a run.
    */
-  private unconfirmedRuns(group: ThreadGroup): Map<number, UnconfirmedRun> {
+  private deriveUnconfirmedRuns(group: ThreadGroup): Map<number, UnconfirmedRun> {
     const runs = new Map<number, UnconfirmedRun>();
     const actionable = group.turns.map((turn) => turn.event.kind === "send" && turn.event.value.state === "unconfirmed" && !this.history.repliedSince(turn.event.value));
     for (let start = 0; start < actionable.length; ) {

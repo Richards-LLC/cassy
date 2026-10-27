@@ -38,6 +38,7 @@ export type SentMessage = {
 };
 
 export type HistoryPage = {
+  open_attention?: Array<Record<string, unknown>>;
   messages: Array<Record<string, unknown>>;
   replies: Array<Record<string, unknown>>;
   has_earlier: boolean;

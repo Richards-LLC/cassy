@@ -177,6 +177,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. Open directly at the latest exchange — one bounded tail request; newest turn in view
 2. Scroll up to request one older page — upward reading gesture requests its cursor and the mounted window remains bounded
 3. Return to the latest exchange without fetching history — Jump to latest restores the tail; mounted turns remain unique and ordered
+4. Answer a decision from before the loaded tail — first-page attention summary keeps the old ask actionable; its quick reply preserves the notification id without loading older pages
 
 #### Expected experience
 

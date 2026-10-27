@@ -7430,6 +7430,13 @@ impl FactoryDaemon {
             }
         }
         let (messages, replies) = commander_history_turns(queue.as_ref(), rows, &self.session_name, &notices);
+        let open_attention = if before.is_none() && !device_id.trim().is_empty() {
+            let mut decisions = queue.conversation_open_attention(&self.session_name, device_id)?;
+            decisions.retain(|row| !is_operator_notice(row));
+            Some(commander_history_turns(queue.as_ref(), decisions, &self.session_name, &std::collections::HashMap::new()).1)
+        } else {
+            None
+        };
         // cas-55a4: other sessions' Commander turns travel beside the page,
         // never in it, so Commander can show them only as a labelled, collapsed
         // earlier-session section. They come once, with the newest page.
@@ -7458,6 +7465,7 @@ impl FactoryDaemon {
             request_id,
             messages,
             replies,
+            open_attention,
             has_earlier,
             next_before,
             earlier_messages,

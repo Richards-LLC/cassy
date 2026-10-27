@@ -2723,6 +2723,7 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
         next_before: None,
         earlier_messages: Vec::new(),
         earlier_replies: Vec::new(),
+        open_attention: None,
     })
     .unwrap();
     assert!(super::server::admit_correlated_daemon_frame(
@@ -2786,6 +2787,7 @@ fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() 
         next_before: None,
         earlier_messages: Vec::new(),
         earlier_replies: Vec::new(),
+        open_attention: None,
     })
     .unwrap();
     assert!(!admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &page), "the old client never receives work events");
@@ -2826,6 +2828,7 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
         next_before: Some(40),
         earlier_messages: Vec::new(),
         earlier_replies: Vec::new(),
+        open_attention: None,
     })
     .unwrap();
 

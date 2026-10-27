@@ -113,6 +113,11 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the regular suite uses a protocol
       double; the separate real-hub part proves Linux recovery with a real disposable hub and real operator queue
       (see [local run instructions](real-hub-journey.md)); macOS remains follow-up'
+  HUB-J12-TRUTHFUL-WORKING:
+    statement: Working requires recent activity on a live authenticated machine with an unanswered message; idle repaint and disconnected machines never claim work.
+    check: Run the supervisor working indicator regression in conversations.test.ts and the single revoked machine part of network-switch.journey.ts with a recent Output frame, then verify an answered real Claude supervisor at its idle prompt and during reconnecting.
+    bug:
+      task: cas-a252
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -1113,6 +1118,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J12-GOAL
+  - HUB-J12-TRUTHFUL-WORKING
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null

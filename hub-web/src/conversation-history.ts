@@ -866,13 +866,16 @@ export class ConversationHistory {
   }
 }
 
-/** Recent pane output is activity evidence. Queue or transport receipts never prove execution. */
+/** Working requires live unanswered activity; receipts and idle TUI repaint alone are insufficient. */
 export function supervisorWorking(
-  _history: Pick<ConversationHistory, "awaitingReply">,
-  _machine: { phase: string; authFailure?: unknown } | undefined,
+  history: Pick<ConversationHistory, "awaitingReply">,
+  machine: { phase: string; authFailure?: unknown } | undefined,
   recentPaneOutput: boolean,
 ): boolean {
-  return recentPaneOutput;
+  // Idle TUIs repaint too. Activity is relevant only while a live,
+  // authenticated supervisor still owes this conversation an answer.
+  return machine?.phase === "live" && !machine.authFailure
+    && history.awaitingReply() && recentPaneOutput;
 }
 
 /** The thread's paging state: how far back it has loaded, and whether more is offered. */

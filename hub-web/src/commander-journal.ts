@@ -123,17 +123,18 @@ export class CommanderJournal {
       if (!this.factory) { reject(new Error("Browser storage is unavailable.")); return; }
       const request = this.factory.open(DELIVERY_DB, 1);
       let settled = false;
-      const timeout = setTimeout(() => { settled = true; reject(new Error("Browser storage did not answer.")); }, 5_000);
+      // IndexedDB events may wait behind rendering or another tab's writer.
+      // Elapsed main-thread time does not prove a failed durable write.
+      request.onblocked = () => { settled = true; reject(new Error("Browser storage upgrade is blocked by another tab.")); };
       request.onupgradeneeded = () => {
         for (const name of ["sends", "replies", "blocks"]) request.result.createObjectStore(name, { keyPath: "key" });
       };
       request.onsuccess = () => {
-        clearTimeout(timeout);
         if (settled) { request.result.close(); return; }
         settled = true;
         resolve(request.result);
       };
-      request.onerror = () => { clearTimeout(timeout); settled = true; reject(request.error); };
+      request.onerror = () => { settled = true; reject(request.error); };
     });
   }
   private async transaction<T>(names: string[], mode: IDBTransactionMode, run: (tx: IDBTransaction, result: (value: T) => void) => void): Promise<T> {
@@ -143,8 +144,9 @@ export class CommanderJournal {
       try { tx = db.transaction(names, mode, mode === "readwrite" ? { durability: "strict" } : undefined); }
       catch (error) { db.close(); reject(error); return; }
       let value: T;
-      const timer = setTimeout(() => { try { tx.abort(); } catch { /* completed */ } }, 5_000);
-      const cleanup = () => { clearTimeout(timer); db.close(); };
+      // A transaction queued behind a busy writer is still valid. Only the
+      // browser's commit/abort events can authorize or refuse its receipt.
+      const cleanup = () => { db.close(); };
       tx.oncomplete = () => { cleanup(); resolve(value!); };
       tx.onabort = () => { cleanup(); reject(tx.error ?? new Error("Browser storage transaction was cancelled.")); };
       tx.onerror = () => { /* onabort is the authoritative failed commit */ };

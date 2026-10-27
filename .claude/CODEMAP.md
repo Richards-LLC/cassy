@@ -128,6 +128,8 @@
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts` - paged history, receipt progress and unopened conversation previews.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
+- `cas-cli/src/hub/composer_upload.rs` - DPoP-authenticated, bounded upload storage, host MIME sniffing and persistent upload identity.
+- `hub-web/src/composer-uploads.ts`, `hub-web/src/composer-uploads.css` - lazy composer file/text previews and upload-before-send integration.
 - `cas-cli/src/ui/factory/daemon/runtime/ws_client.rs`, `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - Commander attachment/input delivery and durable operator replies.
 - `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged Commander work events (thinking, tool calls, task and worker events) from transcripts and the task DB; schema in `docs/guides/commander-work-events.md`.
 - `hub-web/src/usage.ts` - per-journey usage counter (action to HUB journey map), flushed to every paired machine.

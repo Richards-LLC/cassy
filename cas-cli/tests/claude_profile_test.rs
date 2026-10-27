@@ -758,6 +758,115 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
                 .assert()
                 .failure();
         }
+        // Lifecycle lookup must retain both aliases even though write scans
+        // collapse their common physical target (legacy alt sorts first).
+        let aliases_home = TempDir::new().unwrap();
+        let real = aliases_home.path().join(format!(".{provider}-work"));
+        let link = aliases_home.path().join(format!(".{provider}-alt"));
+        std::fs::create_dir(&real).unwrap();
+        let private_bytes = b"private target";
+        std::fs::write(real.join("keep"), private_bytes).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        for alias in ["alt", "work"] {
+            let key = format!("{provider}:{alias}");
+            for action in ["disable", "enable"] {
+                cas_cmd(aliases_home.path())
+                    .current_dir(aliases_home.path())
+                    .args(["accounts", action, &key])
+                    .assert()
+                    .success();
+                let output = cas_cmd(aliases_home.path())
+                    .current_dir(aliases_home.path())
+                    .args(["accounts", "list", "--json"])
+                    .output()
+                    .unwrap();
+                let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let rows = rows["accounts"].as_array().unwrap();
+                assert_eq!(rows.len(), 2);
+                for row in rows {
+                    assert_eq!(
+                        row["flags"]["disabled"],
+                        action == "disable",
+                        "{provider}/{alias}: {row}"
+                    );
+                }
+            }
+        }
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "rename", &format!("{provider}:work"), "renamed"])
+            .assert()
+            .success();
+        let renamed = aliases_home.path().join(format!(".{provider}-renamed"));
+        assert!(renamed.join("keep").is_file());
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "rename", &format!("{provider}:renamed"), "work"])
+            .assert()
+            .success();
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "disable", &format!("{provider}:alt")])
+            .assert()
+            .success();
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "remove", &format!("{provider}:alt"), "--yes"])
+            .assert()
+            .success();
+        assert!(!link.is_symlink());
+        assert_eq!(std::fs::read(real.join("keep")).unwrap(), private_bytes);
+        let output = cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(rows["accounts"][0]["flags"]["disabled"], true);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let second = aliases_home.path().join(format!(".{provider}-copy"));
+        std::os::unix::fs::symlink(&real, &second).unwrap();
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "disable", &format!("{provider}:alt")])
+            .assert()
+            .success();
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "remove", &format!("{provider}:work")])
+            .write_stdin("n\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(link.to_str().unwrap()))
+            .stderr(predicate::str::contains(second.to_str().unwrap()));
+        assert_eq!(std::fs::read(real.join("keep")).unwrap(), private_bytes);
+        assert!(link.is_symlink());
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "remove", &format!("{provider}:work"), "--yes"])
+            .assert()
+            .success();
+        assert!(!real.exists());
+        assert!(
+            !link.is_symlink(),
+            "removing the account removes its aliases"
+        );
+        assert!(!second.is_symlink());
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let output = cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            rows["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["flags"]["disabled"] == false)
+        );
     }
 }
 

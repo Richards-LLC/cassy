@@ -190,7 +190,7 @@ pub(crate) fn expired(reset: Option<&str>) -> bool {
 
 /// Every Claude and Codex account directory with its report label:
 /// `claude-main`, `claude-alt` and `codex` for the defaults, else
-/// `<provider>-<name>`.
+/// `<provider>-<name>`. Canonical targets are collapsed to avoid duplicate reports.
 fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::path::PathBuf)> {
     let mut found = Vec::new();
     for provider in crate::accounts::Provider::ALL {

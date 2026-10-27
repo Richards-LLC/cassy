@@ -81,6 +81,9 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
                     target.email.as_deref().unwrap_or(&target.name)
                 );
                 eprintln!("Folder: {}", target.folder.display());
+                for alias in crate::account_lifecycle::removal_aliases(&target, &home)? {
+                    eprintln!("Alias removed too: {}", alias.display());
+                }
                 eprint!("Permanently remove this folder? [y/N] ");
                 std::io::stderr().flush()?;
                 let mut answer = String::new();

@@ -45,8 +45,12 @@ link to the base (`account links`); `cas accounts drift` lists them.
 A symlinked account directory represents its target, whether that target is
 inside or outside your home directory. Linking and `cas update --user` follow
 that target. When several account aliases reach the same canonical path,
-mutation discovery processes the target once; the registry and launchers keep
-all aliases available for selection.
+bulk linking and user updates process the target once. Registry, launch and
+individual account commands retain every alias. Removing a directory symlink
+removes only that link and preserves its target. Removing the physical account
+also removes its symlink aliases; the confirmation lists them before deletion.
+Disabling either spelling disables that physical login under every alias.
+The registry prefers a real directory as the canonical account.
 
 ## See which account a session uses
 

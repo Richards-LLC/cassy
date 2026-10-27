@@ -24,7 +24,10 @@ Was: shared logins looked identical. → Now: account choices show folder aliase
 → Now: expired windows say usage is unknown, and folders sharing a subscription use the newest snapshot.
 
 • *Linked folders* — Was: a linked account could disappear or have its target processed more than once.
-→ Now: linked accounts appear, unreadable entries are skipped, and updates process each target once.
+→ Now: every account alias remains usable, unreadable entries are skipped, and updates process each target once.
+
+• *Account aliases* — Was: disabling an alias could leave its login eligible, and removing its target stranded links.
+→ Now: disable applies to every alias of the physical account; removing the target lists and removes its aliases too.
 
 • *Readiness* — Was: a clean installation could omit the Claude and Codex login commands.
 → Now: hub readiness shows each missing account's login command without creating a folder.

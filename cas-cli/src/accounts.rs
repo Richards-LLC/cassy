@@ -333,8 +333,8 @@ pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> 
         .collect())
 }
 
-/// Alias-preserving read model for account selection and launch resolution.
-/// Mutation callers use `discover` so a symlink target is processed only once.
+/// Alias-preserving lookup for selection, launch and individual lifecycle commands.
+/// Bulk link/sync callers use `discover` to process each physical target once.
 pub(crate) fn discover_aliases(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
     let real_dir = |path: &Path| path.is_dir();
     let account = |label: String, path: PathBuf, retiring: bool| AccountDir {

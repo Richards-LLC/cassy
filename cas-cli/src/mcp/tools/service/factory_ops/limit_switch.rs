@@ -188,7 +188,7 @@ fn plan_switch(
         // Predict each account's transition through the same policy used to
         // select it. A stale under-threshold snapshot for the limited account
         // cannot become eligible because an unrelated account resets.
-        let reset = accounts.iter().filter(|a| a.provider == provider)
+        let available = accounts.iter().filter(|a| a.provider == provider)
             .filter_map(|account| {
                 let row = std::slice::from_ref(account);
                 if crate::account_selection::recommend(row, provider, now, policy).recommended.is_some() {
@@ -200,17 +200,22 @@ fn plan_switch(
                     .collect::<std::collections::BTreeSet<_>>();
                 resets.into_iter().find(|at| {
                     crate::account_selection::recommend(row, provider, *at, policy).recommended.is_some()
-                })
+                }).map(|at| (at, account))
             })
-            .min()
-            .map(|t| t.to_rfc3339())
+            .min_by_key(|(at, _)| *at);
+        let reset = available.map(|(at, _)| at)
+            .map(|t| crate::cli::limits::format_reset(Some(t), now).trim_start_matches("resets ").to_owned())
             .unwrap_or_else(|| "unknown (usage/reset unavailable)".into());
         return (
             None,
-            format!(
-                "Worker {} ({old_name}), task {tasks}: usage limit; no eligible account until {reset}. No restart queued.",
-                agent.name
-            ),
+            {
+                let mut notice = crate::cloud::presence::wrap_line(&format!(
+                    "Worker {} ({old_name}), task {tasks}: usage limit; no eligible account until {reset}. No restart queued.", agent.name));
+                if let Some((_, account)) = available {
+                    for window in &account.windows { notice.push_str(&format!("{}\n", crate::cli::limits::window_summary(window, now))); }
+                }
+                notice.trim_end().to_owned()
+            },
         );
     };
     let next_name = if next.account.display_name == next.account.name {
@@ -233,10 +238,14 @@ fn plan_switch(
     json["limit_recycle"] = serde_json::to_value(meta).expect("limit metadata serializes");
     (
         Some(json.to_string()),
-        format!(
-            "Worker {}, task {tasks}: usage limit; queued account switch {old_name} -> {} ({}). Worktree, branch and task bindings kept.",
-            agent.name, next_name, next.reason
-        ),
+        {
+            let detail = format!("Worker {}, task {tasks}: usage limit; queued account switch {old_name} -> {} ({}). Worktree, branch and task bindings kept.", agent.name, next_name, next.reason);
+            let mut notice = crate::cloud::presence::wrap_line(&detail);
+            for window in &next.account.windows {
+                notice.push_str(&format!("{}\n", crate::cli::limits::window_summary(window, now)));
+            }
+            notice.trim_end().to_owned()
+        },
     )
 }
 
@@ -680,7 +689,12 @@ mod tests {
             let json: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
             assert_eq!(json["limit_recycle"]["cwd"], "/kept/worktree");
             assert_eq!(json["limit_recycle"]["task_ids"][0], "cas-task");
-            assert!(detail.contains("old -> next"), "{detail}");
+            let spoken = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(spoken.contains("old -> next"), "{detail}");
+            assert!(detail.lines().all(|line| line.chars().count() <= 80), "{detail}");
+            for window in ["5h", "weekly"] {
+                assert!(detail.lines().any(|line| line.starts_with(window) && line.contains("resets ") && line.contains("(in ")), "{detail}");
+            }
             let (json, detail) =
                 plan_switch(&agent, &meta, &accounts, now, &Default::default(), |_| {
                     Err("fixture account invalid".into())
@@ -701,7 +715,7 @@ mod tests {
             );
             assert!(json.is_none());
             assert!(
-                detail.contains("no eligible account until 2026-10-27T15:00:00+00:00"),
+                detail.split_whitespace().collect::<Vec<_>>().join(" ").contains(&format!("no eligible account until {}", crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(3)), now).trim_start_matches("resets "))),
                 "{detail}"
             );
             // No registered row for the old account: still use its known alias.
@@ -709,7 +723,7 @@ mod tests {
             unregistered.old_account = PathBuf::from(format!("/private/account-home/{}legacy@example.invalid", provider.prefix()));
             let (_, detail) = plan_switch(&agent, &unregistered, std::slice::from_ref(&next), now, &Default::default(), |_| Ok(()));
             let mut notice_errors = Vec::new();
-            if !detail.contains("legacy@example.invalid -> next") || detail.contains("/private/account-home") {
+            if !detail.split_whitespace().collect::<Vec<_>>().join(" ").contains("legacy@example.invalid -> next") || detail.contains("/private/account-home") {
                 notice_errors.push(detail);
             }
 
@@ -737,8 +751,8 @@ mod tests {
                 let rows = [blocked, disabled.clone(), logged_out.clone(), stale.clone(), duplicate.clone(), unknown.clone(), accounts[0].clone()];
                 let policy = crate::config::AccountsConfig { threshold, ..Default::default() };
                 let (_, detail) = plan_switch(&agent, &meta, &rows, now, &policy, |_| panic!("none eligible"));
-                let reset = (now + chrono::Duration::hours(hours)).to_rfc3339();
-                if !detail.contains(&format!("no eligible account until {reset}")) {
+                let reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(hours)), now).trim_start_matches("resets ").to_owned();
+                if !detail.split_whitespace().collect::<Vec<_>>().join(" ").contains(&format!("no eligible account until {reset}")) {
                     notice_errors.push(format!("expected {reset}: {detail}"));
                 }
             }

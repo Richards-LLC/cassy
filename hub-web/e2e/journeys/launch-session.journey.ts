@@ -84,7 +84,7 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
 
 test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }) => {
   const launch = atlasLaunch();
-  Object.assign(launch.profiles!.claude!.profiles[1], { recommendation: "resets in 6h, 41% left" });
+  Object.assign(launch.profiles!.claude!.profiles[1], { recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d)" });
   const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: launch } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
@@ -112,7 +112,9 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
     const accounts = sheet.getByRole("radiogroup", { name: "Claude accounts" });
     // The recommendation is preselected, with its reason; the default stays selectable.
     await expect(accounts.getByRole("radio", { name: /support@petrastella.io Recommended/ })).toBeChecked();
-    await expect(accounts.getByText("resets in 6h, 41% left", { exact: true })).toBeVisible();
+    await expect(accounts.getByText("resets Tue 14:00 (in 6h), 41% left", { exact: true })).toBeVisible();
+    await expect(accounts.getByText("5h 20%, resets Tue 14:00 (in 6h)", { exact: true })).toBeVisible();
+    await expect(accounts.getByText("weekly 59%, resets Sat Oct 31 09:00 (in 4d)", { exact: true })).toBeVisible();
     await accounts.getByRole("radio", { name: /^main Default/ }).check();
     await expect(sheet.getByText("Start ledger-api with Claude (main) on Atlas · Linux.")).toBeVisible();
     // A logged-out account is listed but can't be picked, and names its fix.

@@ -164,7 +164,7 @@ fn apply_recommendation(profiles: &mut [Profile], accounts: &[crate::account_reg
     for profile in profiles {
         if let Some(account) = accounts.iter().find(|a| a.folder == profile.directory) {
             profile.login_state = account.login_state;
-            profile.usage = crate::cli::limits::summarize_windows(&account.windows);
+            profile.usage = crate::cli::limits::summarize_windows_at(&account.windows, now);
         }
         profile.recommendation = selection.recommended.as_ref()
             .filter(|r| r.account.folder == profile.directory).map(|r| r.reason.clone());
@@ -224,41 +224,19 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
     let mut choices: Vec<ProfileChoice> = profiles
         .iter()
         .map(|profile| {
-            let alias = if profile.display_name == profile.name {
-                String::new()
-            } else {
-                format!(" ({})", profile.name)
-            };
-            let state = format!(
-                " — {}{}{}",
-                login_state_label(profile.login_state),
-                if profile.active { ", active" } else { "" },
-                if profile.disabled { ", disabled" } else { "" }
-            );
-            let display = shorten_picker_text(
-                &profile.display_name,
-                76usize.saturating_sub(text_width(&alias) + text_width(&state)),
-            );
+            let state = format!(" — {}{}{}", login_state_label(profile.login_state),
+                if profile.active { ", active" } else { "" }, if profile.disabled { ", disabled" } else { "" });
+            let alias = if profile.display_name == profile.name { String::new() }
+                else { format!(" ({})", shorten_picker_text(&profile.name, 72usize.saturating_sub(text_width(&state)))) };
+            let display = shorten_picker_text(&profile.display_name, 76usize.saturating_sub(text_width(&alias) + text_width(&state)));
             let mut label = format!("{display}{alias}{state}");
-            let policy_detail = profile.recommendation.as_deref()
-                .map(|reason| format!(", recommended: {reason}"))
-                .or_else(|| {
-                    profile.exclusion.as_deref()
-                        .filter(|reason| !profile.disabled && *reason != crate::account_selection::LOGIN_UNAVAILABLE_REASON)
-                        .map(|reason| format!(", {reason}"))
-                });
-            if let Some(detail) = policy_detail {
-                label.push_str(&shorten_picker_text(&detail, 76usize.saturating_sub(text_width(&label))));
-            } else if let Some(usage) = &profile.usage {
-                let compact =
-                    usage.replace("reset, usage unknown until next session", "reset/unknown");
-                let mut parts: Vec<_> = compact.split(", ").collect();
-                parts.sort_by_key(|part| !part.contains("reset/unknown"));
-                let compact = parts.join(", ");
-                label.push_str(&shorten_picker_text(
-                    &format!(": {compact}"),
-                    76usize.saturating_sub(text_width(&label)),
-                ));
+            if let Some(reason) = &profile.recommendation {
+                append_picker_detail(&mut label, &format!("recommended: {reason}"));
+            } else if let Some(reason) = profile.exclusion.as_deref().filter(|reason| !profile.disabled && *reason != crate::account_selection::LOGIN_UNAVAILABLE_REASON) {
+                append_picker_detail(&mut label, reason);
+            }
+            if let Some(usage) = &profile.usage {
+                for window in usage.split("; ") { append_picker_detail(&mut label, window); }
             }
             ProfileChoice::Existing {
                 name: profile.name.clone(),
@@ -268,6 +246,19 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
         .collect();
     choices.push(ProfileChoice::NewLogin);
     choices
+}
+
+fn append_picker_detail(label: &mut String, detail: &str) {
+    let mut line = String::new();
+    for word in detail.split_whitespace() {
+        let word = shorten_picker_text(word, 72);
+        if !line.is_empty() && text_width(&line) + 1 + text_width(&word) > 72 {
+            label.push_str("\n    "); label.push_str(&line); line.clear();
+        }
+        if !line.is_empty() { line.push(' '); }
+        line.push_str(&word);
+    }
+    if !line.is_empty() { label.push_str("\n    "); label.push_str(&line); }
 }
 
 fn disabled_label(disabled: bool, label: String) -> String {
@@ -315,8 +306,8 @@ pub(crate) fn active_choice_index(profiles: &[Profile]) -> usize {
 /// inquire's default page is 7. This operator has 7 accounts, which pushed
 /// "log in a new account" below the fold — an option you must scroll to find
 /// is an option most people never discover.
-pub(crate) fn picker_page_size(choice_count: usize) -> usize {
-    choice_count.clamp(7, 20)
+pub(crate) fn picker_page_size(choice_count: usize, option_lines: usize, terminal_rows: usize) -> usize {
+    choice_count.clamp(7, 20).min(terminal_rows.saturating_sub(4) / option_lines.max(1)).max(1)
 }
 
 /// What the operator picked: an existing account, or a validated new name.
@@ -370,13 +361,15 @@ pub(crate) fn prompt_for_selection(
 ) -> Result<Selection> {
     let choices = profile_choices(profiles);
     let starting_cursor = active_choice_index(profiles);
-    let page_size = picker_page_size(choices.len());
+    let option_lines = choices.iter().map(|choice| choice.to_string().lines().count()).max().unwrap_or(1);
+    let terminal_rows = crossterm::terminal::size().map(|(_, rows)| usize::from(rows)).unwrap_or(24);
+    let page_size = picker_page_size(choices.len(), option_lines, terminal_rows);
 
     let selection = inquire::Select::new(&format!("Choose {provider_label} account"), choices)
         .with_starting_cursor(starting_cursor)
         .with_page_size(page_size)
         .with_help_message(&format!(
-            "Session only. Full aliases and usage: cas {} --list-profiles",
+            "Session only. End: new login. Full details: cas {} --list-profiles",
             provider_label.to_ascii_lowercase()
         ))
         .prompt()
@@ -607,8 +600,8 @@ mod tests {
                 .starts_with("operator@example.com (work) —")
         );
         assert_ne!(rows[2].to_string(), rows[3].to_string());
-        assert!(rows[3].to_string().contains("reset/unknown"));
-        assert!(rows.iter().all(|row| text_width(&row.to_string()) <= 76));
+        assert!(rows[3].to_string().contains("reset, usage unknown until next session"));
+        assert!(rows.iter().all(|row| row.to_string().lines().all(|line| text_width(line) <= 76)));
     }
 
     #[test]
@@ -713,7 +706,7 @@ mod tests {
             apply_recommendation(&mut profiles, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             let idle_choices = profile_choices(&profiles);
             assert_eq!(active_choice_index(&profiles), 1);
-            assert!(idle_choices[1].to_string().contains("recommended: resets in 6h, 90% left"));
+            assert!(idle_choices[1].to_string().contains(&format!("recommended: {reset}, 90% left")));
             assert!(idle_choices[0].to_string().contains("duplicate of alt"));
             // This block exercises usable rows; the outer fixture also
             // checks disabled rendering before selection is applied.
@@ -736,9 +729,11 @@ mod tests {
     #[test]
     fn the_new_login_row_is_never_hidden_below_the_fold() {
         // 7 accounts + the new-login row must all be visible at once.
-        assert_eq!(picker_page_size(8), 8);
-        assert_eq!(picker_page_size(3), 7);
-        assert_eq!(picker_page_size(50), 20);
+        assert_eq!(picker_page_size(8, 1, 24), 8);
+        assert_eq!(picker_page_size(3, 1, 24), 7);
+        assert_eq!(picker_page_size(50, 1, 24), 20);
+        assert_eq!(picker_page_size(8, 4, 24), 5);
+        assert_eq!(picker_page_size(8, 4, 10), 1);
     }
 
     #[test]

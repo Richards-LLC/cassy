@@ -94,7 +94,7 @@ pub fn recommend<'a>(
     for skipped in later {
         result
             .excluded
-            .push((skipped, format!("resets later than {}", account.name)));
+            .push((skipped, format!("resets later than {}; {}", account.name, crate::cli::limits::format_reset(skipped.windows.iter().find(|w| w.name == "weekly").and_then(|w| w.resets_at), now))));
     }
     if reset.is_some() {
         for &(skipped, candidate_reset, _, _) in candidates.iter().skip(1) {
@@ -106,15 +106,7 @@ pub fn recommend<'a>(
         }
     }
     let reset_reason = match reset {
-        Some(reset) => {
-            let minutes = (reset - now).num_minutes().max(1);
-            let interval = if minutes < 60 {
-                format!("{minutes}m")
-            } else {
-                format!("{}h", (minutes + 59) / 60)
-            };
-            format!("resets in {interval}")
-        }
+        Some(reset) => crate::cli::limits::format_reset(Some(reset), now),
         None => "weekly reset unknown".to_string(),
     };
     result.recommended = Some(Recommendation {
@@ -161,7 +153,7 @@ fn capacity(
             _ => return Err(format!("{name} usage unknown")),
         };
         if used >= f64::from(threshold) {
-            return Err(format!("{name} at {used:.0}% (threshold {threshold}%)"));
+            return Err(format!("{name} at {used:.0}% (threshold {threshold}%); {}", crate::cli::limits::format_reset(w.resets_at, now)));
         }
         Ok((w.resets_at, used))
     };
@@ -546,7 +538,7 @@ pub(crate) mod tests {
                             r.reason
                         );
                     } else {
-                        assert!(r.reason.contains("resets in"), "{case}: {}", r.reason);
+                        assert!(r.reason.contains("resets ") && r.reason.contains("(in "), "{case}: {}", r.reason);
                     }
                     if case == "unknown weekly reset eligible" {
                         assert_eq!(r.reason, "weekly reset unknown, 41% left");
@@ -581,7 +573,7 @@ pub(crate) mod tests {
                                 .iter()
                                 .find(|(a, _)| a.name == "b")
                                 .map(|(_, reason)| reason.as_str()),
-                            Some("resets later than a")
+                            Some(format!("resets later than a; {}", crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(48)), now)).as_str())
                         );
                     }
                     if case == "duplicate routes to canonical" {

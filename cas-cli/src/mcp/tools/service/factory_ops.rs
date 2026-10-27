@@ -5130,6 +5130,9 @@ impl CasService {
                     || "\n    account: default/inherited".to_string(),
                     |account| format!("\n    account: {account}"),
                 );
+                let account_info = if usage_limited {
+                    format!("{account_info}{}", worker_usage_reset_lines(agent, transcript_path_for_worker.as_deref(), now))
+                } else { account_info };
                 // Context usage (cas-573c): cheap tail-read of the session
                 // transcript to surface a coarse band so the supervisor can
                 // proactively preserve work before compaction. Falls back
@@ -10976,6 +10979,31 @@ pub(crate) fn default_codex_sessions_dir() -> Option<std::path::PathBuf> {
 /// machine-readable exhausted-credit state in the same bounded tail. A generic
 /// error, an old rate-limit record, or an unresolved rollout is not enough to
 /// declare a live worker unavailable.
+fn worker_usage_reset_lines(agent: &cas_types::Agent, transcript: Option<&std::path::Path>, now: chrono::DateTime<chrono::Utc>) -> String {
+    let provider = match worker_cli_from_agent(agent) {
+        cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
+        cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
+        _ => return String::new(),
+    };
+    let dir = agent.metadata.get("worker_account_dir").map(|path| normalized_worker_account_path(path))
+        .or_else(|| dirs::home_dir().map(|home| home.join(if provider == crate::accounts::Provider::Claude { ".claude" } else { ".codex" })));
+    let mut windows = dir.as_ref().and_then(|dir| crate::cli::limits::cached_account_usage(provider, dir))
+        .map(|usage| usage.windows).unwrap_or_default();
+    if windows.is_empty() {
+        if let Some((_, tail)) = transcript.and_then(|path| super::worker_liveness::read_jsonl_tail(path, 256 * 1024)) {
+            windows = tail.lines().rev().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .map(|record| crate::cli::limits::transcript_windows(&record)).find(|windows| !windows.is_empty()).unwrap_or_default();
+        }
+    }
+    if windows.is_empty() && provider == crate::accounts::Provider::Codex {
+        if let Some(dir) = dir { windows = crate::cli::limits::account_usage(provider, &dir).windows; }
+    }
+    ["5h", "weekly"].into_iter().map(|name| {
+        let reset = windows.iter().find(|window| window.name == name).and_then(|window| window.resets_at);
+        format!("\n    {name}: {}", crate::cli::limits::format_reset(reset, now))
+    }).collect::<String>()
+}
+
 pub(crate) fn worker_reports_usage_limit(
     cas_root: &std::path::Path,
     agent: &cas_types::Agent,
@@ -15236,7 +15264,7 @@ mod tests {
             assert!(receipt.contains("recommended over inherited /requester/account"));
             assert!(receipt.contains(&format!("{} recommended account=chosen", provider.name())));
         }
-        assert!(receipt.contains("resets in 6h, 41% left"));
+        assert!(receipt.contains(&format!("{}, 41% left", crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(6)), now))));
         assert!(spawn_specs_summary(&specs, &[]).contains("account=/fixture/.codex-chosen"));
         // Recommendation-populated directories pass through the same final preflight.
         assert!(preflight_codex_config_dir(specs[3].config_dir.as_deref().unwrap()).unwrap_err().contains("auth.json"));

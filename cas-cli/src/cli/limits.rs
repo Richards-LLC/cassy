@@ -222,12 +222,30 @@ pub(crate) struct AccountUsage {
     pub authenticated: bool,
 }
 
+type UsageCache = std::sync::Mutex<std::collections::HashMap<(&'static str, std::path::PathBuf), AccountUsage>>;
+fn usage_cache() -> &'static UsageCache {
+    static CACHE: std::sync::OnceLock<UsageCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+pub(crate) fn cached_account_usage(provider: crate::accounts::Provider, dir: &Path) -> Option<AccountUsage> {
+    usage_cache().lock().ok()?.get(&(provider.name(), dir.canonicalize().unwrap_or_else(|_| dir.to_owned()))).cloned()
+}
+
+/// Structured transcript capacity, when a harness actually published it.
+pub(crate) fn transcript_windows(record: &Value) -> Vec<crate::account_registry::UsageWindow> {
+    find_rate_limits(record).map(|limits| report_windows(&AccountLimit {
+        account: String::new(), provider: String::new(), plan: None,
+        state: String::new(), source: String::new(), windows: parse_codex_limits(limits), detail: None,
+    })).unwrap_or_default()
+}
+
 pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> AccountUsage {
     let (limit, observed_at) = match provider {
         crate::accounts::Provider::Claude => (collect_claude("account", dir), None),
         crate::accounts::Provider::Codex => collect_codex_snapshot("account", dir),
     };
-    AccountUsage {
+    let usage = AccountUsage {
         observed_at,
         plan: limit.plan,
         rejected: limit.state == "auth-needed",
@@ -245,7 +263,11 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
                 }),
             })
             .collect(),
+    };
+    if let Ok(mut cache) = usage_cache().lock() {
+        cache.insert((provider.name(), dir.canonicalize().unwrap_or_else(|_| dir.to_owned())), usage.clone());
     }
+    usage
 }
 
 /// Human reset text; the stored/JSON instant stays UTC RFC3339.
@@ -255,73 +277,48 @@ pub(crate) fn format_reset(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> 
 
 fn format_reset_in<Tz: TimeZone>(reset: Option<DateTime<Utc>>, now: DateTime<Tz>) -> String
 where Tz::Offset: fmt::Display {
-    reset.map(|reset| reset.with_timezone(&now.timezone()).format("%Y-%m-%d %H:%M %Z").to_string())
-        .unwrap_or_else(|| "reset time unknown".into())
+    let Some(reset) = reset else { return "reset time unknown".into() };
+    let local = reset.with_timezone(&now.timezone());
+    let minutes = (local.signed_duration_since(&now).num_seconds() + 59) / 60;
+    if local <= now { return "reset, usage unknown until next session".into() }
+    let tomorrow = now.date_naive().succ_opt();
+    let stamp = if local.date_naive() == now.date_naive() || Some(local.date_naive()) == tomorrow {
+        local.format("%a %H:%M").to_string()
+    } else { local.format("%a %b %-d %H:%M").to_string() };
+    let relative = if minutes < 60 { format!("{}m", minutes.max(1)) }
+        else if minutes < 24 * 60 { format!("{}h", (minutes + 59) / 60) }
+        else { format!("{}d", minutes / (24 * 60)) };
+    format!("resets {stamp} (in {relative})")
 }
 
-fn display_reset(value: &str) -> String {
-    DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|time| {
-            time.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M %Z")
-                .to_string()
-        })
-        .unwrap_or_else(|| value.to_string())
+pub(crate) fn window_summary(window: &crate::account_registry::UsageWindow, now: DateTime<Utc>) -> String {
+    let reset = format_reset(window.resets_at, now);
+    if window.resets_at.is_some_and(|at| at <= now) { return format!("{} {reset}", window.name) }
+    let used = match window.used_percent {
+        Some(used) if used >= 100. => "limit hit".into(),
+        Some(used) => format!("{used:.0}%"),
+        None => "usage unknown".into(),
+    };
+    format!("{} {used}, {reset}", window.name)
+}
+
+pub(crate) fn summarize_windows_at(windows: &[crate::account_registry::UsageWindow], now: DateTime<Utc>) -> Option<String> {
+    (!windows.is_empty()).then(|| windows.iter().map(|window| window_summary(window, now)).collect::<Vec<_>>().join("; "))
 }
 
 pub(crate) fn summarize_windows(windows: &[crate::account_registry::UsageWindow]) -> Option<String> {
-    summarize(&AccountLimit {
-        account: String::new(),
-        provider: String::new(),
-        plan: None,
-        state: String::new(),
-        source: String::new(),
-        detail: None,
-        windows: windows
-            .iter()
-            .map(|window| LimitWindow {
-                name: window.name.clone(),
-                used_percent: window.used_percent,
-                reset_at: window.resets_at.map(|reset| reset.to_rfc3339()),
-                spend_dollars: None,
-            })
-            .collect(),
-    })
+    summarize_windows_at(windows, Utc::now())
+}
+
+fn report_windows(limit: &AccountLimit) -> Vec<crate::account_registry::UsageWindow> {
+    limit.windows.iter().filter(|window| window.name != "extra usage").map(|window| crate::account_registry::UsageWindow {
+        name: window.name.clone(), used_percent: window.used_percent,
+        resets_at: window.reset_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)),
+    }).collect()
 }
 
 fn summarize(limit: &AccountLimit) -> Option<String> {
-    let expired_windows: Vec<_> = limit
-        .windows
-        .iter()
-        .filter(|w| expired(w.reset_at.as_deref()))
-        .map(|w| format!("{} reset, usage unknown until next session", w.name))
-        .collect();
-    let windows: Vec<&LimitWindow> = limit
-        .windows
-        .iter()
-        .filter(|window| {
-            window.used_percent.is_some()
-                && window.name != "extra usage"
-                && !expired(window.reset_at.as_deref())
-        })
-        .collect();
-    if let Some(full) = windows
-        .iter()
-        .filter(|window| window.used_percent.is_some_and(|used| used >= 100.0))
-        .max_by(|a, b| a.reset_at.cmp(&b.reset_at))
-    {
-        return Some(match &full.reset_at {
-            Some(reset) => format!("{} limit hit, resets {}", full.name, display_reset(reset)),
-            None => format!("{} limit hit", full.name),
-        });
-    }
-    // Unknown capacity is the first thing a picker must keep visible when
-    // a long account name leaves room for only part of the usage summary.
-    let mut parts = expired_windows;
-    parts.extend(windows.iter()
-        .map(|window| format!("{} {:.0}%", window.name, window.used_percent.unwrap_or(0.0))));
-    (!parts.is_empty()).then(|| parts.join(", "))
+    summarize_windows(&report_windows(limit))
 }
 
 /// Shared registry capacity for several accounts at once. Duplicate Codex
@@ -535,72 +532,77 @@ fn local_rfc3339(timestamp: &str) -> Option<String> {
 }
 
 fn compact_line(report: &LimitsReport) -> String {
-    report
-        .accounts
-        .iter()
-        .map(|account| {
-            let windows = account
-                .windows
-                .iter()
-                .map(|window| {
-                    if expired(window.reset_at.as_deref()) {
-                        format!("{}:reset/unknown", window.name)
-                    } else {
-                        window
-                            .used_percent
-                            .map(|used| format!("{}:{used:.0}%", window.name))
-                            .unwrap_or_else(|| format!("{}:unknown", window.name))
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            if windows.is_empty() {
-                format!("{}:{}", account.account, account.state)
-            } else {
-                format!("{} {}", account.account, windows)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ")
+    let now = Utc::now();
+    let mut entries = report.accounts.iter().map(|account| {
+        let windows = report_windows(account);
+        let constraining = windows.iter().filter(|w| w.resets_at.is_none_or(|at| at > now))
+            .max_by(|a,b| a.used_percent.unwrap_or(-1.).total_cmp(&b.used_percent.unwrap_or(-1.)));
+        let alias = display_alias(&account.account, 24);
+        let (text, reset) = if let Some(window) = constraining {
+            let used = window.used_percent.map(|used| format!("{used:.0}%")).unwrap_or_else(|| "unknown".into());
+            let reset = format_reset(window.resets_at, now);
+            (format!("{alias} {used} {}", reset.split(" (in ").next().unwrap_or(&reset)), window.resets_at)
+        } else if !windows.is_empty() { (format!("{alias} reset/unknown"), None) }
+        else { (format!("{alias}:{}", account.state), None) };
+        (reset, text)
+    }).collect::<Vec<_>>();
+    entries.sort_by(|a,b| a.0.is_none().cmp(&b.0.is_none()).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+    let mut out = String::new();
+    for (index, (_, entry)) in entries.iter().enumerate() {
+        let separator = if out.is_empty() { "" } else { " | " };
+        let remaining = entries.len() - index - 1;
+        let reserve = if remaining > 0 { format!(" | +{remaining} more").len() } else { 0 };
+        if ratatui::text::Line::from(format!("{out}{separator}{entry}")).width() + reserve > 80 {
+            let suffix = format!("+{} more", entries.len() - index);
+            if !out.is_empty() { out.push_str(" | "); }
+            out.push_str(&suffix);
+            break;
+        }
+        out.push_str(separator); out.push_str(entry);
+    }
+    out
 }
 
-fn print_human(report: &LimitsReport) {
-    println!("Cassy provider limits");
-    for account in &report.accounts {
-        let plan = account
-            .plan
-            .as_deref()
-            .map(|plan| format!(" ({plan})"))
-            .unwrap_or_default();
-        println!(
-            "\n{}{} — {} [{}]",
-            account.account, plan, account.state, account.source
-        );
-        for window in &account.windows {
-            let used = if expired(window.reset_at.as_deref()) {
-                "reset, usage unknown until next session".to_string()
-            } else {
-                window
-                    .used_percent
-                    .map(|value| format!("{value:.1}% used"))
-                    .unwrap_or_else(|| "usage unavailable".to_string())
-            };
-            let reset = window
-                .reset_at
-                .as_deref()
-                .map(|value| format!(", resets {}", display_reset(value)))
-                .unwrap_or_default();
-            let spend = window
-                .spend_dollars
-                .map(|value| format!(", ${value:.2} spent"))
-                .unwrap_or_default();
-            println!("  {}: {}{}{}", window.name, used, spend, reset);
-        }
-        if let Some(detail) = &account.detail {
-            println!("  {detail}");
-        }
+fn display_alias(value: &str, max: usize) -> String {
+    if ratatui::text::Line::from(value).width() <= max { return value.to_owned(); }
+    let mut short = String::new();
+    for c in value.chars() {
+        if ratatui::text::Line::from(format!("{short}{c}...")).width() > max { break; }
+        short.push(c);
     }
+    short.push_str("..."); short
 }
+
+fn render_human(report: &LimitsReport) -> String {
+    let now = Utc::now();
+    let mut out = String::from("Cassy provider limits\n");
+    for account in &report.accounts {
+        out.push('\n');
+        let header = format!("{}{} - {} [{}]", display_alias(&account.account, 48), account.plan.as_ref().map(|plan| format!(" ({plan})")).unwrap_or_default(), account.state, account.source);
+        out.push_str(&crate::cloud::presence::wrap_line(&header));
+        for window in &account.windows {
+            let typed = crate::account_registry::UsageWindow {
+                name: window.name.clone(), used_percent: window.used_percent,
+                resets_at: window.reset_at.as_deref().and_then(|at| DateTime::parse_from_rfc3339(at).ok()).map(|at| at.with_timezone(&Utc)),
+            };
+            let text = if account.provider == "exa" {
+                window.spend_dollars.map(|spend| format!("{}: ${spend:.2} spent", window.name)).unwrap_or_else(|| window_summary(&typed, now))
+            } else {
+                let mut text = window_summary(&typed, now);
+                if let Some(spend) = window.spend_dollars { text.push_str(&format!(", ${spend:.2} spent")); }
+                text
+            };
+            out.push_str("  "); out.push_str(&text); out.push('\n');
+        }
+        if let Some(detail) = &account.detail { out.push_str(&crate::cloud::presence::wrap_line(detail)); }
+    }
+    if report.accounts.iter().any(|a| display_alias(&a.account, 48) != a.account) {
+        out.push_str("Full account names: cas limits --json\n");
+    }
+    out
+}
+
+fn print_human(report: &LimitsReport) { print!("{}", render_human(report)); }
 
 // Holds a live Claude OAuth access token read off disk.
 impl fmt::Debug for ClaudeOauth {
@@ -723,24 +725,28 @@ mod tests {
             windows,
             detail: None,
         };
-        // pin: the picker's usage wording.
-        assert_eq!(
-            summarize(&limit(vec![
-                window("5h", 100.0, Some("2026-10-16 15:00 EDT")),
-                window("weekly", 40.0, None)
-            ]))
-            .as_deref(),
-            Some("5h limit hit, resets 2026-10-16 15:00 EDT")
-        );
-        // pin: the busiest windows when nothing is used up.
-        assert_eq!(
-            summarize(&limit(vec![
-                window("5h", 42.4, None),
-                window("weekly", 82.0, None)
-            ]))
-            .as_deref(),
-            Some("5h 42%, weekly 82%")
-        );
+        let now = Utc::now();
+        let reset = now + chrono::Duration::hours(6);
+        let stamp = reset.to_rfc3339();
+        let full = limit(vec![window("5h", 100., Some(&stamp)), window("weekly", 40., Some(&stamp))]);
+        let summary = summarize(&full).unwrap();
+        assert!(summary.contains(&format!("5h limit hit, {}", format_reset(Some(reset), now))), "{summary}");
+        assert!(summary.contains("weekly 40%") && summary.matches("(in ").count() == 2, "{summary}");
+        let report = LimitsReport { accounts: vec![full] };
+        let human = render_human(&report);
+        assert!(human.matches("(in ").count() == 2 && human.lines().all(|line| ratatui::text::Line::from(line).width() <= 80), "{human}");
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["accounts"][0]["windows"][0]["reset_at"], stamp);
+        let mut compact_report = LimitsReport { accounts: Vec::new() };
+        for (name, hours) in [("account-first", 1), ("account-next", 2), ("account-third", 3), ("account-last", 4)] {
+            let stamp = (now + chrono::Duration::hours(hours)).to_rfc3339();
+            let mut account = limit(vec![window("5h", 20., Some(&stamp)), window("weekly", 96., Some(&stamp))]);
+            account.account = name.into(); compact_report.accounts.push(account);
+        }
+        let compact = compact_line(&compact_report);
+        assert!(compact.starts_with("account-first 96% resets "), "{compact}");
+        assert!(!compact.contains('\n') && ratatui::text::Line::from(compact.as_str()).width() <= 80, "{compact}");
+        assert!(compact.ends_with("more") && compact.contains('+'), "{compact}");
         assert_eq!(summarize(&limit(Vec::new())), None);
     }
 

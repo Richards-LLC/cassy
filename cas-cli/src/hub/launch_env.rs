@@ -387,6 +387,8 @@ pub struct LaunchProfile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusion: Option<String>,
 }
 
@@ -490,6 +492,7 @@ pub fn profiles_for_project(
                         logged_in: probe_login(cli, executable, &set, remove).unwrap_or(false),
                         name: p.name,
                         recommendation: None,
+                        usage: None,
                         exclusion: None,
                     }
                 })
@@ -532,6 +535,8 @@ fn mark_recommendation(
 ) {
     let selection = crate::account_selection::recommend(accounts, provider, now, policy);
     for row in rows {
+        row.usage = accounts.iter().find(|account| account.name == row.name)
+            .and_then(|account| crate::cli::limits::summarize_windows_at(&account.windows, now));
         row.recommendation = selection
             .recommended
             .as_ref()
@@ -713,9 +718,13 @@ mod tests {
         assert_eq!(choose_profile_name(None, None, None), "main");
         for (provider, cli) in [(crate::accounts::Provider::Claude, SupervisorCli::Claude), (crate::accounts::Provider::Codex, SupervisorCli::Codex)] {
             let accounts = vec![crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0)];
-            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, exclusion: None }];
+            let mut rows = vec![LaunchProfile { name: "chosen".into(), logged_in: true, is_default: false, recommendation: None, usage: None, exclusion: None }];
             mark_recommendation(&mut rows, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
-            assert_eq!(rows[0].recommendation.as_deref(), Some("resets in 6h, 41% left"), "{cli:?}");
+            assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 41% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()), "{cli:?}");
+            for name in ["5h", "weekly"] {
+                assert!(rows[0].usage.as_ref().unwrap().contains(name));
+            }
+            assert_eq!(rows[0].usage.as_ref().unwrap().matches("(in ").count(), 2);
             let mut idle_accounts = accounts.clone();
             idle_accounts[0].windows.remove(0);
             idle_accounts[0].windows[0].used_percent = Some(10.0);
@@ -725,10 +734,10 @@ mod tests {
             duplicate.folder = "/fixture/duplicate".into();
             duplicate.flags.duplicate_of = Some(idle_accounts[0].folder.clone());
             idle_accounts.extend([later, duplicate]);
-            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, exclusion: None }));
+            rows.extend(["later", "duplicate"].map(|name| LaunchProfile { name: name.into(), logged_in: true, is_default: false, recommendation: None, usage: None, exclusion: None }));
             mark_recommendation(&mut rows, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
-            assert_eq!(rows[0].recommendation.as_deref(), Some("resets in 6h, 90% left"));
-            assert_eq!(rows[1].exclusion.as_deref(), Some("resets later than chosen"));
+            assert_eq!(rows[0].recommendation.as_deref(), Some(format!("{}, 90% left", crate::cli::limits::format_reset(Some("2026-10-27T18:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));
+            assert_eq!(rows[1].exclusion.as_deref(), Some(format!("resets later than chosen; {}", crate::cli::limits::format_reset(Some("2026-10-30T00:00:00Z".parse().unwrap()), "2026-10-27T12:00:00Z".parse().unwrap())).as_str()));
             assert_eq!(rows[2].exclusion.as_deref(), Some("duplicate of chosen"));
             assert!(rows[1].logged_in && rows[2].logged_in, "exclusions stay manually selectable");
             let mut unknown_reset_accounts = accounts.clone();

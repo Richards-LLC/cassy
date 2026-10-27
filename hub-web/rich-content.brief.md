@@ -29,4 +29,11 @@ Strict visual QA: four captures, 1280×800 and 390×844, light and dark; zero fi
 
 ## Delivery boundary
 
-The normal HUB-J22 walk serves this checkout's committed dist through the existing static journey server. The supervisor supplies a registered candidate hub for `playwright.rich-content-hub.config.ts`; that repeats the same journey against embedded `/commander/chunk-*` assets. Hub protocol and artifact storage remain doubled in both runs, with real media decode and playback.
+The normal HUB-J22 walk serves this checkout's committed dist through the existing static journey server. The supervisor supplies a registered candidate hub for `playwright.rich-content-hub.config.ts`; that repeats the same journey against embedded `/commander/chunk-*` assets. Hub protocol, preview tickets and proxy bytes remain doubled in both runs, with real media decode and playback.
+
+
+## CSP and native media
+
+Preview POSTs use DPoP to mint an ephemeral, revocable ticket; the browser constructs the content URL on the paired hub, without a pairing credential in src. Native video keeps Range streaming. One failed request can probe a single byte, cancel the body and renew one ticket on 401 or expiry; refusals stop. The hub-served proof uses self-only image/media sources and a self-hosted PDF worker. Hosted Commander and another machine origin require a separately reviewed CSP; that case is not claimed here.
+
+Diagram style attributes become a small allowlist of SVG presentation attributes. Theme variables and typography live in the lazy house stylesheet, preserving style-src self without unsafe-inline.

@@ -6,7 +6,10 @@ GlobalWorkerOptions.workerSrc = workerUrl;
 /** Render pixels only: no PDF actions, annotations, HTML or scripting layer. */
 export async function pdfPreview(viewport: HTMLElement, url: string, name: string): Promise<void> {
   const response = await fetch(url, { credentials: "omit", referrerPolicy: "no-referrer" });
-  if (!response.ok) throw new Error("PDF could not be loaded");
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw Object.assign(new Error("PDF could not be loaded"), { status: response.status });
+  }
   const data = new Uint8Array(await response.arrayBuffer());
   if (!viewport.isConnected) return;
   const task = getDocument({ data, useWasm: false, useSystemFonts: true, disableFontFace: true });

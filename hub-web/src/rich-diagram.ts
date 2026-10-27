@@ -2,6 +2,7 @@ import DOMPurify from "dompurify";
 import { renderAsync } from "pele/lazy";
 
 let nextDiagram = 0;
+const presentation = new Set(["fill", "fill-opacity", "stroke", "stroke-width", "stroke-opacity", "stroke-dasharray", "stroke-linecap", "stroke-linejoin", "font-size", "font-weight", "font-style", "text-anchor", "opacity", "rx", "ry"]);
 
 /** No HTML string is inserted into the live document: only sanitized DOM nodes. */
 export async function diagram(document: Document, source: string): Promise<HTMLElement> {
@@ -16,8 +17,16 @@ export async function diagram(document: Document, source: string): Promise<HTMLE
   // DOMPurify handles executable attributes; also disallow external resources
   // and CSS URLs. The renderer's theme uses local CSS variables only.
   for (const node of fragment.querySelectorAll("*")) {
+    // Pele's geometry/text presentation can use SVG attributes under the
+    // hub's strict style-src 'self'. Theme variables live in our lazy CSS.
+    for (const declaration of (node.getAttribute("style") ?? "").split(";")) {
+      const separator = declaration.indexOf(":");
+      const name = declaration.slice(0, separator).trim();
+      if (presentation.has(name)) node.setAttribute(name, declaration.slice(separator + 1).trim());
+    }
+    node.removeAttribute("style");
     for (const attr of [...node.attributes]) {
-      if (/href$/i.test(attr.name) && !attr.value.startsWith("#") || /url\(\s*['"]?(?!#)/i.test(attr.value) || /@import/i.test(attr.value)) node.removeAttribute(attr.name);
+      if (/href$/i.test(attr.name) && !attr.value.startsWith("#") || (/url\(/i.test(attr.value) && !/^url\(\s*(['"]?)#[\w:.-]+\1\s*\)$/i.test(attr.value)) || /@import/i.test(attr.value)) node.removeAttribute(attr.name);
     }
   }
   const figure = document.createElement("figure"); figure.className = "rich-diagram";

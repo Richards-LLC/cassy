@@ -157,7 +157,7 @@ describe("opening an artifact from Commander (cassy#910)", () => {
     const refused = await connection.artifactView("patient pelican", "art-local");
     expect(refused).toEqual({ ok: false, status: 409, code: "artifact_not_in_cloud", detail: "local" });
     const preview = await connection.artifactPreview("patient pelican", "art-preview");
-    expect(preview).toEqual({ ok: true, view: { artifact_id: "art-preview", url: "https://atlas.test/v1/sessions/patient%20pelican/artifacts/art-preview/content?t=opaque-ticket", expires_at: "2030-01-01T00:00:00Z" } });
+    expect(preview).toEqual({ ok: true, view: { artifact_id: "art-preview", url: "https://atlas.test/v1/sessions/patient%20pelican/artifacts/art-preview/content?t=opaque-ticket", expires_at: "2030-01-01T00:00:00.000Z" } });
     expect(seen.at(-1)?.url).toBe("https://atlas.test/v1/sessions/patient%20pelican/artifacts/art-preview/ticket");
     expect(seen.at(-1)?.method).toBe("POST");
     expect(seen.at(-1)?.dpop).toBeTruthy();

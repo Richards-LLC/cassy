@@ -705,7 +705,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Goal:** inspect a Mermaid diagram, a collapsible unified diff, an image, a PDF first page and playable video/audio without leaving the conversation, with source and original files reachable
 - **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
 - **Suite:** `hub-web/e2e/journeys/rich-content.journey.ts`
-- **Gaps:** hub artifact metadata and signed URLs are doubled; actual PNG, PDF, WebM and WAV bytes are decoded by the production browser build. Production embedded lazy-asset serving is proven separately by the hub handler tests.
+- **Gaps:** hub tickets and proxy responses are doubled; actual PNG, PDF, WebM and WAV bytes are decoded by the production browser build under a self-only media CSP. Ticket binding, revocation and proxy authorization are proven by the hub handler tests. Hosted Commander cross-origin media remains outside this hub-served proof.
 
 #### Steps
 
@@ -723,7 +723,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
 - Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.
-- Media reserve their viewport before URLs or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes.
+- Media reserve their viewport before tickets or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes. An expired video ticket is renewed once, preserving the requested playback and native Range seeking.
 - PDF previews render only the first page as pixels. The original file link remains beneath every preview, including unavailable ones.
 
 #### Edge paths

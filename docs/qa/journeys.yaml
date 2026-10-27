@@ -227,7 +227,7 @@ invariants:
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
   HUB-J22-GOAL:
     statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
-    check: 'Walk HUB-J22 through the committed production bundle; read back the hub double artifactRequests for one request per file and real media decode/playback, and verify source fallback plus stable media bounds.'
+    check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
 bug_families:
   clean-home-launch-remedies:
     title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
@@ -1876,4 +1876,4 @@ journeys:
     share_pct: null
     basis: New evidence-reading journey; no per-journey usage instrumentation.
   spec: hub-web/e2e/journeys/rich-content.journey.ts
-  catalog_gaps: Signed URLs and metadata are doubled; real PNG/PDF/WebM/WAV decode and playback use the production browser build. Embedded lazy assets are proven by separate hub handler tests.
+  catalog_gaps: Tickets and proxy bytes are doubled; real PNG/PDF/WebM/WAV decode and playback use the production browser build. Embedded assets and ticket/proxy authorization have separate hub handler tests. Hosted cross-origin media is outside this proof.

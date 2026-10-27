@@ -173,7 +173,7 @@ installAttachmentSheet((sheet, file, context) => {
   if (!entry) return sheet;
   const separator = entry[0].indexOf(":");
   const machineId = entry[0].slice(0, separator), session = entry[0].slice(separator + 1);
-  return inlineAttachment(sheet, file, async () => connections.get(machineId)?.artifactView(session, file.artifact_id));
+  return inlineAttachment(sheet, file, async () => connections.get(machineId)?.artifactPreview(session, file.artifact_id));
 });
 const conversationHistories = new Map<string, ConversationHistory>();
 /** Supervisor turns per thread the operator had on screen the last time that thread was open. */

@@ -1,6 +1,6 @@
 .rich-diagram, .rich-diff { margin: 10px 0 0; max-width: 100%; min-width: 0; background: var(--sheet-bg); color: var(--ink); border-radius: 8px; }
 .rich-diagram { padding: 12px; overflow: auto; --pele-bg: var(--sheet-bg); --pele-fg: var(--ink); --pele-muted: var(--ink-mid); --pele-line: var(--ink); --pele-surface: var(--sheet-bg); --pele-surface-alt: var(--panel); --pele-border: var(--ink-mid); --pele-accent: var(--color-verdict); --pele-font: var(--font-ui); --pele-font-mono: var(--font-mono); }
-.rich-diagram > svg { display: block; max-width: 100%; height: auto; margin: auto; }
+.rich-diagram > svg { --_bg: var(--sheet-bg); --_fg: var(--ink); --_m: var(--ink-mid); --_l: var(--ink); --_s: var(--sheet-bg); --_a: var(--panel); --_b: var(--ink-mid); --_c: var(--color-verdict); --_r: 4px; --_fm: var(--font-mono); font: 16px var(--font-ui); color: var(--ink); display: block; max-width: 100%; height: auto; margin: auto; }
 .rich-diagram summary, .rich-diff summary { padding: 10px 12px; cursor: pointer; font: var(--weight-medium) 13px/1.4 var(--font-ui); color: var(--ink); overflow-wrap: anywhere; }
 .rich-diagram summary { padding: 10px 0 0; }
 .rich-diff pre { margin: 0; padding: 10px 0; overflow-x: auto; font: var(--weight-regular) 12px/1.5 var(--font-mono); }

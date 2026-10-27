@@ -703,6 +703,23 @@ export class HubConnectionSupervisor {
    * (cassy#910). Unlike `request`, a refusal is an answer, not an exception:
    * the machine's stable error code tells Commander what to say.
    */
+  /** Mint a short-lived, revocable media capability; never put pairing credentials in src. */
+  async artifactPreview(session: string, artifactId: string): Promise<ArtifactViewResult> {
+    return withRequestDeadline(async signal => {
+      const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}`;
+      const { response } = await this.authorizedFetch("POST", `${path}/ticket`, { signal });
+      const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+      if (response.ok && typeof body?.ticket === "string" && body.ticket.length > 0 && body.ticket.length <= 4_096 && typeof body.expires_at === "string" && Number.isFinite(Date.parse(body.expires_at))) {
+        const url = new URL(`${path}/content`, this.machine.baseUrl);
+        url.searchParams.set("t", body.ticket);
+        // Convert the hub's clock to this browser's clock for the expiry fast path.
+        const expiresAt = new Date(Date.parse(body.expires_at) - this.clockOffsetMs).toISOString();
+        return { ok: true, view: { artifact_id: artifactId, url: url.href, expires_at: expiresAt } };
+      }
+      return { ok: false, status: response.ok ? 502 : response.status, code: typeof body?.error === "string" ? body.error : "preview_unavailable" };
+    });
+  }
+
   async artifactView(session: string, artifactId: string): Promise<ArtifactViewResult> {
     return withRequestDeadline(async signal => {
     const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/url`;

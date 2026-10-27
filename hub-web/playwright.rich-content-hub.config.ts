@@ -11,7 +11,7 @@ export default defineConfig(base, {
   projects: [{
     ...base.projects!.find((project) => project.name === "journeys")!,
     testMatch: "rich-content.journey.ts",
-    use: { ...base.projects!.find((project) => project.name === "journeys")!.use, baseURL: url.href },
+    use: { ...base.projects!.find((project) => project.name === "journeys")!.use, baseURL: url.href, ignoreHTTPSErrors: true },
   }],
   webServer: [], // The supervisor owns the registered candidate and its lifetime.
 });

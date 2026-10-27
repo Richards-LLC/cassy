@@ -32,3 +32,27 @@ refer to a complete truncated path followed by the separate word `to`.
 
 Scored by the implementing worker on 2026-10-27. The project note must describe
 structural agreement with this build, while the drift verdict describes the live hub.
+
+## Project receipt correction
+
+Candidate `787798cb8` on macOS: a canonical project policy reports
+"this build's canonical routes" for healthy, skipped and mismatching probes.
+With a read/broadcast hub, the receipt stays stale and names the policy edit.
+The project policy is byte-identical across the mismatch.
+
+`terminal-qa: PASS cas integrate violet · 12 runs · 0 fail · 0 warn · 0 allowed`
+
+`terminal-qa: PASS cas integrate violet drift · 12 runs · 0 fail · 0 warn · 4 allowed`
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | Stale and its next action precede the project row; the row describes the installed build. |
+| Fit | 4 | 80/120-column captures retain the full note and the existing path escape. |
+| Craft | 4 | Project note and drift details wrap on whitespace with hanging indents. |
+| Theme safety | 5 | Four palettes, NO_COLOR, pipe and C-locale captures pass. |
+| Machine contract | 5 | Nine JSON captures parse as single documents; note and drift remain separate fields. |
+
+The four allowed detector findings match only a complete ellipsis-shortened
+`project/.cas/proxy.toml` path followed by the separate word `to`. Initial
+strict captures are retained; no word is split. Scored by the implementing
+worker on 2026-10-27; full captures and the narrow exception are in the task artifacts.

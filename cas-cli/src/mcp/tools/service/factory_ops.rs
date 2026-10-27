@@ -12654,7 +12654,6 @@ mod spawn_lifecycle_tests {
             .expect_err("unselected account must refuse before launch");
         for detail in [
             "config_dir",
-            "project",
             logged_in.to_str().unwrap(),
             "No worktree was created",
         ] {
@@ -12720,6 +12719,7 @@ mod spawn_lifecycle_tests {
         std::fs::write(default.join("auth.json"), "{}").unwrap();
         preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
             .expect("authenticated default account remains usable without an explicit selector");
+        assert!(error.contains("project"), "refusal omitted the project worker config_dir remedy: {error}");
 
     }
 

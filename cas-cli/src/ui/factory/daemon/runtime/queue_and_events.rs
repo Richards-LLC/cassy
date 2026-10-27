@@ -12870,18 +12870,22 @@ mod tests {
             scopes: vec!["message:send".into()],
             operator_verified: true,
         };
-        let id = super::super::delivery::enqueue_commander_message(
-            &root,
-            &daemon.session_name,
-            "supervisor",
-            "Yes please, reconcile it.",
-            None,
-            false,
-            None,
-            &attribution,
-        )
-        .unwrap()
-        .id();
+        let receipt = daemon.dispatch_commander_control(
+            super::super::delivery::CommanderControl::SendMessage {
+                target: "supervisor".into(),
+                text: "Yes please, reconcile it.".into(),
+                summary: None,
+                urgent: false,
+                client_ref: Some("ben-send".into()),
+                in_reply_to: None,
+                attribution,
+            },
+        ).await.unwrap().unwrap();
+        let receipt_json = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(receipt_json["MessageQueued"]["operator_label"], "Ben",
+            "the origin's receipt must name the person, not just the hardware");
+        let crate::ui::factory::DaemonMessage::MessageQueued { notification_id: id, .. } = receipt
+        else { panic!("expected queued receipt"); };
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
         assert!(
             queue
@@ -12893,6 +12897,7 @@ mod tests {
         );
         let live = daemon.live_operator_message(id).unwrap().unwrap();
         assert_eq!(live.state, "acknowledged");
+        assert_eq!(live.operator_label.as_deref(), Some("Ben"));
         // The inert supervisor has not consumed the row. A reload and another
         // pairing still see the same durable acceptance, not Sending again.
         for device in ["phone", "desktop"] {
@@ -12905,6 +12910,8 @@ mod tests {
             assert_eq!(messages.len(), 1, "{device}'s accepted turn");
             assert_eq!(messages[0].notification_id, live.notification_id);
             assert_eq!(messages[0].text, live.text);
+            assert_eq!(messages[0].operator_label.as_deref(), Some("Ben"),
+                "both people must see Ben's name on reload");
             assert_eq!(
                 messages[0].state, live.state,
                 "{device}'s receipt regressed on history"

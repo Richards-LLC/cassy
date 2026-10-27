@@ -194,6 +194,7 @@ test('undecoded images fail strict captures even with a visual allowlist', async
     assert.equal(result.exitCode, 1);
     const failures = result.findings.filter(({ type }) => type === 'image-not-decoded');
     assert.equal(failures.length, 2, JSON.stringify(result.findings));
+    // pin: offline reports retain the measured decode refusal's reason, not just the image label.
     assert.ok(result.markdown.includes(failures[0].reason), 'the report names the decode failure or timeout');
     assert.ok(failures.every(({ selector, textSample, reason }) => selector === '#after' && textSample === 'After ranking'
       && reason.includes(mode === 'pending' ? '100 ms' : 'failed')), JSON.stringify(failures));

@@ -307,4 +307,50 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     // the outage, on screen and in the accessibility tree.
     await expect(page.getByText(outage)).toHaveCount(0);
   });
+  await journey.stage("A replacement Live session retires its outage attention and keeps history", async () => {
+    // cas-d53c: real daemon events are separate from the socket's alarm.
+    hub.hold(PELICAN);
+    hub.drop(PELICAN);
+    await expect(header).toContainText("Reconnecting");
+    const events = [
+      { kind: "daemon_disconnected", sequence: 1, session: PELICAN },
+      { kind: "session_removed", sequence: 2, session: PELICAN },
+      { kind: "daemon_error", sequence: 3, session: PELICAN, payload: { message: "Keep this diagnostic" } },
+      { kind: "daemon_disconnected", sequence: 4, session: "another-session" },
+    ];
+    const emit = (rows: typeof events) => page.evaluate((rows) => {
+      const wire = window as unknown as { __journeyMachineEvent: (host: string, data: string) => number };
+      for (const event of rows) wire.__journeyMachineEvent("atlas.test", JSON.stringify(event));
+    }, rows);
+    const stored = () => page.evaluate(async () => {
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open("cas-commander-v1", 2);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const rows = await new Promise<{ id: string; acknowledgedAt?: string; headline?: string }[]>((resolve, reject) => {
+        const request = db.transaction("attention").objectStore("attention").getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      db.close();
+      return rows.filter(row => row.id.startsWith("atlas:event:")).sort((a, b) => a.id.localeCompare(b.id))
+        .map(row => ({ id: row.id, resolved: !!row.acknowledgedAt, enriched: row.headline === "Recovered outage diagnostic" }));
+    });
+    await emit(events);
+    await expect.poll(stored).toEqual(events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: false, enriched: false })));
+    hub.release(PELICAN);
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: RECOVERY_TIMEOUT_MS }).toBe(true);
+    await expect(header).toHaveText(" · Live");
+    const recovered = events.map(event => ({ id: `atlas:event:${event.sequence}`, resolved: event.sequence <= 2, enriched: false }));
+    await expect.poll(stored, { message: "Live resolves only its outage notices, retaining all four rows" }).toEqual(recovered);
+    await expect(page.locator("#attention-panel")).not.toContainText("Session ended");
+    await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-label", "Attention: 1 item for this session");
+    // A later enrichment revision of the retained outage must stay history.
+    await emit(events.slice(0, 2).map(event => ({ ...event, revision: 1,
+      enrichment: { severity: "warning", action: "none", summary: "Recovered outage diagnostic", fingerprint: `outage:${event.sequence}` },
+    })));
+    await expect.poll(stored).toEqual(recovered.map(row => ({ ...row, enriched: row.resolved })));
+    await expect(page.locator("#conversation-attention")).toHaveAttribute("aria-label", "Attention: 1 item for this session");
+  });
 });

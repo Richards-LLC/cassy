@@ -371,6 +371,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own thread has no session line, and the held message stays above the ones sent after it)
 6. During an outage, Interrupt and Raw output say why they wait — the Attention rail names the outage instead of "All clear"; the conversation header's Interrupt and Raw output stay on screen at 1280 and 390, marked unavailable and described by "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.", so the banner stays the one outage line announced; pressing either says why in a toast, sends no interrupt and opens no drawer; once the session is back both are available again and the rail says "All clear"
+7. A replacement Live session retires its outage attention and keeps history — daemon-lost and session-ended notices for the recovered session leave the active rail and badge, remain acknowledged in storage through enrichment replay, and leave unrelated diagnostics and other sessions' outages active (cas-d53c)
 
 #### Expected experience
 

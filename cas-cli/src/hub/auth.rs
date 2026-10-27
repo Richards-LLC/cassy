@@ -1662,11 +1662,12 @@ impl AuthStore {
     }
 
     /// Content-free connection evidence. Caller supplies fixed route/refusal
-    /// categories and a server-generated UUID, never raw headers or paths.
+    /// categories and a server-generated UUID, never raw headers or paths. The
+    /// row names the hub like every other audit row (cas-db44).
     pub(crate) fn audit_connection(&self, category: &str, preflight: bool, status: u16, request_id: &str, reason: Option<&str>, count: u64) -> Result<()> {
         let now = Utc::now();
         let row = serde_json::json!({
-            "timestamp": now, "action": "connection_recovery", "request_id": request_id,
+            "timestamp": now, "machine_id": self.0.machine_id, "action": "connection_recovery", "request_id": request_id,
             "category": category, "preflight": preflight, "status": status,
             "reason": reason, "count": count,
         });

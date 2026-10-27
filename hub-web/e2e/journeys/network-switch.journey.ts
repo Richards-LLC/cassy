@@ -565,7 +565,8 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
     const working = page.getByRole("log").locator(".working");
-    await expect(working).toHaveCount(1);
+    // A receipt alone never claims supervisor execution, before or after revocation.
+    await expect(working).toHaveCount(0);
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
     await hub.up("atlas");

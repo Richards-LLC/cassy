@@ -483,14 +483,14 @@ describe("ConversationView (Pebble thread)", () => {
     expect(delivered.textContent).toBe("Queued for supervisor");
     expect(delivered.getAttribute("role")).toBe("status");
     expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBeUndefined();
-    // A second send still in flight: the first keeps its tick.
+    // A second send still in flight: the first keeps its queue status.
     history.submit("b", "sup", "Second", at(9, 1)); view.update();
     expect(view.element.querySelectorAll(".conversation-delivered")).toHaveLength(1);
     expect(view.element.querySelector('.bub[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
-    // An unrelated supervisor turn crosses the second send (journey F4): the first keeps Delivered…
+    // An unrelated supervisor turn crosses the second send: the first keeps its queue status.
     history.reply({ notification_id: 12, reply_to: null, message: "Gate run 2 of 3 is going.", summary: "", device_id: "d" }, at(9, 2)); view.update();
     expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstQueued for supervisor"]);
-    // …and the second, acknowledged after that turn, ends Delivered too.
+    // The second acceptance is also queued, never inferred transport delivery.
     history.acknowledge({ client_ref: "b", notification_id: 11, target: "sup", stamped: true }); view.update();
     expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstQueued for supervisor", "SecondQueued for supervisor"]);
     const confirmed = { notification_id: 10, target: "sup", text: "First", state: "delivered" as const, stamped: true, device_id: "phone", at: new Date(at(9, 0)).toISOString() };

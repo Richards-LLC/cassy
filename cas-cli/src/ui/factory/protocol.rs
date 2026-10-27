@@ -184,6 +184,8 @@ pub struct ConversationHistoryMessage {
     pub notification_id: i64,
     pub target: String,
     pub text: String,
+    /// acknowledged: durably queued; delivered: actual recipient transport proof.
+    /// Older daemons used sending for accepted-but-unconsumed rows.
     pub state: String,
     pub stamped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -554,7 +556,8 @@ pub enum DaemonMessage {
     /// A newly queued operator send visible to other paired viewers.
     OperatorMessage(ConversationHistoryMessage),
 
-    /// Durable acknowledgment for a Commander semantic message.
+    /// Durable queue acceptance for a Commander semantic message.
+    /// This does not prove recipient transport delivery or execution.
     MessageQueued {
         client_ref: Option<String>,
         notification_id: i64,

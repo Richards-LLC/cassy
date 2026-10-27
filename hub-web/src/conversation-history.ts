@@ -260,8 +260,7 @@ export class ConversationHistory {
   /**
    * A send that left this browser and has no reply yet (cas-5a8f). Unlike
    * `hasPending`, a send still held here because the machine is unreachable
-   * does not count: the supervisor has not seen it, so it cannot be working
-   * on it.
+   * does not count. This is a wait for a reply, never evidence of execution.
    */
   awaitingReply(): boolean {
     return this.events.some(event => event.kind === "send" && !event.value.held && (event.value.state === "sending" || event.value.state === "acknowledged" || event.value.state === "delivered"));
@@ -640,7 +639,7 @@ export class ConversationHistory {
     // cas-8d52: the time this message shows, for the thread a reload rebuilds.
     const shown = send.shownAt ?? send.at;
     if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
-    // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
+    // A late receipt proves queue acceptance: restore the dismissed send without claiming transport delivery.
     delete send.value.dismissed;
     if (send.value.state === "replied" || this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id)) send.value.state = "replied";
     else if (send.value.state !== "delivered") send.value.state = "acknowledged";

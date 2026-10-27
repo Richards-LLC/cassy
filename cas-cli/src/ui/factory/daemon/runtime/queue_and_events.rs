@@ -16544,7 +16544,7 @@ mod tests {
             .id();
         queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
         let (_, history) = super::commander_history_turns(
-            vec![queue.queued_prompt(ask_id).unwrap().unwrap()], "factory-1", &Default::default(),
+            queue.as_ref(), vec![queue.queued_prompt(ask_id).unwrap().unwrap()], "factory-1", &Default::default(),
         );
         assert_eq!(history[0].options, ["Fix in-train", "Ship with allowlist"]);
 

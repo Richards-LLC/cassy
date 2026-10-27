@@ -47,7 +47,7 @@ test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true
 
 // Independent goals have their own budget; each still enters through Commander.
 test("HUB-J13 grant launch and keep the permission across a reload", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], launch: { atlas: atlasLaunch() } });
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
 
@@ -83,7 +83,7 @@ test("HUB-J13 grant launch and keep the permission across a reload", journeyPart
 });
 
 test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
@@ -150,7 +150,7 @@ test("HUB-J13 start a new session from Commander and return to it", journeyPart,
 });
 
 test("HUB-J13 attach to an already running project", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
   await journey.open();
@@ -165,7 +165,7 @@ test("HUB-J13 attach to an already running project", journeyPart, async ({ page,
 });
 
 test("HUB-J13 recover from a refused launch by browsing a folder", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   await journey.open();
 
@@ -200,7 +200,7 @@ test("HUB-J13 recover from a refused launch by browsing a folder", journeyPart, 
 });
 
 test("HUB-J13 read the grant command and supervisor and worker hints on a phone", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: ["machine-read", "session-read"] }, launch: { atlas: atlasLaunch() } });
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: ["machine-read", "session-read"] }, launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
 
   await journey.stage("The grant command reads as whole tokens on a phone, with Supervisor and Workers explained", async () => {
@@ -243,12 +243,11 @@ test("HUB-J13 read the grant command and supervisor and worker hints on a phone"
 });
 
 test("HUB-J13 allow launch with a long machine name on a phone", journeyPart, async ({ page, journey }) => {
-  const machine: Machine = { ...ATLAS, label: "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap", sessions: [...ATLAS.sessions, { name: "bright-heron-21", supervisor: "bright-heron-21", project_dir: "/home/dev/ledger-api", workers: [], liveness: "live" }] };
+  const machine: Machine = { ...structuredClone(ATLAS), label: "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap", sessions: [...ATLAS.sessions, { name: "bright-heron-21", supervisor: "bright-heron-21", project_dir: "/home/dev/ledger-api", workers: [], liveness: "live" }] };
   const launch = atlasLaunch();
   launch.projects.find((project) => project.id === "p-ledger")!.running_session = "bright-heron-21";
   const hub = await journey.hub({ machines: [machine], paired: ["atlas"], launch: { atlas: launch } });
   const sheet = page.getByRole("dialog", { name: "New session" });
-  const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
 
   await journey.stage("A long machine name fits the phone consent", async () => {
     await journey.open();

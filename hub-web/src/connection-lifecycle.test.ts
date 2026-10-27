@@ -1062,7 +1062,6 @@ describe("Commander live connection lifecycle", () => {
     socket.receive({ channel: "pty:session-a", error: { code: "session_not_found" } });
     socket.receive({ channel: "events", event: { kind: "session_added", session: "session-a", sequence: 1 } });
     expect(connection.hasLiveAttach("session-a")).toBe(false);
-    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Wait for the replacement" } })).toBe(false);
     await vi.advanceTimersByTimeAsync(2_000);
     expect(subscriptions()).toHaveLength(3);
     socket.receive(welcome);

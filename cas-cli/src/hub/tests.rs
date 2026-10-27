@@ -1586,9 +1586,16 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         "base-uri 'none'",
         "frame-ancestors 'none'",
         "form-action 'none'",
-        "worker-src 'none'",
+        "worker-src 'self'",
+        "media-src 'self'",
+        "img-src 'self' data:",
     ] {
         assert!(csp.contains(required), "missing CSP directive {required}");
+    }
+    for directive in ["img-src", "media-src", "worker-src"] {
+        let value = csp.split(';').map(str::trim)
+            .find(|value| value.starts_with(&format!("{directive} "))).unwrap();
+        assert!(!value.contains("https:") && !value.contains("*"), "{value}");
     }
     assert!(!csp.contains("'unsafe-inline'"));
     assert!(!csp.contains("'unsafe-eval'"));
@@ -5245,4 +5252,54 @@ async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_
         listed(&session_reader).await,
         vec![(folder.canonicalize().unwrap().to_string_lossy().into_owned(), Some("factory-a".to_owned()))],
     );
+}
+
+
+/// Media elements need reusable, narrowly scoped capabilities instead of a
+/// pairing credential in a URL (cas-1b35). One table drives the public router.
+#[tokio::test]
+async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
+    use cas_store::{NewArtifact, PromptQueueStore, SqliteArtifactStore};
+    let f = ops_fixture([Scope::SessionRead].into_iter().collect());
+    let artifacts = SqliteArtifactStore::open(&f.cas_dir).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&f.cas_dir).unwrap();
+    for (id, mime, session) in [
+        ("art-image", "image/png", OPS_SESSION),
+        ("art-video", "video/mp4", OPS_SESSION),
+        ("art-pdf", "application/pdf", OPS_SESSION),
+        ("art-html", "text/html", OPS_SESSION),
+        ("art-foreign", "image/png", "another-session"),
+    ] {
+        artifacts.record_local(&NewArtifact {
+            id: id.into(), task_id: OPS_TASK.into(), name: id.into(),
+            mime: mime.into(), size_bytes: 6, sha256: "a".repeat(64),
+        }).unwrap();
+        artifacts.mark_uploaded(id, &format!("cloud-{id}")).unwrap();
+        artifacts.mark_committed(id, None).unwrap();
+        let row = queue.enqueue_with_session("supervisor", "operator", "media", session).unwrap();
+        queue.stamp_operator_reply(row, "status", &[cas_types::ArtifactRef {
+            artifact_id: id.into(), name: id.into(), mime: mime.into(),
+            size_bytes: 6, sha256: "a".repeat(64),
+        }]).unwrap();
+    }
+    for (session, artifact, expected) in [
+        (OPS_SESSION, "art-image", StatusCode::OK),
+        (OPS_SESSION, "art-video", StatusCode::OK),
+        (OPS_SESSION, "art-pdf", StatusCode::OK),
+        (OPS_SESSION, "art-html", StatusCode::NOT_FOUND),
+        (OPS_SESSION, "art-missing", StatusCode::NOT_FOUND),
+        (OPS_SESSION, "art-foreign", StatusCode::NOT_FOUND),
+        ("another-session", "art-image", StatusCode::NOT_FOUND),
+    ] {
+        let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/ticket");
+        let (status, body) = f.call("POST", &uri, None).await;
+        assert_eq!(status, expected, "{uri}: {body}");
+        if expected == StatusCode::OK {
+            assert!(!body["ticket"].as_str().unwrap().is_empty());
+            assert!(body.get("url").is_none());
+            let expires = chrono::DateTime::parse_from_rfc3339(body["expires_at"].as_str().unwrap()).unwrap();
+            assert!(expires > chrono::Utc::now());
+            assert!(expires <= chrono::Utc::now() + chrono::Duration::minutes(5));
+        }
+    }
 }

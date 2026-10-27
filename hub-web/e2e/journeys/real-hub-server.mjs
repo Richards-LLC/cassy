@@ -228,14 +228,8 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
     "[factory]\nai_enrichment = false\n",
   );
   if (newSession) {
-    // A machine hub commonly inherits the project that originally started it.
-    const launcher = join(home, "launcher");
-    await mkdir(launcher);
-    await run("git", ["init", "-q", launcher], { env, timeout: 5000 });
-    await run(cli, ["init", "--yes", "--no-integrations"], {
-      cwd: launcher, env: { ...env, CAS_ROOT: join(launcher, ".cas") }, timeout: 15000,
-    });
-    state.env.CAS_ROOT = join(launcher, ".cas");
+    // Match the production user service: a machine hub has no CAS_ROOT.
+    delete state.env.CAS_ROOT;
     await writeFile(join(home, ".cas", "config.toml"), `[hub]\nlaunch_roots = [${JSON.stringify(home)}]\n`);
   }
   if (!newSession) startDaemon();

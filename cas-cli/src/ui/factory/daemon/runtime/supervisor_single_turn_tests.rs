@@ -36,6 +36,10 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
 
 /// [`fixture`] with the supervisor launched under `cli`.
 pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempDir, FactoryDaemon) {
+    fixture_with_readiness(cli, true).await
+}
+
+async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (tempfile::TempDir, FactoryDaemon) {
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
@@ -79,7 +83,9 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
         )
         .unwrap();
     // This private shell has no harness startup phase to wait through.
-    pane.backdate_spawn_for_test(Duration::from_secs(6));
+    if ready {
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+    }
     daemon.app.mux.add_pane(pane);
     daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
@@ -95,7 +101,7 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
             }
             if banner.windows(b"ready".len()).any(|bytes| bytes == b"ready")
                 && root.path().join("input").is_file()
-                && daemon.app.mux.pane_ready_for_injection(&name)
+                && (!ready || daemon.app.mux.pane_ready_for_injection(&name))
             {
                 break;
             }
@@ -262,6 +268,87 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     typed_once(&root, &mut daemon, needle).await;
+}
+
+/// cas-dd2e: sturdy-lion-37 wrote its startup brief while Claude was still
+/// starting. Its transport reservation then hid the pending wake forever.
+/// The private PTY only captures input: it never reads Teams or replies for us.
+#[tokio::test(flavor = "current_thread")]
+async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() {
+    if !fixture_child("claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready") {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // The operator selected a named Claude profile. That launch includes the
+    // real SessionStart fallback bundle, too large for the inline-body path.
+    let profile = env.home().join("claude-profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &profile);
+    let (root, mut daemon) = fixture_with_readiness(cas_mux::SupervisorCli::Claude, false).await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let name = daemon.app.supervisor_name().to_string();
+    // Keep the first pass inside the real harness startup-readiness window.
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas.clone(), daemon.app.project_scope(),
+    );
+    // The real incident's startup contained project context (11,962 chars).
+    // A saved handoff exercises the same context builder without copying the
+    // operator's private project text into the regression.
+    let mut handoff = cas_types::Entry::new(
+        "startup-handoff".into(), cas_mux::claude_supervisor_contract("(none)"),
+    );
+    handoff.tags = vec!["handoff".into(), "role:supervisor".into()];
+    crate::store::open_store(&cas).unwrap().add(&handoff).unwrap();
+    crate::ui::factory::queue_supervisor_intro_prompt(
+        &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
+    );
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    let row = queue.peek_for_targets(&[&name], None, 10).unwrap().remove(0);
+    assert!(row.prompt.contains("<cas-session-start-fallback>"), "named-profile startup carries context: {}", row.prompt);
+    assert!(!cas_store::fits_hook_surface(&row.prompt), "startup with its handoff takes the Teams body path ({} chars)", row.prompt.chars().count());
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            if queue.deferred_inbox_state(row.id).unwrap().is_some() { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("startup must reach Teams while its pane is not ready");
+    assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_none());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    let held = teams_messages(&daemon);
+    assert_eq!(held.len(), 1);
+    assert!(held[0]["text"].as_str().unwrap().contains(&row.prompt));
+
+    // Claude's file watcher can ingest the Teams copy before its composer
+    // is ready. Ingestion is not a turn. Advance the existing observation
+    // window explicitly, rather than making the test sleep for 15 seconds.
+    std::fs::write(daemon.teams.as_ref().unwrap().teams_dir().join("inboxes/supervisor.json"), "[]").unwrap();
+    daemon.inbox_deferred_writes.get_mut(&row.id).unwrap().written_at =
+        Instant::now() - Duration::from_secs(16);
+    // The normal Claude retry cadence is durable wall-clock state. Make its
+    // existing next offer due as well, without a 30-second test sleep.
+    rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET wake_attempt_at = ?1 WHERE id = ?2",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(), row.id],
+    ).unwrap();
+    daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::from_secs(6));
+    let retried = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+            if typed.ends_with('\r') && queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_some() {
+                break typed;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    assert!(retried.is_ok(), "a ready supervisor must receive its deferred startup wake: {:?}",
+        queue.message_delivery_report(row.id).unwrap().map(|report|
+            (report.stage, report.pending_detail, report.recipient_receipt)));
+    let typed = retried.unwrap();
+    assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
+    assert!(typed.contains(&format!("inbox_poll notification_id={}", row.id)), "wake identifies its startup body: {typed:?}");
+    assert!(teams_messages(&daemon).is_empty(), "retry must not append another Teams body after ingestion");
 }
 
 /// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a

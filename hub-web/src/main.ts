@@ -2505,9 +2505,9 @@ function toast(message: string, scope?: { thread?: string; until?: () => boolean
   placeToastClearOfBanner(output);
   output.classList.add("visible");
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
-  // Timing out only hides it, as before; a scoped toast is also emptied once
-  // its conversation closes or its state ends (retireStaleToast).
-  toastTimer = window.setTimeout(() => output.classList.remove("visible"), 3200);
+  // Expiry retires the announcement too: an opacity-zero live region must
+  // not keep an old connection claim in the accessibility tree.
+  toastTimer = window.setTimeout(dismissToast, 3200);
 }
 
 /** The re-pair command shown under the status that introduces it (cas-093d F02). */

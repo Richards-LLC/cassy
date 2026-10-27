@@ -223,7 +223,9 @@ for (const colorScheme of ["light", "dark"] as const) {
   });
 }
 
-test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
+// These desktop goals share an entry, not a whole-test budget. Each gets a
+// fresh fleet; the merge/permission goal keeps its cross-machine request.
+async function openDesktopFleet(page: Page, journey: Journey) {
   const hub = await journey.hub({
     machines: [fleetMachine(ATLAS), fleetMachine(STUDIO)],
     paired: ["atlas", "studio"],
@@ -245,6 +247,11 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(rail.getByRole("button", { name: "Focus epic…" })).toBeVisible();
   });
 
+  return { hub, rail, announcer, row, task, sent };
+}
+
+test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
+  const { hub, rail, announcer, row, task, sent } = await openDesktopFleet(page, journey);
   await journey.stage("Pause a worker and undo it", async () => {
     const trigger = row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" });
     await trigger.click();
@@ -301,6 +308,23 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(task("cas-1500").locator(".status-chip")).toHaveText("Open");
   });
 
+  await journey.stage("Stopping a row hands focus to the next row", async () => {
+    await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
+    await row("swift-lark-3").getByRole("menuitem", { name: "Stop…" }).click();
+    await row("swift-lark-3").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(announcer).toHaveText("swift-lark-3 stopped.");
+    await expect(row("swift-lark-3")).toHaveCount(0);
+    await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeFocused();
+    // cas-d043 G06: with a row following, the result line is in view as well.
+    await expect(page.locator(".conversation-context .fleet-ops-result")).toHaveText("swift-lark-3 stopped.");
+    await expect(page.locator(".conversation-context .fleet-ops-result")).toBeInViewport();
+    await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeInViewport();
+  });
+
+});
+
+test("HUB-J17 a stale worker generation refuses Stop", journeyPart, async ({ page, journey }) => {
+  const { hub, announcer, row, sent } = await openDesktopFleet(page, journey);
   await journey.stage("A stale stop says what changed", async () => {
     // Another device restarted swift-lark-3 since this rail drew it.
     const world = (hub as unknown as { options: { fleet: Record<string, FleetWorld> } }).options.fleet[PELICAN]!;
@@ -314,6 +338,10 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(row("swift-lark-3")).toBeVisible();
   });
 
+});
+
+test("HUB-J17 a merge request stays on its machine and permissions explain refusal", journeyPart, async ({ page, journey }) => {
+  const { hub, rail, announcer, row, task } = await openDesktopFleet(page, journey);
   await journey.stage("Ask the supervisor to merge, after seeing the exact message", async () => {
     await task("cas-1999").getByRole("button", { name: "Ask supervisor to merge" }).click();
     const preview = task("cas-1999").locator(".fleet-ops-preview");
@@ -323,19 +351,6 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(announcer).toHaveText("Asked the supervisor to merge cas-1999.");
     await expect(task("cas-1999").locator(".fleet-ops-asked")).toHaveText(/^Asked (just now|\d+[smh] ago)$/);
     expect(hub.operations.filter((call) => (call.body.op as Record<string, unknown>).kind === "request_merge")).toHaveLength(1);
-  });
-
-  await journey.stage("Stopping a row hands focus to the next row", async () => {
-    await row("swift-lark-3").getByRole("button", { name: "Actions for swift-lark-3" }).click();
-    await row("swift-lark-3").getByRole("menuitem", { name: "Stop…" }).click();
-    await row("swift-lark-3").locator(".fleet-ops-confirm").getByRole("button", { name: "Stop", exact: true }).click();
-    await expect(announcer).toHaveText("swift-lark-3 stopped.");
-    await expect(row("swift-lark-3")).toHaveCount(0);
-    await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeFocused();
-    // cas-d043 G06: with a row following, the result line is in view as well.
-    await expect(page.locator(".conversation-context .fleet-ops-result")).toHaveText("swift-lark-3 stopped.");
-    await expect(page.locator(".conversation-context .fleet-ops-result")).toBeInViewport();
-    await expect(row("quiet-owl-7").getByRole("button", { name: "Actions for quiet-owl-7" })).toBeInViewport();
   });
 
   await journey.stage("A pairing without factory:manage", async () => {
@@ -391,7 +406,6 @@ test("HUB-J17 run the fleet from a conversation", async ({ page, journey }) => {
     await expect(manage.locator("code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt,factory:manage$/);
   });
 });
-
 
 // Keep machine-switch routing together; Undo and picker interactions are a
 // separate goal with their own fresh fleet and entry through the first sheet.

@@ -7805,7 +7805,16 @@ impl FactoryDaemon {
                     self.app.cas_dir(),
                     queued.id,
                     &queued.target,
-                    super::prompt_queue_jobs::QueueStamp::Retry { reason: cas_store::PendingReason::GatedNotReady, detail: (Some("operator composer is dirty")).map(|detail| detail.to_string()) },
+                    // GH #1400: nothing reached the transport. A protected
+                    // draft (or a prior submit still settling) must not spend
+                    // the failure budget and become terminal after 900s.
+                    // Park durably; the independent relay watchdog still
+                    // alerts the operator while this pane cannot accept input.
+                    super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                        detail: "composer protected: operator draft or prior injection/submit still pending".into(),
+                        recheck_at: chrono::Utc::now()
+                            + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
+                    },
                 );
                 {
                     self.record_injection_event(
@@ -7814,7 +7823,7 @@ impl FactoryDaemon {
                         &queued.target,
                         &pane_target,
                         "deferred",
-                        Some("operator composer is dirty".to_string()),
+                        Some("composer protected: operator draft or prior injection/submit still pending".to_string()),
                     );
                 }
             }
@@ -14661,39 +14670,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(stated.is_file(), "a failed fetch leaves a stated boundary");
-    }
-
-    #[test]
-    fn composer_deferred_delivery_stays_durable_across_restart_cas_0b64() {
-        let temp = tempfile::TempDir::new().unwrap();
-        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
-        let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let row_id = queue
-            .enqueue_with_session("supervisor", "worker-1", "report", "factory-session")
-            .unwrap();
-
-        let outcome = cas_mux::InjectOutcome::DeferredComposerDirty;
-        match outcome {
-            cas_mux::InjectOutcome::Delivered => {
-                queue.mark_transport_delivered(row_id).unwrap();
-            }
-            cas_mux::InjectOutcome::DeferredComposerDirty => {
-                queue
-                    .record_retry(
-                        row_id,
-                        cas_store::PendingReason::GatedNotReady,
-                        Some("operator composer is dirty"),
-                    )
-                    .unwrap();
-            }
-        }
-        drop(queue);
-
-        let reopened = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
-        let report = reopened.message_delivery_report(row_id).unwrap().unwrap();
-        assert_eq!(report.legacy_status, cas_store::MessageStatus::Pending);
-        assert_eq!(report.delivered_at, None);
-        assert_eq!(reopened.pending_count().unwrap(), 1);
     }
 
     #[test]

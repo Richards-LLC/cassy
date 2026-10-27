@@ -166,6 +166,10 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     );
     let alerts = queue.peek_operator_replies(&daemon.session_name, 10).unwrap();
     assert_eq!(alerts.len(), 1, "one durable escalation outside the blocked supervisor pane");
+    let held = queue.list_undelivered_lifecycle_relays(10).unwrap()
+        .into_iter().find(|row| row.prompt_id == id).unwrap();
+    assert!(held.next_attempt_at.is_some());
+    assert_eq!(held.operator_alert_id, Some(alerts[0].id));
     let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&alerts[0].prompt).unwrap();
     assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
     assert!(super::queue_and_events::escalate_undelivered_supervisor_relays(

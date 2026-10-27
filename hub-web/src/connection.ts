@@ -32,6 +32,7 @@ import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, L
 import { sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
+import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
 
 export type ConnectionState = ConnectionSnapshot;
 

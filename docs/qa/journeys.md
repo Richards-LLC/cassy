@@ -699,3 +699,13 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Edge paths
 
 - With no cloud origin configured, Explorer is a disabled item that says so.
+
+
+### HUB-J24 — Paste text, screenshots and files into a supervisor message
+
+- **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
+- **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with readable local paths.
+- **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
+- **Steps:** Paste plain text; preview long text, screenshot and picked file; lose an upload response, retry the same identity, and send the stored paths.
+- **Edge paths:** 10 MiB cap, empty/unsupported bytes, traversal names, unsigned or unknown session, upload identity conflict. Files remain through reconnect and shell replacement; a visible note says to send before closing the page.
+- **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.

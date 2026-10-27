@@ -47,6 +47,9 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
+  HUB-J24-GOAL:
+    statement: Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with readable local paths.
+    check: Walk HUB-J24 and the real authenticated upload regression; verify the real-hub supervisor describes a pasted screenshot using its stored path.
   HUB-J1-GOAL:
     statement: my machine's supervisor appears and I can open its conversation
     check: 'Walk HUB-J1 in hub-web/e2e/journeys/pair-code.journey.ts; verify the expected experience and edge paths
@@ -1854,3 +1857,27 @@ journeys:
   catalog_gaps: Explorer is stubbed at the cloud origin; Explorer's own switcher back to Commander and its token
     adoption are tracked in Richards-LLC/petra-stella-cloud#148; that the hub reports `cloud_project_id` from the
     project's canonical id is proven by the Rust hub test (cas-eaa3)
+
+- id: HUB-J24
+  name: Paste text, screenshots and files into a supervisor message
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: Open a paired conversation on desktop or phone, in light or dark.
+  steps:
+  - Paste plain text inline.
+  - Preview long pasted text, a screenshot and a picked file in the composer.
+  - Retry a failed upload with the same identity and send the stored paths once.
+  goal: Text plus readable host paths reach the supervisor without duplicate delivery.
+  owner_groups: [commander_runtime, commander_dependencies]
+  owners:
+  - hub-web/src/composer-uploads.ts
+  - hub-web/src/composer-uploads.css
+  - hub-web/e2e/journeys/paste-content.journey.ts
+  invariants: [HUB-J24-GOAL]
+  traffic:
+    share_pct: null
+    basis: New journey; no production traffic attribution yet.
+  spec: hub-web/e2e/journeys/paste-content.journey.ts
+  catalog_gaps: Protocol-double uploads model a lost response; host storage and MIME sniffing are proven by Rust and a fixture-HOME real-hub walk. Physical iOS and Android clipboards are not driven. Native OS share-target installation is a separate follow-up; Commander has no service worker.

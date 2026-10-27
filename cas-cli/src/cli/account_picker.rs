@@ -235,6 +235,7 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
                 profile
                     .usage
                     .as_deref()
+                    .filter(|_| profile.recommendation.is_none() && profile.exclusion.is_none())
                     .map(|usage| format!(": {usage}"))
                     .unwrap_or_default()
             ),

@@ -115,7 +115,7 @@ explicit go. Client messages carry commitments the operator owns.
      delivered environment and run the same command with `--side after`.
      Both runs use the same shot IDs, framing and masks. Preserve the receipt
      source; never label a deployed screenshot as a Git build.
-   - Without a catalog, the core runs affected journeys at both revisions and
+   - Without a catalog, the core runs affected browser checks at both revisions and
      pairs their final-stage screenshots only when both runs pass.
    - Mask personal data with `qa.capture.mask` or each shot's `mask`. A missing
      requested mask fails capture. Auth failures produce a finding without an

@@ -412,6 +412,43 @@ describe("Commander live connection lifecycle", () => {
     // The drained read's failure must not cost the fresh read.
     await vi.waitFor(() => expect(latest).toBe("catalog-2"));
   });
+  it("ends the stream without a fresh read when the drained heartbeat read is refused for auth (cas-1966)", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("heartbeat-fleet-change-refused"), () => {}, event => events.push(event));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const stream = hub.streams.at(-1)!.signal;
+
+    // The heartbeat's catalog read is in flight when the fleet changes, and
+    // the hub then refuses the pairing.
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/sessions" && !held) {
+        held = true;
+        await pending;
+      }
+      return fetchNow(input, init);
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(held).toBe(true));
+    const catalogReads = () => hub.requests.filter(row => row.path === "/v1/sessions").length;
+    const before = catalogReads();
+    let readsAtEnd: number | undefined;
+    stream.addEventListener("abort", () => { readsAtEnd = catalogReads(); }, { once: true });
+    hub.event({ kind: "fleet_changed", session: "session-a" });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    hub.refusePairing(true);
+    release();
+
+    await vi.waitFor(() => expect(stream.aborted).toBe(true));
+    expect(readsAtEnd! - before).toBe(1);
+  });
   it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {
     const hub = transport(multiplex);
     TransportSocket.instances = [];

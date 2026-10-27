@@ -90,8 +90,7 @@ fn selected(args: &[String]) -> bool {
                 ".journey.ts",
             ]
             .iter()
-            .find_map(|suffix| filename.strip_suffix(suffix))
-            else {
+            .find_map(|suffix| filename.strip_suffix(suffix)) else {
                 // Playwright ORs file filters, so a plain word can widen the run too.
                 return false;
             };

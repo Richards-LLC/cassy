@@ -758,6 +758,45 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
                 .assert()
                 .failure();
         }
+        // Lifecycle lookup must retain both aliases even though write scans
+        // collapse their common physical target (legacy alt sorts first).
+        let aliases_home = TempDir::new().unwrap();
+        let real = aliases_home.path().join(format!(".{provider}-work"));
+        let link = aliases_home.path().join(format!(".{provider}-alt"));
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("keep"), "private target").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        for alias in ["alt", "work"] {
+            let key = format!("{provider}:{alias}");
+            for action in ["disable", "enable"] {
+                cas_cmd(aliases_home.path()).current_dir(aliases_home.path())
+                    .args(["accounts", action, &key]).assert().success();
+                let output = cas_cmd(aliases_home.path()).current_dir(aliases_home.path())
+                    .args(["accounts", "list", "--json"]).output().unwrap();
+                let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+                let row = rows["accounts"].as_array().unwrap().iter().find(|row| row["name"] == alias).unwrap();
+                assert_eq!(row["flags"]["disabled"], action == "disable");
+            }
+        }
+        cas_cmd(aliases_home.path()).current_dir(aliases_home.path())
+            .args(["accounts", "rename", &format!("{provider}:work"), "renamed"])
+            .assert().success();
+        let renamed = aliases_home.path().join(format!(".{provider}-renamed"));
+        assert!(renamed.join("keep").is_file());
+        cas_cmd(aliases_home.path()).current_dir(aliases_home.path())
+            .args(["accounts", "rename", &format!("{provider}:renamed"), "work"])
+            .assert().success();
+        cas_cmd(aliases_home.path()).current_dir(aliases_home.path())
+            .args(["accounts", "remove", &format!("{provider}:alt"), "--yes"])
+            .assert().success();
+        assert!(!link.is_symlink());
+        assert_eq!(std::fs::read_to_string(real.join("keep")).unwrap(), "private target");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        cas_cmd(aliases_home.path()).current_dir(aliases_home.path())
+            .args(["accounts", "remove", &format!("{provider}:work"), "--yes"])
+            .assert().success();
+        assert!(!real.exists());
+        assert!(link.is_symlink(), "removing a real account leaves unrelated links alone");
     }
 }
 

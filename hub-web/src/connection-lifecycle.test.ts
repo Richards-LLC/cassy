@@ -334,7 +334,12 @@ describe("Commander live connection lifecycle", () => {
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
     await vi.waitFor(() => expect(events).toHaveLength(100));
     const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    // The shared flight's GET leaves only after its request is signed, which
+    // is asynchronous: wait for it, then check that no second one follows.
+    const catalogReads = () => hub.requests.filter(row => row.path === "/v1/sessions").length - before;
+    await vi.waitFor(() => expect(catalogReads()).toBe(1));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(catalogReads()).toBe(1);
     connection.stop();
     await Promise.all(manual);
   });
@@ -371,6 +376,40 @@ describe("Commander live connection lifecycle", () => {
     release();
 
     // The event must obtain a post-change catalog without another heartbeat.
+    await vi.waitFor(() => expect(latest).toBe("catalog-2"));
+  });
+  it("refreshes a fleet change even when the overlapping heartbeat's read fails (cas-1966)", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    let latest: string | undefined;
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("heartbeat-fleet-change-failed"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+
+    // The heartbeat's catalog read is in flight when Stop changes the fleet,
+    // and then fails on a flaky network.
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let fail!: () => void;
+    const pending = new Promise<void>(resolve => { fail = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/sessions" && !held) {
+        held = true;
+        await pending;
+        throw new TypeError("Failed to fetch");
+      }
+      return fetchNow(input, init);
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(held).toBe(true));
+    hub.catalogRevision(2);
+    hub.event({ kind: "fleet_changed", session: "session-a" });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    fail();
+
+    // The drained read's failure must not cost the fresh read.
     await vi.waitFor(() => expect(latest).toBe("catalog-2"));
   });
   it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {

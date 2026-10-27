@@ -84,3 +84,12 @@ The shared API is `account_registry::{Account, AccountFlags, LoginState,
 UsageWindow, collect, discover_with}`. `Account.name` is the launch alias and
 `Account.folder` is the stable directory key. Selection code must check login,
 usage windows and flags independently; `windows: []` is unknown capacity.
+
+### Limits JSON reset timestamps
+
+`cas limits --json` now returns each window's `reset_at` as an RFC3339 UTC
+instant (for example `2026-10-27T17:00:00+00:00`), replacing the old localized
+`YYYY-MM-DD HH:MM ZONE` display string. Consumers should parse the datetime,
+rather than split or compare localized text. `cas limits` and picker summaries
+still render local time for people. `cas accounts list --json` uses the plural
+field `resets_at`, also an absolute UTC instant; unknown resets are `null`.

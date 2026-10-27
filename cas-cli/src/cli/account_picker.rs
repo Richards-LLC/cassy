@@ -227,7 +227,11 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
             name: profile.name.clone(),
             label: disabled_label(profile.disabled, format!(
                 "{} — {}{}{}{}{}",
-                profile.display_name,
+                if profile.display_name == profile.name {
+                    profile.display_name.clone()
+                } else {
+                    format!("{} ({})", profile.display_name, profile.name)
+                },
                 login_state_label(profile.login_state),
                 if profile.active { ", active" } else { "" },
                 if profile.disabled { ", disabled" } else { "" },
@@ -525,7 +529,11 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        std::fs::copy(alt.join("auth.json"), home.path().join(".codex-work/auth.json")).unwrap();
+        std::fs::copy(
+            alt.join("auth.json"),
+            home.path().join(".codex-work/auth.json"),
+        )
+        .unwrap();
         let profiles = scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
             if name == "alt" {
                 LoginState::LoggedIn
@@ -546,7 +554,11 @@ mod tests {
                 .starts_with("operator@example.com (alt) — logged in")
         );
         assert!(matches!(&rows[1], ProfileChoice::Existing { name, .. } if name == "alt"));
-        assert!(rows[2].to_string().starts_with("operator@example.com (work) —"));
+        assert!(
+            rows[2]
+                .to_string()
+                .starts_with("operator@example.com (work) —")
+        );
         assert_ne!(rows[1].to_string(), rows[2].to_string());
     }
 

@@ -216,11 +216,7 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
     };
     AccountUsage {
         plan: limit.plan,
-        rejected: limit.state == "auth-needed"
-            && limit
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("rejected")),
+        rejected: limit.state == "auth-needed",
         authenticated: provider == crate::accounts::Provider::Claude && limit.state == "active",
         windows: limit
             .windows
@@ -583,10 +579,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join(".credentials.json"), "{}").unwrap();
         let usage = account_usage(crate::accounts::Provider::Claude, home.path());
-        assert!(usage.rejected, "auth-needed is a login failure regardless of detail text");
+        assert!(
+            usage.rejected,
+            "auth-needed is a login failure regardless of detail text"
+        );
         std::fs::remove_file(home.path().join(".credentials.json")).unwrap();
-        assert!(!account_usage(crate::accounts::Provider::Claude, home.path()).rejected,
-            "absent credentials are not rejected credentials");
+        assert!(
+            !account_usage(crate::accounts::Provider::Claude, home.path()).rejected,
+            "absent credentials are not rejected credentials"
+        );
     }
 
     #[test]

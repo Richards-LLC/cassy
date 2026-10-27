@@ -51,6 +51,18 @@ pub struct UsageWindow {
     pub resets_at: Option<DateTime<Utc>>,
 }
 
+/// Non-secret identity within an Account's provider namespace. Provider IDs
+/// take precedence; `email` is populated only for the fallback identity.
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq, Serialize)]
+pub struct AccountIdentity {
+    /// Provider subscription/account ID, absent for an email fallback.
+    pub account_id: Option<String>,
+    /// Codex workspace or Claude organization, when published by the provider.
+    pub workspace_id: Option<String>,
+    /// Normalized login email, used only when no provider account ID is known.
+    pub email: Option<String>,
+}
+
 /// A provider subscription at a particular folder. Several folders may share
 /// one identity, while one email may own several different subscriptions.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -65,9 +77,8 @@ pub struct Account {
     pub email: Option<String>,
     /// Login email when known, otherwise the folder alias; never a launch key.
     pub display_name: String,
-    /// Non-secret account ID plus organization/workspace. Email fallback is
-    /// prefixed `email:` and used only when provider IDs are unavailable.
-    pub identity: Option<String>,
+    /// Typed provider account/workspace identity, or an explicit email fallback.
+    pub identity: Option<AccountIdentity>,
     /// Subscription tier from credentials/claims or the usage API, if known.
     pub plan: Option<String>,
     /// Current probe result, with explicit rejection and missing-login states.
@@ -101,7 +112,11 @@ fn string_at(value: &serde_json::Value, pointer: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn metadata(provider: Provider, home: &Path, folder: &Path) -> (Option<String>, Option<String>) {
+fn metadata(
+    provider: Provider,
+    home: &Path,
+    folder: &Path,
+) -> (Option<AccountIdentity>, Option<String>) {
     match provider {
         Provider::Claude => {
             let value = if folder == home.join(".claude") {
@@ -112,8 +127,12 @@ fn metadata(provider: Provider, home: &Path, folder: &Path) -> (Option<String>, 
             };
             let identity = value.as_ref().and_then(|value| {
                 let account = string_at(value, "/oauthAccount/accountUuid")?;
-                let org = string_at(value, "/oauthAccount/organizationUuid").unwrap_or_default();
-                Some(serde_json::json!([account, org]).to_string())
+                let org = string_at(value, "/oauthAccount/organizationUuid");
+                Some(AccountIdentity {
+                    account_id: Some(account),
+                    workspace_id: org,
+                    email: None,
+                })
             });
             let plan = json_file(&folder.join(provider.credentials()))
                 .and_then(|value| string_at(&value, "/claudeAiOauth/subscriptionType"));
@@ -132,9 +151,12 @@ fn metadata(provider: Provider, home: &Path, folder: &Path) -> (Option<String>, 
                 });
             let identity = account.map(|account| {
                 let workspace = string_at(&auth, "/tokens/workspace_id")
-                    .or_else(|| string_at(&auth, "/workspace_id"))
-                    .unwrap_or_default();
-                serde_json::json!([account, workspace]).to_string()
+                    .or_else(|| string_at(&auth, "/workspace_id"));
+                AccountIdentity {
+                    account_id: Some(account),
+                    workspace_id: workspace,
+                    email: None,
+                }
             });
             let plan = string_at(&claims, "/https:~1~1api.openai.com~1auth/chatgpt_plan_type");
             (identity, plan)
@@ -153,7 +175,12 @@ pub(crate) fn account(provider: Provider, home: &Path, folder: PathBuf) -> Accou
         .to_string();
     let email = provider.login_email(home, &folder);
     let (identity, plan) = metadata(provider, home, &folder);
-    let identity = identity.or_else(|| email.as_ref().map(|email| format!("email:{email}")));
+    let identity = identity.or_else(|| {
+        email.as_ref().map(|email| AccountIdentity {
+            email: Some(email.clone()),
+            ..Default::default()
+        })
+    });
     let never =
         !folder.join(provider.credentials()).exists() && email.is_none() && identity.is_none();
     let disabled = crate::account_lifecycle::disabled(home, &folder);
@@ -204,7 +231,7 @@ fn mark_duplicates(accounts: &mut [Account]) {
             a.folder.clone(),
         )
     });
-    let mut seen: std::collections::HashMap<(&str, String), PathBuf> =
+    let mut seen: std::collections::HashMap<(&str, AccountIdentity), PathBuf> =
         std::collections::HashMap::new();
     for i in order {
         let a = &mut accounts[i];
@@ -418,10 +445,16 @@ mod tests {
                 );
                 assert_eq!(row.display_name, email);
                 let identity = serde_json::to_value(&row.identity).unwrap();
-                assert!(identity.is_object(), "identity must be structured, not JSON text");
+                assert!(
+                    identity.is_object(),
+                    "identity must be structured, not JSON text"
+                );
                 assert_eq!(identity["account_id"].as_str(), id);
                 assert_eq!(identity["workspace_id"].as_str(), id.map(|_| workspace));
-                assert_eq!(identity["email"].as_str(), if id.is_none() { Some(email) } else { None });
+                assert_eq!(
+                    identity["email"].as_str(),
+                    if id.is_none() { Some(email) } else { None }
+                );
             }
             for name in [
                 "empty",

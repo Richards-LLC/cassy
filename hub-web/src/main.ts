@@ -2899,7 +2899,7 @@ function bindSpeechComposer(): void {
         const draft = module.draftFor(uploadThread);
         if (root.isConnected) draft.bind(root);
         if (files.length) draft.add(files); else if (text) draft.addText(text);
-      }).catch(() => showComposerStatus("Couldn't open attachments. Your paste was not added; try again.", "error")); 
+      }).catch(() => showComposerStatus("Couldn't open attachments. Your paste was not added; try again.", "error"));
       acceptingUploads.set(uploadThread, accepted);
       void accepted.finally(() => { if (acceptingUploads.get(uploadThread) === accepted) acceptingUploads.delete(uploadThread); });
     };

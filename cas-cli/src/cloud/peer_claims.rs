@@ -2265,6 +2265,60 @@ mod tests {
         assert_eq!(claims, 3, "session A's repeat edit reuses its own lease without asking");
     }
 
+    #[tokio::test]
+    async fn shared_file_advisory_routes_by_factory_session_cas_c24c() {
+        use crate::cloud::file_leases::{FileLease, claim_with, collision_note, notify_worker_of_holder};
+        use wiremock::matchers::{body_partial_json, method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
+            .and(body_partial_json(serde_json::json!({"agent_id": "holder"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": "success", "result": "claimed"
+            })))
+            .mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
+            .and(body_partial_json(serde_json::json!({"agent_id": "reader"})))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "error": "already_claimed", "owner_agent_id": "holder"
+            })))
+            .mount(&server).await;
+        let claims = PeerClaims {
+            config: CloudConfig { endpoint: server.uri(), token: Some("sandbox-token".into()), ..Default::default() },
+            project: "github.com/acme/widgets".into(), label: "this-host".into(),
+            retired_local: HashMap::new(), budget: None,
+        };
+        tokio::task::spawn_blocking(move || {
+            for (holder_session, same_session) in [("session-a", true), ("session-b", false)] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = crate::store::init_cas_dir(dir.path()).unwrap();
+                let agents = crate::store::open_agent_store(&root).unwrap();
+                for (id, name, session) in [("reader", "reader-worker", "session-a"), ("holder", "holder-worker", holder_session)] {
+                    let mut agent = crate::types::Agent::new(id.into(), name.into());
+                    agent.factory_session = Some(session.into());
+                    agents.register(&agent).unwrap();
+                }
+                let path = "web/DESIGN.md";
+                assert_eq!(claim_with(&claims, &root, "holder", "holder-worker", "cas-real-task", path), FileLease::Mine);
+                let FileLease::HeldBy(holder) = claim_with(&claims, &root, "reader", "reader-worker", "cas-reader", path) else {
+                    panic!("expected a contended file for {holder_session}");
+                };
+                let note = collision_note(path, &holder);
+                assert!(notify_worker_of_holder(&root, "reader", "reader-worker", Some("session-a"), path, &holder));
+                let queued = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(10).unwrap();
+                assert_eq!(queued[0].prompt, note, "Claude context and Codex message agree");
+                assert!(note.contains("holder-worker") && note.contains("cas-real-task"), "{holder_session}: {note}");
+                // pin: the advisory must distinguish local coordination from a different supervisor.
+                assert_eq!(note.contains("another worker in your session (holder-worker, task cas-real-task)"), same_session, "{note}");
+                assert_eq!(note.contains("other session's supervisor"), !same_session, "{note}");
+                assert!(note.contains("target=supervisor") && !note.contains("cas-8dbe"), "{note}");
+            }
+        }).await.unwrap();
+    }
+
     /// cas-c55f: a park releases the finished task's file leases while the
     /// same worker already edits a file for its next task. The release must
     /// not overwrite that claim, so the repeat edit reuses it.

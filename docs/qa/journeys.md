@@ -51,6 +51,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - One obvious "Pair a machine" action on the empty screen, at every width.
 - The code and the exact command to run are shown together; copying the command works.
+- Someone who does not run the machine is told to send the code to whoever does (it works for 10 minutes), with one Send the code action: the phone's share sheet, or the clipboard where there is none (cas-a56c).
 - While waiting, the status says what the machine is doing, with a visible countdown.
 - The confirm step names the machine and the scopes in plain words before anything is stored.
 - After pairing, the user lands on a list with the supervisor in it. No reload and no second step.
@@ -186,6 +187,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - Enter sends and Shift+Enter adds a new line.
+- A pairing with message:send can send without pane:input or terminal control; another device holding the pane never blocks a supervisor message.
 - The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
@@ -415,6 +417,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - A network switch never needs a reload, and never leaves the page claiming Live on a dead socket.
+- Working requires recent pane activity, a live authenticated machine and an unanswered message. An idle prompt repaint, Reconnecting or Needs pairing never claims work (cas-a252).
 - A message is never silently lost: it goes out once when it can, or says "Not sent" with Retry.
 - Recovery is bounded: at most 10 s after the network returns, sooner when the browser says it changed.
 
@@ -551,6 +554,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
 - A failed end shows its error under the row and offers End session again.
+- A session named from the CLI can be ended under the same name rule, including `q`, `q2`, and `build_dev.v1`; the hub's launch/attach validation uses that rule too. The real authenticated handler regression `hub::tests::end_session_writes_audit_row` covers this boundary (cas-1ce3).
 
 ### HUB-J17 · Run the fleet from a conversation
 

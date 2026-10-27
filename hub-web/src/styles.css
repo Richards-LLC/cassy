@@ -1060,7 +1060,7 @@ main {
 
 /* cas-b7c0: a pairing that can only read keeps its composer read-only; the
    sentence under it says why. Voice input would only fill a field that cannot send. */
-.message[data-read-only] #message-text { cursor: default; }
+.message[data-read-only] #message-text { cursor: default; border-style: dashed; }
 .message[data-read-only] #message-mic { display: none; }
 
 .message-status.error { color: var(--state-warn); }
@@ -1375,6 +1375,10 @@ fieldset {
    its Copy share a row, and the command fills whole lines below them. */
 .pair-withheld { display: grid; gap: var(--space-1); }
 .pair-withheld > .pair-lead, .pair-withheld-ask { margin: 0; }
+/* cas-a56c: the second person's way to send the code on. */
+.pair-share { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
+.pair-share .scope-hint { flex: 1 1 14rem; margin: 0; }
+.pair-share button { min-height: var(--rail-item-min); padding: 0 var(--space-3); font-size: var(--fs-meta); }
 .pair-withheld-command { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
 .pair-withheld-command .scope-hint { flex: 1 1 14rem; margin: 0; }
 .pair-withheld-command button { min-height: var(--space-8); padding: 0 var(--space-3); font-size: var(--fs-meta); }

@@ -557,8 +557,7 @@ test("HUB-J12 network switch: a refused pairing leaves no 'connection dropped' n
 test("HUB-J12 network switch: single revoked machine stops promising reconnection (cas-f698)", journeyPart, async ({ page, journey }) => {
   await journey.stage("A single revoked machine stops promising reconnection: Needs pairing, and no message reads working", async () => {
     const { hub, clock, header } = await connected(page);
-    // cas-5a8f: a send the supervisor has, awaiting its reply, reads "working"
-    // while the machine is live...
+    // A live receipt by itself does not prove the supervisor is working.
     await accepted(page, hub, "Before the pairing is revoked");
     // cas-71f4: the supervisor has it once it is delivered; until then the
     // bubble's "Sending…" is the one signal.
@@ -567,14 +566,20 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     const working = page.getByRole("log").locator(".working");
     // A receipt alone never claims supervisor execution, before or after revocation.
     await expect(working).toHaveCount(0);
+    // cas-a252: fresh activity can indicate unanswered work only while live.
+    // Keep that output recent across the drop: a stale TUI repaint must not
+    // light "working" beside Reconnecting or Needs pairing.
+    hub.send(PELICAN, { Output: { pane_id: "supervisor", data: [46] } });
+    await expect(working).toHaveCount(1);
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
+    await expect(header).toHaveText(" · Reconnecting");
+    await expect(working).toHaveCount(0);
     await hub.up("atlas");
     await clock.advance(1_000);
     await expect(header).toHaveText(" · Needs pairing");
     await expect(page.locator("#hub-footer-badges .machine-badge-state")).toHaveText("Needs pairing");
-    // ...and not beside "Needs pairing": the page can no longer know, on screen
-    // or to a screen reader.
+    // Neither receipt nor old pane output can claim work after pairing is lost.
     await expect(working).toHaveCount(0);
     expect(await page.getByRole("log").ariaSnapshot()).not.toContain("status: working");
   });

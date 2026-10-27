@@ -2496,7 +2496,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     );
     assert!(
         !super::server::is_pane_read_message(&semantic),
-        "SendMessage remains a leased mutation"
+        "SendMessage is a semantic mutation, not a pane read"
     );
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
@@ -2584,9 +2584,15 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         request_id: "request-2109".into(),
     };
     let auth = Some((AuthStore::open(&root, "machine-test").unwrap(), phone));
-    let mut pending = std::collections::HashSet::from([
-        ("factory-1".to_string(), "send-ok".to_string()),
-        ("factory-1".to_string(), "send-bad".to_string()),
+    use super::server::PendingRefKind::{History, Send};
+    // cas-3877: client_ref is browser-supplied, so the audit keeps a bounded prefix.
+    let long_ref = format!("send-bad{}", "x".repeat(4000));
+    let mut pending = super::server::PendingRefs::from([
+        (("factory-1".to_string(), "send-ok".to_string()), Send),
+        (("factory-1".to_string(), long_ref.clone()), Send),
+        // cas-3877: the daemon answers a failed history page load with an
+        // Error carrying the request's id; that is not a send.
+        (("factory-1".to_string(), "history-1".to_string()), History),
     ]);
     let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
         client_ref: Some("send-ok".into()),
@@ -2598,14 +2604,20 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     .unwrap();
     let refused = serde_json::to_vec(&DaemonMessage::Error {
         message: "semantic message enqueue failed: database is locked".into(),
-        client_ref: Some("send-bad".into()),
+        client_ref: Some(long_ref.clone()),
     })
     .unwrap();
-    let admit = |pending: &mut std::collections::HashSet<(String, String)>, frame: &[u8]| {
+    let admit = |pending: &mut super::server::PendingRefs, frame: &[u8]| {
         super::server::admit_correlated_daemon_frame(pending, "factory-1", &auth, frame)
     };
+    let history_failed = serde_json::to_vec(&DaemonMessage::Error {
+        message: "conversation history unavailable".into(),
+        client_ref: Some("history-1".into()),
+    })
+    .unwrap();
     assert!(admit(&mut pending, &queued));
     assert!(admit(&mut pending, &refused));
+    assert!(admit(&mut pending, &history_failed), "the requester still sees its history error");
     assert!(!admit(&mut pending, &queued), "a consumed answer is neither relayed nor audited again");
 
     let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap_or_default();
@@ -2614,7 +2626,7 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|row| row["action"] == "commander_send")
         .collect();
-    assert_eq!(rows.len(), 2, "one outcome row per answered send:\n{audit}");
+    assert_eq!(rows.len(), 2, "one outcome row per answered send, none for a history load:\n{audit}");
     for row in &rows {
         assert_eq!(row["target_session"], "factory-1");
         assert_eq!(row["request_id"], "request-2109");
@@ -2626,11 +2638,15 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     assert_eq!(rows[1]["outcome"], "failed");
     let detail = rows[1]["detail"].as_str().unwrap();
     assert!(detail.contains("client_ref=send-bad") && detail.contains("database is locked"), "{detail}");
+    assert!(!detail.contains(&long_ref) && detail.len() < 1000, "client_ref is capped: {} bytes", detail.len());
 }
 
 #[test]
 fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
-    let mut pending = std::collections::HashSet::from([("factory-1".into(), "history-1".into())]);
+    let mut pending = super::server::PendingRefs::from([(
+        ("factory-1".into(), "history-1".into()),
+        super::server::PendingRefKind::History,
+    )]);
     let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-1".into(),
         messages: Vec::new(),
@@ -2641,18 +2657,20 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
         earlier_replies: Vec::new(),
     })
     .unwrap();
-    assert!(super::server::correlated_daemon_frame_allowed(
+    assert!(super::server::admit_correlated_daemon_frame(
         &mut pending,
         "factory-1",
+        &None,
         &frame
     ));
     assert!(
         pending.is_empty(),
         "the response cannot be replayed to another socket"
     );
-    assert!(!super::server::correlated_daemon_frame_allowed(
+    assert!(!super::server::admit_correlated_daemon_frame(
         &mut pending,
         "factory-1",
+        &None,
         &frame
     ));
 }
@@ -4695,6 +4713,7 @@ async fn end_session_writes_audit_row() {
     let _home = crate::test_env_guard::TestEnvGuard::temp_home();
     let mut scopes = control_scopes();
     scopes.insert(Scope::FactoryManage);
+    scopes.insert(Scope::SessionLaunch);
     let fixture = ops_fixture(scopes);
 
     let (status, _) = fixture
@@ -4709,6 +4728,56 @@ async fn end_session_writes_audit_row() {
         assert_eq!(row["target_session"], "factory-gone-566b");
         assert_eq!(row["required_scope"], "factory:manage");
         assert_eq!(row["device_id"], fixture.device_id.as_str());
+    }
+
+    // cas-1ce3: names accepted by the CLI's real session registry must also
+    // pass the hub's launch/attach validation and reach End session cleanup.
+    let manager = crate::ui::factory::SessionManager::new();
+    for name in ["q", "q2", "build_dev.v1"] {
+        let metadata = crate::ui::factory::create_metadata(
+            name,
+            i32::MAX as u32, // A dead PID: cleanup must never signal a real process.
+            "supervisor",
+            &[],
+            None,
+            fixture.cas_dir.parent().unwrap().to_str(),
+            None,
+        );
+        manager.save_metadata(&metadata).unwrap();
+
+        let (status, body) = fixture
+            .call(
+                "POST",
+                "/v1/sessions",
+                Some(serde_json::json!({
+                    "target": {"kind": "project", "id": "not-a-registered-project"},
+                    "supervisor_cli": "claude",
+                    "name": name,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert_eq!(
+            body["error"], "invalid_target",
+            "CLI name must pass launch validation: {name}: {body}"
+        );
+
+        let (status, body) = fixture
+            .call("DELETE", &format!("/v1/sessions/{name}"), None)
+            .await;
+        assert_eq!(
+            status, StatusCode::OK,
+            "CLI name must be endable: {name}: {body}"
+        );
+        assert_eq!(body["session"], name);
+        assert!(manager.find_session(Some(name)).unwrap().is_none());
+        let outcomes: Vec<_> = fixture
+            .audit("session_end")
+            .into_iter()
+            .filter(|row| row["target_session"] == name)
+            .map(|row| row["outcome"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(outcomes, ["requested", "cleaned_stale"], "{name}");
     }
 }
 

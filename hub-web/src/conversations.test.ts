@@ -818,10 +818,11 @@ describe("fitMachineLine (cas-766c)", () => {
   });
 });
 
-describe("supervisor working indicator (cas-5a8f, cas-3f40)", () => {
-  it("a send receipt never claims execution; pane output is independent evidence", () => {
+describe("supervisor working indicator (cas-5a8f, cas-3f40, cas-a252)", () => {
+  it("a receipt needs live unanswered work and pane output; idle repaint is not working", () => {
     const history = new ConversationHistory();
     const live = { phase: "live" };
+    expect(supervisorWorking(history, live, true)).toBe(false);
     history.hold("held", "supervisor", "Are you there?");
     expect(history.hasPending()).toBe(true);
     expect(supervisorWorking(history, live, false)).toBe(false);
@@ -831,7 +832,12 @@ describe("supervisor working indicator (cas-5a8f, cas-3f40)", () => {
     expect(supervisorWorking(history, live, false)).toBe(false);
     history.hydrateSend({ notification_id: 7, target: "supervisor", text: "Are you there?", state: "delivered", stamped: true, device_id: "phone", at: "2026-10-27T03:38:00Z" });
     expect(supervisorWorking(history, live, false)).toBe(false);
-    expect(supervisorWorking(history, { phase: "backoff" }, true)).toBe(true);
+    expect(supervisorWorking(history, live, true)).toBe(true);
+    expect(supervisorWorking(history, { phase: "backoff" }, true)).toBe(false);
+    expect(supervisorWorking(history, { phase: "live", authFailure: "revoked" }, true)).toBe(false);
+    history.receive({ notification_id: 8, reply_to: 7, message: "Reconciled.", summary: "", device_id: "*", kind: "status", attachments: [] });
+    expect(history.awaitingReply()).toBe(false);
+    expect(supervisorWorking(history, live, true)).toBe(false);
   });
 });
 

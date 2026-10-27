@@ -601,7 +601,8 @@ pub(crate) fn daemon_identity_is_live(metadata: &SessionMetadata) -> bool {
         })
 }
 
-fn valid_session_name(name: &str) -> bool {
+/// One filename component, shared by the CLI registry and the hub's session operations.
+pub(crate) fn valid_session_name(name: &str) -> bool {
     !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
 }
 

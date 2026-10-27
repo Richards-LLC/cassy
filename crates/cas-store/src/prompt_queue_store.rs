@@ -2807,7 +2807,7 @@ pub trait PromptQueueStore: Send + Sync {
         Ok(0)
     }
 
-    /// cas-d85c3: move a verified phone (`paired_device`) message that never
+    /// cas-d85c3: move a verified phone (`paired_device`, `operator_verified`) message that never
     /// reached an ended supervisor to the successor that claimed its handoff,
     /// including the successor's factory session, so its delivery lane and
     /// Commander thread carry it. Only an unread row moves: no ack, no
@@ -7125,7 +7125,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     "SELECT q.id FROM prompt_queue q
                      WHERE q.processed_at IS NULL AND q.acked_at IS NULL
                        AND q.transport_delivered_at IS NULL
-                       AND q.origin_kind = 'paired_device'
+                       AND q.origin_kind = 'paired_device' AND q.operator_verified = 1
                        AND q.target = ?1 AND q.factory_session IS ?2
                        AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
                             WHERE seen.prompt_id = q.id AND seen.recipient = q.target

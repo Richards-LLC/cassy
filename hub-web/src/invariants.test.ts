@@ -329,19 +329,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(css).toContain(".message-status.error {");
   });
 
-  // Contract: takes control to deliver an observed message instead of dropping it.
-  // Consumer: Commander application render and event handlers (main.ts), operating the session and conversation surface.
-  // Historical regression retained; see cas-9d89 inventory for behavioural coverage gaps.
-  it("takes control to deliver an observed message instead of dropping it", async () => {
+  // Legacy hubs can still refuse control; the message keeps the recovery action and focus.
+  it("keeps control-refusal recovery on the message", async () => {
     const source = await readSource("main.ts");
-    // The hub refuses SendMessage without this device's session lease
-    // (hub/server.rs handle_client_message), so observe-mode sends need the
-    // lease the operator would otherwise have to take by hand.
-    expect(source).toContain('if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {');
-    expect(source).toContain("async function takeControlForMessage(machine: StoredMachine, session: string, force = false): Promise<boolean> {");
-    expect(source).toContain("await connections.get(machine.id)?.requestControl(session, force);");
-    expect(source).toContain("return leases.get(sessionKey(machine.id, session))?.held_by_me === true;");
-    expect(source).toContain("Could not take control of ${session}");
     // cas-3433: the conversation header has no Take control, so no copy may
     // send the operator there; a refused message carries the control itself.
     expect(source).not.toContain("Take control from the header");

@@ -1,5 +1,5 @@
-import { test, expect, journeyPart } from "./journey";
-import type { Route } from "@playwright/test";
+import { test, expect, journeyPart, type Journey } from "./journey";
+import type { Page, Route } from "@playwright/test";
 import { SCOPES, type FleetWorld, type Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
@@ -33,20 +33,27 @@ const fleetMachine = (machine: Machine): Machine => ({
   })),
 });
 
+// cas-d50a2: independent outcomes own fresh worlds and their own existing
+// test budget. Seven recorded stages in one case exhausted it under load.
+async function openFailureFleet(page: Page, journey: Journey, width: number) {
+  await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
+  const row = page.locator("#status-view .status-agent", { hasText: "swift-lark-3" });
+  const panel = () => width === 390 ? page.locator("dialog.fleet-action-sheet") : row;
+  const result = page.locator("#fleet-ops-announcer");
+  await journey.stage("Open the fleet", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
+    await expect(row).toBeVisible();
+  });
+  return { row, panel, result };
+}
+
 for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as const) {
   test.describe(`fleet failure copy ${width} ${colorScheme} cas_a348`, () => {
     test.use({ viewport: { width, height: 844 }, colorScheme });
-    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348`, journeyPart, async ({ page, journey }) => {
-      await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate", "factory-manage"] }, fleet: { [PELICAN]: fleet() } });
-      const row = page.locator("#status-view .status-agent", { hasText: "swift-lark-3" });
-      const panel = () => width === 390 ? page.locator("dialog.fleet-action-sheet") : row;
-      const result = page.locator("#fleet-ops-announcer");
-      await journey.stage("Open the fleet", async () => {
-        await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-        if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
-        await expect(row).toBeVisible();
-      });
+    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: worker failure and recovery`, journeyPart, async ({ page, journey }) => {
+      const { row, panel, result } = await openFailureFleet(page, journey, width);
       await journey.stage("A server failure names the worker and offers a next step", async () => {
         await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
         await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
@@ -75,6 +82,18 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
         await expect(row.locator(".status-chip")).toHaveText("Active");
       });
+      await journey.stage("A successful retry clears failure feedback and offers Undo", async () => {
+        await page.unroute("**/v1/sessions/*/operations");
+        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
+        await panel().getByRole("menuitem", { name: "Pause" }).click();
+        await expect(result).toHaveText("swift-lark-3 paused.");
+        await expect(row.locator(".fleet-ops-note")).toHaveCount(0);
+        await expect(row.locator(".status-chip")).toHaveText("Paused");
+        await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
+      });
+    });
+    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: connection and pairing refusals`, journeyPart, async ({ page, journey }) => {
+      const { row, panel, result } = await openFailureFleet(page, journey, width);
       await journey.stage("A connection failure offers connection recovery without diagnostics", async () => {
         await page.unroute("**/v1/sessions/*/operations");
         await page.route("**/v1/sessions/*/operations", (route) => route.abort("failed"));
@@ -100,6 +119,9 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
           if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
         });
       }
+    });
+    test(`HUB-J17 fleet failure copy ${width} ${colorScheme} cas_a348: assignment failure`, journeyPart, async ({ page, journey }) => {
+      const { result } = await openFailureFleet(page, journey, width);
       await journey.stage("A failed assignment names the task before its assignee", async () => {
         await page.unroute("**/v1/sessions/*/operations");
         await page.route("**/v1/sessions/*/operations", (route) => route.fulfill({ status: 500, contentType: "text/html", body: "Internal Server Error" }));
@@ -114,15 +136,6 @@ for (const width of [390, 1280]) for (const colorScheme of ["light", "dark"] as 
         await expect(result).toHaveText(text);
         await expect(task.locator(".fleet-ops-note")).toHaveText(text);
         if (width === 390) await expect(page.locator("#fleet-phone-undo")).toContainText(text);
-      });
-      await journey.stage("A successful retry clears failure feedback and offers Undo", async () => {
-        await page.unroute("**/v1/sessions/*/operations");
-        await row.getByRole("button", { name: "Actions for swift-lark-3" }).click();
-        await panel().getByRole("menuitem", { name: "Pause" }).click();
-        await expect(result).toHaveText("swift-lark-3 paused.");
-        await expect(row.locator(".fleet-ops-note")).toHaveCount(0);
-        await expect(row.locator(".status-chip")).toHaveText("Paused");
-        await expect(page.getByRole("button", { name: "Undo", exact: true })).toBeVisible();
       });
     });
   });

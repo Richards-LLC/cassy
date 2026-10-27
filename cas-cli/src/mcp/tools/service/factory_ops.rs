@@ -188,8 +188,8 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// worktrees were cut, four workers registered, and every first turn died in
 /// about a second.
 ///
-/// Codex also requires an explicit or captured account selection. For a
-/// selected account, only affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
+/// Codex uses its default home when no explicit or captured account is set.
+/// Only an absent default or affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
 /// probe that timed out, a harness with no account plumbing — must not block a
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
@@ -197,6 +197,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     // cas-c8de: the account probes and the codex version probe share one
     // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+    let default_codex_home = dirs::home_dir().map(|home| home.join(".codex"));
     if specs.iter().any(|spec| {
         spec.cli == cas_mux::SupervisorCli::Codex
             && spec
@@ -209,7 +210,21 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
                 .as_deref()
                 .filter(|dir| !dir.trim().is_empty())
                 .is_none()
+    }) && !default_codex_home.as_deref().is_some_and(|home| {
+        home.is_dir()
+            && home.to_str().is_some_and(|home| {
+                crate::capability::probe_account_auth(
+                    cas_mux::SupervisorCli::Codex,
+                    Some(home),
+                    deadline,
+                )
+                .availability
+                    != cas_factory::CapabilityAvailability::Unavailable
+            })
     }) {
+        // The default home is already the implicit worker launch target. A
+        // named account must still be selected by the caller when that default
+        // is absent or logged out; Unknown retains the existing probe policy.
         // Capability can aggregate accounts; a worker must use one account
         // chosen by its caller. Never silently select a different login.
         let homes =
@@ -237,8 +252,9 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             None => "account registry unreadable".into(),
         };
         return Err(format!(
-            "spawn refused: no Codex account selected. Pass config_dir with the intended CODEX_HOME \
-             (or launch the supervisor with CODEX_HOME set). Registered logged-in Codex homes: {accounts}. \
+            "spawn refused: the default Codex home is absent or logged out. Pass config_dir with the intended CODEX_HOME, \
+             or set the project worker config_dir in .cas/config.toml ([factory.defaults] or [[factory.workers]]) \
+             for hub/Commander spawns. Registered logged-in Codex homes: {accounts}. \
              No worktree was created and no task was assigned."
         ));
     }
@@ -12712,6 +12728,17 @@ mod spawn_lifecycle_tests {
         spec.requester_config_dir = spec.config_dir.take();
         preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
         assert!(!env.home().join(".codex").exists());
+        // An implicit default is already the worker's launch target; accepting
+        // its authenticated login never chooses a different registered account.
+        let default = env.home().join(".codex");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("auth.json"), "{}").unwrap();
+        preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect("authenticated default account remains usable without an explicit selector");
+        assert!(
+            error.contains("project"),
+            "refusal omitted the project worker config_dir remedy: {error}"
+        );
     }
 
     #[test]

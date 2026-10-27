@@ -67,8 +67,13 @@ unset. An authenticated named account keeps Codex lanes available after the
 legacy `~/.codex` is retired. An explicit `CODEX_HOME` limits the check to that
 account.
 
-Spawning a Codex worker still requires an account choice: pass its home as
-`config_dir`, or start the requesting supervisor with `CODEX_HOME` set.
-Without either selection, spawn refuses before creating a worktree or assigning
-a task, lists the registered homes confirmed logged in, and asks for
-`config_dir`. Cassy does not select an account automatically.
+A Codex worker uses its authenticated default `~/.codex` when no account is
+selected. If that home is absent or logged out, pass a registered account's home
+as `config_dir`, or set the worker `config_dir` in the project's
+`.cas/config.toml` (`[factory.defaults]` or `[[factory.workers]]`). The project
+setting also applies to hub and Commander spawns. A requesting supervisor's
+`CODEX_HOME` remains an explicit selection.
+
+When the implicit default is unavailable, spawn refuses before creating a
+worktree or assigning a task and lists the registered homes confirmed logged
+in. Cassy does not select a different account automatically.

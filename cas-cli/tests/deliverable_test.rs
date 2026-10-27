@@ -106,6 +106,8 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
         ],
     );
     let unlinked = git(root, &["rev-parse", "HEAD"]);
+    git(root, &["commit", "--allow-empty", "-q", "-m", "nonvisual delivery"]);
+    let unpaired_change = git(root, &["rev-parse", "HEAD"]);
     let cas_root = root.join(".cas");
     fs::create_dir_all(&cas_root).unwrap();
     let mut config = cas::config::Config::default();
@@ -120,6 +122,9 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
     let mut task = cas::types::Task::new("cas-fixture".into(), "Anchored delivery".into());
     task.deliverables.factory_branch_anchor = Some(anchored);
     tasks.add(&task).unwrap();
+    let mut nonvisual = cas::types::Task::new("cas-nonvisual".into(), "Nonvisual delivery".into());
+    nonvisual.deliverables.factory_branch_anchor = Some(unpaired_change);
+    tasks.add(&nonvisual).unwrap();
     let scoped = cas::deliverable::pairs::task_dir(&config, &cas_root, "cas-fixture");
     fs::create_dir_all(&scoped).unwrap();
     for entry in fs::read_dir(&dir).unwrap() {
@@ -142,6 +147,13 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
     assert_eq!(ranged["pairs"].as_array().unwrap().len(), 1, "{ranged}");
     assert_eq!(ranged["pairs"][0]["task_id"], "cas-fixture");
     assert_eq!(ranged["unlinked"], serde_json::json!([unlinked]));
+    assert!(ranged["findings"].as_array().unwrap().iter().any(|finding|
+        finding["code"] == "pairs-unavailable" && finding["message"].as_str().unwrap().contains("cas-nonvisual")), "{ranged}");
+    let pair = &ranged["pairs"][0];
+    let attachments: Vec<_> = ["before", "after"].into_iter()
+        .map(|side| Path::new(pair["directory"].as_str().unwrap()).join(pair[side]["jpg"].as_str().unwrap()))
+        .collect();
+    assert_eq!(attachments, vec![scoped.join("roster.before.jpg"), scoped.join("roster.after.jpg")]);
     fs::write(dir.join("roster.after.jpg"), b"changed after capture").unwrap();
     let receipt = invoke();
     assert!(receipt["pairs"].as_array().unwrap().is_empty(), "{receipt}");

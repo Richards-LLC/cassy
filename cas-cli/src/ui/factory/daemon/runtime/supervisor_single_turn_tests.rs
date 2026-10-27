@@ -266,6 +266,63 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
 
 /// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
 /// physical submit is not evidence that the real Codex harness accepted a turn.
+/// cas-dd2e: sturdy-lion-37 wrote its startup brief while Claude was still
+/// starting. Its transport reservation then hid the pending wake forever.
+/// The private PTY only captures input: it never reads Teams or replies for us.
+#[tokio::test(flavor = "current_thread")]
+async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() {
+    if !fixture_child("claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let name = daemon.app.supervisor_name().to_string();
+    // Keep the first pass inside the real harness startup-readiness window.
+    daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::ZERO);
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas.clone(), daemon.app.project_scope(),
+    );
+    crate::ui::factory::queue_supervisor_intro_prompt(
+        &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
+    );
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    let row = queue.peek_for_targets(&[&name], None, 10).unwrap().remove(0);
+    assert!(!cas_store::fits_hook_surface(&row.prompt), "real startup takes the Teams body path");
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            if queue.deferred_inbox_state(row.id).unwrap().is_some() { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("startup must reach Teams while its pane is not ready");
+    assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_none());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    let held = teams_messages(&daemon);
+    assert_eq!(held.len(), 1);
+    assert!(held[0]["text"].as_str().unwrap().contains(&row.prompt));
+
+    daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::from_secs(6));
+    let retried = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+            if typed.ends_with('\r') && queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_some() {
+                break typed;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    assert!(retried.is_ok(), "a ready supervisor must receive its deferred startup wake: {:?}",
+        queue.message_delivery_report(row.id).unwrap());
+    let typed = retried.unwrap();
+    assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
+    assert!(typed.contains(&format!("[cas #{} ", row.id)), "wake identifies its startup body: {typed:?}");
+    assert_eq!(teams_messages(&daemon), held, "retry must not append another Teams body");
+}
+
+/// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
+/// physical submit is not evidence that the real Codex harness accepted a turn.
 #[tokio::test(flavor = "current_thread")]
 async fn codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b() {
     if !fixture_child("codex_reminder_and_peer_reply_confirm_submit_after_async_claim_cas_353b") {

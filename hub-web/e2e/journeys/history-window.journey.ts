@@ -16,7 +16,7 @@ for (const [name, viewport, colorScheme] of [
     const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [
       { has_earlier: true, next_before: 101, messages: [], replies: turns(101, 150), open_attention: [deepAsk] },
       { has_earlier: true, next_before: 51, messages: [], replies: turns(51, 100) },
-      { has_earlier: false, messages: [], replies: turns(1, 50) },
+      { has_earlier: false, messages: [], replies: turns(2, 50) },
     ] } });
     const thread = page.locator(".conversation-reading.thread");
     const log = page.getByRole("log");

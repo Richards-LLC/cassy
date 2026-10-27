@@ -534,7 +534,7 @@ export class ConversationView {
       // Paging holds the reader's turn from here (journey F7), not the button.
       this.focusMoved = undefined;
       this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
-      if (this.window.hasEarlier) { this.window.earlier(); this.update(); return; }
+      if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
@@ -543,7 +543,7 @@ export class ConversationView {
     for (const spacer of [this.above, this.below]) { spacer.setAttribute("aria-hidden", "true"); spacer.style.overflowAnchor = "none"; }
     this.loadLater = document.createElement("button"); this.loadLater.type = "button";
     this.loadLater.className = "conversation-load-earlier"; this.loadLater.textContent = "Load later"; this.loadLater.hidden = true;
-    this.loadLater.onclick = () => { this.window.later(); this.update(); };
+    this.loadLater.onclick = () => this.moveWindow(false);
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
@@ -738,6 +738,23 @@ export class ConversationView {
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
   }
 
+  /** Explicit paging through rows already held in memory. */
+  private moveWindow(earlier: boolean): void {
+    // A paging button moves to the newly exposed cached rows. Holding the old
+    // turn here would send the next scroll frame straight back to that window.
+    this.following = false;
+    this.earlierIntent = false;
+    this.place = undefined;
+    this.placePending = false;
+    this.scrolledTo = this.element.scrollTop;
+    if (earlier) this.window.earlier(); else this.window.later();
+    this.update();
+    const first = [...this.msgs.children].find(node => node !== this.above && node !== this.below) as HTMLElement | undefined;
+    if (first) this.element.scrollTop += first.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
+    this.scrolledTo = this.element.scrollTop;
+    this.notePlace();
+  }
+
   /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
   private scrollWindow(up: boolean): void {
     if (this.windowFrame !== undefined) return;
@@ -816,8 +833,8 @@ export class ConversationView {
    */
   private readingAnchor(): { key?: string; node: HTMLElement; top: number } | undefined {
     if (this.msgs.hidden) return undefined;
-    const top = this.element.getBoundingClientRect().top;
-    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > top ? box.top : undefined; };
+    const bounds = this.element.getBoundingClientRect();
+    const visible = (node: HTMLElement) => { const box = node.getBoundingClientRect(); return box.height > 0 && box.bottom > bounds.top && box.top < bounds.bottom ? box.top : undefined; };
     for (const node of this.msgs.querySelectorAll<HTMLElement>("[data-key]")) {
       const at = visible(node);
       if (at !== undefined) return { key: node.dataset.key, node, top: at };

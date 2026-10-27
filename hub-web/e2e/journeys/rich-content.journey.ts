@@ -79,7 +79,8 @@ for (const [index, variant] of variants.entries()) {
       const before = await preview.boundingBox();
       const pixels = preview.getByRole("img", { name: /PDF preview, page 1 of 1/ });
       await expect(pixels).toBeVisible();
-      expect(await pixels.evaluate((node: HTMLImageElement) => {
+      expect(await pixels.evaluate(async (node: HTMLImageElement) => {
+        await node.decode();
         const canvas = document.createElement("canvas"); canvas.width = 100; canvas.height = 100;
         const context = canvas.getContext("2d")!; context.drawImage(node, 0, 0);
         return [...context.getImageData(50, 50, 1, 1).data];

@@ -1212,6 +1212,12 @@ export class ConversationView {
         const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
         if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value, run);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
+        // Ask/blocker bodies carry their attachment nodes inside the object.
+        const nested = [...(previous?.querySelectorAll<HTMLElement>("[data-attachment-signature]") ?? [])];
+        [...bubble.querySelectorAll<HTMLElement>("[data-attachment-signature]")].forEach((sheet, index) => {
+          const kept = nested[index];
+          if (kept && kept.dataset.attachmentSignature === sheet.dataset.attachmentSignature) sheet.replaceWith(kept);
+        });
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;

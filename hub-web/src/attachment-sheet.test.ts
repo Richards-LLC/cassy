@@ -53,7 +53,8 @@ describe("sheets in the thread", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src" });
     document.body.replaceChildren(view.element);
-    history.reply(reply(71, "Gate green. The brief and the report card are attached.", [brief, card]), at(9, 52));
+    const files = [{ ...brief }, card];
+    history.reply(reply(71, "Gate green. The brief and the report card are attached.", files), at(9, 52));
     view.update();
     const turn = view.element.querySelector<HTMLElement>(".msgs > .turn.sup")!;
     const children = [...turn.children].map((child) => child.tagName === "TIME" ? "time" : child.className.split(" ")[0]);
@@ -71,6 +72,9 @@ describe("sheets in the thread", () => {
     history.reply(reply(72, "Also tagged.", undefined, "answer"), at(9, 53)); view.update();
     expect(view.element.querySelector(".sheet")).toBe(first);
     expect(view.element.querySelector<HTMLElement>(".bub")?.classList.contains("group-first")).toBe(true);
+    files[0]!.name = "Updated evidence.pdf"; view.update();
+    expect(view.element.querySelector(".sheet")).not.toBe(first);
+    expect(view.element.querySelector(".sheet .fname")?.textContent).toBe("Updated evidence.pdf");
   });
   it("shows an attachment-only turn as its sheet alone", () => {
     const history = new ConversationHistory();

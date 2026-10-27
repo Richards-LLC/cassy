@@ -31,11 +31,11 @@ export default defineConfig({
       output: {
         entryFileNames: "app.js",
         // cas-397a embeds these lazy assets in the production hub too.
-        chunkFileNames: "chunk-[name]-[hash].js",
+        chunkFileNames: (chunk) => `chunk-${chunk.name.replace(/[^A-Za-z0-9_-]/g, "-")}-[hash:8].js`,
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";
-          if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash].js";
-          if (name === "rich-content.css") return "chunk-rich-content-[hash].css";
+          if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash:8].js";
+          if (name === "rich-content.css") return "chunk-rich-content-[hash:8].css";
           if (name.endsWith(".css")) return "app.css";
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).
           if (name.endsWith("Inter-latin-wght.woff2")) return "inter.woff2";

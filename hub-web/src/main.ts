@@ -9,7 +9,7 @@ import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
@@ -388,9 +388,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
-      // The supervisor is executing while a send it received awaits its
-      // reply on a reachable machine, or the pane produced output in the last
-      // half minute (cas-5a8f: never on a held send or an unreachable machine).
+      // Only recent pane activity drives the working line. A queued or
+      // transported message alone never proves the supervisor took a turn.
       working: () => supervisorWorking(
         history,
         connectionStates.get(threadMachineId),
@@ -4164,7 +4163,7 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable", interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4230,7 +4229,7 @@ function keptMessagesLine(): string {
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
 function conversationHeaderLabel(machineId: string, session: string | undefined): string {
-  return visibleSessions(machineId).find((item) => item.name === session)?.unreachable ? "Unreachable · message pending" : conversationStatusLabel(machineId, session);
+  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live") ?? conversationStatusLabel(machineId, session);
 }
 
 /**

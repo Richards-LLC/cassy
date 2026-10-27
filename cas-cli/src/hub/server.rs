@@ -3313,7 +3313,8 @@ fn operator_message_allowed(auth: &Option<(AuthStore, AuthContext)>, bytes: &[u8
         return true;
     };
     auth.as_ref().is_some_and(|(_, context)| {
-        context.has(Scope::PaneRead) && context.device_id != message.device_id
+        context.has(Scope::PaneRead)
+            && (context.device_id != message.device_id || message.state == "delivered")
     })
 }
 
@@ -4442,8 +4443,15 @@ mod machine_protocol_tests {
             },
         )).unwrap();
         assert!(!operator_message_allowed(&None, &frame));
-        assert!(!operator_message_allowed(&Some((store.clone(), sender)), &frame));
-        assert!(operator_message_allowed(&Some((store, viewer)), &frame));
+        assert!(!operator_message_allowed(&Some((store.clone(), sender.clone())), &frame));
+        assert!(operator_message_allowed(&Some((store.clone(), viewer)), &frame));
+        let mut delivered: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        delivered["OperatorMessage"]["state"] = serde_json::json!("delivered");
+        let delivered = serde_json::to_vec(&delivered).unwrap();
+        assert!(operator_message_allowed(&Some((store.clone(), sender)), &delivered));
+        let no_read = AuthContext::test_fixture("phone", "https://controller.example", Default::default());
+        assert!(!operator_message_allowed(&Some((store, no_read)), &delivered));
+
     }
 }
 

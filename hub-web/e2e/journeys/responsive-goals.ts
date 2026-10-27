@@ -106,7 +106,7 @@ export async function phoneReply(page: Page, journey: Journey): Promise<void> {
     await activate(page, page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true }));
     expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Please verify the gate first." });
     const queued = hub.deliverLatest(PELICAN);
-    await expect(page.locator('.conversation-turn[data-state="acknowledged"]')).toBeVisible();
+    await expect(page.locator('.conversation-turn[data-state="delivered"]')).toBeVisible();
     hub.answerQueued(PELICAN, queued, "Verified. The gate is green.");
     await expect(page.getByRole("log").getByText("Verified. The gate is green.")).toBeVisible();
     await expect(composer).toHaveValue("");

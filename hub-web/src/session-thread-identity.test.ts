@@ -141,6 +141,12 @@ describe("session-bound thread history (cas-55a4)", () => {
     expect(emptyThreadCopy({ ...base, connection: "Live", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet — nothing is waiting on you." });
     expect(emptyThreadCopy({ ...base, connection: undefined, resolved: true }).state).toBe("empty");
     expect(emptyThreadCopy({ ...base, connection: "Needs pairing", resolved: true })).toEqual({ state: "empty", said: "No messages from the cas-src supervisor in this session yet. Atlas · Linux needs pairing again before new ones can arrive." });
+    for (const resolved of [true, false]) {
+      const pending = emptyThreadCopy({ ...base, connection: "Waiting for supervisor", resolved });
+      expect(pending.said).toContain("connected");
+      expect(pending.said).toContain("queued message");
+      expect(pending.said).not.toContain("can't be reached");
+    }
     expect(emptyThreadCopy({ ...base, connection: "Unreachable · message pending", resolved: true }).said).toBe("No messages from the cas-src supervisor in this session yet. Atlas · Linux can't be reached — anything new will show here once it's back.");
     expect(emptyThreadCopy({ ...base, connection: "Can't reach · retrying", resolved: true }).said).toContain("Reconnecting to Atlas · Linux");
     for (const connection of ["Live", "Degraded", "Unsteady", "Connecting", "Idle", undefined]) expect(emptyThreadCopy({ ...base, connection, resolved: false }).state).toBe("loading");

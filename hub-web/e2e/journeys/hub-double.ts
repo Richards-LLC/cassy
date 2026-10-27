@@ -672,14 +672,29 @@ export class HubDouble {
     return clientRef;
   }
 
-  /** Acknowledge the latest send (MessageQueued) without answering it yet. */
-  deliverLatest(session: string): number {
+  /** Accept into the durable queue; this is not a supervisor handoff. */
+  queueLatest(session: string): number {
     const sent = this.sends.at(-1);
     if (!sent) throw new Error("hub double: nothing was sent");
     const queued = this.nextId++;
     this.send(session, { MessageQueued: { client_ref: sent.client_ref, notification_id: queued, target: sent.target, stamped: true } });
     this.remember(session).messages.push({ notification_id: queued, target: sent.target, text: sent.text, state: "acknowledged", stamped: true, device_id: "journey-device", session, ...(sent.in_reply_to === undefined || sent.in_reply_to === null ? {} : { reply_to: sent.in_reply_to }), at: this.machineNow(session) });
     return queued;
+  }
+
+  /** Model an actual supervisor transport receipt, independently of queue acceptance. */
+  deliverQueued(session: string, notificationId: number): void {
+    const message = this.remember(session).messages.find((row) => row.notification_id === notificationId);
+    if (!message) throw new Error("hub double: queued message missing");
+    message.state = "delivered";
+    this.send(session, { OperatorMessage: message });
+  }
+
+  /** Queue the latest send and then prove its supervisor transport handoff. */
+  deliverLatest(session: string): number {
+    const id = this.queueLatest(session);
+    this.deliverQueued(session, id);
+    return id;
   }
 
   /** Answer an already-acknowledged send as the supervisor. */

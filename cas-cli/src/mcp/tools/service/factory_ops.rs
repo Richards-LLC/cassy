@@ -2833,6 +2833,11 @@ impl CasService {
             }
         }
 
+        // Validate the chosen account before the legacy strict fallback can
+        // hide an unselected Codex account behind a default-home auth error.
+        // This gate runs before any queue insertion or worktree creation.
+        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+
         // A caller who requested Codex must either receive Codex or an
         // actionable refusal. Rewriting the provider/tier to Claude here is
         // a cost and capability change the supervisor did not approve.
@@ -2867,11 +2872,6 @@ impl CasService {
                 ));
             }
         }
-        // cas-8a55: the last gate before this request becomes worktrees. A
-        // logged-out account is refused here, by name, instead of producing
-        // workers that register, take their task and die on the first turn
-        // while still heartbeating.
-        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
         for notice in notices.iter().chain(config_dir_warnings.iter()) {
             tracing::warn!(target: "cas::factory", "{notice}");
         }
@@ -12672,7 +12672,8 @@ mod spawn_lifecycle_tests {
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let tasks = core.open_task_store().unwrap();
         tasks.init().unwrap();
-        let mut epic = cas_types::Task::new("cas-cba9-fixture".into(), "Codex account selection".into());
+        let mut epic =
+            cas_types::Task::new("cas-cba9-fixture".into(), "Codex account selection".into());
         epic.task_type = cas_types::TaskType::Epic;
         tasks.add(&epic).unwrap();
         #[cfg(feature = "mcp-proxy")]
@@ -12681,16 +12682,31 @@ mod spawn_lifecycle_tests {
         let service = CasService::new(core);
         let request: FactoryRequest = serde_json::from_value(serde_json::json!({
             "action": "spawn_workers", "count": 1, "cli": "codex"
-        })).unwrap();
+        }))
+        .unwrap();
         let direct_error = tokio::runtime::Builder::new_current_thread()
-            .enable_all().build().unwrap().block_on(service.factory_spawn_workers_in(
-                &crate::ops::fleet::FleetContext::operator("codex-account-fixture"), request,
-            )).expect_err("direct spawn must refuse the unselected account");
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(service.factory_spawn_workers_in(
+                &crate::ops::fleet::FleetContext::operator("codex-account-fixture"),
+                request,
+            ))
+            .expect_err("direct spawn must refuse the unselected account");
         for detail in ["config_dir", logged_in.to_str().unwrap()] {
-            assert!(direct_error.message.contains(detail), "missing {detail:?}: {direct_error}");
+            assert!(
+                direct_error.message.contains(detail),
+                "missing {detail:?}: {direct_error}"
+            );
         }
         use cas_store::SpawnQueueStore;
-        assert!(crate::store::open_spawn_queue_store(&cas_root).unwrap().peek(10).unwrap().is_empty());
+        assert!(
+            crate::store::open_spawn_queue_store(&cas_root)
+                .unwrap()
+                .peek(10)
+                .unwrap()
+                .is_empty()
+        );
         spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
         preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
         spec.requester_config_dir = spec.config_dir.take();

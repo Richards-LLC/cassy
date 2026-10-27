@@ -2909,7 +2909,9 @@ pub fn execute(args: &DoctorArgs, cli: &Cli, cas_root: Option<&Path>) -> anyhow:
             checks.push(memory_decay_check(&cas_root));
         }
     }
-    if let Some(check) = lesson_recurrence_check(&crate::cli::release_report::lesson_recurrences()) {
+    if let Some(check) = lesson_recurrence_check(&crate::cli::release_report::lesson_recurrences(
+        &Config::load(&cas_root).unwrap_or_default(),
+    )) {
         checks.push(check);
     }
 

@@ -74,7 +74,7 @@ pub struct ReleaseReportArgs {
 
     /// A standalone `release-latency.receipt` from
     /// `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run
-    /// directory is read alongside ~/.cas/artifacts/release
+    /// directory is read alongside `<[factory] artifacts_root>/release`
     #[arg(long, value_name = "PATH")]
     pub latency_receipt: Option<PathBuf>,
 
@@ -191,8 +191,24 @@ struct ReleaseEvidence {
 
 #[derive(Debug, Clone)]
 enum ReceiptReference {
-    ArtifactsRootRelative(String),
+    /// A receipt under the artifacts root: how that root is named to the
+    /// reader, and the receipt's path relative to it.
+    ArtifactsRootRelative { root_label: String, path: String },
     StandaloneInput,
+}
+
+/// The sources line for the release receipt.
+fn receipt_reference_line(reference: Option<&ReceiptReference>) -> String {
+    match reference {
+        Some(ReceiptReference::ArtifactsRootRelative { root_label, path }) => {
+            format!("Release receipt (relative to `{root_label}`): `{path}`.\n\n")
+        }
+        Some(ReceiptReference::StandaloneInput) => {
+            "Standalone release receipt supplied; its parsed measurements are shown below.\n\n"
+                .to_string()
+        }
+        None => "Release receipt: unavailable.\n\n".to_string(),
+    }
 }
 
 impl ReleaseEvidence {
@@ -1052,7 +1068,7 @@ fn acquire_sources(
         );
     }
 
-    let release_evidence = find_release_evidence(tag, &release, latency_receipt);
+    let release_evidence = find_release_evidence(tag, &release, latency_receipt, config);
     if release_evidence
         .budget_breaches
         .as_ref()
@@ -1068,10 +1084,10 @@ fn acquire_sources(
         ));
     }
     if !release_evidence.has_reportable_publication_timing() {
-        warnings.push(
-            "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/; pass --latency-receipt <run-dir>/release-latency.receipt for a standalone measurement"
-                .to_string(),
-        );
+        warnings.push(format!(
+            "release receipts: green-to-published latency is unavailable under {}/release/; pass --latency-receipt <run-dir>/release-latency.receipt for a standalone measurement",
+            release_artifacts_root(config).1.trim_end_matches('/')
+        ));
     }
 
     let issue_count = issues.len();
@@ -2063,15 +2079,9 @@ fn assemble_markdown(
     } else {
         output.push_str("GitHub release: unavailable.\n\n");
     }
-    match &sources.release_evidence.receipt_reference {
-        Some(ReceiptReference::ArtifactsRootRelative(path)) => output.push_str(&format!(
-            "Release receipt (relative to `~/.cas/artifacts`): `{path}`.\n\n"
-        )),
-        Some(ReceiptReference::StandaloneInput) => output.push_str(
-            "Standalone release receipt supplied; its parsed measurements are shown below.\n\n",
-        ),
-        None => output.push_str("Release receipt: unavailable.\n\n"),
-    }
+    output.push_str(&receipt_reference_line(
+        sources.release_evidence.receipt_reference.as_ref(),
+    ));
     // cas-2bef: the renderer fixes the top-level sections, so the stage
     // budgets are a subsection of the evidence.
     output.push_str(&pipeline_latency_section(&sources.release_evidence));
@@ -2553,28 +2563,49 @@ fn find_release_evidence(
     tag: &str,
     release: &Option<ReleaseMetadata>,
     latency_receipt: Option<&Path>,
+    config: &Config,
 ) -> ReleaseEvidence {
-    let Some(home) = dirs::home_dir() else {
-        return ReleaseEvidence::default();
-    };
-    let artifacts_root = home.join(".cas/artifacts");
-    let release_root = artifacts_root.join("release");
+    let (artifacts_root, root_label) = release_artifacts_root(config);
     find_release_evidence_in(
         tag,
         release,
-        &release_root,
+        &artifacts_root.join("release"),
         latency_receipt.and_then(Path::parent),
         &artifacts_root,
+        &root_label,
     )
 }
 
+/// cas-0dd1: the `[factory] artifacts_root` that release runs write under,
+/// and how the report names it: the configured value as written, or
+/// `~/.cas/artifacts` when unset.
+fn release_artifacts_root(config: &Config) -> (PathBuf, String) {
+    let configured = config.factory().artifacts_root;
+    let configured = configured.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    (
+        crate::config::resolved_factory_artifacts_root(configured),
+        configured
+            .unwrap_or(crate::config::FACTORY_ARTIFACTS_ROOT_DEFAULT)
+            .to_string(),
+    )
+}
+
+/// Release evidence under an artifacts root laid out as release runs write
+/// it, `<root>/release/<run>/`.
 #[cfg(test)]
 fn find_release_evidence_under(
     tag: &str,
     release: &Option<ReleaseMetadata>,
-    root: &Path,
+    artifacts_root: &Path,
 ) -> ReleaseEvidence {
-    find_release_evidence_in(tag, release, root, None, root)
+    find_release_evidence_in(
+        tag,
+        release,
+        &artifacts_root.join("release"),
+        None,
+        artifacts_root,
+        crate::config::FACTORY_ARTIFACTS_ROOT_DEFAULT,
+    )
 }
 
 /// Files under `root` count when their path names the tag. A standalone
@@ -2586,6 +2617,7 @@ fn find_release_evidence_in(
     root: &Path,
     run_dir: Option<&Path>,
     artifacts_root: &Path,
+    root_label: &str,
 ) -> ReleaseEvidence {
     let wanted = tag.to_ascii_lowercase();
     let bare = wanted.trim_start_matches('v');
@@ -2644,9 +2676,10 @@ fn find_release_evidence_in(
         if values.contains_key("PUBLISH_LATENCY_SECONDS") || path_text.contains("published.receipt")
         {
             evidence.receipt_reference = Some(match path.strip_prefix(artifacts_root) {
-                Ok(relative) => ReceiptReference::ArtifactsRootRelative(
-                    relative.to_string_lossy().replace('\\', "/"),
-                ),
+                Ok(relative) => ReceiptReference::ArtifactsRootRelative {
+                    root_label: root_label.to_string(),
+                    path: relative.to_string_lossy().replace('\\', "/"),
+                },
                 Err(_) => ReceiptReference::StandaloneInput,
             });
         }
@@ -2708,11 +2741,9 @@ impl LessonRecurrence {
 }
 
 /// Every recorded release run's lesson recurrence, newest version first.
-pub(crate) fn lesson_recurrences() -> Vec<LessonRecurrence> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    let mut runs: Vec<LessonRecurrence> = fs::read_dir(home.join(".cas/artifacts/release"))
+pub(crate) fn lesson_recurrences(config: &Config) -> Vec<LessonRecurrence> {
+    let (artifacts_root, _) = release_artifacts_root(config);
+    let mut runs: Vec<LessonRecurrence> = fs::read_dir(artifacts_root.join("release"))
         .into_iter()
         .flatten()
         .flatten()
@@ -3238,10 +3269,39 @@ mod tests {
         );
     }
 
+    /// cas-0dd1: with `[factory] artifacts_root` configured, the release
+    /// receipt is found under that root and named relative to it.
+    #[test]
+    fn release_receipt_is_found_and_named_under_the_configured_artifacts_root_cas_0dd1() {
+        let artifacts = tempfile::tempdir().unwrap();
+        let run = artifacts.path().join("release/v9.1.0-latency");
+        fs::create_dir_all(&run).unwrap();
+        fs::write(
+            run.join("release-latency.receipt"),
+            "TAG=v9.1.0\nPUBLISH_START_KIND=gate-green\nPUBLISH_LATENCY_SECONDS=300\nBUDGET_SECONDS=600\nWITHIN_BUDGET=true\nGATE_GREEN_EPOCH=1792079228\nPUBLISHED_AT=2026-10-15T15:52:08Z\n",
+        )
+        .unwrap();
+        let configured = artifacts.path().display().to_string();
+        let mut config = Config::default();
+        let mut factory = config.factory();
+        factory.artifacts_root = Some(configured.clone());
+        config.factory = Some(factory);
+
+        let evidence = find_release_evidence("v9.1.0", &None, None, &config);
+
+        assert_eq!(evidence.green_to_published_seconds, Some(300));
+        assert_eq!(
+            receipt_reference_line(evidence.receipt_reference.as_ref()),
+            format!(
+                "Release receipt (relative to `{configured}`): `release/v9.1.0-latency/release-latency.receipt`.\n\n"
+            )
+        );
+    }
+
     #[test]
     fn main_push_receipts_report_green_or_main_fallback_without_unavailable_warning() {
         let green_root = tempfile::tempdir().unwrap();
-        let green_dir = green_root.path().join("v3.55.0-latency");
+        let green_dir = green_root.path().join("release/v3.55.0-latency");
         fs::create_dir_all(&green_dir).unwrap();
         fs::write(
             green_dir.join("release-latency.receipt"),
@@ -3259,7 +3319,7 @@ mod tests {
         );
 
         let fallback_root = tempfile::tempdir().unwrap();
-        let fallback_dir = fallback_root.path().join("v3.55.0-latency");
+        let fallback_dir = fallback_root.path().join("release/v3.55.0-latency");
         fs::create_dir_all(&fallback_dir).unwrap();
         fs::write(fallback_dir.join("gate.green.epoch"), "1792079228\n").unwrap();
         fs::write(fallback_dir.join("main.landed.epoch"), "1792079238\n").unwrap();

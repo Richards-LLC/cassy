@@ -7,6 +7,12 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed
+
+- Supervisor answers are saved to the operator thread while Commander is
+  reconnecting. A temporarily empty device count now reports held delivery;
+  reattach recovers the same reply instead of losing it before it is queued.
+
 ## [3.82.0] - 2026-10-26
 
 ### Added — every report, page and note wears the target project's DESIGN.md

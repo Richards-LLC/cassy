@@ -315,9 +315,9 @@ fn classify_reply_reference(
     }
 }
 
-/// GH #1196: why an operator turn cannot be delivered right now, or `None`
-/// when it can or the state is unknown. Delivery needs a Commander client
-/// connected to the session's daemon or an enrolled cloud operator feed.
+/// Whether an operator turn is waiting for a Commander client to reconnect.
+/// This is receipt text only: the durable operator thread must record the
+/// turn even when no client is currently counted (cas-c797).
 ///
 /// The daemon records its client count in `loop.json` at the end of each loop
 /// pass. The watchdog rewrites the file every 5 s even while the loop is
@@ -325,38 +325,29 @@ fn classify_reply_reference(
 /// ([`STATUS_STALE_SECS`](crate::factory_daemon_health::STATUS_STALE_SECS))
 /// and the last pass is recent
 /// ([`LOOP_WEDGED_SECS`](crate::factory_daemon_health::LOOP_WEDGED_SECS)).
-/// Anything else is unknown, and the turn queues so the daemon can deliver it
-/// once it is back. An unreadable cloud binding is unknown too.
-///
-/// Known limits: a device that attached within the last loop pass (about
-/// 5 s) can still be refused; retrying reaches it. A refused send records
-/// nothing, so an `in_reply_to` it carried stays unacknowledged.
-pub(crate) fn operator_turn_undeliverable(
+/// Anything else is unknown and keeps the ordinary queued receipt. A client
+/// can attach after this sample; its history and stable notification ID still
+/// recover the same turn. An unreadable cloud binding is unknown too.
+pub(crate) fn operator_turn_waiting_for_commander(
     cas_root: &std::path::Path,
     factory_session: &str,
     now: chrono::DateTime<chrono::Utc>,
-) -> Option<String> {
+) -> bool {
     use crate::factory_daemon_health::{LOOP_WEDGED_SECS, STATUS_STALE_SECS};
-    let status = crate::factory_daemon_health::read_status(cas_root, factory_session)?;
+    let Some(status) = crate::factory_daemon_health::read_status(cas_root, factory_session) else {
+        return false;
+    };
     let fresh = now.signed_duration_since(status.written_at).num_seconds() <= STATUS_STALE_SECS
         && now.signed_duration_since(status.last_pass_at).num_seconds() <= LOOP_WEDGED_SECS;
     if !fresh || status.commander_clients != Some(0) {
-        return None;
+        return false;
     }
     let cloud_feed = cas_store::SqlitePromptQueueStore::open(cas_root)
         .and_then(|store| store.operator_feed_binding())
         .map(|binding| binding.is_some())
         // An unreadable binding is unknown, not absent.
         .unwrap_or(true);
-    if cloud_feed {
-        return None;
-    }
-    Some(format!(
-        "No Commander device is attached to factory session {factory_session}, and this \
-         project has no cloud operator feed, so nothing can deliver this turn. Nothing was \
-         queued. Reach the operator in the terminal or another channel; once a Commander \
-         device connects, operator sends are delivered normally."
-    ))
+    !cloud_feed
 }
 
 #[cfg(test)]
@@ -1780,14 +1771,12 @@ impl CasService {
                     format!("Failed to encode Commander reply: {error}"),
                 )
             })?;
-            // GH #1196: with no Commander client connected to this session's
-            // daemon and no enrolled cloud feed, nothing can deliver this
-            // turn. Say so now instead of queuing it to expire in 15 min.
-            if let Some(reason) =
-                operator_turn_undeliverable(&self.inner.cas_root, factory_session, chrono::Utc::now())
-            {
-                return Err(Self::error(ErrorCode::INVALID_REQUEST, reason));
-            }
+            // Presence is a sampled transport hint, not permission to save an
+            // answer. The atomic thread/outbox write below survives daemon
+            // replacement and is replayed with the same notification ID.
+            let held = operator_turn_waiting_for_commander(
+                &self.inner.cas_root, factory_session, chrono::Utc::now(),
+            );
             let reply = queue
                 .record_operator_turn(&cas_store::OperatorTurn {
                     source: "supervisor",
@@ -1823,8 +1812,13 @@ impl CasService {
                 }
                 None => String::new(),
             };
+            let (verdict, detail, status) = if held {
+                ("held for delivery", "Saved in the operator thread; delivery resumes on reattach.", "held for delivery to")
+            } else {
+                ("queued", "", "queued for")
+            };
             return Ok(Self::success(format!(
-                "Commander {} queued\n\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: queued for {wire_device_id}{deadline}",
+                "Commander {} {verdict}\n{detail}\nID: {reply_id}\nAnswered notification_id: {}\nDevice: {wire_device_id}\nStatus: {status} {wire_device_id}{deadline}",
                 kind.as_str(),
                 req.in_reply_to
                     .map_or_else(|| "none".to_string(), |id| id.to_string())
@@ -7523,12 +7517,11 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
-    /// GH #1196: with the session's daemon reporting no Commander client and
-    /// no cloud operator feed, an operator send fails at once and queues
-    /// nothing; with a client connected, or no daemon status at all
-    /// (unknown), it queues as before.
+    /// cas-c797: a disconnected viewer changes the receipt, never whether the
+    /// turn enters the durable thread. This also covers an unprompted turn
+    /// before any verified Commander message exists in the current session.
     #[tokio::test(flavor = "current_thread")]
-    async fn gh_1196_operator_send_with_no_commander_attached_fails_at_once() {
+    async fn operator_send_without_a_commander_is_held_and_connected_sends_still_queue() {
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", None),
             ("CAS_AGENT_NAME", None),
@@ -7605,21 +7598,14 @@ mod cas_89e1_post_merge_message_type_tests {
         };
 
         write_clients(Some(0));
-        let error = service
-            .message_send(request())
-            .await
-            .expect_err("no Commander attached: refused at send time");
-        assert!(
-            error.message.contains("No Commander device is attached to factory session factory-no-commander"),
-            "{error:?}"
-        );
-        assert!(error.message.contains("Nothing was queued"), "{error:?}");
-        assert_eq!(queued(), 0, "nothing is queued to expire");
+        let response = response_text(service.message_send(request()).await.expect("held"));
+        assert!(response.contains("Commander status held for delivery"), "{response}");
+        assert_eq!(queued(), 1, "unprompted turn is durable before a viewer attaches");
 
         write_clients(Some(1));
         let response = response_text(service.message_send(request()).await.expect("queued"));
         assert!(response.contains("Commander status queued"), "{response}");
-        assert_eq!(queued(), 1);
+        assert_eq!(queued(), 2);
 
         std::fs::remove_file(crate::factory_daemon_health::status_path(
             &cas_root,
@@ -7630,10 +7616,9 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(response.contains("Commander status queued"), "unknown state still queues: {response}");
     }
 
-    /// GH #1196 review M4/L8: each branch where the Commander state is not
-    /// known to be "no device" lets the turn queue.
+    /// Stale or unknown presence must not assert a held transport state.
     #[test]
-    fn gh_1196_operator_refusal_needs_a_known_live_state() {
+    fn operator_held_receipt_needs_a_known_disconnected_state() {
         use crate::factory_daemon_health::{LOOP_WEDGED_SECS, STATUS_STALE_SECS};
         let temp = tempfile::tempdir().expect("temporary Cassy root");
         let cas_root = temp.path().join(".cas");
@@ -7657,15 +7642,15 @@ mod cas_89e1_post_merge_message_type_tests {
             status.commander_clients = Some(0);
             crate::factory_daemon_health::write_status(cas_root, &status).expect("write loop.json");
         };
-        let check = |now| operator_turn_undeliverable(&cas_root, session, now);
+        let check = |now| operator_turn_waiting_for_commander(&cas_root, session, now);
 
         write(&cas_root, written);
-        assert!(check(written).is_some(), "fresh, live, no device, no feed: refused");
+        assert!(check(written), "fresh, live, no device, no feed: held");
         let stale = written + chrono::Duration::seconds(STATUS_STALE_SECS + 1);
-        assert!(check(stale).is_none(), "stale loop.json is unknown");
+        assert!(!check(stale), "stale loop.json is unknown");
 
         write(&cas_root, written - chrono::Duration::seconds(LOOP_WEDGED_SECS + 1));
-        assert!(check(written).is_none(), "a wedged loop's client count is unknown");
+        assert!(!check(written), "a wedged loop's client count is unknown");
 
         write(&cas_root, written);
         store
@@ -7677,14 +7662,14 @@ mod cas_89e1_post_merge_message_type_tests {
                 bound_at: "2026-10-15T19:00:00Z".into(),
             })
             .expect("bind feed");
-        assert!(check(written).is_none(), "a cloud-bound project always queues");
+        assert!(!check(written), "a cloud-bound project always queues");
 
         let bad_root = temp.path().join("unreadable").join(".cas");
         std::fs::create_dir_all(&bad_root).expect("second Cassy root");
         std::fs::write(bad_root.join("cas.db"), b"not a sqlite database").expect("corrupt db");
         write(&bad_root, written);
         assert!(
-            operator_turn_undeliverable(&bad_root, session, written).is_none(),
+            !operator_turn_waiting_for_commander(&bad_root, session, written),
             "an unreadable binding is unknown, not absent"
         );
     }

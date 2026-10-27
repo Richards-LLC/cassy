@@ -224,7 +224,7 @@ fn set_login(account: &mut Account, state: LoginState) {
     account.flags.stale_login = account.login_state == LoginState::StaleLogin;
 }
 
-fn mark_duplicates(accounts: &mut [Account]) {
+fn mark_duplicates_and_order(accounts: &mut [Account]) {
     // Prefer a folder named after the email over a legacy alias, then use
     // folder order. The canonical choice is stable across probe completion order.
     let mut order: Vec<usize> = (0..accounts.len()).collect();
@@ -249,10 +249,21 @@ fn mark_duplicates(accounts: &mut [Account]) {
             }
         }
     }
+    accounts.sort_by_key(|a| {
+        (
+            a.provider.name(),
+            a.flags
+                .duplicate_of
+                .clone()
+                .unwrap_or_else(|| a.folder.clone()),
+            a.flags.duplicate_of.is_some(),
+            a.folder.clone(),
+        )
+    });
 }
 
 /// Discover one provider with an injectable login probe. Preserves non-account
-/// suffix filtering through `accounts::discover`; performs no usage requests.
+/// suffix filtering through `accounts::discover_aliases`; performs no usage requests.
 /// Pickers include a virtual `main` row for first login via `include_main`.
 pub fn discover_with(
     provider: Provider,
@@ -260,7 +271,7 @@ pub fn discover_with(
     include_main: bool,
     mut probe: impl FnMut(&str, &Path) -> LoginState,
 ) -> std::io::Result<Vec<Account>> {
-    let mut accounts: Vec<_> = accounts::discover(provider, home)?
+    let mut accounts: Vec<_> = accounts::discover_aliases(provider, home)?
         .into_iter()
         .map(|dir| account(provider, home, dir.path))
         .collect();
@@ -271,7 +282,7 @@ pub fn discover_with(
     for a in &mut accounts {
         set_login(a, probe(&a.name, &a.folder));
     }
-    mark_duplicates(&mut accounts);
+    mark_duplicates_and_order(&mut accounts);
     Ok(accounts)
 }
 
@@ -319,18 +330,8 @@ fn refresh(accounts: &mut [Account]) {
     }
     drop(sender);
     receive_updates(accounts, receiver, until);
-    mark_duplicates(accounts);
-    accounts.sort_by_key(|a| {
-        (
-            a.provider.name(),
-            a.flags
-                .duplicate_of
-                .clone()
-                .unwrap_or_else(|| a.folder.clone()),
-            a.flags.duplicate_of.is_some(),
-            a.folder.clone(),
-        )
-    });
+    mark_duplicates_and_order(accounts);
+
 }
 
 /// Refresh picker capacity through the same identity-sharing path as the list.

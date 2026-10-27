@@ -38,6 +38,7 @@ pub fn resolve_existing(provider: Provider, home: &Path, selector: &str) -> Resu
     let closest = rows
         .iter()
         .min_by_key(|row| (distance(selector, &row.name), &row.name))
+        .filter(|row| distance(selector, &row.name) <= 2)
         .map(|row| format!("\nClosest alias: {}", row.name))
         .unwrap_or_default();
     bail!(
@@ -198,6 +199,9 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(error.contains("Closest alias: alt"));
+            let unrelated = resolve_existing(provider, home.path(), "nobody@example.net")
+                .unwrap_err().to_string();
+            assert!(!unrelated.contains("Closest alias:"), "{unrelated}");
             assert!(error.contains(&format!("cas {} login altt", provider.name())));
             let mut specs = vec![cas_mux::WorkerSpec {
                 name: None,

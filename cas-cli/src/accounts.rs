@@ -322,8 +322,20 @@ fn email_shaped(name: &str) -> bool {
 /// Find the provider's account directories under `home`: the retiring
 /// defaults first, then the named ones in name order. Directory symlinks are
 /// followed; unreadable entries and non-account siblings (`.lock`, `.bak`, ...)
-/// are skipped, matching the launchers' historical best-effort discovery.
+/// are skipped. Each canonical directory target is returned once, even when
+/// several aliases reach it. Write callers treat the target, inside or outside
+/// `home`, as the account; the registry retains every alias separately.
 pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
+    let mut targets = BTreeSet::new();
+    Ok(discover_aliases(provider, home)?
+        .into_iter()
+        .filter(|account| account.path.canonicalize().is_ok_and(|target| targets.insert(target)))
+        .collect())
+}
+
+/// Alias-preserving read model for account selection and launch resolution.
+/// Mutation callers use `discover` so a symlink target is processed only once.
+pub(crate) fn discover_aliases(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
     let real_dir = |path: &Path| path.is_dir();
     let account = |label: String, path: PathBuf, retiring: bool| AccountDir {
         email: provider.login_email(home, &path),

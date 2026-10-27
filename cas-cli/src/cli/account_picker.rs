@@ -242,7 +242,7 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
             let mut label = format!("{display}{alias}{state}");
             let policy_detail = profile.recommendation.as_deref()
                 .map(|reason| format!(", recommended: {reason}"))
-                .or_else(|| profile.exclusion.as_deref().filter(|_| !profile.disabled)
+                .or_else(|| profile.exclusion.as_deref().filter(|reason| !profile.disabled && *reason != "not logged in or login unknown")
                     .map(|reason| format!(", {reason}")));
             if let Some(detail) = policy_detail {
                 label.push_str(&shorten_picker_text(&detail, 76usize.saturating_sub(text_width(&label))));
@@ -574,6 +574,8 @@ mod tests {
             home.path().join(".codex-work/auth.json"),
         )
         .unwrap();
+        std::fs::create_dir(home.path().join(".codex-operator@example.com")).unwrap();
+        std::fs::copy(alt.join("auth.json"), home.path().join(".codex-operator@example.com/auth.json")).unwrap();
         let mut profiles =
             scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
                 if name == "alt" {
@@ -585,24 +587,24 @@ mod tests {
             .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["main", "alt", "work"]);
-        assert!(profiles[1].active);
+        assert_eq!(names, vec!["main", "operator@example.com", "alt", "work"]);
+        assert!(profiles[2].active);
         assert!(!profiles[0].active);
-        profiles[2].usage = Some("weekly 99%, 5h reset, usage unknown until next session".into());
+        profiles[3].usage = Some("weekly 99%, 5h reset, usage unknown until next session".into());
         let rows = profile_choices(&profiles);
-        assert!(
-            rows[1]
-                .to_string()
-                .starts_with("operator@example.com (alt) — logged in")
-        );
-        assert!(matches!(&rows[1], ProfileChoice::Existing { name, .. } if name == "alt"));
         assert!(
             rows[2]
                 .to_string()
+                .starts_with("operator@example.com (alt) — logged in")
+        );
+        assert!(matches!(&rows[2], ProfileChoice::Existing { name, .. } if name == "alt"));
+        assert!(
+            rows[3]
+                .to_string()
                 .starts_with("operator@example.com (work) —")
         );
-        assert_ne!(rows[1].to_string(), rows[2].to_string());
-        assert!(rows[2].to_string().contains("reset/unknown"));
+        assert_ne!(rows[2].to_string(), rows[3].to_string());
+        assert!(rows[3].to_string().contains("reset/unknown"));
         assert!(rows.iter().all(|row| text_width(&row.to_string()) <= 76));
     }
 
@@ -659,7 +661,7 @@ mod tests {
                 disabled: false,
                 usage: None,
             recommendation: None,
-            exclusion: None,
+            exclusion: Some("not logged in or login unknown".into()),
             },
             Profile {
                 name: "alt".to_string(),

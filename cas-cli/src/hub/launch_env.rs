@@ -113,6 +113,13 @@ pub fn resolve_for_project(
             _ => None,
         };
         if let Some(provider) = provider {
+            // Readiness needs the missing-profile error to offer the first-login
+            // remedy. Only the implicit default gets this treatment; explicit
+            // unknown selectors still use the registry's refusal policy.
+            let main = home.join(format!(".{}", provider.name()));
+            if profile.is_none() && configured.is_none() && recommended.is_none() && !main.is_dir() {
+                return Err(LaunchError::ProfileMissing { cli: name, path: main });
+            }
             let account = crate::account_registry::resolve_existing(provider, &home, &profile_name)
                 .map_err(|error| LaunchError::ProbeFailed { cli: name, detail: error.to_string() })?;
             profile_name = account.name;
@@ -671,6 +678,29 @@ mod tests {
             assert!(!valid_profile_name(value), "{value:?}");
         }
         assert!(valid_profile_name("daniel@petrastella.io"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_implicit_main_is_actionable_but_explicit_names_still_refuse() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let bin = home.join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        env.remove("CLAUDE_CONFIG_DIR");
+        env.remove("CODEX_HOME");
+        for (provider, cli) in [("claude", SupervisorCli::Claude), ("codex", SupervisorCli::Codex)] {
+            let executable = bin.join(provider);
+            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(resolve(cli, None), Err(LaunchError::ProfileMissing { path, .. }) if path == home.join(format!(".{provider}"))));
+            for selector in ["main", "typo"] {
+                assert!(matches!(resolve(cli, Some(selector)), Err(LaunchError::ProbeFailed { detail, .. }) if detail.contains("unknown") && detail.contains(&format!("cas {provider} login {selector}"))));
+            }
+            assert!(!home.join(format!(".{provider}")).exists());
+            assert!(!home.join(format!(".{provider}-typo")).exists());
+        }
     }
 
     #[test]

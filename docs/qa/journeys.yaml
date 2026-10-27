@@ -257,6 +257,11 @@ bug_families:
     tasks: [cas-f300]
     invariants: [HUB-J1-LANDSCAPE-CODE-ACCESS]
     journeys: [HUB-J1]
+  pairing-code-rate-limit-refusal:
+    title: When the relay rate-limited code creation, the dialog said only that the service refused, with no cause or next step
+    tasks: [cas-310f]
+    invariants: [HUB-J1-GOAL]
+    journeys: [HUB-J1]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

@@ -214,3 +214,36 @@ it("loads supported inline media into reserved space and keeps the original Open
   await vi.waitFor(() => expect(root.textContent).toContain("Preview unavailable"));
   expect(root.querySelector("canvas")).toBeNull(); root.remove();
 });
+
+it("renews a preview once on 401 or expiry, and never retries a refusal in a loop", async () => {
+  const realNow = Date.now.bind(Date);
+  let clockOffset = 0;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
+  try {
+    for (const reason of ["401", "expired", "403"]) {
+      let cancelled = 0;
+      const probe = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        expect((init?.headers as Record<string, string>).Range).toBe("bytes=0-0");
+        return new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([0])); }, cancel() { cancelled += 1; } }), { status: reason === "403" ? 403 : 401 });
+      });
+      vi.stubGlobal("fetch", probe);
+      let tickets = 0;
+      const file = { ...brief, artifact_id: `art-refresh-${reason}`, mime: "image/png" };
+      const resolve = vi.fn(async () => ({ ok: true as const, view: { artifact_id: file.artifact_id, url: `https://files.example/content?t=ticket-${++tickets}`, expires_at: new Date(Date.now() + 5_000).toISOString() } }));
+      const root = inlineAttachment(renderAttachmentSheet(document, file), file, resolve); document.body.append(root);
+      try {
+        await vi.waitFor(() => expect(root.querySelector("img")).not.toBeNull());
+        if (reason === "expired") clockOffset += 6_000;
+        root.querySelector("img")!.dispatchEvent(new Event("error"));
+        if (reason !== "403") {
+          await vi.waitFor(() => expect(root.querySelector("img")?.getAttribute("src")).toContain("ticket-2"));
+          root.querySelector("img")!.dispatchEvent(new Event("error"));
+        }
+        await vi.waitFor(() => expect(root.textContent).toContain("Preview unavailable"));
+        expect(resolve).toHaveBeenCalledTimes(reason === "403" ? 1 : 2);
+        expect(probe).toHaveBeenCalledTimes(reason === "expired" ? 0 : 1);
+        expect(cancelled).toBe(reason === "expired" ? 0 : 1);
+      } finally { root.remove(); }
+    }
+  } finally { clock.mockRestore(); vi.unstubAllGlobals(); }
+});

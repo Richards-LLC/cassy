@@ -301,7 +301,11 @@ pub fn collect(home: &Path) -> std::io::Result<Vec<Account>> {
 }
 
 /// Collect only the requested provider for a launch decision, with one deadline.
-pub fn collect_for(provider: Provider, home: &Path, include_main: bool) -> std::io::Result<Vec<Account>> {
+pub fn collect_for(
+    provider: Provider,
+    home: &Path,
+    include_main: bool,
+) -> std::io::Result<Vec<Account>> {
     let mut accounts = discover_with(provider, home, include_main, |_, _| LoginState::Unknown)?;
     refresh(&mut accounts);
     Ok(accounts)
@@ -545,6 +549,42 @@ mod tests {
                     if id.is_none() { Some(email) } else { None }
                 );
             }
+            // The lexically first alias must not displace the physical account.
+            let real = home.path().join(format!("{}a", provider.prefix()));
+            let link = home.path().join(format!("{}0-alias", provider.prefix()));
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let now = chrono::Utc::now();
+            for alias in [&real, &link] {
+                crate::account_lifecycle::set_disabled(home.path(), alias, true).unwrap();
+                let mut rows =
+                    discover_with(provider, home.path(), false, |_, _| LoginState::LoggedIn)
+                        .unwrap();
+                let canonical = rows.iter().find(|a| a.name == "a").unwrap();
+                assert!(canonical.flags.duplicate_of.is_none());
+                for row in rows
+                    .iter_mut()
+                    .filter(|a| matches!(a.name.as_str(), "a" | "0-alias"))
+                {
+                    assert!(row.flags.disabled, "{provider:?}: {}", row.name);
+                    row.windows = vec![UsageWindow {
+                        name: "weekly".into(),
+                        used_percent: Some(10.0),
+                        resets_at: Some(now + chrono::Duration::hours(20)),
+                    }];
+                }
+                let selection =
+                    crate::account_selection::recommend(&rows, provider, now, &Default::default());
+                assert!(selection.recommended.is_none());
+                // Re-enable through the other spelling, including old alias policy entries.
+                let other = if alias == &real { &link } else { &real };
+                crate::account_lifecycle::set_disabled(home.path(), other, false).unwrap();
+                assert!(
+                    discover_with(provider, home.path(), false, |_, _| LoginState::LoggedIn)
+                        .unwrap()
+                        .iter()
+                        .all(|a| !a.flags.disabled)
+                );
+            }
             for name in [
                 "empty",
                 "stale",
@@ -564,7 +604,7 @@ mod tests {
                 _ => LoginState::LoggedIn,
             })
             .unwrap();
-            assert_eq!(rows.len(), 10);
+            assert_eq!(rows.len(), 11);
             let row = |name| rows.iter().find(|a| a.name == name).unwrap();
             assert_eq!(row("empty").login_state, LoginState::NeverLoggedIn);
             assert!(row("empty").flags.never_logged_in);

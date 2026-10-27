@@ -781,13 +781,15 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
                     .output()
                     .unwrap();
                 let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-                let row = rows["accounts"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|row| row["name"] == alias)
-                    .unwrap();
-                assert_eq!(row["flags"]["disabled"], action == "disable");
+                let rows = rows["accounts"].as_array().unwrap();
+                assert_eq!(rows.len(), 2);
+                for row in rows {
+                    assert_eq!(
+                        row["flags"]["disabled"],
+                        action == "disable",
+                        "{provider}/{alias}: {row}"
+                    );
+                }
             }
         }
         cas_cmd(aliases_home.path())
@@ -812,13 +814,42 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         cas_cmd(aliases_home.path())
             .current_dir(aliases_home.path())
+            .args(["accounts", "disable", &format!("{provider}:alt")])
+            .assert()
+            .success();
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "remove", &format!("{provider}:work")])
+            .write_stdin("n\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains(link.to_str().unwrap()));
+        assert_eq!(std::fs::read(real.join("keep")).unwrap(), private_bytes);
+        assert!(link.is_symlink());
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
             .args(["accounts", "remove", &format!("{provider}:work"), "--yes"])
             .assert()
             .success();
         assert!(!real.exists());
         assert!(
-            link.is_symlink(),
-            "removing a real account leaves unrelated links alone"
+            !link.is_symlink(),
+            "removing the account removes its aliases"
+        );
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let output = cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            rows["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["flags"]["disabled"] == false)
         );
     }
 }

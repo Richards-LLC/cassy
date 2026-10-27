@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   planSupervisorSend,
+  sendBlockTone,
   sendsOnEnter,
   supervisorMessage,
   supervisorTarget,
@@ -120,6 +121,9 @@ describe("Cassy Cloud supervisor send plan", () => {
     expect(plan).toMatchObject({ kind: "blocked", block: "missing-scope" });
     if (plan.kind !== "blocked") return;
     expect(plan.reason).toContain("Ask whoever runs soundwave-linux for a link that can send");
+    // cas-a56c (QA F02): a fact about this pairing keeps its neutral tone when Send is tapped.
+    expect(sendBlockTone(plan.block)).toBe("info");
+    expect(sendBlockTone("no-supervisor")).toBe("error");
     expect(plan.reason).not.toMatch(/cas hub|--scopes|message:send/);
   });
 

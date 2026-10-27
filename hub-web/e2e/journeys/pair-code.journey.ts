@@ -50,6 +50,12 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
     });
     await activate(page, dialog.getByRole("button", { name: "Create pairing code" }));
     await expect(dialog.getByText("cas hub authorize KQ7M-4XTR")).toBeVisible();
+    // cas-a56c: someone who does not run the machine can send the code on in
+    // one tap, and the waiting line is not followed by an empty ruled row.
+    await expect(dialog.locator(".pair-share")).toContainText("Not your machine? Send this code to whoever runs it.");
+    await expect(dialog.getByRole("button", { name: "Send the code" })).toBeVisible();
+    await expect(dialog.locator("#pair-status")).toBeVisible();
+    expect(await dialog.locator(".dialog-actions").evaluate((node) => getComputedStyle(node).borderTopWidth), "the waiting line's rule is the only one above the bar").toBe("0px");
   });
 
   await journey.stage("Approve on the machine", async () => {

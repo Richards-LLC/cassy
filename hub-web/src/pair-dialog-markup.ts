@@ -1,4 +1,5 @@
 import { cloudBrand, escapeHtml } from "./cloud-brand";
+import { pairingShareText } from "./pair-share";
 import { cleanupStepCopy, type CleanupStepContext } from "./pairing-cleanup";
 import type { PairingDraft, PairingStep } from "./pairing-draft";
 import { DEFAULT_PAIRING_SCOPES } from "./pairing-relay";
@@ -123,6 +124,14 @@ export function pairCommandMarkup(command: string): string {
 }
 
 /**
+ * The second person's path (cas-a56c): someone pairing a phone to a machine they
+ * do not run sends the code to whoever does, in plain words and one tap.
+ */
+function pairShareMarkup(userCode: string): string {
+  return `<div class="pair-share"><p class="scope-hint" id="pair-share-hint">Not your machine? Send this code to whoever runs it. It works for 10 minutes; they approve this browser with the command above.</p><button id="pair-share" type="button" data-share-text="${escapeAttr(pairingShareText(userCode))}" aria-describedby="pair-share-hint">Send the code</button><span class="sr-only pair-share-status" role="status"></span></div>`;
+}
+
+/**
  * The pairing dialog for one pairing state. main.ts renders it from its live
  * state; the visual-QA fixtures render it from a fixture state, so the gate
  * measures the production dialog — the email field included (D11).
@@ -152,7 +161,7 @@ export function pairDialogMarkup(state: PairDialogState): string {
   }
   if (pendingPairing?.kind === "relay-request") {
     const scopes = pendingPairing.requestedScopes;
-    return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow"><h2 id="pair-title">Pair a machine</h2>${capabilityLead(scopes)}<p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">${escapeHtml(state.countdown ?? "10:00")}</strong></p>${technicalDetails("code", pairingDraft, detailRow("Cassy Cloud origin", pendingPairing.controllerOrigin) + detailRow("Exact scopes", exactScopes(scopes)))}${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
+    return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow"><h2 id="pair-title">Pair a machine</h2>${capabilityLead(scopes)}<p>On the machine you want to pair, run this command, then approve the request it prints:</p><p><code>cas hub authorize ${escapeHtml(pendingPairing.userCode)}</code></p><div class="pair-code" aria-label="Pairing code">${escapeHtml(pendingPairing.userCode)}</div><div class="pair-code-actions"><button id="pair-copy" type="button" data-pair-command="cas hub authorize ${escapeAttr(pendingPairing.userCode)}">Copy command</button></div><p>Expires in <strong id="pair-countdown">${escapeHtml(state.countdown ?? "10:00")}</strong></p>${pairShareMarkup(pendingPairing.userCode)}${technicalDetails("code", pairingDraft, detailRow("Cassy Cloud origin", pendingPairing.controllerOrigin) + detailRow("Exact scopes", exactScopes(scopes)))}${pairStatusMarkup(pairingStatus)}<div class="dialog-actions"><button id="pair-cancel" type="button">Cancel</button></div></section></dialog>`;
   }
   if (pendingPairing?.kind === "invitation") {
     const relay = Boolean(pendingPairing.relay);
@@ -184,7 +193,7 @@ export function pairDialogMarkup(state: PairDialogState): string {
   // One state, one next action. Without an invitation there is nothing to
   // Pair, so no Pair control exists here at all; a link printed by the machine
   // opens the confirmation form directly and never passes through this step.
-  return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2 id="pair-title">Pair a machine</h2>${capabilityLead(DEFAULT_PAIRING_SCOPES)}<p>Create a ten-minute code, then approve it on the machine you want to pair.</p><label>Email me the code too (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="you@example.com" value="${escapeAttr(pairingDraft.email)}"><small class="field-hint">Handy when you approve it on the machine from another screen.</small></label>${technicalDetails("create", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin) + detailRow("Exact scopes", exactScopes(DEFAULT_PAIRING_SCOPES)))}${pairStatusMarkup(pairingStatus)}${state.repairCommand ? pairCommandMarkup(state.repairCommand) : ""}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
+  return `<dialog id="pair-dialog" aria-labelledby="pair-title">${cloudBrand()}<section class="pair-flow" tabindex="-1" autofocus><h2 id="pair-title">Pair a machine</h2>${capabilityLead(DEFAULT_PAIRING_SCOPES)}<p>Create a ten-minute code, then approve it on the machine you want to pair. Not your machine? Create the code anyway; you can send it to whoever runs it.</p><label>Email me the code too (optional)<input id="pair-email" type="email" autocomplete="email" placeholder="you@example.com" value="${escapeAttr(pairingDraft.email)}"><small class="field-hint">Handy when you approve it on the machine from another screen.</small></label>${technicalDetails("create", pairingDraft, detailRow("Cassy Cloud origin", pageOrigin) + detailRow("Exact scopes", exactScopes(DEFAULT_PAIRING_SCOPES)))}${pairStatusMarkup(pairingStatus)}${state.repairCommand ? pairCommandMarkup(state.repairCommand) : ""}<p class="pair-alternative">Already have a link? Open the pairing URL that <code>cas hub pair</code> printed on the machine; it continues straight to confirmation.</p><div class="dialog-actions"><button id="pair-close" type="button">${pairingCreateInFlight ? "Cancel" : "Close"}</button>${relayAction}</div></section></dialog>`;
 }
 
 

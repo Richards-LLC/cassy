@@ -132,6 +132,8 @@ export function conversationAttentionBadge(count: number): { hidden: boolean; te
   return { hidden: count < 1, text: String(count), label: `Attention: ${count} item${count === 1 ? "" : "s"} for this session` };
 }
 
+/** Show work (cas-ff22): a list with a quiet leading tick, the thread's work rows. */
+const SHOW_WORK_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h2M4 12h2M4 17h2M9 7h11M9 12h11M9 17h7"/></svg>';
 const RAW_OUTPUT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>';
 const INTERRUPT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
@@ -147,7 +149,7 @@ export function interruptLabel(project: string | undefined): string {
  * description beside it (applyActionAvailability), instead of disappearing.
  */
 export function conversationActionsMarkup(project: string | undefined): string {
-  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
+  return `<span class="conversation-header-actions"><button id="conversation-show-work" class="conversation-action" type="button" aria-pressed="false">${SHOW_WORK_ICON}<span class="action-label">Show work</span></button><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><span id="conversation-show-work-reason" hidden></span><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
 }
 
 export function conversationHeaderMarkup(model: ConversationShellModel): string {

@@ -1928,6 +1928,8 @@ export class HubConnectionSupervisor {
 
   private handleDaemonObject(session: string, message: Record<string, any>, frameFence = credentialFence(this.machine)): void {
     if (message.Welcome) {
+      // Before the attach turns live: its listeners read what the daemon offers.
+      this.workEventSupport.set(session, workEventSupport(message.Welcome.capabilities));
       const socket = this.sockets.get(session);
       if (socket) {
         this.readySockets.add(socket);
@@ -1963,7 +1965,6 @@ export class HubConnectionSupervisor {
       // cas-f285: no terminal emulator runs here, so no keyframe is asked
       // for. A daemon that announces its panes' rows is read through them;
       // an older one's raw bytes are the only text it offers.
-      this.workEventSupport.set(session, workEventSupport(welcome.capabilities));
       const bootstrap = Array.isArray(welcome.pane_bootstrap) ? welcome.pane_bootstrap as PaneBootstrap[] : [];
       if (bootstrap.length > 0) this.paneBootstraps.set(session, bootstrap); else this.paneBootstraps.delete(session);
       this.callbacks.onSessionState(session, welcome.state, bootstrap.length > 0 || authoritative ? undefined : welcome.scrollback);

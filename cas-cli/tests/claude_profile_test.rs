@@ -883,7 +883,7 @@ fn new_login_is_atomic_for_both_providers_and_reports_existing_email() {
             r#"#!/bin/sh
 if [ "$1" = auth ] && [ "$2" = status ]; then echo '{{"loggedIn":true}}'; exit 0; fi
 if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
-[ "$FAIL_LOGIN" = 1 ] && exit 1
+[ "$FAIL_LOGIN" = 1 ] && {{ echo AUTH_RAN; exit 1; }}
 dir="${{CLAUDE_CONFIG_DIR:-$CODEX_HOME}}"
 if [ "{provider}" = claude ]; then
   printf '{{"oauthAccount":{{"emailAddress":"real@example.com","accountUuid":"%s","organizationUuid":"org"}}}}' "${{LOGIN_ACCOUNT_ID:-one}}" > "$dir/.claude.json"
@@ -920,14 +920,47 @@ fi
                 ),
             )
             .unwrap();
-        cas_cmd(home.path())
+        // Real filesystem refusal: the folder can be inspected and locked, but
+        // its contents cannot be deleted. This fixture runs as the test user.
+        use std::os::unix::fs::PermissionsExt;
+        let blocked = home.path().join(format!(".{provider}-login.tmp.blocked"));
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("keep"), "fixture").unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::File::open(&blocked)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+                ),
+            )
+            .unwrap();
+        let output = cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("CODEX_HOME")
             .env("FAIL_LOGIN", "1")
             .args([provider, "login", "mistyped@example.com"])
-            .assert()
-            .failure();
+            .output()
+            .unwrap();
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(blocked.join("keep").is_file());
+        std::fs::remove_dir_all(&blocked).unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("AUTH_RAN"),
+            "{provider}: sweep must not block auth: {stderr}"
+        );
+        assert!(
+            stderr.contains(&blocked.display().to_string()) && stderr.contains("Permission denied"),
+            "{stderr}"
+        );
+        assert_eq!(
+            stderr.matches("Warning:").count(),
+            1,
+            "one warning per failed folder: {stderr}"
+        );
         assert!(
             !stale.exists(),
             "next login must sweep old temporary folders"

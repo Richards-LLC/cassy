@@ -41,7 +41,7 @@ Remove keeps the login intact if deleting its folder fails. A later Keychain
 failure names the remaining item with one copyable command on its own line:
 `security delete-generic-password -s 'Claude Code-credentials-<hash>'`.
 An unreadable known-repo registry refuses the mutation with `account kept` and
-`Run: cas doctor`; database diagnostics stay in debug logs so the command stays
+`Run: cas update`; database diagnostics stay in debug logs so the command stays
 copyable. An enabled account's removal leaves the policy bytes unchanged.
 
 New-account auth catches SIGINT and SIGTERM until its staging folder is cleaned,
@@ -51,3 +51,43 @@ auth transaction survive. Signal death is preserved after cleanup.
 
 The cas-7450 ledger records final candidate captures and terminal-qa separately;
 the earlier critique above applies to the original lifecycle delivery.
+
+## Recovery compatibility (cas-f140)
+
+A host database without a `known_repos` table has no registered repositories;
+removal still checks its agents and live process selectors. Corrupt databases,
+open failures and unreadable lists keep the account with `Run: cas update`.
+
+Stale cleanup is best-effort for both login entry points. One warning per failed
+folder names its full path and cause on separate lines, says login continues,
+and proceeds to other folders and auth. Fresh, symlinked and locked folders stay
+protected. The duplicate question reads the same stdin buffer as earlier prompts
+and remains cancellable. Machine mutation receipts and stdout stay unchanged.
+
+### Recovery critique
+
+terminal-qa: PASS accounts-recovery · 11 runs · 0 fail · 0 warn · 0 allowed
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | The warning says login continues; refused removal says account kept then gives `cas update`. |
+| Fit | 4 | Folder and cause occupy separate lines; both-provider recovery captures pass 80 and 120 columns. |
+| Craft | 4 | Each failed folder has one warning; repair command remains copyable on its own line. |
+| Theme safety | 5 | Plain ASCII and default foreground pass four palettes, NO_COLOR and C locale. |
+| Machine contract | 5 | Diagnostics stay on stderr and leave mutation JSON intact. |
+
+Scored by warm-crane-68 on 2026-10-27. The exact-build candidate, captures and
+receipt are in cas-f140's delivery evidence; live macOS Keychain is unexercised.
+
+### Historical host agents (cas-f140 round 2)
+
+The registered-agent guard probes the schema and reads only status and account
+metadata. Pre-m199 and pre-m204 hosts retain their active-agent protection without
+needing newer process/session columns or a schema update. An absent agent table
+or selector columns falls back to the live environment and process guards; a
+corrupt or unreadable database refuses with `account kept` and `Run: cas update`.
+
+The picker's email input uses inquire's private crossterm event buffer, which is
+separate from shared stdin. Type-ahead entered there for the later duplicate
+question remains a known limitation, tracked as cas-5b4e per supervisor decision
+Supervisor message 4211400. Queued/shared-stdin answers and Ctrl-C at the duplicate question work.

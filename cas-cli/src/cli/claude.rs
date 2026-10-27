@@ -172,8 +172,11 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
             "  {} ({login}){active}\n    {directory}\n",
-            if profile.display_name == profile.name { profile.name.clone() }
-            else { format!("{} ({})", profile.display_name, profile.name) },
+            if profile.display_name == profile.name {
+                profile.name.clone()
+            } else {
+                format!("{} ({})", profile.display_name, profile.name)
+            },
         ));
         if let Some(usage) = &profile.usage {
             for line in crate::cloud::presence::wrap_line(usage).lines() {
@@ -331,7 +334,7 @@ fn prepare_login_profile(
 }
 
 fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String> {
-    crate::account_lifecycle::sweep_stale_logins(home)?;
+    crate::account_lifecycle::sweep_stale_logins(home);
     let (profile_dir, pending) = prepare_login_profile(home, profile)?;
     let login_args = [OsString::from("auth"), OsString::from("login")]
         .into_iter()
@@ -488,8 +491,14 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
 
     let profile = match args.profile() {
         // An explicitly named account is the no-prompt fast path.
-        Some(profile) => crate::account_registry::resolve_existing(
-            crate::accounts::Provider::Claude, &home, profile)?.name,
+        Some(profile) => {
+            crate::account_registry::resolve_existing(
+                crate::accounts::Provider::Claude,
+                &home,
+                profile,
+            )?
+            .name
+        }
         None => {
             let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
             let profiles = scan_profiles(&home, active_dir.as_deref()).with_context(|| {
@@ -610,7 +619,9 @@ fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     // the explicit and the picked case. Only the silent fallback below — no
     // explicit profile and no prompt (non-TTY, or a single account) — still
     // needs its own announcement, which is what it printed before this change.
-    let profile = SELECTED_PROFILE.get().cloned()
+    let profile = SELECTED_PROFILE
+        .get()
+        .cloned()
         .or_else(|| args.profile().map(str::to_string));
     let Some(profile) = profile else {
         eprintln!(

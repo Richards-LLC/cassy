@@ -358,6 +358,9 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
   let id = 0;
   await journey.stage("The reply is stored on this device before its application ACK", async () => {
     await journey.open(); await choose(page);
+    // cas-7ecc: the reply rides the conversation's socket, so it is said only
+    // once that socket is open (as the sibling parts below wait for it).
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __receiptOrder: string[] }).__receiptOrder.length = 0; });
     id = hub.supervisorSays(PELICAN, "A durable reply on this device");
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);

@@ -410,6 +410,7 @@ impl AuthStore {
             return Ok(());
         };
         let pending = state.installations[index].clone();
+        let mut paired = false;
         anyhow::ensure!(
             pending.candidate.controller_origin == action.controller_origin
                 && pending.candidate.public_key_thumbprint == action.public_key_jwk.thumbprint()?,
@@ -448,6 +449,7 @@ impl AuthStore {
                 _ => anyhow::bail!("installation generation conflict"),
             }
             state.installations[index].phase = Phase::Committed;
+            paired = true;
         } else {
             if pending.phase == Phase::Aborted {
                 return Ok(());
@@ -479,6 +481,13 @@ impl AuthStore {
         // with the new credential; refused retries must not carry cleanup.
         prune_installations(&mut state, now);
         self.persist(&state)?;
+        drop(state);
+        // cas-fce7: the commit is when an installation pairing takes effect,
+        // so it writes the `pairing_exchange` row the legacy exchange writes.
+        // A prepare can still be cancelled; a retried commit is the same pairing.
+        if paired {
+            self.audit(None, "allowed", "pairing_exchange", None, None, now)?;
+        }
         Ok(())
     }
 }

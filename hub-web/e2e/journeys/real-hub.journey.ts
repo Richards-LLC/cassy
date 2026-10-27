@@ -102,7 +102,9 @@ test(
       if (typeof payload !== "string") return;
       try {
         const frame = JSON.parse(payload);
-        if (frame.message?.Welcome) welcomes.push(Date.now());
+        // The real daemon publishes UTC pass timestamps. Match them against
+        // the monotonic epoch of this actual frame, not the fixture clock.
+        if (frame.message?.Welcome) welcomes.push(performance.timeOrigin + performance.now());
       } catch { /* Non-JSON frames are pane output. */ }
     }));
     const header = page.locator("#conversation-connection");

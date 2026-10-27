@@ -64,8 +64,51 @@ impl PreToolUseHarness {
     }
 }
 
-/// Input received from Claude Code hooks via stdin
-#[derive(Debug, Clone, Deserialize, Default)]
+// Keep public fields, typed wire validation and alias normalization on one
+// schema. A separate hand-written wire struct would drift as hooks evolve.
+macro_rules! define_hook_input {
+    (
+        $(#[$meta:meta])*
+        pub struct $name:ident {
+            $(
+                $(#[doc = $doc:literal])*
+                #[serde(default $(, alias = $alias:literal)* $(, rename = $rename:literal)?)]
+                pub $field:ident: $ty:ty,
+            )*
+        }
+    ) => {
+        $(#[$meta])*
+        pub struct $name {
+            $(
+                $(#[doc = $doc])*
+                #[cfg_attr(test, serde(default $(, alias = $alias)* $(, rename = $rename)?))]
+                pub $field: $ty,
+            )*
+        }
+
+        #[derive(Deserialize)]
+        struct HookInputWire {
+            $(
+                #[serde(default $(, alias = $alias)* $(, rename = $rename)?)]
+                $field: $ty,
+            )*
+        }
+
+        const HOOK_INPUT_ALIASES: &[(&str, &str)] = &[
+            $($(($alias, stringify!($field)),)*)*
+        ];
+
+        impl From<HookInputWire> for $name {
+            fn from(wire: HookInputWire) -> Self {
+                Self { $($field: wire.$field,)* }
+            }
+        }
+    };
+}
+
+define_hook_input! {
+/// Input received from harness hooks via stdin.
+#[derive(Debug, Clone, Default)]
 #[cfg_attr(test, derive(Serialize))]
 pub struct HookInput {
     /// Unique session identifier
@@ -264,6 +307,51 @@ pub struct HookInput {
     /// so the streaming shape is visible in the type rather than inferred.
     #[serde(default)]
     pub index: Option<u64>,
+}
+}
+
+impl<'de> Deserialize<'de> for HookInput {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct HookObject;
+
+        impl<'de> serde::de::Visitor<'de> for HookObject {
+            type Value = serde_json::Map<String, serde_json::Value>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a hook input object")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                let mut fields = serde_json::Map::new();
+                while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
+                    // Tolerate distinct compatibility spellings, not repeated
+                    // identical keys whose authority would be ambiguous.
+                    if fields.insert(key.clone(), value).is_some() {
+                        return Err(serde::de::Error::custom(format!("duplicate field `{key}`")));
+                    }
+                }
+                Ok(fields)
+            }
+        }
+
+        let mut fields = deserializer.deserialize_map(HookObject)?;
+        for &(alias, canonical) in HOOK_INPUT_ALIASES {
+            if let Some(value) = fields.remove(alias) {
+                // Presence wins, including null. If several aliases occur
+                // without a canonical key, declaration order breaks the tie.
+                fields.entry(canonical.to_string()).or_insert(value);
+            }
+        }
+        serde_json::from_value::<HookInputWire>(serde_json::Value::Object(fields))
+            .map(Into::into)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl HookInput {

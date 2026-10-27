@@ -92,6 +92,31 @@ fn env_uses(bytes: &[u8], folder: &Path) -> bool {
     })
 }
 
+/// ps prints space-separated environment entries. Match a whole selector value,
+/// so a session on email-2 never prevents removing the idle email account.
+#[cfg(any(target_os = "macos", test))]
+fn ps_uses(text: &str, folder: &Path) -> bool {
+    [
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    ]
+    .iter()
+    .any(|key| {
+        let selector = format!("{key}={}", folder.display());
+        text.match_indices(&selector).any(|(offset, _)| {
+            text[..offset]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+                && text[offset + selector.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(char::is_whitespace)
+        })
+    })
+}
+
 fn in_use(folder: &Path, home: &Path) -> Result<bool> {
     for key in [
         "CLAUDE_CONFIG_DIR",
@@ -120,14 +145,7 @@ fn in_use(folder: &Path, home: &Path) -> Result<bool> {
             .output()?;
         anyhow::ensure!(out.status.success(), "Cannot inspect live process accounts");
         let text = String::from_utf8_lossy(&out.stdout);
-        if [
-            "CLAUDE_CONFIG_DIR",
-            "CODEX_HOME",
-            "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-        ]
-        .iter()
-        .any(|key| text.contains(&format!("{key}={}", folder.display())))
-        {
+        if ps_uses(&text, folder) {
             return Ok(true);
         }
     }
@@ -578,6 +596,27 @@ mod tests {
         })
         .unwrap();
         assert_eq!(calls, vec![vec!["delete-generic-password", "-s", old]]);
+    }
+
+    #[test]
+    fn process_selectors_distinguish_subscription_suffixes() {
+        let folder = Path::new("/fixture home/.claude-email@example.com");
+        for (text, expected) in [
+            (
+                "claude CLAUDE_CONFIG_DIR=/fixture home/.claude-email@example.com OTHER=x",
+                true,
+            ),
+            (
+                "claude CLAUDE_CONFIG_DIR=/fixture home/.claude-email@example.com-2 OTHER=x",
+                false,
+            ),
+            (
+                "claude NOT_CLAUDE_CONFIG_DIR=/fixture home/.claude-email@example.com",
+                false,
+            ),
+        ] {
+            assert_eq!(ps_uses(text, folder), expected, "{text}");
+        }
     }
 
     #[test]

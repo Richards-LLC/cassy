@@ -1144,19 +1144,28 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
         task.notes = original_notes;
         tasks.update(&task).unwrap();
         std::fs::remove_file(terminal).unwrap();
-        std::fs::write(task_dir.join("before.png"), "baseline").unwrap();
-        if complete_pairs {
-            std::fs::write(task_dir.join("after.png"), "current").unwrap();
-        }
+        // A capture side in the current files.pairs schema: PNG and JPEG,
+        // each with the SHA-256 of its bytes.
+        let capture = |name: &str, contents: &str| {
+            use sha2::{Digest, Sha256};
+            for ext in ["png", "jpg"] {
+                std::fs::write(task_dir.join(format!("{name}.{ext}")), contents).unwrap();
+            }
+            let digest = format!("{:x}", Sha256::digest(contents.as_bytes()));
+            serde_json::json!({"png": format!("{name}.png"), "jpg": format!("{name}.jpg"),
+                "sha256": digest, "jpg_sha256": digest})
+        };
+        let before = capture("before", "baseline");
+        let after = complete_pairs.then(|| capture("after", "current"));
         std::fs::write(
             task_dir.join("pairs.json"),
             serde_json::json!({
                 "schema": 1, "task_id": TASK, "head_sha": f.final_tip,
                 "pairs": if complete_pairs { serde_json::json!([{
-                    "id": "G3", "before": {"png": "before.png"}, "after": {"png": "after.png"},
+                    "id": "G3", "before": before, "after": after,
                 }]) } else { serde_json::json!([]) },
                 "unpaired": if complete_pairs { serde_json::json!([]) }
-                    else { serde_json::json!([{"id": "G3", "before": {"png": "before.png"}}]) },
+                    else { serde_json::json!([{"id": "G3", "before": before}]) },
             })
             .to_string(),
         )
@@ -1166,6 +1175,9 @@ async fn exact_terminal_evidence_waiver_still_records_park_cas_2de9() {
             &manifest,
             serde_json::json!({
                 "head_sha": f.final_tip, "files": {"pairs": "pairs.json"},
+                // The bundle states what the pairs file holds: a BEFORE-only
+                // cell is a partial comparison, a matched one complete.
+                "pairs_status": if complete_pairs { "complete" } else { "partial" },
             })
             .to_string(),
         )

@@ -85,7 +85,7 @@ fn queue_limit_switch_with(
     let old = agent
         .metadata
         .get("worker_account_dir")
-        .map(PathBuf::from)
+        .map(|raw| normalized_worker_account_path(raw))
         .unwrap_or_else(|| {
             home.join(if cli == cas_mux::SupervisorCli::Claude {
                 ".claude"
@@ -121,7 +121,8 @@ fn queue_limit_switch_with(
 }
 
 fn same_folder(a: &Path, b: &Path) -> bool {
-    a == b || matches!((a.canonicalize(), b.canonicalize()), (Ok(a), Ok(b)) if a == b)
+    normalized_worker_account_path(&a.to_string_lossy())
+        == normalized_worker_account_path(&b.to_string_lossy())
 }
 
 fn plan_switch(
@@ -244,7 +245,7 @@ pub(crate) fn prepare_limit_resume(
     let current_account = agent
         .metadata
         .get("worker_account_dir")
-        .map(PathBuf::from)
+        .map(|raw| normalized_worker_account_path(raw))
         .unwrap_or_else(|| meta.old_account.clone());
     anyhow::ensure!(
         same_folder(&current_account, &meta.old_account),
@@ -403,7 +404,10 @@ mod tests {
     #[test]
     fn paired_provider_transcripts_copy_before_stop_and_existing_targets_are_not_overwritten() {
         let home = tempfile::tempdir().unwrap();
-        let _env = crate::test_support::TestEnvGuard::with_vars(&[("HOME", home.path().to_str().unwrap())]);
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[(
+            "HOME",
+            home.path().to_str().unwrap(),
+        )]);
         let cwd = home.path().join("worktree");
         std::fs::create_dir_all(&cwd).unwrap();
         let id = "019f84af-3121-7950-ba14-b01db2dad6c7";
@@ -436,13 +440,17 @@ mod tests {
             agent
                 .metadata
                 .insert("worker_cli".into(), cli.backend().name().into());
-            agent
-                .metadata
-                .insert("worker_account_dir".into(), format!("~/.{}-old", cli.backend().name()));
+            agent.metadata.insert(
+                "worker_account_dir".into(),
+                format!("~/.{}-old", cli.backend().name()),
+            );
             agent
                 .metadata
                 .insert("clone_path".into(), cwd.to_string_lossy().into());
-            assert!(same_folder(Path::new(agent.metadata.get("worker_account_dir").unwrap()), &old));
+            assert!(same_folder(
+                Path::new(agent.metadata.get("worker_account_dir").unwrap()),
+                &old
+            ));
             let meta = LimitRecycle {
                 agent_id: agent.id.clone(),
                 episode: "episode".into(),

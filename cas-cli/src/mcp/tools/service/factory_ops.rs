@@ -10793,14 +10793,7 @@ fn codex_sessions_dir_for_worker_account(account_dir: Option<&str>) -> Option<st
     if account_dir.is_empty() {
         return None;
     }
-    let expanded = account_dir.strip_prefix('~').map_or_else(
-        || std::path::PathBuf::from(account_dir),
-        |suffix| {
-            dirs::home_dir()
-                .map(|home| home.join(suffix.trim_start_matches('/')))
-                .unwrap_or_else(|| std::path::PathBuf::from(account_dir))
-        },
-    );
+    let expanded = normalized_worker_account_path(account_dir);
     Some(expanded.join("sessions"))
 }
 
@@ -11104,6 +11097,13 @@ fn auth_failure_evidence_at(
 
 /// The account directory a worker was actually spawned against, which is what
 /// a remedy has to name on a host running several of them.
+/// Account selectors share the backend's tilde expansion; canonical paths
+/// also make symlink aliases compare as the same subscription directory.
+fn normalized_worker_account_path(raw: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(cas_pty::expand_codex_home(raw));
+    path.canonicalize().unwrap_or(path)
+}
+
 pub(crate) fn worker_account_dir(agent: &cas_types::Agent) -> Option<String> {
     agent
         .metadata
@@ -11516,7 +11516,7 @@ fn worker_status_transcript_path_for_account(
         }
         cas_mux::SupervisorCli::Claude => match account_dir {
             Some(account) => {
-                let path = std::path::Path::new(account).join("projects")
+                let path = normalized_worker_account_path(account).join("projects")
                     .join(escaped_project_slug(clone_path?)).join(format!("{session_id}.jsonl"));
                 path.is_file().then_some(path)
             }

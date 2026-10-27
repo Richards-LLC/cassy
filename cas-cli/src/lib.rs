@@ -21,6 +21,7 @@ compile_error!(
 );
 
 // Core modules
+pub mod account_registry;
 pub mod accounts;
 pub mod agent_id;
 pub(crate) mod ai_enrichment;

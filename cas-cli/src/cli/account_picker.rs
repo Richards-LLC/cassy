@@ -18,22 +18,38 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Whether a profile's credential is usable right now.
-///
-/// `Unknown` is a first-class answer, not an error: a probe that cannot reach
-/// the provider CLI must leave the account visible and selectable rather than
-/// silently shortening the operator's list.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum LoginState {
-    LoggedIn,
-    LoggedOut,
-    Unknown,
+pub(crate) use crate::account_registry::LoginState;
+
+/// Bound provider status subprocesses and reap a wedged child. Probes capture
+/// both streams so provider diagnostics cannot pollute `accounts list --json`.
+pub(crate) fn probe_output(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    child.wait_with_output().ok()
 }
 
 /// One detected account profile.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Profile {
     pub(crate) name: String,
+    pub(crate) display_name: String,
     pub(crate) directory: PathBuf,
     pub(crate) login_state: LoginState,
     pub(crate) active: bool,
@@ -100,59 +116,31 @@ pub(crate) fn scan_profiles_with(
     active_dir: Option<&Path>,
     mut login_state_for: impl FnMut(&str, &Path) -> LoginState,
 ) -> io::Result<Vec<Profile>> {
-    let mut profiles = vec![profile_for(
-        layout.main_name,
-        home.join(layout.main_dir),
-        active_dir,
-        layout.main_name,
-        &mut login_state_for,
-    )];
-
-    if let Ok(entries) = std::fs::read_dir(home) {
-        for entry in entries {
-            let entry = entry?;
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let Some(profile_name) = file_name.strip_prefix(layout.named_prefix) else {
-                continue;
-            };
-            if !is_account_profile_name(profile_name) {
-                continue;
-            }
-            let profile_name = profile_name.to_string();
-            profiles.push(profile_for(
-                &profile_name,
-                path,
-                active_dir,
-                layout.main_name,
-                &mut login_state_for,
+    let provider = match layout.named_prefix {
+        ".claude-" => crate::accounts::Provider::Claude,
+        ".codex-" => crate::accounts::Provider::Codex,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unknown account provider",
             ));
         }
-    }
-
-    profiles[1..].sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(profiles)
-}
-
-fn profile_for(
-    name: &str,
-    directory: PathBuf,
-    active_dir: Option<&Path>,
-    main_name: &str,
-    login_state_for: &mut impl FnMut(&str, &Path) -> LoginState,
-) -> Profile {
-    Profile {
-        name: name.to_string(),
-        login_state: login_state_for(name, &directory),
-        active: active_dir.map_or(name == main_name, |active| active == directory),
-        directory,
-        usage: None,
-    }
+    };
+    let accounts =
+        crate::account_registry::discover_with(provider, home, true, &mut login_state_for)?;
+    Ok(accounts
+        .into_iter()
+        .map(|account| Profile {
+            active: active_dir.map_or(account.name == layout.main_name, |dir| {
+                dir == account.folder
+            }),
+            name: account.name,
+            display_name: account.display_name,
+            directory: account.folder,
+            login_state: account.login_state,
+            usage: None,
+        })
+        .collect())
 }
 
 /// Return whether a launch should ask the operator to select an account.
@@ -193,6 +181,8 @@ pub(crate) fn login_state_label(state: LoginState) -> &'static str {
         LoginState::LoggedIn => "logged in",
         LoginState::LoggedOut => "not logged in",
         LoginState::Unknown => "login state unknown",
+        LoginState::NeverLoggedIn => "not logged in",
+        LoginState::StaleLogin => "not logged in",
     }
 }
 
@@ -208,7 +198,7 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
             name: profile.name.clone(),
             label: format!(
                 "{} — {}{}{}",
-                profile.name,
+                profile.display_name,
                 login_state_label(profile.login_state),
                 if profile.active { ", active" } else { "" },
                 profile
@@ -306,21 +296,22 @@ pub(crate) fn prompt_for_selection(
         ProfileChoice::Existing { name, .. } => Ok(Selection::Existing(name)),
         ProfileChoice::NewLogin => {
             let main_name = layout.main_name.to_string();
-            let entered = inquire::Text::new(&format!("Email for the new {provider_label} account"))
-                .with_help_message(&format!(
-                    "creates ~/{}<email> and runs the {provider_label} login flow",
-                    layout.named_prefix
-                ))
-                .with_validator(move |input: &str| {
-                    Ok(match validate_new_profile_name(input, &main_name) {
-                        Ok(()) => inquire::validator::Validation::Valid,
-                        Err(message) => inquire::validator::Validation::Invalid(
-                            inquire::validator::ErrorMessage::Custom(message),
-                        ),
+            let entered =
+                inquire::Text::new(&format!("Email for the new {provider_label} account"))
+                    .with_help_message(&format!(
+                        "creates ~/{}<email> and runs the {provider_label} login flow",
+                        layout.named_prefix
+                    ))
+                    .with_validator(move |input: &str| {
+                        Ok(match validate_new_profile_name(input, &main_name) {
+                            Ok(()) => inquire::validator::Validation::Valid,
+                            Err(message) => inquire::validator::Validation::Invalid(
+                                inquire::validator::ErrorMessage::Custom(message),
+                            ),
+                        })
                     })
-                })
-                .prompt()
-                .with_context(|| format!("new {provider_label} login cancelled"))?;
+                    .prompt()
+                    .with_context(|| format!("new {provider_label} login cancelled"))?;
             Ok(Selection::NewLogin(entered.trim().to_string()))
         }
     }
@@ -480,20 +471,37 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".claude-alt")).unwrap();
 
         let alt = home.path().join(".codex-alt");
-        let profiles =
-            scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
-                if name == "alt" {
-                    LoginState::LoggedIn
-                } else {
-                    LoginState::Unknown
-                }
+        use base64::Engine as _;
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"email":"operator@example.com"}"#);
+        std::fs::write(
+            alt.join("auth.json"),
+            serde_json::json!({
+                "tokens": {"id_token": format!("header.{claims}.signature")}
             })
-            .unwrap();
+            .to_string(),
+        )
+        .unwrap();
+        let profiles = scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
+            if name == "alt" {
+                LoginState::LoggedIn
+            } else {
+                LoginState::Unknown
+            }
+        })
+        .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["main", "alt", "work"]);
         assert!(profiles[1].active);
         assert!(!profiles[0].active);
+        let rows = profile_choices(&profiles);
+        assert!(
+            rows[1]
+                .to_string()
+                .starts_with("operator@example.com — logged in")
+        );
+        assert!(matches!(&rows[1], ProfileChoice::Existing { name, .. } if name == "alt"));
     }
 
     #[test]
@@ -501,6 +509,7 @@ mod tests {
         let profiles = vec![
             Profile {
                 name: "main".to_string(),
+                display_name: "main".to_string(),
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedIn,
                 active: true,
@@ -508,6 +517,7 @@ mod tests {
             },
             Profile {
                 name: "alt".to_string(),
+                display_name: "alt".to_string(),
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
@@ -518,7 +528,12 @@ mod tests {
         assert!(should_prompt_for_profile(None, &profiles, true, true));
         assert!(!should_prompt_for_profile(None, &profiles, false, true));
         assert!(!should_prompt_for_profile(None, &profiles, true, false));
-        assert!(!should_prompt_for_profile(Some("alt"), &profiles, true, true));
+        assert!(!should_prompt_for_profile(
+            Some("alt"),
+            &profiles,
+            true,
+            true
+        ));
         assert!(should_prompt_for_profile(None, &profiles[..1], true, true));
         assert!(!should_prompt_for_profile(None, &[], true, true));
         assert!(!should_prompt_for_profile(None, &profiles, false, false));
@@ -529,6 +544,7 @@ mod tests {
         let profiles = vec![
             Profile {
                 name: "main".to_string(),
+                display_name: "main".to_string(),
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedOut,
                 active: true,
@@ -536,6 +552,7 @@ mod tests {
             },
             Profile {
                 name: "alt".to_string(),
+                display_name: "alt".to_string(),
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
@@ -563,7 +580,17 @@ mod tests {
     fn new_profile_names_that_could_escape_or_collide_are_refused() {
         assert!(validate_new_profile_name("work@example.com", "main").is_ok());
 
-        for bad in ["", "   ", "main", "../escape", "a/b", "a b", ".hidden", "-flag", "x.lock"] {
+        for bad in [
+            "",
+            "   ",
+            "main",
+            "../escape",
+            "a/b",
+            "a b",
+            ".hidden",
+            "-flag",
+            "x.lock",
+        ] {
             assert!(
                 validate_new_profile_name(bad, "main").is_err(),
                 "{bad:?} should be refused as a profile directory name"

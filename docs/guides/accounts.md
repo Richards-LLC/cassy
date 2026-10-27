@@ -59,3 +59,28 @@ cas claude --bare <profile> --continue   # resume the last session in this folde
 
 The picker shows the same usage marks. Sessions resume across accounts
 because `projects/` lives in the base. `cas codex` works the same way.
+
+## List subscriptions
+
+```bash
+cas accounts list
+cas accounts list --json
+```
+
+The grouped list names Claude and Codex subscriptions by their login email,
+with the folder alias, plan, login state, usage and reset times. `main`, `alt`
+and email folder names remain valid arguments to `cas claude`, `cas codex`
+and worker `config_dir` settings. Display names do not change those aliases.
+
+`duplicate_of` identifies a second folder holding the same provider account
+and organization/workspace ID. Different subscriptions sharing an email stay
+separate; email is the fallback identity only when no provider ID is available.
+`never_logged_in` means no stored credential or previous-login evidence was
+found. `stale_login` requires a rejected credential; a failed probe stays
+unknown. Provider work shares a four-second deadline; missing usage is unknown,
+never zero. JSON reset timestamps are absolute UTC RFC3339 values.
+
+The shared API is `account_registry::{Account, AccountFlags, LoginState,
+UsageWindow, collect, discover_with}`. `Account.name` is the launch alias and
+`Account.folder` is the stable directory key. Selection code must check login,
+usage windows and flags independently; `windows: []` is unknown capacity.

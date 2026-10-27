@@ -74,6 +74,9 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
     let home = home_with_profiles();
     let alt = home.path().join(".claude-alt");
 
+    std::fs::write(alt.join(".claude.json"), serde_json::json!({
+        "oauthAccount": {"emailAddress": "operator@example.com", "accountUuid": "one", "organizationUuid": "org"}
+    }).to_string()).unwrap();
     cas_cmd(home.path())
         .env("CLAUDE_CONFIG_DIR", &alt)
         .args(["claude", "--list-profiles"])
@@ -81,9 +84,104 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         .success()
         .stdout(predicate::str::contains("Usage: cas claude <profile>"))
         // pin: cas-e1f4 two-line rows that fit 80 columns.
-        .stdout(predicate::str::contains("  alt (logged in) (active)\n    ~/.claude-alt\n"))
-        .stdout(predicate::str::contains("  main (not logged in)\n    ~/.claude\n"))
-        .stdout(predicate::str::contains("  work (not logged in)\n    ~/.claude-work\n"));
+        .stdout(predicate::str::contains(
+            "  operator@example.com (logged in) (active)\n    ~/.claude-alt\n",
+        ))
+        .stdout(predicate::str::contains(
+            "  main (not logged in)\n    ~/.claude\n",
+        ))
+        .stdout(predicate::str::contains(
+            "  work (not logged in)\n    ~/.claude-work\n",
+        ));
+}
+
+#[test]
+fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
+    use base64::Engine as _;
+    let home = home_with_profiles();
+    let identity = serde_json::json!({"oauthAccount": {
+        "emailAddress": "operator@example.com", "accountUuid": "one", "organizationUuid": "org"
+    }})
+    .to_string();
+    for name in ["alt", "operator@example.com"] {
+        let dir = home.path().join(format!(".claude-{name}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".claude.json"), &identity).unwrap();
+        // No OAuth token: this test never makes a network request.
+        std::fs::write(dir.join(".credentials.json"), "{}").unwrap();
+    }
+    let codex = home.path().join(".codex-team");
+    std::fs::create_dir_all(codex.join("sessions")).unwrap();
+    let claims =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"email":"team@example.com"}"#);
+    std::fs::write(
+        codex.join("auth.json"),
+        serde_json::json!({"tokens": {
+            "id_token": format!("h.{claims}.s"), "account_id": "team"
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(codex.join("sessions/rollout.jsonl"), serde_json::json!({"rate_limits": {
+        "plan_type": "pro", "primary": {"window_minutes": 300, "used_percent": 12, "resets_at": 1787011690},
+        "secondary": {"window_minutes": 10080, "used_percent": 34, "resets_at": 1787098090}
+    }}).to_string()).unwrap();
+    // Keep the login probe deterministic and local for this fixture home.
+    cas::test_paths::warm_stub(
+        &home.path().join("bin/codex"),
+        "#!/bin/sh\necho 'Logged in using ChatGPT'\n",
+    );
+    let output = cas_cmd(home.path())
+        .args(["accounts", "list", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let rows = json["accounts"].as_array().unwrap();
+    assert_eq!(rows.len(), 4);
+    let row = |provider, name| {
+        rows.iter()
+            .find(|a| a["provider"] == provider && a["name"] == name)
+            .unwrap()
+    };
+    let alt = row("claude", "alt");
+    assert_eq!(alt["display_name"], "operator@example.com");
+    assert!(
+        alt["flags"]["duplicate_of"]
+            .as_str()
+            .unwrap()
+            .ends_with(".claude-operator@example.com")
+    );
+    assert_eq!(row("claude", "work")["flags"]["never_logged_in"], true);
+    assert_eq!(
+        row("claude", "operator@example.com")["login_state"],
+        "stale_login"
+    );
+    let team = row("codex", "team");
+    assert_eq!(team["plan"], "pro");
+    assert_eq!(team["windows"][0]["used_percent"], 12.0);
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(team["windows"][0]["resets_at"].as_str().unwrap())
+            .unwrap()
+            .timestamp(),
+        1787011690
+    );
+    assert!(alt["windows"].as_array().unwrap().is_empty());
+    assert!(!String::from_utf8(output).unwrap().contains("id_token"));
+    let human = cas_cmd(home.path())
+        .args(["accounts", "list"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let human = String::from_utf8(human).unwrap();
+    assert!(human.contains("operator@example.com"));
+    assert!(human.contains("usage unknown"));
+    assert!(human.contains("stale login"));
+    assert!(human.lines().all(|line| line.len() <= 80));
 }
 
 /// The headline behavior: `cas claude alt` selects the alt account and then
@@ -250,7 +348,10 @@ fn login_subcommand_links_a_new_account_to_the_shared_base() {
         std::fs::read_link(account.join("settings.json")).unwrap(),
         base.join("settings.json")
     );
-    assert!(!account.join(".credentials.json").exists(), "no login is shared");
+    assert!(
+        !account.join(".credentials.json").exists(),
+        "no login is shared"
+    );
 }
 
 #[test]

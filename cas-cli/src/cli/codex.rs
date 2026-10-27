@@ -168,7 +168,7 @@ fn classify_login_output(success: bool, stdout: &str, stderr: &str) -> LoginStat
 }
 
 /// Ask the codex CLI itself whether this profile's credential is usable.
-fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
+pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
     if !profile_dir.is_dir() {
         return LoginState::LoggedOut;
     }
@@ -176,7 +176,9 @@ fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(["login", "status"]);
 
-    let Ok(output) = command.output() else {
+    let Some(output) =
+        super::account_picker::probe_output(command, std::time::Duration::from_secs(2))
+    else {
         return LoginState::Unknown;
     };
     classify_login_output(
@@ -208,7 +210,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
             "  {} ({login}){active}{usage}\n    {directory}\n",
-            profile.name,
+            profile.display_name,
         ));
     }
     output.push('\n');
@@ -224,13 +226,13 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
 fn with_usage(mut profiles: Vec<super::account_picker::Profile>) -> Vec<super::account_picker::Profile> {
     let accounts = profiles
         .iter()
-        .filter(|profile| profile.login_state != super::account_picker::LoginState::LoggedOut)
+        .filter(|profile| matches!(profile.login_state, LoginState::LoggedIn | LoginState::Unknown))
         .map(|profile| (profile.name.clone(), profile.directory.clone()))
         .collect();
     let usage = super::limits::usage_summaries(
         crate::accounts::Provider::Codex,
         accounts,
-        std::time::Duration::from_secs(4),
+        crate::account_registry::USAGE_DEADLINE,
     );
     for profile in &mut profiles {
         profile.usage = usage.get(&profile.name).cloned();

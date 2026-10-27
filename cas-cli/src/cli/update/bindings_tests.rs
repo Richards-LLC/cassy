@@ -127,7 +127,13 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
     let env = crate::test_support::TestEnvGuard::temp_home();
     let manager = SessionManager::new();
     let mut metadata = crate::ui::factory::create_metadata(
-        "active9299", std::process::id(), "supervisor", &[], None, None, None,
+        "active9299",
+        std::process::id(),
+        "supervisor",
+        &[],
+        None,
+        None,
+        None,
     );
     manager.save_metadata(&metadata).unwrap();
     let listener = std::os::unix::net::UnixListener::bind(gui_socket_path("probe9299")).unwrap();
@@ -171,11 +177,10 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         manager.save_metadata(&metadata).unwrap();
     }
     let after_metadata = inventory.validate();
-    let after_metadata_inventory = RuntimeSnapshot::capture(false);
     for _ in 0..4 {
         manager.list_sessions().unwrap();
     }
-    let after_cleanup = after_metadata_inventory.validate();
+    let after_cleanup = inventory.validate();
     assert!(
         after_metadata.is_ok() && after_cleanup.is_ok(),
         "routine writes and no-op cleanup must preserve inventory: metadata={after_metadata:?}, cleanup={after_cleanup:?}"
@@ -220,10 +225,15 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         "a new runtime invalidates cached inventory"
     );
     manager.remove_metadata("new9299").unwrap();
-    inventory.validate().expect("restored session identities remain valid");
+    inventory
+        .validate()
+        .expect("restored session identities remain valid");
     let before_removal = RuntimeSnapshot::capture(false);
     manager.remove_metadata(&metadata.name).unwrap();
-    assert!(before_removal.validate().is_err(), "removing a session must invalidate inventory");
+    assert!(
+        before_removal.validate().is_err(),
+        "removing a session must invalidate inventory"
+    );
     manager.save_metadata(&metadata).unwrap();
     // Each identity component must fence replacement, independently of mutable
     // progress fields and of whether the process is currently alive.
@@ -233,7 +243,9 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         ("created_at", |m| m.created_at.push_str("-replacement")),
         ("pid", |m| m.daemon_pid += 1),
         ("process start", |m| m.daemon_pid_starttime = Some(u64::MAX)),
-        ("build", |m| m.daemon_build_hash = Some("replacement".into())),
+        ("build", |m| {
+            m.daemon_build_hash = Some("replacement".into())
+        }),
         ("project", |m| m.project_dir = Some("/replacement".into())),
         ("socket", |m| m.socket_path.push_str("-replacement")),
     ];
@@ -242,7 +254,10 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         let mut replacement = metadata.clone();
         replace(&mut replacement);
         manager.save_metadata(&replacement).unwrap();
-        assert!(inventory.validate().is_err(), "{label} replacement must invalidate inventory");
+        assert!(
+            inventory.validate().is_err(),
+            "{label} replacement must invalidate inventory"
+        );
         if replacement.name != metadata.name {
             manager.remove_metadata(&replacement.name).unwrap();
         }
@@ -260,6 +275,12 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
     let before_unlink = RuntimeSnapshot::capture(false);
     drop(listener);
     manager.list_sessions().unwrap();
-    assert!(!gui_socket_path("probe9299").exists(), "unheld orphan is reclaimed");
-    assert!(before_unlink.validate().is_err(), "actual socket unlink invalidates inventory");
+    assert!(
+        !gui_socket_path("probe9299").exists(),
+        "unheld orphan is reclaimed"
+    );
+    assert!(
+        before_unlink.validate().is_err(),
+        "actual socket unlink invalidates inventory"
+    );
 }

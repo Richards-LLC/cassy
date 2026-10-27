@@ -306,7 +306,9 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
     for index in 0..4 {
         metadata.epic_id = Some(format!("fixture-epic-{index}"));
         metadata.held_workers = vec![format!("worker-{index}")];
-        crate::ui::factory::SessionManager::new().save_metadata(&metadata).unwrap();
+        crate::ui::factory::SessionManager::new()
+            .save_metadata(&metadata)
+            .unwrap();
     }
     let report = OrdinaryBindingClient::new(&endpoint, "ordinary-fixture-user")
         .unwrap()

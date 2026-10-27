@@ -93,8 +93,22 @@ pub fn repair(provider: Provider, home: &Path) -> Result<Option<accounts::Applie
     if plan.is_empty() {
         return Ok(None);
     }
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-    accounts::apply(&plan, home, &stamp).map(Some)
+    apply(&plan, home).map(Some)
+}
+
+/// `accounts::apply` with a backup folder no earlier run used: two repairs in
+/// the same second (a link, then doctor or a launch) must not collide.
+pub fn apply(plan: &accounts::Plan, home: &Path) -> Result<accounts::Applied> {
+    let base = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let backups = home.join(".cas").join("accounts-backup");
+    let taken = |stamp: &str| backups.join(format!("{stamp}-{}", plan.provider.name())).exists();
+    let mut stamp = base.clone();
+    let mut ordinal = 2;
+    while taken(&stamp) {
+        stamp = format!("{base}-{ordinal}");
+        ordinal += 1;
+    }
+    accounts::apply(plan, home, &stamp)
 }
 
 /// Every account folder of every provider that has a base, with its status.

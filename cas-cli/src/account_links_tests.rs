@@ -132,3 +132,21 @@ fn recreated_retired_folders_are_named_and_never_linked() {
         assert_eq!(survey.iter().filter(|(_, _, s)| s.retired.is_some()).count(), 2);
     }
 }
+
+#[test]
+fn a_repair_in_the_same_second_as_a_link_gets_its_own_backup() {
+    let (home, account) = linked_home(Provider::Claude);
+    let h = home.path();
+    std::fs::remove_file(account.join("agents")).unwrap();
+    write(&account.join("agents/mine.md"), "mine");
+    // The backup the link just wrote, for this second and the next two.
+    let now = chrono::Utc::now();
+    for offset in 0..3 {
+        let stamp = (now + chrono::Duration::seconds(offset)).format("%Y%m%dT%H%M%SZ");
+        write(&h.join(format!(".cas/accounts-backup/{stamp}-claude/items/.claude-a@x.com/agents/old.md")), "old");
+    }
+    let applied = repair(Provider::Claude, h).unwrap().unwrap();
+    assert!(applied.backup.to_string_lossy().ends_with("-2-claude"), "{}", applied.backup.display());
+    assert_eq!(std::fs::read_to_string(applied.backup.join("items/.claude-a@x.com/agents/mine.md")).unwrap(), "mine");
+    assert!(std::fs::read_link(account.join("agents")).is_ok());
+}

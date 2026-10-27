@@ -171,8 +171,7 @@ fn autofix_in(home: &Path, mut confirm: impl FnMut(&str) -> bool) -> Vec<Check> 
             previews.push(summary);
             continue;
         }
-        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
-        match accounts::apply(&plan, home, &stamp) {
+        match account_links::apply(&plan, home) {
             Ok(applied) => applied_rows.push(format!(
                 "{}: {}, {}, {}, backup {}, undo: bash {}",
                 provider.name(),

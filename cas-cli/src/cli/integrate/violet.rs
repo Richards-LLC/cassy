@@ -1981,7 +1981,7 @@ fn plan_project_proxy(
         ServerAction::Drop | ServerAction::DropSameHub
     );
     if allowlist_is_canonical && !drops_server {
-        let mut note = "already names exactly the hub's current routes".to_string();
+        let mut note = "already names exactly this build's canonical routes".to_string();
         if server_action == ServerAction::Keep {
             note.push_str("; ");
             note.push_str(&kept_override_note());

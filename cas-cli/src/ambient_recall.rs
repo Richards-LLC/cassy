@@ -2097,7 +2097,15 @@ pub(crate) fn build_local_ambient_recall_context(
     cas_root: &Path,
     prompt: &str,
 ) -> Option<RecallPacket> {
-    build_ambient_recall_context_with_factory_identity(input, cas_root, Some(prompt), false, None, None, false)
+    build_ambient_recall_context_with_factory_identity(
+        input,
+        cas_root,
+        Some(prompt),
+        false,
+        None,
+        None,
+        false,
+    )
 }
 
 /// Build an ambient packet for a factory launch before the harness has made
@@ -4031,6 +4039,160 @@ mod tests {
     }
 
     #[test]
+    fn supervisor_captured_packet_replay_is_compact_and_code_requires_a_request() {
+        #[derive(Deserialize)]
+        struct Replay {
+            query_hash: String,
+            prompt: String,
+            baseline_bytes: usize,
+            candidates: Vec<EvidenceCandidate>,
+        }
+        // Captured UserPromptSubmit and PostToolUse packets from the same real
+        // supervisor session; candidate scores come from its decision traces.
+        let replays: Vec<Replay> =
+            serde_json::from_str(include_str!("../tests/data/ambient-supervisor-replay.json"))
+                .unwrap();
+        for replay in replays {
+            for (role, requested_code) in [
+                (RecallRole::Supervisor, false),
+                (RecallRole::Supervisor, true),
+                (RecallRole::Worker, false),
+            ] {
+                let identity = identity(role);
+                let request = RecallRequest {
+                    prompt: if requested_code {
+                        "Search code symbols for this task".into()
+                    } else {
+                        replay.prompt.clone()
+                    },
+                    // Historical file/tool context must not opt supervisors in.
+                    files: vec!["src/ambient_recall.rs".into()],
+                    ..Default::default()
+                };
+                let query = RecallQuery::build(&identity, &request).unwrap();
+                let retriever = FixedRetriever {
+                    calls: Cell::new(0),
+                    rows: replay.candidates.clone(),
+                };
+                let candidates = retrieve_candidates(&identity, &request, &[&retriever]).unwrap();
+                let rendered =
+                    render_packet(&identity, &query, &candidates, &mut RecallLedger::default());
+                let (bytes, injected) = rendered
+                    .map(|(packet, rows)| (packet.full.len(), rows))
+                    .unwrap_or_default();
+                let code = injected
+                    .iter()
+                    .filter(|row| row.surface == EvidenceSurface::Code)
+                    .count();
+                eprintln!(
+                    "replay={} role={role:?} requested_code={requested_code} before_bytes={} after_bytes={bytes} injected={} code={code}",
+                    replay.query_hash,
+                    replay.baseline_bytes,
+                    injected.len()
+                );
+                if role == RecallRole::Supervisor {
+                    assert!(
+                        bytes <= 800,
+                        "supervisor packet exceeds its budget: {bytes}"
+                    );
+                    if !requested_code {
+                        assert_eq!(
+                            code, 0,
+                            "ambient file/tool context requested Code implicitly"
+                        );
+                    }
+                } else {
+                    assert!(code > 0, "worker code recall was suppressed");
+                }
+                if requested_code {
+                    assert!(
+                        code > 0,
+                        "explicit supervisor code request lost its evidence"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn supervisor_uses_exact_turn_task_and_epic_before_ambient_tool_context() {
+        let env = TestEnvGuard::temp_home();
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut unrelated = Task::new("cas-noise".into(), "Neon PostHog Nuxt".into());
+        unrelated.status = TaskStatus::InProgress;
+        tasks.add(&unrelated).unwrap();
+        tasks
+            .add(&Task::new(
+                "cas-target".into(),
+                "Review token budget".into(),
+            ))
+            .unwrap();
+        let entries = crate::store::open_store_local(&root).unwrap();
+        for (id, content) in [
+            (
+                "mem-task",
+                "Decision for cas-target: preserve exact evidence",
+            ),
+            ("mem-epic", "Decision for cas-focus: compact packets"),
+            (
+                "mem-neighbor",
+                "Decision for cas-focus-extra: unrelated work",
+            ),
+        ] {
+            entries
+                .add(&Entry {
+                    id: id.into(),
+                    content: content.into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let identity = identity(RecallRole::Supervisor);
+        let input = cas_core::hooks::types::HookInput::default();
+        let mut request = hook_request(&input, &root, &identity, "Review cas-target");
+        assert_eq!(request.task_id.as_deref(), Some("cas-target"));
+        // Session focus is supplied by the factory metadata resolver in the hook.
+        request.focus_epic_id = Some("cas-focus".into());
+        let query = RecallQuery::build(&identity, &request).unwrap();
+        let local = SqliteRecallRetriever::existing(&root).unwrap();
+        let mut noisy = candidate("mem-tool-noise", EvidenceScope::Global);
+        noisy.strong_session_signal = true;
+        noisy.relevance = 99.0;
+        let noise = FixedRetriever {
+            calls: Cell::new(0),
+            rows: vec![noisy],
+        };
+        let candidates = retrieve_candidates(&identity, &request, &[&local, &noise]).unwrap();
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
+        let ids: Vec<_> = injected
+            .iter()
+            .map(|row| row.evidence_id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"mem-task"),
+            "exact task evidence missing: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"mem-epic"),
+            "exact epic evidence missing: {ids:?}"
+        );
+        assert!(!ids.contains(&"mem-neighbor"));
+        assert!(
+            injected.iter().take(2).all(|row| row.binding),
+            "tool noise preceded bindings: {ids:?}"
+        );
+        assert!(packet.full.len() <= 800);
+        assert!(
+            !packet.full.contains("Decision for"),
+            "supervisor received evidence bodies"
+        );
+        let unbound = hook_request(&input, &root, &identity, "Give me an update please");
+        assert_ne!(unbound.task_id.as_deref(), Some("cas-noise"));
+    }
+
+    #[test]
     fn cas_4caa_expired_memory_cards_are_labeled_expired() {
         let identity = identity(RecallRole::Supervisor);
         let query = RecallQuery::build(
@@ -4709,7 +4871,9 @@ mod tests {
         );
         assert_eq!(redact_prompt(&wake), "", "{wake}");
         assert_eq!(
-            redact_prompt(&format!("[cas #33981 supervisor-authored 4s first]\n\n{wake}")),
+            redact_prompt(&format!(
+                "[cas #33981 supervisor-authored 4s first]\n\n{wake}"
+            )),
             ""
         );
         // Real content still counts, including a commit-sha prefix and a task id.
@@ -6125,8 +6289,13 @@ mod tests {
             .unwrap();
 
         let drain_started = Instant::now();
-        let drain =
-            crate::cloud::embed_drain::drain_all_pending_with(&cas_root, 32, &embedder, crate::cloud::CodeVectorDrain::Drain).unwrap();
+        let drain = crate::cloud::embed_drain::drain_all_pending_with(
+            &cas_root,
+            32,
+            &embedder,
+            crate::cloud::CodeVectorDrain::Drain,
+        )
+        .unwrap();
         let drain_ms = drain_started.elapsed().as_millis();
         assert!(!drain.capability_absent);
         assert!(drain.problems().is_empty(), "{:?}", drain.problems());

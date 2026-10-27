@@ -111,6 +111,7 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
         // No OAuth token: this test never makes a network request.
         std::fs::write(dir.join(".credentials.json"), "{}").unwrap();
     }
+    let future_reset = chrono::Utc::now().timestamp() + 86400;
     let codex = home.path().join(".codex-team");
     std::fs::create_dir_all(codex.join("sessions")).unwrap();
     let claims =
@@ -124,8 +125,17 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     )
     .unwrap();
     std::fs::write(codex.join("sessions/rollout.jsonl"), serde_json::json!({"rate_limits": {
-        "plan_type": "pro", "primary": {"window_minutes": 300, "used_percent": 12, "resets_at": 1787011690},
-        "secondary": {"window_minutes": 10080, "used_percent": 34, "resets_at": 1787098090}
+        "plan_type": "pro", "primary": {"window_minutes": 300, "used_percent": 12, "resets_at": future_reset},
+        "secondary": {"window_minutes": 10080, "used_percent": 34, "resets_at": future_reset + 86400}
+    }}).to_string()).unwrap();
+    let canonical = home.path().join(".codex-team@example.com");
+    std::fs::create_dir_all(canonical.join("sessions")).unwrap();
+    std::fs::copy(codex.join("auth.json"), canonical.join("auth.json")).unwrap();
+    std::fs::write(codex.join("sessions/rollout.jsonl"), serde_json::json!({"timestamp": "2026-01-01T00:00:00Z", "rate_limits": {
+        "plan_type": "pro", "primary": {"window_minutes": 300, "used_percent": 12, "resets_at": future_reset}
+    }}).to_string()).unwrap();
+    std::fs::write(canonical.join("sessions/rollout.jsonl"), serde_json::json!({"timestamp": "2026-01-02T00:00:00Z", "rate_limits": {
+        "plan_type": "pro", "primary": {"window_minutes": 300, "used_percent": 45, "resets_at": future_reset}
     }}).to_string()).unwrap();
     // Keep the login probe deterministic and local for this fixture home.
     cas::test_paths::warm_stub(
@@ -141,7 +151,7 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let rows = json["accounts"].as_array().unwrap();
-    assert_eq!(rows.len(), 4);
+    assert_eq!(rows.len(), 5);
     let row = |provider, name| {
         rows.iter()
             .find(|a| a["provider"] == provider && a["name"] == name)
@@ -162,12 +172,15 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     );
     let team = row("codex", "team");
     assert_eq!(team["plan"], "pro");
-    assert_eq!(team["windows"][0]["used_percent"], 12.0);
+    assert_eq!(team["windows"][0]["used_percent"], 45.0);
+    assert_eq!(row("codex", "team@example.com")["windows"], team["windows"]);
+    assert!(rows.iter().position(|a| a["name"] == "team@example.com").unwrap()
+        < rows.iter().position(|a| a["name"] == "team").unwrap());
     assert_eq!(
         chrono::DateTime::parse_from_rfc3339(team["windows"][0]["resets_at"].as_str().unwrap())
             .unwrap()
             .timestamp(),
-        1787011690
+        future_reset
     );
     assert!(alt["windows"].as_array().unwrap().is_empty());
     assert!(!String::from_utf8(output).unwrap().contains("id_token"));
@@ -183,6 +196,49 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     assert!(human.contains("usage unknown"));
     assert!(human.contains("stale login"));
     assert!(human.lines().all(|line| line.len() <= 80));
+}
+
+#[test]
+fn account_launch_resolves_display_emails_and_refuses_ambiguous_or_unknown_names() {
+    use base64::Engine as _;
+    let home = home_with_profiles();
+    let bin = home.path().join("bin");
+    for provider in ["claude", "codex"] {
+        cas::test_paths::warm_stub(&bin.join(provider), r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true}'; exit 0; fi
+if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
+printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
+"#);
+        for (alias, email) in [("main", "main@example.com"), ("alt", "shared@example.com"), ("work", "shared@example.com")] {
+            let dir = home.path().join(if alias == "main" { format!(".{provider}") } else { format!(".{provider}-{alias}") });
+            std::fs::create_dir_all(&dir).unwrap();
+            if provider == "claude" {
+                let json = serde_json::json!({"oauthAccount": {"emailAddress": email}}).to_string();
+                std::fs::write(if alias == "main" { home.path().join(".claude.json") } else { dir.join(".claude.json") }, json).unwrap();
+            } else {
+                let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::json!({"email": email}).to_string());
+                std::fs::write(dir.join("auth.json"), serde_json::json!({"tokens": {"id_token": format!("h.{claims}.s")}}).to_string()).unwrap();
+            }
+        }
+        let command = |name: &str| {
+            let mut cmd = cas_cmd(home.path());
+            cmd.env_remove("CODEX_HOME").env_remove("CLAUDE_CONFIG_DIR").env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+                .args([provider, "--bare", name, "--version"]);
+            cmd
+        };
+        command("main@example.com").assert().success().stdout(predicate::str::contains("SELECTED=main"));
+        assert!(!home.path().join(format!(".{provider}-main@example.com")).exists());
+        command("shared@example.com").assert().failure()
+            .stderr(predicate::str::contains("ambiguous")).stderr(predicate::str::contains("alt"))
+            .stderr(predicate::str::contains("work"));
+        command("altt").assert().failure().stderr(predicate::str::contains("alt"))
+            .stderr(predicate::str::contains(format!("cas {provider} login altt")));
+        assert!(!home.path().join(format!(".{provider}-altt")).exists());
+        // An exact existing folder alias wins even when its text is another login's email.
+        let exact = home.path().join(format!(".{provider}-main@example.com"));
+        std::fs::create_dir(&exact).unwrap();
+        command("main@example.com").assert().success().stdout(predicate::str::contains(exact.to_string_lossy().as_ref()));
+    }
 }
 
 /// The headline behavior: `cas claude alt` selects the alt account and then

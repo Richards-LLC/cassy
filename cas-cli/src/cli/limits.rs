@@ -608,7 +608,9 @@ mod tests {
         let usage = account_usage(crate::accounts::Provider::Codex, home.path());
         assert_eq!(usage.plan.as_deref(), Some("pro"));
         assert_eq!(usage.windows[0].resets_at.unwrap().timestamp(), 1787011690);
-        assert_eq!(usage.windows[1].used_percent, Some(7.0));
+        assert_eq!(usage.windows[1].used_percent, None);
+        assert!(usage_summary(crate::accounts::Provider::Codex, home.path()).unwrap()
+            .contains("reset, usage unknown until next session"));
         assert!(
             !usage.authenticated,
             "a transcript does not prove a current login"

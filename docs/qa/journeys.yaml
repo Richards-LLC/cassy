@@ -245,7 +245,7 @@ bug_families:
     invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
     journeys: [HUB-J13]
   null-label-reply-receipt:
-    title: Null live reply labels normalize to omitted history labels before durable receipt, draining pending replay across attaches
+    title: Null live labels normalize before durable receipt; queued browser writes survive load and batch without losing receipt fences, draining pending replay across attaches
     tasks: [cas-c641]
     invariants: [HUB-J3-GOAL, HUB-J12-GOAL]
     journeys: [HUB-J3, HUB-J12]

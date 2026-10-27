@@ -22,7 +22,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - **Commander reply replay** — Accept replies whose optional operator label is
   null, persist them before acknowledging delivery, and let previously pending
   replies drain instead of replaying on every attach. History and live replies
-  share the same canonical label representation.
+  share the same canonical label representation. Reply writes and receipt
+  checks now batch under load; a valid IndexedDB write waiting behind another
+  writer no longer expires after five seconds.
 
 ## [3.84.0] - 2026-10-27
 

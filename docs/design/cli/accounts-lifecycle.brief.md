@@ -90,4 +90,4 @@ corrupt or unreadable database refuses with `account kept` and `Run: cas update`
 The picker's email input uses inquire's private crossterm event buffer, which is
 separate from shared stdin. Type-ahead entered there for the later duplicate
 question remains a known limitation, tracked as cas-5b4e per supervisor decision
-#4211400. Queued/shared-stdin answers and Ctrl-C at the duplicate question work.
+Supervisor message 4211400. Queued/shared-stdin answers and Ctrl-C at the duplicate question work.

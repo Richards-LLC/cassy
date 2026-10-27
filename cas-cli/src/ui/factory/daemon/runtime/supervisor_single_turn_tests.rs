@@ -319,6 +319,12 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     assert_eq!(held.len(), 1);
     assert!(held[0]["text"].as_str().unwrap().contains(&row.prompt));
 
+    // Claude's file watcher can ingest the Teams copy before its composer
+    // is ready. Ingestion is not a turn. Advance the existing observation
+    // window explicitly, rather than making the test sleep for 15 seconds.
+    std::fs::write(daemon.teams.as_ref().unwrap().teams_dir().join("inboxes/supervisor.json"), "[]").unwrap();
+    daemon.inbox_deferred_writes.get_mut(&row.id).unwrap().written_at =
+        Instant::now() - Duration::from_secs(16);
     daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::from_secs(6));
     let retried = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -335,7 +341,7 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     let typed = retried.unwrap();
     assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
     assert!(typed.contains(&format!("inbox_poll notification_id={}", row.id)), "wake identifies its startup body: {typed:?}");
-    assert_eq!(teams_messages(&daemon), held, "retry must not append another Teams body");
+    assert!(teams_messages(&daemon).is_empty(), "retry must not append another Teams body after ingestion");
 }
 
 /// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a

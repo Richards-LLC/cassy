@@ -12654,6 +12654,7 @@ mod spawn_lifecycle_tests {
             .expect_err("unselected account must refuse before launch");
         for detail in [
             "config_dir",
+            "project",
             logged_in.to_str().unwrap(),
             "No worktree was created",
         ] {
@@ -12712,6 +12713,14 @@ mod spawn_lifecycle_tests {
         spec.requester_config_dir = spec.config_dir.take();
         preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
         assert!(!env.home().join(".codex").exists());
+        // An implicit default is already the worker's launch target; accepting
+        // its authenticated login never chooses a different registered account.
+        let default = env.home().join(".codex");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("auth.json"), "{}").unwrap();
+        preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect("authenticated default account remains usable without an explicit selector");
+
     }
 
     #[test]

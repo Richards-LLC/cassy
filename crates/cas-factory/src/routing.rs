@@ -1987,6 +1987,8 @@ candidates = ["primary", "fallback"]
         ] {
             assert!(error.contains(detail), "missing {detail:?}: {error}");
         }
+        let empty = RoutingError::NoActiveRecipe { lane: "empty".into(), skipped: vec![] }.to_string();
+        assert!(!empty.ends_with(": "), "empty skipped list left a dangling separator: {empty}");
     }
 
     #[test]

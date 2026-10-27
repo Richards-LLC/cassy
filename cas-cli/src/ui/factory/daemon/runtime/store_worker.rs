@@ -43,6 +43,15 @@ pub(crate) const PASS_STORE_WAIT_BUDGET: Duration = Duration::from_millis(50);
 /// freeze the terminal for long (GH #1165).
 pub(crate) const SHUTDOWN_STORE_WAIT_BUDGET: Duration = Duration::from_secs(2);
 
+/// Store-wait budget one Commander `SendMessage` enqueue gets on the loop
+/// thread, in place of whatever is left of the pass budget (cas-cd73). An
+/// operator's send is a rare, deliberate human action; refusing it because
+/// earlier work in the pass spent [`PASS_STORE_WAIT_BUDGET`] showed "Not sent"
+/// on the phone during ordinary SQLite contention. Bounded like a shutdown, so
+/// sustained contention stalls the loop for at most this long per send and
+/// then fails back to the sender.
+pub(crate) const COMMANDER_SEND_STORE_WAIT_BUDGET: Duration = Duration::from_secs(2);
+
 /// How often the background thread runs the pending task-sync repair.
 pub(crate) const TASK_SYNC_RECONCILE_INTERVAL: Duration = Duration::from_secs(30);
 

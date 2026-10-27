@@ -649,7 +649,7 @@ fn timeout_finding(budget_secs: u32, started: Instant) -> Finding {
     pairs::finding(
         "capture-timeout",
         format!(
-            "Capture exceeded budget {budget_secs}s (elapsed {:.2}s); verify serve command and readiness",
+            "Exceeded budget {budget_secs}s; elapsed {:.2}s. Check serve",
             started.elapsed().as_secs_f64()
         ),
     )

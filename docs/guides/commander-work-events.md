@@ -39,6 +39,11 @@ work-event frame.
 {"WorkEventDetailRequest": {"request_id": "detail-1", "event_id": "t:<agent>:000000000001234:001"}}
 ```
 
+`agent` is optional. When set to an agent's name, the page is that agent's own
+timeline: its transcript, its task-DB rows and its hook events. A worker's
+transcript is read only for such a request. Send it only to a daemon that
+advertises `work_events_live`.
+
 A page holds at most 100 events. `limit` 0 means 100. The page holds the newest
 events before `before`, listed oldest first. While `has_earlier` is true, pass
 `next_before` back as `before` to page further back. The cursor is opaque.
@@ -77,6 +82,22 @@ row's payload. It is sent only when requested and is cut at 16 KiB, with
 transcript was rotated, the row was pruned, or the event belongs to another
 session. A failed request is answered with `Error` whose `client_ref` is the
 `request_id`.
+
+## Change notices
+
+A daemon that advertises `work_events_live` tells each client that has read a
+page when the stream gains events:
+
+```json
+{"WorkEventsAppended": {"schema_version": 1}}
+```
+
+The notice carries no event content. The client then reads the newest page
+again. The daemon checks for changes on its blocking job lane at most every
+2 seconds, and only while such a client is connected. It compares the session
+stream's newest event and the length of each worker's transcript; it stats a
+worker transcript and does not read it. The hub relays the notice only to
+sockets that have read a work-events page.
 
 ## Redaction
 

@@ -331,8 +331,20 @@ impl FactoryDaemon {
         }
     }
 
-    /// Hand finished work-event answers to the clients that asked.
+    /// Probe the stream for clients that follow it, and hand finished
+    /// work-event answers and change notices to their clients (cas-ff22).
     pub(super) fn deliver_work_events(&mut self) {
+        let now = std::time::Instant::now();
+        let clients = &self.ws_clients;
+        if self.work_events.probe_due(now, |client| clients.contains_key(&client)) {
+            self.work_events.start_probe(
+                &mut self.queue_jobs,
+                now,
+                self.app.cas_dir().to_path_buf(),
+                self.app.project_path().to_path_buf(),
+                self.session_name.clone(),
+            );
+        }
         for reply in self.work_events.take(&mut self.queue_jobs) {
             self.send_work_event_reply(reply);
         }
@@ -438,8 +450,8 @@ impl FactoryDaemon {
                     }
                 }
             }
-            ClientMessage::WorkEventsRequest { request_id, before, limit } => {
-                self.submit_work_events(client_id, request_id, super::work_events::WorkEventRequest::Page { before, limit });
+            ClientMessage::WorkEventsRequest { request_id, before, limit, agent } => {
+                self.submit_work_events(client_id, request_id, super::work_events::WorkEventRequest::Page { before, limit, agent });
             }
             ClientMessage::WorkEventDetailRequest { request_id, event_id } => {
                 self.submit_work_events(client_id, request_id, super::work_events::WorkEventRequest::Detail { event_id });

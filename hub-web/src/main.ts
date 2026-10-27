@@ -85,6 +85,8 @@ import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
 import { countUsage, usage, type UsageAction } from "./usage";
+import { WorkPicture } from "./work-picture";
+import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -169,6 +171,20 @@ const conversationViews = new Map<string, ConversationView>();
 // Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
 installAttachmentSheet();
 const conversationHistories = new Map<string, ConversationHistory>();
+/**
+ * Show work (cas-ff22): what work-event pages to read and when. A repaint
+ * updates only the session's own thread views and the open timeline, never
+ * the shell.
+ */
+const workPicture = new WorkPicture({
+  transport: (machineId) => connections.get(machineId),
+  repaintThread: (machineId, session) => {
+    const key = sessionKey(machineId, session);
+    for (const [viewKey, view] of conversationViews) if (viewKey === key || viewKey.startsWith(`${key}:`)) view.update();
+  },
+  repaintTimeline: () => syncWorkerTimeline(),
+  storage: (() => { try { return window.localStorage; } catch { return undefined; } })(),
+});
 /** Supervisor turns per thread the operator had on screen the last time that thread was open. */
 const readReplies = new Map<string, number>();
 /** Rows as last rendered, so the compose FAB can pick the thread that most wants the operator. */
@@ -459,6 +475,9 @@ function mountConversation(key: string, mount: HTMLElement): void {
         const page = conversationHistoryPage(threadKey);
         return page.loaded && !page.hasEarlier;
       },
+      // cas-ff22: Show work's rows between the turns; undefined while it is off.
+      work: () => workPicture.threadWork(threadMachineId, threadSession),
+      workRows: workPicture.rows(threadMachineId, threadSession),
       loadEarlier: () => {
         const page = conversationHistoryPage(threadKey);
         if (page.loading || page.nextBefore === undefined) return;
@@ -473,6 +492,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
     });
     conversationViews.set(key, conversation);
   }
+  workPicture.watchThread(selectedMachineId, selectedSession);
   if (conversation.element.parentElement !== mount) mount.append(conversation.element);
   // The unanswered ask is pinned directly above the composer as well as in the flow.
   const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
@@ -759,6 +779,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const key = sessionKey(machine.id, session);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
+      // cas-ff22: answers in flight on the old socket never come; a live
+      // attach re-reads the newest work of whatever shows it.
+      if (attachWasLive && state.phase !== "live") workPicture.disconnected(machine.id, session);
+      if (state.phase === "live" && !attachWasLive) { workPicture.disconnected(machine.id, session); workPicture.reattached(machine.id, session); }
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
@@ -951,12 +975,21 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       }
       updateConversationViews();
       renderConversationList();
+      // cas-ff22: older turns on screen may want the work done between them.
+      workPicture.coverHistory(machine.id, session, history.visibleEvents()[0]?.at);
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onSessionSummary: (session, summary) => {
       sessionSummaries.set(sessionKey(machine.id, session), summary);
       render();
     },
+    onWorkEvents: (session, page) => {
+      workPicture.page(machine.id, session, page);
+      workPicture.coverHistory(machine.id, session, conversationHistory(sessionKey(machine.id, session), session).visibleEvents()[0]?.at);
+    },
+    onWorkEventDetail: (session, detail) => workPicture.detail(machine.id, session, detail),
+    onWorkEventsFailed: (session, requestId, detail) => workPicture.failed(machine.id, session, requestId, detail),
+    onWorkEventsAppended: (session) => workPicture.appended(machine.id, session),
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
       // A retrying drop is already one plain status on the banner, header, row
@@ -2131,6 +2164,30 @@ function syncConversationActions(): void {
   syncControlHolder();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
+  const showWork = document.querySelector<HTMLButtonElement>("#conversation-show-work");
+  showWork?.setAttribute("aria-pressed", String(workPicture.showWork));
+  applyActionAvailability(showWork, document.querySelector<HTMLElement>("#conversation-show-work-reason"), showWorkUnavailableReason());
+}
+
+/** Why Show work cannot show anything for the open conversation (cas-ff22), if it cannot. */
+function showWorkUnavailableReason(): string | undefined {
+  if (!selectedMachineId || !selectedSession) return "Open a conversation to see its work.";
+  if (attachStates.get(sessionKey(selectedMachineId, selectedSession))?.phase !== "live" && !workPicture.supported(selectedMachineId, selectedSession)) return "Work shows once the conversation is connected.";
+  if (!workPicture.supported(selectedMachineId, selectedSession)) return "This machine's Cassy does not serve work yet. Update Cassy there to see work.";
+  return undefined;
+}
+
+/** Show work's switch: off shows replies only, on shows the work between them, on this device. */
+function toggleShowWork(): void {
+  const reason = showWorkUnavailableReason();
+  if (reason && !workPicture.showWork) {
+    const thread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    toast(reason, { thread, until: () => showWorkUnavailableReason() !== reason });
+    return;
+  }
+  workPicture.setShowWork(!workPicture.showWork);
+  countUsage("show-work.toggle");
+  syncConversationActions();
 }
 
 /**
@@ -2238,6 +2295,52 @@ function rawOutputDialog(): HTMLDialogElement {
     toggle?.focus();
   });
   return opened;
+}
+
+/** The worker whose timeline is open (cas-ff22). */
+let timelineWorker: { machineId: string; session: string; worker: string } | undefined;
+
+function timelineHandlers(): Parameters<typeof renderWorkerTimeline>[4] {
+  return {
+    readOlder: () => { if (timelineWorker) { workPicture.readOlder({ machineId: timelineWorker.machineId, session: timelineWorker.session, agent: timelineWorker.worker }); syncWorkerTimeline(); } },
+    closed: () => {
+      const closing = timelineWorker;
+      timelineWorker = undefined;
+      workPicture.watchTimeline(undefined);
+      // Focus goes back to the row's Timeline control, which a rail repaint may have replaced.
+      if (closing) document.querySelector<HTMLButtonElement>(`.status-timeline[data-worker="${CSS.escape(closing.worker)}"]`)?.focus();
+    },
+    rawOutput: openRawOutput,
+  };
+}
+
+/** Open one worker's live timeline from its row in Tasks & progress (cas-ff22). */
+function openWorkerTimeline(machineId: string, session: string, worker: string): void {
+  timelineWorker = { machineId, session, worker };
+  const dialog = workerTimelineDialog(document, timelineHandlers());
+  workPicture.watchTimeline({ machineId, session, agent: worker });
+  syncWorkerTimeline();
+  if (!dialog.open) { countUsage("worker.timeline"); dialog.showModal(); }
+}
+
+/** Repaint the open timeline from its stream and the worker's latest status. */
+function syncWorkerTimeline(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#worker-timeline");
+  if (!dialog?.open && !timelineWorker) return;
+  if (!dialog || !timelineWorker) return;
+  const { machineId, session, worker } = timelineWorker;
+  const status = statuses.get(sessionKey(machineId, session));
+  const agent = ((status?.agents as FleetAgent[] | undefined) ?? []).find((candidate) => candidate.name === worker);
+  const tasks = [...((status?.tasks_in_progress as FleetTask[] | undefined) ?? []), ...((status?.tasks_ready as FleetTask[] | undefined) ?? [])];
+  const task = agent?.current_task ?? undefined;
+  const unavailable = workPicture.timelineSupported(machineId, session) ? undefined : "This machine's Cassy does not serve worker timelines yet. Update Cassy there, or read the worker's terminal on the machine.";
+  renderWorkerTimeline(dialog, {
+    worker,
+    ...(agent?.status ? { status: agent.status } : {}),
+    ...(task ? { task } : {}),
+    ...(task && tasks.find((candidate) => candidate.id === task)?.title ? { taskTitle: String(tasks.find((candidate) => candidate.id === task)!.title) } : {}),
+    ...(unavailable ? { unavailable } : {}),
+  }, workPicture.stream(machineId, session, worker), workPicture.rows(machineId, session, worker), timelineHandlers());
 }
 
 /** Open the read-only Raw output drawer over the open conversation (cas-0546). */
@@ -4921,6 +5024,16 @@ function renderStatus(status?: Record<string, unknown>): void {
     line.append(identifier(worker.name), chip(worker.agent?.status));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
+    if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
+      const machineId = selectedMachineId, sessionName = selectedSession;
+      const open = document.createElement("button");
+      open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
+      open.setAttribute("aria-haspopup", "dialog");
+      open.setAttribute("aria-label", `${worker.name} timeline`);
+      open.textContent = "Timeline";
+      open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
+      line.append(open);
+    }
     const work = document.createElement("p"); work.className = "status-activity";
     if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
     work.append(document.createTextNode(worker.work)); row.append(work);
@@ -4947,6 +5060,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     empty.textContent = "No agents or tasks reported for this session yet.";
     container.append(empty);
   }
+  syncWorkerTimeline();
   if (phoneLayout()) presentFleetSheet(container, dismissFleetPanel);
   restoreFocus();
 }
@@ -5009,6 +5123,8 @@ function bindEvents(): void {
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };
   const rawOutputToggle = document.querySelector<HTMLButtonElement>("#conversation-raw-output");
   if (rawOutputToggle) rawOutputToggle.onclick = openRawOutput;
+  const showWorkToggle = document.querySelector<HTMLButtonElement>("#conversation-show-work");
+  if (showWorkToggle) showWorkToggle.onclick = toggleShowWork;
   // Phone compose FAB: open the thread that is waiting on the operator, else
   // the first one, and land in its composer; with nothing paired, pair.
   const compose = document.querySelector<HTMLButtonElement>("#compose-fab");

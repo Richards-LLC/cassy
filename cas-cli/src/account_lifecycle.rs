@@ -117,6 +117,13 @@ fn ps_uses(text: &str, folder: &Path) -> bool {
     })
 }
 
+fn repo_inspection_error(error: impl std::fmt::Display) -> anyhow::Error {
+    tracing::debug!(%error, "Cannot inspect known repositories");
+    // The CLI prints anyhow chains on the same line. Keep the suggested
+    // command separate and copyable instead of appending SQLite's SQL to it.
+    anyhow::anyhow!("Cannot inspect known repositories; account kept\nRun: cas doctor")
+}
+
 fn in_use(folder: &Path, home: &Path) -> Result<bool> {
     for key in [
         "CLAUDE_CONFIG_DIR",
@@ -154,10 +161,14 @@ fn in_use(folder: &Path, home: &Path) -> Result<bool> {
     use crate::store::KnownRepoStore;
     let host = home.join(".cas");
     let mut roots = vec![host.clone()];
-    let inspection_error = "Cannot inspect known repositories; account kept\nRun: cas doctor";
-    if host.join("cas.db").try_exists().context(inspection_error)? {
-        let store = crate::store::SqliteKnownRepoStore::open(&host).context(inspection_error)?;
-        let repos = store.list().context(inspection_error)?;
+    if host
+        .join("cas.db")
+        .try_exists()
+        .map_err(repo_inspection_error)?
+    {
+        let store =
+            crate::store::SqliteKnownRepoStore::open(&host).map_err(repo_inspection_error)?;
+        let repos = store.list().map_err(repo_inspection_error)?;
         roots.extend(repos.into_iter().map(|r| r.path.join(".cas")));
     }
     if let Ok(root) = crate::store::find_cas_root() {
@@ -392,7 +403,10 @@ fn keychain_delete(
         &["delete-generic-password".into(), "-s".into(), service],
         None,
     )
-    .with_context(|| remedy.clone())?;
+    .map_err(|error| {
+        tracing::debug!(%error, "Cannot delete account Keychain item");
+        anyhow::anyhow!("{remedy}")
+    })?;
     anyhow::ensure!(
         out.status.success() || out.status.code() == Some(44),
         "{remedy}"
@@ -885,7 +899,10 @@ mod tests {
                 result.is_err(),
                 "an unreadable repo list must refuse removal"
             );
-            assert!(format!("{:#}", result.unwrap_err()).contains("known repositories"));
+            let error = format!("{:#}", result.unwrap_err());
+            assert!(error.contains("known repositories"));
+            // pin: the final line must remain a copyable diagnostic command.
+            assert!(error.ends_with("\nRun: cas doctor"));
             assert!(target.folder.is_dir());
         }
     }

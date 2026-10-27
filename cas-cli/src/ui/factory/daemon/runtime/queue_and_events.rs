@@ -13561,6 +13561,38 @@ mod tests {
     }
 
     #[test]
+    fn commander_tail_includes_open_attention_without_loading_older_pages() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let session = daemon.session_name.clone();
+        let turn = |kind: &str| {
+            let payload = serde_json::json!({"schema_version":2,"reply_to":null,"message":"decision","summary":"","device_id":"*","kind":kind,"attachments":[]});
+            let id = queue.enqueue_with_session("supervisor", "operator", &payload.to_string(), &session).unwrap();
+            queue.stamp_operator_reply(id, kind, &[]).unwrap();
+            id
+        };
+        let open = turn("ask");
+        let answered = turn("ask");
+        let retired_blocker = turn("blocker");
+        queue.record_terminal_operator_turn(&session, &format!("[CAS reply: explicitly acknowledges notification_id={answered}]\nProceed")).unwrap();
+        let blocker = turn("blocker");
+        let newest = turn("answer");
+        let page = daemon.conversation_history_page("tail".into(), "phone", None, 1).unwrap();
+        let json = serde_json::to_value(page).unwrap();
+        let page = &json["ConversationHistory"];
+        assert_eq!(page["replies"].as_array().unwrap().len(), 1);
+        assert_eq!(page["replies"][0]["notification_id"], newest);
+        let attention = page["open_attention"].as_array().expect("first page independently includes old open decisions");
+        assert_eq!(attention.iter().map(|reply| reply["notification_id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![open, blocker]);
+        assert!(!attention.iter().any(|reply| reply["notification_id"] == retired_blocker));
+        let older = serde_json::to_value(daemon.conversation_history_page("older".into(), "phone", Some(newest), 1).unwrap()).unwrap();
+        assert!(older["ConversationHistory"].get("open_attention").is_none(), "summary is first-page only");
+    }
+
+    #[test]
     fn external_wake_delivery_is_durable_and_not_repeated_after_restart() {
         let temp = tempfile::TempDir::new().unwrap();
         let reminder_store: Arc<dyn cas_store::ReminderStore> =

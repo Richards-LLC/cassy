@@ -184,6 +184,11 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Scroll-up paging retains the reading anchor; keyboard Load earlier remains available.
 - New replies append without detaching unchanged focused content.
 
+#### Edge paths
+
+- A mount, reconnect or focus-restoring scroll does not request older history.
+- A long same-speaker run remains bounded; Jump to latest returns from an older window.
+
 ### HUB-J5 · Reply by typing
 
 - **Entry:** an open conversation with a live supervisor

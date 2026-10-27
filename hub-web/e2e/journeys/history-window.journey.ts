@@ -28,10 +28,15 @@ for (const [name, viewport, colorScheme] of [
       await expect(page.getByRole("button", { name: "Jump to latest" })).toBeHidden();
     });
     await journey.stage("Scroll up to request one older page", async () => {
+      await thread.evaluate(element => {
+        (window as any).windowScrollProbe = [];
+        for (const type of ["scroll", "wheel"]) element.addEventListener(type, event => (window as any).windowScrollProbe.push({ type, top: element.scrollTop, delta: (event as WheelEvent).deltaY, at: performance.now() }));
+      });
       // Stop above the tail, then use an actual reading gesture near the top.
       await thread.evaluate(element => { element.scrollTop = 300; });
       await thread.hover(); await page.mouse.wheel(0, -250);
-      await expect.poll(() => hub.historyRequests.length).toBe(2);
+      try { await expect.poll(() => hub.historyRequests.length).toBe(2); }
+      finally { console.log("window-scroll", await page.evaluate(() => (window as any).windowScrollProbe)); }
       expect(hub.historyRequests.at(-1)).toMatchObject({ before: 101 });
       await expect.poll(() => log.locator(".conversation-turn").count()).toBeLessThanOrEqual(80);
       await expect(log.locator('[data-key="reply:150"]')).not.toBeAttached();

@@ -1,4 +1,5 @@
 import { test, expect, journeyPart } from "./journey";
+import type { DoubleOptions } from "./hub-double";
 import { journeyDay } from "./clock";
 import { ATLAS, PELICAN } from "./world";
 
@@ -6,8 +7,8 @@ const you = (id: number, text: string, at: string) => ({ notification_id: id, ta
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
 
-test("HUB-J4 read the conversation history", async ({ page, journey }) => {
-  const hub = await journey.hub({
+function historyWorld(): DoubleOptions {
+  return {
     machines: [ATLAS],
     paired: ["atlas"],
     history: {
@@ -18,7 +19,11 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
         { has_earlier: false, messages: [you(1, "Draft the QA epic plan.", journeyDay(2, 6)), you(3, "Keep it to three lanes.", journeyDay(2, 6, 30))], replies: [sup(2, 1, "Drafted: three lanes, one gate.", journeyDay(2, 6, 6)), sup(4, 3, "Three lanes it is.", journeyDay(2, 6, 36))] },
       ],
     },
-  });
+  };
+}
+
+test("HUB-J4 read the conversation history", async ({ page, journey }) => {
+  const hub = await journey.hub(historyWorld());
   const log = page.getByRole("log");
 
   await journey.stage("Open the conversation and see the recent turns", async () => {
@@ -105,6 +110,28 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     await expect(log.getByText("Yesterday")).toBeVisible();
     // cas-2093 (F12): the end of history is stated on screen, not left above the fold.
     await expect(page.getByText("No earlier history")).toBeInViewport();
+  });
+});
+
+test("HUB-J4 open reports and recover their notices without moving the reader", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub(historyWorld());
+  const log = page.getByRole("log");
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
+  // Reach the real history boundary before reconnecting. The reattach's newest
+  // page still advertises older turns; it must not reset the reader's boundary.
+  for (const arrived of ["Scheduled for 09:00 with three workers.", "Drafted: three lanes, one gate."]) {
+    await page.getByRole("button", { name: "Load earlier" }).click();
+    await expect(log.getByText(arrived)).toBeAttached();
+  }
+  await expect(page.getByText("No earlier history")).toBeVisible();
+  /** Top of the first thread item on screen: the line the reader is on. */
+  const reading = () => page.evaluate(() => {
+    const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
+    const top = thread.getBoundingClientRect().top;
+    const node = [...thread.querySelectorAll<HTMLElement>(".msgs [data-key]")].find((item) => item.getBoundingClientRect().height > 0 && item.getBoundingClientRect().bottom > top)!;
+    return { key: node.dataset.key!, y: Math.round(node.getBoundingClientRect().top) };
   });
 
   await journey.stage("Open a report the supervisor sent", async () => {

@@ -516,8 +516,9 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
     await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable choices QA");
     await page.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(page.locator("#pair-dialog")).toBeHidden();
-    await page.getByRole("navigation", { name: "Choose a supervisor" })
-      .getByRole("button", { name: /project on/ }).click();
+    // Pairing opens the only conversation on a phone. Its list is then
+    // hidden; clicking the disappearing row races that automatic navigation.
+    await expect(page.getByRole("textbox", { name: "Your message", exact: true })).toBeVisible();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
     await context.tracing.start({ screenshots: false,
       snapshots: { dom: true, aria: true, screen: true }, sources: true });

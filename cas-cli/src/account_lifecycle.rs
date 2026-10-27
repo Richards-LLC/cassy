@@ -260,10 +260,19 @@ pub(crate) fn set_disabled(home: &Path, folder: &Path, disabled: bool) -> Result
 }
 
 pub(crate) fn remove(target: &Target, home: &Path) -> Result<()> {
+    remove_with(target, home, cfg!(target_os = "macos"), &mut security)
+}
+
+fn remove_with(
+    target: &Target,
+    home: &Path,
+    macos: bool,
+    run: &mut impl FnMut(&[String], Option<&str>) -> Result<Output>,
+) -> Result<()> {
     ensure_idle(target, home)?;
     read_policy(home)?;
-    if cfg!(target_os = "macos") && target.provider == Provider::Claude {
-        keychain_delete(&target.folder, &mut security)?;
+    if macos && target.provider == Provider::Claude {
+        keychain_delete(&target.folder, run)?;
     }
     // remove_dir_all unlinks symlinks within the tree, never traverses them.
     if std::fs::symlink_metadata(&target.folder)?
@@ -529,6 +538,109 @@ impl Drop for NewLogin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn remove_keeps_credentials_until_folder_deletion_and_reports_keychain_remedy() {
+        use std::os::unix::process::ExitStatusExt;
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let target = Target {
+            provider: Provider::Claude,
+            name: "idle".into(),
+            folder: env.home().join(".claude-idle"),
+            email: None,
+        };
+        // A regular file makes remove_dir_all fail deterministically, even as root.
+        std::fs::write(&target.folder, "cannot remove as directory").unwrap();
+        let mut calls = 0;
+        assert!(
+            remove_with(&target, env.home(), true, &mut |_, _| {
+                calls += 1;
+                Ok(Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            })
+            .is_err()
+        );
+        assert_eq!(
+            calls, 0,
+            "folder failure must leave the Keychain item intact"
+        );
+        std::fs::remove_file(&target.folder).unwrap();
+        std::fs::create_dir(&target.folder).unwrap();
+        let error = remove_with(&target, env.home(), true, &mut |args, _| {
+            assert!(
+                !target.folder.exists(),
+                "delete the folder before touching credentials"
+            );
+            assert_eq!(
+                args,
+                &["delete-generic-password", "-s", &service(&target.folder)]
+            );
+            Ok(Output {
+                status: std::process::ExitStatus::from_raw(1 << 8),
+                stdout: vec![],
+                stderr: vec![],
+            })
+        })
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains(&format!(
+                "security delete-generic-password -s '{}'",
+                service(&target.folder)
+            )),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn remove_refuses_unreadable_known_repos() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("cas.db"), "not a sqlite database").unwrap();
+        let target = Target {
+            provider: Provider::Codex,
+            name: "idle".into(),
+            folder: env.home().join(".codex-idle"),
+            email: None,
+        };
+        std::fs::create_dir(&target.folder).unwrap();
+        let result = remove(&target, env.home());
+        assert!(
+            result.is_err(),
+            "an unreadable repo list must refuse removal"
+        );
+        assert!(format!("{:#}", result.unwrap_err()).contains("known repositories"));
+        assert!(target.folder.is_dir());
+    }
+
+    #[test]
+    fn remove_enabled_account_preserves_policy_bytes_and_absence() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let target = Target {
+            provider: Provider::Codex,
+            name: "idle".into(),
+            folder: env.home().join(".codex-idle"),
+            email: None,
+        };
+        let path = policy_path(env.home());
+        std::fs::create_dir(&target.folder).unwrap();
+        remove(&target, env.home()).unwrap();
+        assert!(!path.exists(), "a no-op must not create config.toml");
+        for text in [
+            "# preserve this comment\n[accounts]\nselection = 'manual'\n",
+            "# empty disabled list\n[accounts]\ndisabled = [ ]\n",
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+            std::fs::create_dir(&target.folder).unwrap();
+            remove(&target, env.home()).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), text.as_bytes());
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn keychain_lifecycle_uses_named_services_and_preserves_old_item_on_write_failure() {

@@ -784,6 +784,22 @@ fi
 "#
         );
         cas::test_paths::warm_stub(&bin.join(provider), &script);
+        let stale = home.path().join(format!(".{provider}-login.tmp.stale"));
+        let fresh = home.path().join(format!(".{provider}-login.tmp.fresh"));
+        let linked = home.path().join(format!(".{provider}-login.tmp.link"));
+        let outside = home.path().join("keep-target");
+        for path in [&stale, &fresh, &outside] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::File::open(&stale)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+                ),
+            )
+            .unwrap();
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
         cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -792,6 +808,17 @@ fi
             .args([provider, "login", "mistyped@example.com"])
             .assert()
             .failure();
+        assert!(
+            !stale.exists(),
+            "next login must sweep old temporary folders"
+        );
+        assert!(fresh.is_dir(), "fresh temporary folders must be kept");
+        assert!(
+            linked.is_symlink() && outside.is_dir(),
+            "never traverse sweep symlinks"
+        );
+        std::fs::remove_dir(&fresh).unwrap();
+        std::fs::remove_file(&linked).unwrap();
         assert!(
             !home
                 .path()
@@ -854,5 +881,102 @@ fi
                 .join(format!(".{provider}-real@example.com-2"))
                 .is_dir()
         );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn interrupted_login_cleans_temporary_account_for_both_providers() {
+    use cas_pty::{Pty, PtyConfig, PtyEvent};
+    for provider in ["claude", "codex"] {
+        // Ctrl-C goes to the foreground group; service shutdown may target only cas.
+        for (signal, group) in [(libc::SIGINT, true), (libc::SIGTERM, false)] {
+            let home = TempDir::new().unwrap();
+            let bin = home.path().join("bin");
+            std::fs::create_dir(&bin).unwrap();
+            cas::test_paths::warm_stub(
+                &bin.join(provider),
+                "#!/bin/sh\nprintf 'AUTH_READY\\n'\nexec /bin/cat\n",
+            );
+            let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            )))
+            .unwrap();
+            let mut pty = Pty::spawn(
+                "interrupted-account-login",
+                PtyConfig {
+                    command: cas::test_paths::cas_binary().to_string_lossy().into_owned(),
+                    args: vec![
+                        provider.into(),
+                        "login".into(),
+                        "cancelled@example.com".into(),
+                    ],
+                    cwd: Some(home.path().into()),
+                    env: vec![
+                        ("HOME".into(), home.path().to_string_lossy().into_owned()),
+                        (
+                            "XDG_CONFIG_HOME".into(),
+                            home.path().join(".xdg").to_string_lossy().into_owned(),
+                        ),
+                        ("PATH".into(), path.to_string_lossy().into_owned()),
+                        ("CAS_SKIP_FACTORY_TOOLING".into(), "1".into()),
+                    ],
+                    env_remove: vec![
+                        "CAS_ROOT".into(),
+                        "CAS_CLONE_PATH".into(),
+                        "CLAUDE_CONFIG_DIR".into(),
+                        "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                        "CODEX_HOME".into(),
+                    ],
+                    ..PtyConfig::default()
+                },
+            )
+            .unwrap();
+            let pid = pty.process_group_id().unwrap() as i32;
+            let mut output = Vec::new();
+            let mut interrupted = false;
+            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    match pty.recv().await {
+                        Some(PtyEvent::Output(bytes)) => {
+                            output.extend(bytes);
+                            if !interrupted
+                                && String::from_utf8_lossy(&output).contains("AUTH_READY")
+                            {
+                                assert_eq!(
+                                    unsafe { libc::kill(if group { -pid } else { pid }, signal) },
+                                    0
+                                );
+                                interrupted = true;
+                            }
+                        }
+                        Some(PtyEvent::Exited(code)) => return code,
+                        Some(PtyEvent::Error(e)) => panic!("login PTY: {e}"),
+                        None => panic!("login exited without status"),
+                    }
+                }
+            })
+            .await;
+            pty.kill_tree_force();
+            assert!(
+                result.is_ok() && interrupted,
+                "{provider} {signal}: {}",
+                String::from_utf8_lossy(&output)
+            );
+            let leftovers: Vec<_> = std::fs::read_dir(home.path())
+                .unwrap()
+                .flatten()
+                .filter(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with(&format!(".{provider}-"))
+                })
+                .map(|e| e.path())
+                .collect();
+            assert!(
+                leftovers.is_empty(),
+                "{provider} {signal}: interrupted login left {leftovers:?}"
+            );
+        }
     }
 }

@@ -122,12 +122,12 @@ it("renders Mermaid through sanitized SVG and keeps invalid diagrams as source",
 
 it("never inserts a renderer's scripts, event handlers or foreignObject", async () => {
   const pele = await import("pele/lazy");
-  const render = vi.spyOn(pele, "renderAsync").mockResolvedValue({ svg: '<svg xmlns="http://www.w3.org/2000/svg" onload="window.compromised=1"><script>window.compromised=1</script><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><img src="x" onerror="window.compromised=1" /></div></foreignObject><text onclick="window.compromised=1">Safe label</text></svg>', width: 200, height: 100, links: [], type: "flowchart", mermaidType: "flowchart-v2" });
+  const render = vi.spyOn(pele, "renderAsync").mockResolvedValue({ svg: '<svg xmlns="http://www.w3.org/2000/svg" style="font-size:12px;fill:var(--_fg)" onload="window.compromised=1"><script>window.compromised=1</script><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><img src="x" onerror="window.compromised=1" /></div></foreignObject><text onclick="window.compromised=1">Safe label</text></svg>', width: 200, height: 100, links: [], type: "flowchart", mermaidType: "flowchart-v2" });
   const root = document.createElement("div"); document.body.append(root);
   try {
     root.append(...renderMarkdown(document, "```mermaid\nflowchart LR\nA --> B\n```"));
     await vi.waitFor(() => expect(root.querySelector("svg")?.textContent).toBe("Safe label"));
-    expect(root.querySelector("script, foreignObject, [onload], [onclick], [onerror]")).toBeNull();
+    expect(root.querySelector("script, foreignObject, [onload], [onclick], [onerror], [style]")).toBeNull();
     root.querySelector("svg")!.dispatchEvent(new Event("load"));
     root.querySelector("text")!.dispatchEvent(new MouseEvent("click"));
     expect((window as unknown as { compromised?: number }).compromised).toBeUndefined();

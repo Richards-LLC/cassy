@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { runVisualQa } from './visual-qa.mjs';
+import { runVisualQa, resolvePlaywright } from './visual-qa.mjs';
 import { runVisualQa as runBuiltinVisualQa } from '../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs';
 
 const fixture = fileURLToPath(new URL('./visual-qa-fixtures/loading-only.html', import.meta.url));
@@ -140,4 +140,61 @@ test('invalid readiness options fail before rendering', async () => {
 test('canonical and builtin visual QA copies are identical', async () => {
   assert.equal(await readFile(new URL('./visual-qa.mjs', import.meta.url), 'utf8'),
     await readFile(new URL('../cas-cli/src/builtins/skills/cas-ui-craft/scripts/visual-qa.mjs', import.meta.url), 'utf8'));
+});
+
+// C957: real C5 ranking After PNG, the image omitted in C9's PASS screenshots.
+// Control only the browser decoder boundary, without timing sleeps: the image
+// becomes available when decode is requested, then Chromium decodes its real bytes.
+test('captures wait for the After image decoder in resting and journey screenshots', async () => {
+  const artifactDir = await artifacts();
+  const png = await readFile(new URL('./visual-qa-fixtures/ranking.after.png', import.meta.url));
+  const uri = 'data:image/png;base64,' + png.toString('base64');
+  const path = join(artifactDir, 'after.html');
+  await writeFile(path, html(`<main><h1>Ranking capture</h1>
+    <img id="after" alt="After ranking" decoding="async" style="position:absolute;left:16px;top:96px;width:320px;height:94px"
+      src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></main>
+    <script>const image=document.querySelector('#after'); const nativeDecode=image.decode.bind(image);
+      image.decode=()=>{ image.src=${JSON.stringify(uri)}; return nativeDecode(); };</script>`));
+  const result = await runVisualQa({ ...matrix, urls: [path], artifactDir,
+    journey: { states: [{ name: 'after' }] } });
+  assert.equal(result.status, 'PASS', JSON.stringify(result.findings));
+  assert.equal(result.screenshots.length, 2);
+  const { playwright } = await resolvePlaywright();
+  const executablePath = process.env.CHROME_PATH || ['google-chrome', 'chromium', 'chromium-browser']
+    .map(name => spawnSync('which', [name], { encoding: 'utf8' })).find(result => result.status === 0)?.stdout.trim();
+  const browser = await playwright.chromium.launch({ headless: true, executablePath });
+  try {
+    const page = await browser.newPage();
+    for (const shot of result.screenshots) {
+      const screenshot = 'data:image/png;base64,' + (await readFile(join(artifactDir, shot.path))).toString('base64');
+      const pixel = await page.evaluate(async (uri) => {
+        const image = new Image(); image.src = uri; await image.decode();
+        const canvas = document.createElement('canvas'); canvas.width = image.width; canvas.height = image.height;
+        const context = canvas.getContext('2d'); context.drawImage(image, 0, 0);
+        return [...context.getImageData(17, 97, 1, 1).data];
+      }, screenshot);
+      // pin: original C5 PNG's paper pixel; a blank capture is white here.
+      assert.deepEqual(pixel, [246, 243, 236, 255], shot.state || 'resting');
+    }
+  } finally { await browser.close(); }
+});
+
+test('undecoded images fail strict captures even with a visual allowlist', async () => {
+  for (const mode of ['broken', 'pending']) {
+    const artifactDir = await artifacts();
+    const path = join(artifactDir, 'after.html');
+    const allowlistPath = join(artifactDir, 'allowlist.json');
+    await writeFile(allowlistPath, JSON.stringify({ entries: [{ type: '*', selector: '*', reason: 'Visual exceptions cannot approve undecoded evidence.' }] }));
+    await writeFile(path, html(`<main><h1>Ranking capture</h1><img id="after" alt="After ranking" decoding="async"
+      style="width:320px;height:94px" src="data:image/png;base64,broken"></main>
+      ${mode === 'pending' ? '<script>document.querySelector("#after").decode=()=>new Promise(()=>{});</script>' : ''}`));
+    const result = await runBuiltinVisualQa({ ...matrix, urls: [path], artifactDir, readyTimeoutMs: 100, allowlistPath,
+      journey: { states: [{ name: 'after' }] } });
+    assert.equal(result.status, 'FAIL', mode);
+    assert.equal(result.exitCode, 1);
+    const failures = result.findings.filter(({ type }) => type === 'image-not-decoded');
+    assert.equal(failures.length, 2, JSON.stringify(result.findings));
+    assert.ok(failures.every(({ selector, textSample, reason }) => selector === '#after' && textSample === 'After ranking'
+      && reason.includes(mode === 'pending' ? '100 ms' : 'failed')), JSON.stringify(failures));
+  }
 });

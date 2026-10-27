@@ -5067,3 +5067,58 @@ fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
         "github.com/acme/widget"
     );
 }
+
+/// cas-2c559: `/v1/projects` needs only machine:read, but a live session's
+/// project (cas-0273) is session data. A pairing that can only see machines
+/// must not learn the folder of a running session in an unregistered project;
+/// one that can read sessions sees it. The folder is not a git checkout, so it
+/// is listed through the non-git fallback (its canonical path).
+#[tokio::test]
+async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_cas_2c559() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let temp = private_tempdir();
+    let folder = temp.path().join("plain-folder");
+    std::fs::create_dir(&folder).unwrap();
+    let mut session = fixture_session("factory-a");
+    session.project_dir = Some(folder.join(".").to_string_lossy().into_owned());
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let pair = |scopes: std::collections::BTreeSet<Scope>| {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), Utc::now()).unwrap();
+        let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", scopes);
+        exchange.public_key_jwk = public_jwk(&signing);
+        (signing, auth.exchange_pairing(exchange, Utc::now()).unwrap())
+    };
+    let machine_only = pair([Scope::MachineRead].into_iter().collect());
+    let session_reader = pair([Scope::MachineRead, Scope::SessionRead].into_iter().collect());
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let listed = |(signing, credential): &(SigningKey, DeviceCredential)| {
+        let request = Request::get("/v1/projects")
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", credential.credential))
+            .header("dpop", sign_dpop(signing, &credential.credential, "GET", "/v1/projects", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .body(Body::empty()).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            body["projects"].as_array().unwrap().iter()
+                .map(|p| (p["path"].as_str().unwrap().to_owned(), p["running_session"].as_str().map(str::to_owned)))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(listed(&machine_only).await, Vec::new(), "machine:read alone reveals no running session's folder");
+    assert_eq!(
+        listed(&session_reader).await,
+        vec![(folder.canonicalize().unwrap().to_string_lossy().into_owned(), Some("factory-a".to_owned()))],
+    );
+}

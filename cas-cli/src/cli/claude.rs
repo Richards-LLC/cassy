@@ -194,7 +194,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
 fn with_usage(mut profiles: Vec<Profile>) -> Vec<Profile> {
     let accounts = profiles
         .iter()
-        .filter(|profile| profile.login_state != LoginState::LoggedOut)
+        .filter(|profile| matches!(profile.login_state, LoginState::LoggedIn | LoginState::Unknown))
         .map(|profile| (profile.name.clone(), profile.directory.clone()))
         .collect();
     let usage = super::limits::usage_summaries(

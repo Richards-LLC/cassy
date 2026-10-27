@@ -176,7 +176,10 @@ fn render_list(
         flagged
     );
     for provider in Provider::ALL {
-        out.push_str(&format!("\n{}\n", provider.name()));
+        if provider != Provider::Claude {
+            out.push('\n');
+        }
+        out.push_str(&format!("{}\n", provider.name()));
         out.push_str(&format!("  {:<34} {:<12} {}\n", "ACCOUNT", "PLAN", "LOGIN"));
         for a in accounts.iter().filter(|a| a.provider == provider) {
             use crate::account_registry::LoginState;

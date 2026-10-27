@@ -53,6 +53,7 @@ pub(crate) struct Profile {
     pub(crate) directory: PathBuf,
     pub(crate) login_state: LoginState,
     pub(crate) active: bool,
+    pub(crate) disabled: bool,
     /// Live usage for the picker, e.g. `5h limit hit, resets 15:00` (cas-e1f4).
     pub(crate) usage: Option<String>,
     pub(crate) recommendation: Option<String>,
@@ -133,6 +134,7 @@ pub(crate) fn scan_profiles_with(
     Ok(accounts
         .into_iter()
         .map(|account| Profile {
+            disabled: account.flags.disabled,
             active: active_dir.map_or(account.name == layout.main_name, |dir| {
                 dir == account.folder
             }),
@@ -223,26 +225,34 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
         .iter()
         .map(|profile| ProfileChoice::Existing {
             name: profile.name.clone(),
-            label: format!(
-                "{} — {}{}{}{}",
+            label: disabled_label(profile.disabled, format!(
+                "{} — {}{}{}{}{}",
                 profile.display_name,
                 login_state_label(profile.login_state),
                 if profile.active { ", active" } else { "" },
+                if profile.disabled { ", disabled" } else { "" },
                 profile.recommendation.as_deref()
                     .map(|reason| format!(", recommended: {reason}"))
-                    .or_else(|| profile.exclusion.as_deref().map(|reason| format!(", {reason}")))
+                    .or_else(|| profile.exclusion.as_deref().filter(|_| !profile.disabled).map(|reason| format!(", {reason}")))
                     .unwrap_or_default(),
-                profile
-                    .usage
-                    .as_deref()
+                profile.usage.as_deref()
                     .filter(|_| profile.recommendation.is_none() && profile.exclusion.is_none())
                     .map(|usage| format!(": {usage}"))
                     .unwrap_or_default()
-            ),
+            )),
         })
         .collect();
     choices.push(ProfileChoice::NewLogin);
     choices
+}
+
+fn disabled_label(disabled: bool, label: String) -> String {
+    use std::io::IsTerminal;
+    if disabled && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        format!("\x1b[2m{label}\x1b[0m")
+    } else {
+        label
+    }
 }
 
 /// Index of the account the environment currently points at, for cursor start.
@@ -546,6 +556,7 @@ mod tests {
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedIn,
                 active: true,
+                disabled: false,
                 usage: None,
             recommendation: None,
             exclusion: None,
@@ -556,6 +567,7 @@ mod tests {
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
+                disabled: false,
                 usage: None,
             recommendation: None,
             exclusion: None,
@@ -585,6 +597,7 @@ mod tests {
                 directory: PathBuf::from("/tmp/.codex"),
                 login_state: LoginState::LoggedOut,
                 active: true,
+                disabled: false,
                 usage: None,
             recommendation: None,
             exclusion: None,
@@ -595,6 +608,7 @@ mod tests {
                 directory: PathBuf::from("/tmp/.codex-alt"),
                 login_state: LoginState::Unknown,
                 active: false,
+                disabled: true,
                 usage: None,
             recommendation: None,
             exclusion: None,
@@ -604,7 +618,10 @@ mod tests {
         let choices = profile_choices(&profiles);
         assert_eq!(choices.len(), 3);
         assert_eq!(choices[0].to_string(), "main — not logged in, active");
-        assert_eq!(choices[1].to_string(), "alt — login state unknown");
+        assert_eq!(
+            choices[1].to_string(),
+            "alt — login state unknown, disabled"
+        );
         assert_eq!(choices[2], ProfileChoice::NewLogin);
         assert_eq!(active_choice_index(&profiles), 0);
         for provider in crate::accounts::Provider::ALL {

@@ -86,14 +86,89 @@ pub fn ensure(provider: Provider, home: &Path, folder: &Path) -> Result<Ensured>
     Ok(Ensured { linked, status })
 }
 
-/// The destructive repair: `cas accounts link` for the whole provider, with
-/// its backup and restore script.
-pub fn repair(provider: Provider, home: &Path) -> Result<Option<accounts::Applied>> {
-    let plan = accounts::plan(provider, home)?;
-    if plan.is_empty() {
-        return Ok(None);
+/// The launch-time repair of one folder: back up its own real shared items,
+/// copy files the base lacks into the base, and link those slots. It never
+/// renames, retires or moves a folder and never touches another account, so
+/// it is offered only when no folder change or cross-account merge is needed.
+pub enum FolderRepair {
+    /// Nothing to replace.
+    None,
+    /// Needs `cas doctor --fix`: a retired or default folder, or an item
+    /// whose files differ from the base's (a merge across accounts).
+    NeedsDoctor,
+    /// This folder's own slots only.
+    Offer(accounts::Plan),
+}
+
+pub fn plan_folder_repair(provider: Provider, home: &Path, folder: &Path) -> Result<FolderRepair> {
+    let status = inspect(provider, home, folder);
+    if status.conflicts.is_empty() {
+        return Ok(FolderRepair::None);
     }
-    apply(&plan, home).map(Some)
+    let label = match folder.file_name().and_then(|name| name.to_str()) {
+        Some(label) if folder.parent() == Some(home) => label.to_string(),
+        _ => return Ok(FolderRepair::NeedsDoctor),
+    };
+    // A default folder is renamed or retired by `cas accounts link`.
+    if status.retired.is_some() || provider.retiring().contains(&label.as_str()) {
+        return Ok(FolderRepair::NeedsDoctor);
+    }
+    let base = provider.base_dir(home);
+    let mut merges = Vec::new();
+    let mut links = Vec::new();
+    for item in &status.conflicts {
+        let path = folder.join(item);
+        let meta = std::fs::symlink_metadata(&path)?;
+        let was = if meta.file_type().is_symlink() {
+            format!("link -> {}", std::fs::read_link(&path)?.display())
+        } else if meta.is_dir() {
+            "dir".into()
+        } else {
+            "file".into()
+        };
+        // A link elsewhere keeps its target's files in place; only a real item
+        // carries files into the base.
+        if !meta.file_type().is_symlink() {
+            for (rel, file) in accounts::files_under(&path, item)? {
+                let shared = base.join(&rel);
+                if std::fs::symlink_metadata(&shared).is_err() {
+                    merges.push(accounts::Merge {
+                        account: label.clone(),
+                        to: rel.clone(),
+                        rel,
+                        conflict: false,
+                        kind: accounts::MergeKind::Copy,
+                        base_from: None,
+                    });
+                } else if !shared.is_file() || accounts::digest_file(&shared)? != accounts::digest_file(&file)? {
+                    return Ok(FolderRepair::NeedsDoctor);
+                }
+            }
+        }
+        links.push(accounts::Link {
+            account: label.clone(),
+            item: item.clone(),
+            was,
+        });
+    }
+    let account = accounts::AccountDir {
+        label: label.clone(),
+        path: folder.to_path_buf(),
+        retiring: false,
+        email: provider.login_email(home, folder),
+        has_login: folder.join(provider.credentials()).exists(),
+    };
+    Ok(FolderRepair::Offer(accounts::Plan {
+        provider,
+        base,
+        create_base: false,
+        accounts: vec![account],
+        dir_changes: Vec::new(),
+        merges,
+        empty_dirs: Vec::new(),
+        links,
+        notes: Vec::new(),
+    }))
 }
 
 /// `accounts::apply` with a backup folder no earlier run used: two repairs in
@@ -176,46 +251,83 @@ pub fn notices(provider: Provider, home: &Path, folder: &Path, ensured: &Ensured
 }
 
 /// Check, auto-link and report before `cas claude|codex` launches `folder`.
-/// Never blocks the launch. Interactive launches may repair conflicts now.
-pub fn prelaunch(provider: Provider, home: &Path, folder: &Path, interactive: bool) {
+/// Never blocks the launch. An interactive launch may repair the folder's
+/// own real items now. Returns the folder to launch, re-read after a repair.
+pub fn prelaunch(provider: Provider, home: &Path, folder: &Path, interactive: bool) -> PathBuf {
+    let mut ask = |question: &str| {
+        use std::io::Write as _;
+        eprint!("{question} [y/N] ");
+        let _ = std::io::stderr().flush();
+        let mut answer = String::new();
+        let read = std::io::stdin().read_line(&mut answer);
+        // An empty read (EOF) echoes no newline; keep later output off the prompt line.
+        if !answer.ends_with('\n') {
+            eprintln!();
+        }
+        read.is_ok() && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    prelaunch_with(provider, home, folder, interactive.then_some(&mut ask as &mut dyn FnMut(&str) -> bool))
+}
+
+fn prelaunch_with(
+    provider: Provider,
+    home: &Path,
+    folder: &Path,
+    confirm: Option<&mut dyn FnMut(&str) -> bool>,
+) -> PathBuf {
+    let here = short(home, folder);
     let ensured = match ensure(provider, home, folder) {
         Ok(ensured) => ensured,
         Err(error) => {
-            eprintln!(
-                "Warning: could not link shared items in {}: {error:#}",
-                short(home, folder)
-            );
-            return;
+            eprintln!("Warning: could not link shared items in {here}: {error:#}");
+            return folder.to_path_buf();
         }
     };
     for line in notices(provider, home, folder, &ensured) {
         eprintln!("{line}");
     }
-    if !interactive || ensured.status.conflicts.is_empty() || ensured.status.retired.is_some() {
-        return;
+    let Some(confirm) = confirm else {
+        return folder.to_path_buf();
+    };
+    let plan = match plan_folder_repair(provider, home, folder) {
+        Ok(FolderRepair::Offer(plan)) => plan,
+        Ok(FolderRepair::None) => return folder.to_path_buf(),
+        Ok(FolderRepair::NeedsDoctor) => {
+            eprintln!("This needs folder or cross-account changes; run `cas doctor --fix` to preview them.");
+            return folder.to_path_buf();
+        }
+        Err(error) => {
+            eprintln!("Warning: could not plan a repair for {here}: {error:#}");
+            return folder.to_path_buf();
+        }
+    };
+    let items: Vec<&str> = plan.links.iter().map(|link| link.item.as_str()).collect();
+    let question = format!(
+        "Back up and link {} in {here} only (no other folder changes)?",
+        items.join(", ")
+    );
+    if !confirm(&question) {
+        return folder.to_path_buf();
     }
-    use std::io::Write as _;
-    eprint!("Repair now? Real items are backed up first [y/N] ");
-    let _ = std::io::stderr().flush();
-    let mut answer = String::new();
-    if std::io::stdin().read_line(&mut answer).is_err()
-        || !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-    {
-        return;
-    }
-    match repair(provider, home) {
-        Ok(Some(applied)) => {
-            eprintln!(
-                "[OK] {}: {} linked; backup {}",
-                provider.name(),
-                plural(applied.linked, "item"),
-                short(home, &applied.backup)
-            );
+    match apply(&plan, home) {
+        Ok(applied) => {
+            let base = short(home, &plan.base);
+            let mut line = format!("[OK] Linked {} in {here} to {base}", items.join(", "));
+            if applied.merged > 0 {
+                line.push_str(&format!("; copied {} the base lacked into it", plural(applied.merged, "file")));
+            }
+            line.push_str(&format!("; replaced items backed up in {}", short(home, &applied.backup)));
+            eprintln!("{line}");
             eprintln!("Undo: bash {}", applied.restore.display());
         }
-        Ok(None) => {}
         Err(error) => eprintln!("Warning: repair failed; launching anyway: {error:#}"),
     }
+    // Re-read the launch folder: the repair must leave it in place.
+    let status = inspect(provider, home, folder);
+    if !folder.is_dir() || !status.conflicts.is_empty() {
+        eprintln!("Warning: {here} still has unlinked shared items; run `cas doctor --fix`.");
+    }
+    folder.to_path_buf()
 }
 
 fn retired(provider: Provider, home: &Path, folder: &Path) -> Option<Retired> {

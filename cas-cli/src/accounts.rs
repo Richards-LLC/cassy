@@ -602,7 +602,7 @@ fn side_by_side(rel: &str, account: &str) -> String {
 /// Every regular file under `root` (or `root` itself), as paths relative to
 /// the account directory: `<item>/<...>`. Symlinks inside an item are
 /// followed only when they point at a regular file.
-fn files_under(root: &Path, item: &str) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn files_under(root: &Path, item: &str) -> Result<Vec<(String, PathBuf)>> {
     if root.is_file() {
         return Ok(vec![(item.to_string(), root.to_path_buf())]);
     }
@@ -628,7 +628,7 @@ fn digest(path: &Path) -> Result<[u8; 32]> {
     digest_file(path)
 }
 
-fn digest_file(path: &Path) -> Result<[u8; 32]> {
+pub(crate) fn digest_file(path: &Path) -> Result<[u8; 32]> {
     use sha2::{Digest as _, Sha256};
     use std::io::Read as _;
     let mut file =

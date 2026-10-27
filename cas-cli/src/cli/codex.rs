@@ -513,7 +513,8 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
 
     // cas-05cee: a session on a folder without its shared links has no
     // skills, agents, hooks or settings. Link empty slots before launch.
-    crate::account_links::prelaunch(
+    // The repair never moves the folder; launch what it re-read.
+    let profile_dir = crate::account_links::prelaunch(
         crate::accounts::Provider::Codex,
         &home,
         &profile_dir,

@@ -134,20 +134,66 @@ fn recreated_retired_folders_are_named_and_never_linked() {
 }
 
 #[test]
-fn a_repair_in_the_same_second_as_a_link_gets_its_own_backup() {
-    let (home, account) = linked_home(Provider::Claude);
-    let h = home.path();
-    std::fs::remove_file(account.join("agents")).unwrap();
-    write(&account.join("agents/mine.md"), "mine");
-    // The backup the link just wrote, for this second and the next two.
-    let now = chrono::Utc::now();
-    for offset in 0..3 {
-        let stamp = (now + chrono::Duration::seconds(offset)).format("%Y%m%dT%H%M%SZ");
-        write(&h.join(format!(".cas/accounts-backup/{stamp}-claude/items/.claude-a@x.com/agents/old.md")), "old");
+fn a_launch_repair_touches_only_the_launched_folder_and_keeps_it_logged_in() {
+    for provider in Provider::ALL {
+        let (home, account) = linked_home(provider);
+        let h = home.path();
+        let p = provider.prefix();
+        // The full `cas accounts link` plan would rename this default folder
+        // (a unique login) and merge another account's real item.
+        let default = h.join(format!(".{}", provider.name()));
+        login(provider, &default, "new@y.com");
+        write(&default.join("agents/theirs.md"), "default");
+        let other = h.join(format!("{p}c@x.com"));
+        login(provider, &other, "c@x.com");
+        write(&other.join("agents/theirs.md"), "other");
+        // The launched folder: one real item with a file the base lacks.
+        std::fs::remove_file(account.join("agents")).unwrap();
+        write(&account.join("agents/mine.md"), "mine");
+        let credential = std::fs::read(account.join(provider.credentials())).unwrap();
+        // An earlier run's backup holds this second and the next two.
+        let now = chrono::Utc::now();
+        for offset in 0..3 {
+            let stamp = (now + chrono::Duration::seconds(offset)).format("%Y%m%dT%H%M%SZ");
+            std::fs::create_dir_all(h.join(format!(".cas/accounts-backup/{stamp}-{}", provider.name()))).unwrap();
+        }
+
+        let mut asked = Vec::new();
+        let mut record = |question: &str| {
+            asked.push(question.to_string());
+            true
+        };
+        let launched = prelaunch_with(provider, h, &account, Some(&mut record as &mut dyn FnMut(&str) -> bool));
+        assert_eq!(launched, account);
+        assert_eq!(asked.len(), 1);
+        assert!(asked[0].contains(&format!("agents in ~/{p}a@x.com only")), "{asked:?}");
+        assert!(account.is_dir(), "the launched folder stays in place");
+        assert_eq!(std::fs::read(account.join(provider.credentials())).unwrap(), credential);
+        assert_eq!(std::fs::read_link(account.join("agents")).unwrap(), provider.base_dir(h).join("agents"));
+        assert!(provider.base_dir(h).join("agents/mine.md").is_file());
+        assert!(default.join("agents/theirs.md").is_file() && !default.join("agents").is_symlink(), "default untouched");
+        assert!(other.join("agents/theirs.md").is_file() && !other.join("agents").is_symlink(), "other account untouched");
+        let backup = std::fs::read_dir(h.join(".cas/accounts-backup"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.join("restore.sh").is_file())
+            .expect("a backup with a restore script");
+        assert!(backup.to_string_lossy().ends_with(&format!("-2-{}", provider.name())), "{}", backup.display());
+
+        // Folder changes or a merge across accounts: no offer, nothing moved.
+        for folder in [&default, &other] {
+            if folder == &other {
+                write(&provider.base_dir(h).join("agents/theirs.md"), "base copy differs");
+            }
+            let mut asked = false;
+            let mut record = |_: &str| {
+                asked = true;
+                true
+            };
+            prelaunch_with(provider, h, folder, Some(&mut record as &mut dyn FnMut(&str) -> bool));
+            assert!(!asked, "{} needs doctor, not a launch repair", folder.display());
+            assert!(folder.join("agents/theirs.md").is_file());
+        }
     }
-    let applied = repair(Provider::Claude, h).unwrap().unwrap();
-    assert!(applied.backup.to_string_lossy().ends_with("-2-claude"), "{}", applied.backup.display());
-    let backed_up = applied.backup.join("items").join(".claude-a@x.com").join("agents");
-    assert!(backed_up.join("mine.md").is_file(), "the real folder is in this run's backup");
-    assert!(std::fs::read_link(account.join("agents")).is_ok());
 }

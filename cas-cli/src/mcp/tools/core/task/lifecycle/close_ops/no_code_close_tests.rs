@@ -1369,6 +1369,40 @@ async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
     }
 }
 
+/// cas-aa98: a no-code task delivers no commits, so the worker's next task
+/// committing on the same lane is not foreign work in this task's delivery.
+/// On 2026-10-27 cas-421d refused "DELIVERY BRANCH UNRESOLVED" until its
+/// worker reset the lane, then restored its in-progress work.
+#[tokio::test]
+async fn no_code_close_survives_the_next_task_on_its_lane_cas_aa98() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    git(repo, &["merge", "-q", "--ff-only", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let id = "cas-aa98";
+    let mut task = assigned(id, TaskType::Task, "main");
+    task.status = TaskStatus::Open;
+    task.execution_note = Some("no-code".into());
+    task.external_ref = Some(PR.into());
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action": "start", "id": id})).await;
+    assert!(f.task(id).deliverables.factory_branch_start.is_some(), "{started}");
+    std::fs::write(worker_path.join("next.rs"), "pub fn next() {}\n").unwrap();
+    git(&worker_path, &["add", "next.rs"]);
+    git(&worker_path, &["commit", "-q", "-m", "feat(cas-b7c0): the worker's next task"]);
+    git(&worker_path, &["push", "-q", "origin", LANE]);
+    let response = call(&f.worker, serde_json::json!({
+        "action": "close", "id": id, "reason": "Read-only QA ledger published",
+    })).await;
+    assert_closed_without_lane(&f, id, &response);
+}
+
 /// A legacy start recorded the preceding parked task's lane before the worker
 /// switched to its own lane. Only a proven integrated delivery can recover it;
 /// neither an arbitrary receipt nor supervisor review erases delivery checks.

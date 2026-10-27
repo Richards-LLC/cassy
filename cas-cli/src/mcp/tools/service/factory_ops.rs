@@ -15179,10 +15179,11 @@ mod tests {
             let mut requester = base.clone(); requester.requester_config_dir = Some("/requester/account".into());
             specs.extend([base, explicit, requester]);
         }
-        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| Ok(vec![
-            crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 20.0),
-            crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0),
-        ]));
+        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+            let mut idle = crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 0.0);
+            idle.windows.remove(0);
+            Ok(vec![idle, crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0)])
+        });
         for (offset, provider) in [(0, crate::accounts::Provider::Claude), (3, crate::accounts::Provider::Codex)] {
             assert_eq!(specs[offset].config_dir.as_deref(), Some(format!("/fixture/{}chosen", provider.prefix()).as_str()));
             assert_eq!(specs[offset + 1].config_dir.as_deref(), Some("/explicit/account"));

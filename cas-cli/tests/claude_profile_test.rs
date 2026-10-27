@@ -619,9 +619,9 @@ if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; e
 [ "$FAIL_LOGIN" = 1 ] && exit 1
 dir="${{CLAUDE_CONFIG_DIR:-$CODEX_HOME}}"
 if [ "{provider}" = claude ]; then
-  echo '{{"oauthAccount":{{"emailAddress":"real@example.com"}}}}' > "$dir/.claude.json"
+  printf '{{"oauthAccount":{{"emailAddress":"real@example.com","accountUuid":"%s","organizationUuid":"org"}}}}' "${{LOGIN_ACCOUNT_ID:-one}}" > "$dir/.claude.json"
 else
-  echo '{{"tokens":{{"id_token":"h.{token}.s"}}}}' > "$dir/auth.json"
+  printf '{{"tokens":{{"id_token":"h.{token}.s","account_id":"%s"}}}}' "${{LOGIN_ACCOUNT_ID:-one}}" > "$dir/auth.json"
 fi
 "#
         );
@@ -680,6 +680,21 @@ fi
             names.len(),
             1,
             "failed/duplicate logins must leave no scratch accounts"
+        );
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env("LOGIN_ACCOUNT_ID", "two")
+            .args([provider, "login", "another-subscription"])
+            .write_stdin("y\n")
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("already exists").not());
+        assert!(
+            home.path()
+                .join(format!(".{provider}-real@example.com-2"))
+                .is_dir()
         );
     }
 }

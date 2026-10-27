@@ -76,11 +76,13 @@ export class ComposerUploads {
       if (entry.thumbnail) { const image = document.createElement("img"); image.src = entry.thumbnail; image.alt = ""; chip.append(image); }
       const label = document.createElement("span"); label.textContent = `${entry.file.name} · ${Math.ceil(entry.file.size / 1024)} KiB`;
       chip.append(label);
-      if (entry.preview) { const preview = document.createElement("pre"); preview.textContent = entry.preview; chip.append(preview); }
+
       const remove = document.createElement("button"); remove.type = "button"; remove.textContent = "Remove";
       remove.setAttribute("aria-label", `Remove ${entry.file.name}`); remove.disabled = this.sending;
       remove.onclick = () => { if (entry.thumbnail) URL.revokeObjectURL(entry.thumbnail); this.files = this.files.filter(item => item !== entry); this.paint(); };
-      chip.append(remove); strip.append(chip);
+      chip.append(remove);
+      if (entry.preview) { const preview = document.createElement("pre"); preview.textContent = entry.preview; chip.append(preview); }
+      strip.append(chip);
     }
     const status = document.createElement("p"); status.setAttribute("role", "status");
     status.textContent = this.error || (this.sending ? "Uploading files…" : this.files.length ? "Files stay here through reconnects. Send before closing this page." : "");

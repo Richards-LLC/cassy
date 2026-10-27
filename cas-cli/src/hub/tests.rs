@@ -2587,6 +2587,9 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     let mut pending = std::collections::HashSet::from([
         ("factory-1".to_string(), "send-ok".to_string()),
         ("factory-1".to_string(), "send-bad".to_string()),
+        // cas-3877: the daemon answers a failed history page load with an
+        // Error carrying the request's id; that is not a send.
+        ("factory-1".to_string(), "history-1".to_string()),
     ]);
     let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
         client_ref: Some("send-ok".into()),
@@ -2604,8 +2607,14 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     let admit = |pending: &mut std::collections::HashSet<(String, String)>, frame: &[u8]| {
         super::server::admit_correlated_daemon_frame(pending, "factory-1", &auth, frame)
     };
+    let history_failed = serde_json::to_vec(&DaemonMessage::Error {
+        message: "conversation history unavailable".into(),
+        client_ref: Some("history-1".into()),
+    })
+    .unwrap();
     assert!(admit(&mut pending, &queued));
     assert!(admit(&mut pending, &refused));
+    assert!(admit(&mut pending, &history_failed), "the requester still sees its history error");
     assert!(!admit(&mut pending, &queued), "a consumed answer is neither relayed nor audited again");
 
     let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap_or_default();
@@ -2614,7 +2623,7 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
         .filter(|row| row["action"] == "commander_send")
         .collect();
-    assert_eq!(rows.len(), 2, "one outcome row per answered send:\n{audit}");
+    assert_eq!(rows.len(), 2, "one outcome row per answered send, none for a history load:\n{audit}");
     for row in &rows {
         assert_eq!(row["target_session"], "factory-1");
         assert_eq!(row["request_id"], "request-2109");

@@ -12961,6 +12961,20 @@ mod tests {
             assert!(row.prompt.contains("reassign or recover"), "{}", row.prompt);
         }
         assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());
+        // A queued 3.84 switch must also be inert after upgrading.
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        let mut legacy = serde_json::to_value(cas_mux::WorkerSpec::builtin_default()).unwrap();
+        legacy["limit_recycle"] = serde_json::json!({
+            "agent_id":"codex", "episode":"old", "session":"provision-test",
+            "old_account":"/old", "task_ids":["cas-codex"], "cwd":"/kept"
+        });
+        let id = queue.enqueue_recycle("codex", Some(&legacy.to_string()), Some("provision-test")).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        daemon.enqueue_spawn_requests().unwrap();
+        assert!(daemon.pending_spawns.is_empty(), "legacy limit switches must never reach the stop/respawn path");
+        let rows = queue.recent_spawn_lifecycle("provision-test", 10).unwrap();
+        assert!(rows.iter().any(|row| row.request_id == id && row.state == Some(cas_store::SpawnLifecycleState::Failed)));
+
     }
 
     #[tokio::test]

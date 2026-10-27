@@ -7613,6 +7613,14 @@ mod workspace_contract_tests {
     /// read-only commands that merely mention them stay allowed.
     #[test]
     fn gh_1182_agent_shell_cannot_run_wrapped_operator_policy_commands() {
+        let env = TestEnvGuard::temp_home();
+        let policy_denial = |command: &str| {
+            let output = handle_pre_tool_use(&bash_input(command, env.home()), None).unwrap();
+            let value = serde_json::to_value(output).unwrap();
+            let hook = &value["hookSpecificOutput"];
+            (hook["permissionDecision"] == "deny")
+                .then(|| hook["permissionDecisionReason"].as_str().unwrap().to_owned())
+        };
         for command in [
             "timeout 30 env -i PATH=/usr/bin HOME=/home/u /abs/path/cas config set factory.write_roots \"~/Downloads\"",
             "timeout 30 cas config set factory.write_roots /etc",
@@ -7646,7 +7654,7 @@ mod workspace_contract_tests {
             "echo 'cas config set factory.write_roots /x' | sh",
             "node -e 'require(\"child_process\").execSync(\"cas config grant-write --task t --path /x --reason r\")'",
         ] {
-            let denial = operator_policy_command_denial(command)
+            let denial = policy_denial(command)
                 .unwrap_or_else(|| panic!("{command} must be refused"));
             assert!(denial.contains("OPERATOR-ONLY"), "{denial}");
         }
@@ -7662,8 +7670,9 @@ mod workspace_contract_tests {
             "cas config set factory.note_max_chars 1800",
             "cat CHANGELOG.md | grep -n 'set factory.write_roots'",
             "python3 -c 'print(1)'",
+            "python3 - <<'PY'\nfrom pathlib import Path\ntext = Path('draft.md').read_text().replace('factory.write_roots', 'write_roots')\nprint(set(text.split()))\nPY",
         ] {
-            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+            assert_eq!(policy_denial(allowed), None, "{allowed}");
         }
     }
 

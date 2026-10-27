@@ -45,8 +45,17 @@ fn selected(args: &[String]) -> bool {
             i += 2;
             continue;
         }
+        // The direct CLI includes its subcommand; the verified runner does not.
+        if i == 0 && arg == "test" {
+            i += 1;
+            continue;
+        }
         if !arg.starts_with('-') {
-            let filename = std::path::Path::new(arg)
+            let spec = arg
+                .rsplit_once(':')
+                .filter(|(_, line)| !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()))
+                .map_or(arg.as_str(), |(spec, _)| spec);
+            let filename = std::path::Path::new(spec)
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
@@ -73,7 +82,7 @@ fn selected(args: &[String]) -> bool {
             {
                 return false;
             }
-            if let Some(stem) = [
+            let Some(stem) = [
                 ".spec.ts",
                 ".spec.mjs",
                 ".spec.js",
@@ -82,13 +91,14 @@ fn selected(args: &[String]) -> bool {
             ]
             .iter()
             .find_map(|suffix| filename.strip_suffix(suffix))
-            {
-                if !stem.chars().any(char::is_alphanumeric) {
-                    return false;
-                }
-                // Keep scanning: another positional regex could widen the run.
-                targeted = true;
+            else {
+                // Playwright ORs file filters, so a plain word can widen the run too.
+                return false;
+            };
+            if !stem.chars().any(char::is_alphanumeric) {
+                return false;
             }
+            targeted = true;
         }
         i += 1;
     }

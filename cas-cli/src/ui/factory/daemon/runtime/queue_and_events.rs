@@ -8063,6 +8063,17 @@ impl FactoryDaemon {
                     session: self.session_name.clone(),
                 },
             );
+            // cas-dd2e: the Teams write completed, but the turn is still
+            // owed. Keeping this reservation makes NOT_ALREADY_CONSUMED_SQL
+            // hide the row from every later selection, so readiness can
+            // never grant its deferred wake. Persist the held-copy marker
+            // first; retry dedup and hook recovery continue to use it. The
+            // token-scoped release cannot erase a recipient's newer receipt.
+            self.queue_jobs.release_inject_claim(
+                self.app.cas_dir(),
+                queued.id,
+                &queued.target,
+            );
             self.lifecycle_redelivery_attempts
                 .entry(queued.id)
                 .or_insert_with(std::time::Instant::now);

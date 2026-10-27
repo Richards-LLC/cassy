@@ -38,6 +38,7 @@ pub fn resolve_existing(provider: Provider, home: &Path, selector: &str) -> Resu
     let closest = rows
         .iter()
         .min_by_key(|row| (distance(selector, &row.name), &row.name))
+        .filter(|row| distance(selector, &row.name) <= 2)
         .map(|row| format!("\nClosest alias: {}", row.name))
         .unwrap_or_default();
     bail!(

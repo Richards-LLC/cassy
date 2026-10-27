@@ -42,6 +42,12 @@ New accounts created with `cas claude` or `cas codex` link to the base
 automatically. `cas doctor` reports an account whose shared items no longer
 link to the base (`account links`); `cas accounts drift` lists them.
 
+A symlinked account directory represents its target, whether that target is
+inside or outside your home directory. Linking and `cas update --user` follow
+that target. When several account aliases reach the same canonical path,
+mutation discovery processes the target once; the registry and launchers keep
+all aliases available for selection.
+
 ## See which account a session uses
 
 - The Claude status line (`cas statusline`, already in the shared settings)

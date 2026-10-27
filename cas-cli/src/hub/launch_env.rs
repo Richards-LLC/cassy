@@ -105,6 +105,13 @@ pub fn resolve(
             _ => None,
         };
         if let Some(provider) = provider {
+            // Readiness needs the missing-profile error to offer the first-login
+            // remedy. Only the implicit default gets this treatment; explicit
+            // unknown selectors still use the registry's refusal policy.
+            let main = home.join(format!(".{}", provider.name()));
+            if profile.is_none() && configured.is_none() && recommended.is_none() && !main.is_dir() {
+                return Err(LaunchError::ProfileMissing { cli: name, path: main });
+            }
             let account = crate::account_registry::resolve_existing(provider, &home, &profile_name)
                 .map_err(|error| LaunchError::ProbeFailed { cli: name, detail: error.to_string() })?;
             profile_name = account.name;

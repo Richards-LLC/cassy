@@ -33,10 +33,19 @@ const NOTICE_WINDOW_SECS: i64 = OWN_CLAIM_REUSE_SECS;
 pub enum FileLease {
     /// This worker holds (or now holds) the file's lease.
     Mine,
-    /// Another agent holds it: a live peer elsewhere, or another local session.
-    HeldBy(String),
+    /// Another agent holds it, in this session or elsewhere.
+    HeldBy(FileHolder),
     /// No peer check ran (no Cloud login, Cloud unreachable, or backing off).
     Unchecked,
+}
+
+/// A holder's identity and its known relationship to the editing worker.
+/// Unknown session identity must not imply a different supervisor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileHolder {
+    SameSession(String),
+    OtherSession(String),
+    UnknownSession(String),
 }
 
 /// The Cloud claim id for a repository-relative path. The repository scope is
@@ -211,14 +220,31 @@ pub(crate) fn claim_with(
     let holder = format!("{agent_name} (task {task_id})");
     let duration = super::peer_claims::lease_duration_secs(cas_root);
     let agents = crate::store::open_agent_store(cas_root).ok();
-    let local_name = |id: &str| -> Option<String> {
-        let agent = agents.as_ref()?.get(id).ok()?;
-        Some(match agent.factory_session.as_deref() {
-            Some(session) => format!("{} (factory session {session}, this machine)", agent.name),
-            None => format!("{} (this machine)", agent.name),
+    let session = agents
+        .as_ref()
+        .and_then(|store| store.get(agent_id).ok())
+        .and_then(|agent| agent.factory_session)
+        .filter(|session| !session.is_empty());
+    let local_holder = |other_id: &str| -> Option<FileHolder> {
+        let agent = agents.as_ref()?.get(other_id).ok()?;
+        // The file ledger identifies the task this particular edit belongs to.
+        let other_ledger = load(cas_root, other_id);
+        let worker = match other_ledger.leases.get(&id).and_then(|entry| entry.task_id.as_deref()) {
+            Some(task) => format!("{}, task {task}", agent.name),
+            None => agent.name,
+        };
+        let other_session = agent.factory_session.as_deref().filter(|s| !s.is_empty());
+        Some(match (session.as_deref(), other_session) {
+            (Some(ours), Some(theirs)) if ours == theirs => FileHolder::SameSession(worker),
+            (Some(_), Some(theirs)) => FileHolder::OtherSession(format!(
+                "{worker} (factory session {theirs}, this machine)"
+            )),
+            _ => FileHolder::UnknownSession(format!("{worker} (this machine)")),
         })
     };
-    let is_local = |id: &str| id != agent_id && local_name(id).is_some();
+    let is_local = |id: &str| {
+        id != agent_id && agents.as_ref().is_some_and(|store| store.get(id).is_ok())
+    };
     let answer = claims.acquire_within(
         &id,
         ClaimKind::File,
@@ -230,9 +256,10 @@ pub(crate) fn claim_with(
     );
     let (lease, record) = match answer {
         Acquire::Claimed => (FileLease::Mine, Some(true)),
-        Acquire::LocalHolder(other) => {
-            (FileLease::HeldBy(local_name(&other).unwrap_or(other)), None)
-        }
+        Acquire::LocalHolder(other) => (
+            FileLease::HeldBy(local_holder(&other).unwrap_or(FileHolder::UnknownSession(other))),
+            None,
+        ),
         Acquire::PeerHolds(hold) | Acquire::StalePeer(hold) => {
             // A live holder is named from the agent list; its claim reason
             // also carries the task it is editing for.
@@ -240,7 +267,7 @@ pub(crate) fn claim_with(
                 .recorded_holder(&id, agent_id, CLAIM_BUDGET)
                 .map(|recorded| format!("{} on {}", recorded.name, recorded.machine))
                 .unwrap_or_else(|| hold.describe());
-            (FileLease::HeldBy(who), None)
+            (FileLease::HeldBy(FileHolder::UnknownSession(who)), None)
         }
         Acquire::Unavailable(_) => (FileLease::Unchecked, Some(false)),
     };
@@ -269,11 +296,22 @@ pub(crate) fn claim_with(
 }
 
 /// The advisory a worker sees before editing a file another agent holds.
-pub fn collision_note(relative_path: &str, holder: &str) -> String {
+pub fn collision_note(relative_path: &str, holder: &FileHolder) -> String {
+    let (who, handoff) = match holder {
+        FileHolder::SameSession(worker) => (
+            format!("another worker in your session ({worker})"),
+            "",
+        ),
+        FileHolder::OtherSession(worker) => (
+            worker.clone(),
+            ", which can reach the other session's supervisor",
+        ),
+        FileHolder::UnknownSession(worker) => (worker.clone(), ""),
+    };
     format!(
-        "⚠️ SHARED FILE (cas-8dbe): {relative_path} is being edited by {holder}. Before you change it, \
-         coordinate through your supervisor (`coordination action=message target=supervisor summary=\"shared file {relative_path}\" message=\"<what you need to change>\"`), which can \
-         reach the other session's supervisor, so both edits do not collide."
+        "⚠️ SHARED FILE: {relative_path} is being edited by {who}. Before you change it, \
+         coordinate through your supervisor (`coordination action=message target=supervisor summary=\"shared file {relative_path}\" message=\"<what you need to change>\"`){handoff}, \
+         so both edits do not collide."
     )
 }
 
@@ -287,7 +325,7 @@ pub fn notify_worker_of_holder(
     agent_name: &str,
     factory_session: Option<&str>,
     relative_path: &str,
-    holder: &str,
+    holder: &FileHolder,
 ) -> bool {
     let id = lease_id(relative_path);
     let now = chrono::Utc::now().timestamp();
@@ -323,17 +361,18 @@ mod tests {
     fn codex_worker_is_messaged_the_holder_once_per_window_cas_a30e9() {
         let dir = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(dir.path()).unwrap();
-        let holder = "fierce-koala-22 (task cas-ac47) on soundwave";
+        let holder = FileHolder::UnknownSession("fierce-koala-22 (task cas-ac47) on soundwave".into());
         let path = "hub-web/src/source-admission.ts";
-        let first = notify_worker_of_holder(&cas_root, "worker-b", "bright-cobra-44", Some("sess-b"), path, holder);
-        let repeat = notify_worker_of_holder(&cas_root, "worker-b", "bright-cobra-44", Some("sess-b"), path, holder);
+        let first = notify_worker_of_holder(&cas_root, "worker-b", "bright-cobra-44", Some("sess-b"), path, &holder);
+        let repeat = notify_worker_of_holder(&cas_root, "worker-b", "bright-cobra-44", Some("sess-b"), path, &holder);
         assert!(first && !repeat, "first={first} repeat={repeat}");
         let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
         let queued = queue.peek_all(10).unwrap();
         assert_eq!(queued.len(), 1, "{queued:?}");
         assert_eq!(queued[0].target, "bright-cobra-44");
         // The same advisory a Claude worker gets as PreToolUse context.
-        assert_eq!(queued[0].prompt, collision_note(path, holder));
+        assert_eq!(queued[0].prompt, collision_note(path, &holder));
+        assert!(!queued[0].prompt.contains("other session's supervisor"));
     }
 }
 

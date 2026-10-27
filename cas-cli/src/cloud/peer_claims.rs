@@ -2247,7 +2247,9 @@ mod tests {
         assert_eq!(
             second,
             crate::cloud::file_leases::FileLease::HeldBy(
-                "fierce-koala-22 (task cas-ac47) on soundwave".into()
+                crate::cloud::file_leases::FileHolder::UnknownSession(
+                    "fierce-koala-22 (task cas-ac47) on soundwave".into()
+                )
             ),
         );
         let claims = server

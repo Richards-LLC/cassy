@@ -4,6 +4,7 @@ import { machineMonogram } from "./machine-accent";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
+import { reconcileChildren, ThreadWindow } from "./thread-window";
 import { bindSwipeDismiss } from "./swipe-dismiss";
 import { machineName } from "./conversation-list";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
@@ -437,6 +438,12 @@ export class ConversationView {
   /** Composer focus/keyboard state, used to keep the thread tail visible. */
   private composing = false;
   private nodes = new Map<string, HTMLElement>();
+  private readonly cachedNodes = new Map<string, HTMLElement>();
+  private readonly window = new ThreadWindow();
+  private readonly above: HTMLElement;
+  private readonly below: HTMLElement;
+  private readonly loadLater: HTMLButtonElement;
+  private windowFrame?: number;
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
   /**
@@ -516,10 +523,16 @@ export class ConversationView {
       // Paging holds the reader's turn from here (journey F7), not the button.
       this.focusMoved = undefined;
       this.loadEarlierFocus = this.element.ownerDocument.activeElement === this.loadEarlier;
+      if (this.window.hasEarlier) { this.window.earlier(); this.update(); return; }
       this.options.loadEarlier?.();
     };
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
+    this.above = document.createElement("div"); this.below = document.createElement("div");
+    for (const spacer of [this.above, this.below]) { spacer.setAttribute("aria-hidden", "true"); spacer.style.overflowAnchor = "none"; }
+    this.loadLater = document.createElement("button"); this.loadLater.type = "button";
+    this.loadLater.className = "conversation-load-earlier"; this.loadLater.textContent = "Load later"; this.loadLater.hidden = true;
+    this.loadLater.onclick = () => { this.window.later(); this.update(); };
     this.empty = document.createElement("div"); this.empty.className = "empty"; this.empty.hidden = true;
     this.jump = document.createElement("button"); this.jump.type = "button";
     this.jump.className = "conversation-jump"; this.jump.textContent = "Jump to latest"; this.jump.hidden = true;
@@ -529,7 +542,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.empty, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -544,6 +557,7 @@ export class ConversationView {
       // and one whose thread had grown unseen was read as layout and pinned.
       this.pinDeferred = false;
       const scrollTop = this.element.scrollTop;
+      const scrollingUp = scrollTop < this.scrolledTo;
       const readerLeftTail = scrollTop < this.scrolledTo - 1 && !shouldFollowTail(this.element);
       if (readerLeftTail) {
         this.following = false;
@@ -553,6 +567,7 @@ export class ConversationView {
         this.scrolledTo = scrollTop;
         if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
         this.notePlace();
+        this.scrollWindow(true);
         return;
       }
       if (this.pinPending) return;
@@ -578,6 +593,7 @@ export class ConversationView {
       // The reader scrolled their focused control away: their scroll is the place now.
       if (this.focusMoved && !this.shows(this.focusMoved)) this.focusMoved = undefined;
       this.notePlace();
+      this.scrollWindow(scrollingUp);
     }, { passive: true });
     this.element.addEventListener("focusin", (event) => {
       const target = event.target;
@@ -633,31 +649,39 @@ export class ConversationView {
     // Turns added above the reader (Load earlier) must not move what they are
     // reading (journey F7): remember the first turn on screen and where it sat.
     const anchor = this.following ? undefined : this.readingAnchor();
+    this.window.measure(this.nodes);
     const offeredEarlier = !this.loadEarlier.hidden;
-    const hasEarlier = this.options.hasEarlier?.() === true;
+    let hasEarlier = this.options.hasEarlier?.() === true || this.window.hasEarlier;
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
-    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) });
-    const document = this.element.ownerDocument;
+    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, groupSize: 4, ...(work ? { work } : {}) });
+    const focused = documentActiveKey(this.msgs);
+    const window = this.window.select(model, this.element.scrollTop, this.element.clientHeight, this.following, focused ?? anchor?.key);
+    hasEarlier = this.options.hasEarlier?.() === true || this.window.hasEarlier;
+    this.loadEarlier.hidden = !hasEarlier;
+    this.loadLater.hidden = !this.window.hasLater;
+    this.above.style.height = `${window.above}px`; this.below.style.height = `${window.below}px`;    const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];
-    for (const item of model) {
-      let node = this.nodes.get(item.key);
+    for (const item of window.items) {
+      let node = this.nodes.get(item.key) ?? this.cachedNodes.get(item.key);
       if (!node) node = document.createElement(item.type === "day" ? "p" : "div");
       this.renderItem(node, item);
       next.set(item.key, node);
       children.push(node);
+      this.cachedNodes.delete(item.key);
+      this.cachedNodes.set(item.key, node);
     }
     this.nodes = next;
-    for (const key of this.expanded) if (!next.has(key)) this.expanded.delete(key);
+    while (this.cachedNodes.size > 60) this.cachedNodes.delete(this.cachedNodes.keys().next().value!);
     // Only re-append when the sequence changed: an unchanged list keeps its
     // scroll position and selection.
     const same = this.msgs.children.length === children.length && children.every((node, index) => this.msgs.children[index] === node);
-    if (!same) this.msgs.replaceChildren(...children);
+    if (!same || window.above > 0 || window.below > 0) reconcileChildren(this.msgs, [...(window.above > 0 ? [this.above] : []), ...children, ...(window.below > 0 ? [this.below] : [])]);
     this.renderPinned(document);
     this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
@@ -678,6 +702,19 @@ export class ConversationView {
     this.notePlace();
     if (this.following && document.getSelection()?.isCollapsed !== false) this.pinUnlessUnseen();
     if (this.loadEarlierFocus && !loadingEarlier) this.restoreLoadEarlierFocus(document);
+  }
+
+  /** Scroll intent, rather than mount/resize, is the only automatic paging trigger. */
+  private scrollWindow(up: boolean): void {
+    if (this.windowFrame !== undefined) return;
+    this.windowFrame = requestAnimationFrame(() => {
+      this.windowFrame = undefined;
+      if (this.disposed) return;
+      if (up && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)
+        && !this.window.hasEarlier && this.options.hasEarlier?.() && !this.options.loadingEarlier?.()) {
+        this.options.loadEarlier?.();
+      } else this.update();
+    });
   }
 
   /**
@@ -866,6 +903,9 @@ export class ConversationView {
     jump.append(label, " ", text, glyph.content.firstElementChild!);
     jump.title = "Go to the question";
     jump.onclick = () => {
+      this.following = false;
+      this.window.show(`reply:${ask.notification_id}`);
+      this.update();
       const turn = this.element.querySelector<HTMLElement>(`[data-key="reply:${ask.notification_id}"]`);
       if (turn) {
         turn.tabIndex = -1;
@@ -1252,7 +1292,7 @@ export class ConversationView {
       children.push(bubble, ...sheets);
     }
     if (group.time) children.push(timeElement(document, group.time, group.clockAhead));
-    node.replaceChildren(...children);
+    reconcileChildren(node, children);
     if (refocus) landFocusIn(refocus.bubble, refocus.className);
   }
 
@@ -1618,6 +1658,11 @@ function syncClampPill(node: HTMLElement): void {
   const more = node.querySelector<HTMLButtonElement>(":scope > .coalesce-expand");
   if (!line || !more || !line.isConnected || line.dataset.expanded === "true" || Number(line.dataset.count) > 1) return;
   more.hidden = !(line.scrollHeight > line.clientHeight + 1);
+}
+
+function documentActiveKey(root: HTMLElement): string | undefined {
+  const active = root.ownerDocument.activeElement;
+  return active instanceof HTMLElement && root.contains(active) ? active.closest<HTMLElement>("[data-key]")?.dataset.key : undefined;
 }
 
 function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => string): string {

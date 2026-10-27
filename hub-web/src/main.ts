@@ -229,6 +229,16 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
   return page;
 }
 function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); persistArrivals(); syncEarlyThread(); }
+let replyPresentationFrame: number | undefined;
+/** Socket catch-up and journal receipts share one presentation per frame. */
+function scheduleReplyPresentation(): void {
+  if (replyPresentationFrame !== undefined) return;
+  replyPresentationFrame = requestAnimationFrame(() => {
+    replyPresentationFrame = undefined;
+    updateConversationViews();
+    renderConversationList();
+  });
+}
 // What the desktop context rail can show beyond the header (P10): the last
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
@@ -928,8 +938,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       conversationHistory(sessionKey(machine.id, session), session).receive({ ...reply, device_persisted: false }, Date.now(), session);
       // A later supervisor turn shortens an unreceipted send's wait (cas-1622).
       scheduleReceiptCheck(sessionKey(machine.id, session));
-      updateConversationViews(); renderConversationList();
-      if (selectedMachineId === machine.id && selectedSession === session) render();
+      scheduleReplyPresentation();
     },
     onConversationHistoryRequested: (session) => {
       const cursor = conversationHistoryPage(sessionKey(machine.id, session));

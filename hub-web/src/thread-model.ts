@@ -66,6 +66,8 @@ export interface ThreadWork { type: "work"; key: string; events: WorkEvent[] }
 export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking | ThreadWork;
 
 export interface ThreadModelOptions {
+  /** Bounds a rendered group so a single speaker cannot defeat windowing. */
+  groupSize?: number;
   /** Whether the supervisor is executing: appends the working line. */
   working?: boolean;
   /** Clock used for day labels; injectable for tests. */
@@ -297,7 +299,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     // start a new group. (Splitting on the mark alone would regroup a thread
     // on reload, where a first live turn's mark is settled differently.)
     const apart = group !== undefined && at !== undefined && groupLastAt !== undefined && at - groupLastAt >= GROUP_SPLIT_MS;
-    if (!group || group.side !== turn.side || apart) {
+    if (!group || group.side !== turn.side || apart || group.turns.length >= (options.groupSize ?? Infinity)) {
       closeGroup();
       group = { type: "group", key: `group:${turn.key}`, side: turn.side, turns: [], time: undefined };
       items.push(group);

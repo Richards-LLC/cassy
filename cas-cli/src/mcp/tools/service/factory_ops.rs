@@ -15200,6 +15200,37 @@ mod tests {
         });
         assert!(specs[0].config_dir.is_none());
         assert!(fallback.contains("full: 5h at 100% (threshold 90%)"));
+
+        // Registry -> persisted disabled flag -> selection -> spawn. Capacity is
+        // fixture data; discovery and the policy write use their real paths.
+        let home = tempfile::tempdir().unwrap();
+        for provider in crate::accounts::Provider::ALL {
+            for name in ["soonest", "later"] {
+                std::fs::create_dir(home.path().join(format!("{}{name}", provider.prefix()))).unwrap();
+            }
+            crate::account_lifecycle::set_disabled(home.path(),
+                &home.path().join(format!("{}soonest", provider.prefix())), true).unwrap();
+        }
+        specs[0].config_dir = None;
+        specs[3].config_dir = None;
+        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+            let mut rows = crate::account_registry::discover_with(provider, home.path(), false,
+                |_, _| crate::account_registry::LoginState::LoggedIn)?;
+            for row in &mut rows {
+                row.windows = crate::account_selection::tests::row(provider, &row.name,
+                    if row.name == "soonest" { 6 } else { 48 }, 20.0, 10.0).windows;
+            }
+            let selection = crate::account_selection::recommend(&rows, provider, now, &Default::default());
+            assert_eq!(selection.recommended.unwrap().account.name, "later");
+            assert!(selection.excluded.iter().any(|(row, reason)| row.name == "soonest"
+                && row.flags.disabled && reason == "disabled"));
+            Ok(rows)
+        });
+        for (offset, provider) in [(0, crate::accounts::Provider::Claude), (3, crate::accounts::Provider::Codex)] {
+            assert_eq!(specs[offset].config_dir.as_deref(),
+                Some(home.path().join(format!("{}later", provider.prefix())).to_str().unwrap()));
+            assert!(receipt.contains(&format!("{} recommended account=later", provider.name())));
+        }
     }
 
     #[test]

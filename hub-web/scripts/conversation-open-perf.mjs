@@ -13,6 +13,7 @@ const { values } = parseArgs({ options: {
   capture: { type: "string" }, repeats: { type: "string", default: "3" },
   flow: { type: "string", default: "backlog" },
   dist: { type: "string" }, "bundle-revision": { type: "string" },
+  "require-all-acked": { type: "boolean", default: false },
 } });
 if (!values.output || (!values.capture && (!values.db || !values.session))) {
   throw Error("Usage: node scripts/conversation-open-perf.mjs --db /project/.cas/cas.db --session SESSION --output TASK_ARTIFACT_DIR [--repeats 3]\nOr --capture PRIVATE_CAPTURE_JSON to replay the identical input.");
@@ -35,6 +36,7 @@ if (!values.dist) run("npm", ["run", "build", "--", "--sourcemap"]);
 run("npx", ["playwright", "test", "--config", "e2e/conversation-perf.config.ts", "conversation-open.perf.ts", "--workers=1", `--repeat-each=${repeats}`], {
   CONVERSATION_PERF_CAPTURE: capture, CONVERSATION_PERF_OUTPUT: output,
   CONVERSATION_PERF_FLOW: values.flow,
+  CONVERSATION_PERF_REQUIRE_ALL_ACKED: values["require-all-acked"] ? "1" : "0",
   ...(values.dist ? { CONVERSATION_PERF_DIST: resolve(values.dist) } : {}),
   ...(values["bundle-revision"] ? { CONVERSATION_PERF_BUNDLE_REVISION: values["bundle-revision"] } : {}),
 });

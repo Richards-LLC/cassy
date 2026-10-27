@@ -12,12 +12,12 @@ No product code was changed for this investigation.
 From `hub-web`, after `npm ci`, run this single finite command:
 
 ```bash
-node scripts/conversation-open-perf.mjs --db /home/pippenz/Petrastella/cassy/.cas/cas.db --session cassy-quiet-panther-51 --output /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/rerun --flow backlog --repeats 1
+node scripts/conversation-open-perf.mjs --db "<project>/.cas/cas.db" --session "<session>" --output "<task-artifacts>/rerun" --flow backlog --repeats 1
 ```
 
 For the identical frozen input, replace `--db ... --session ...` with
-`--capture /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/final/private-history.json`.
-Use a new output directory per run. `--flow history` measures the bounded
+`--capture "<task-artifacts>/final/private-history.json"`.
+Replace the angle-bracket placeholders with the project, session, artifact directory and candidate build for your machine. Use a new output directory per run. `--flow history` measures the bounded
 page and repeated explicit Load earlier separately, without the live backlog.
 `--repeats 3` produces median/min/max summaries. The measurement does not
 assert that hundreds of bubbles must remain, so the fix can reuse it.
@@ -191,8 +191,10 @@ source never replaced this worktree's product files.
 From `hub-web`, the fixed replay command is:
 
 ```bash
-node scripts/conversation-open-perf.mjs --capture /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/final/private-history.json --output /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/fixed --flow backlog --repeats 1 --dist /home/pippenz/Petrastella/cassy/.cas/worktrees/quick-octopus-91/target/cas-d1b1-fixed/hub-web/dist --bundle-revision b7eeeaa33
+node scripts/conversation-open-perf.mjs --capture "<task-artifacts>/final/private-history.json" --output "<task-artifacts>/fixed" --flow backlog --repeats 1 --dist "<candidate-build>/hub-web/dist" --bundle-revision b7eeeaa33
 ```
+
+For persistence acceptance, add `--require-all-acked`: it asserts that every frozen pending notification ID was durably acknowledged before reconnect, rather than treating cumulative ACK counts as identity coverage. Each phase records expected/acknowledged/remaining IDs, replayed pending IDs and a timestamped ACK timeline. Baseline runs omit that flag so failed persistence can still be measured.
 
 The supplied `--dist` must be built with source maps from the stated revision.
 The probe revision and bundle revision are recorded separately in the receipt.

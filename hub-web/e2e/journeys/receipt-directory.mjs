@@ -39,3 +39,30 @@ export function claimReceiptDirectory(directory, title, identity) {
     if (entry.isFile() && entry.name !== 'receipt-owner.json') rmSync(join(directory, entry.name), { force: true });
   }
 }
+
+// Unset is deliberately distinct from an explicitly empty mask list: ordinary
+// worker/CI runs keep their screenshot options, receipt schema and timing.
+export function captureMask(raw) {
+  if (raw === undefined) return undefined;
+  let value;
+  try { value = JSON.parse(raw); } catch { throw new Error('JOURNEY_CAPTURE_MASK must be a JSON array of selectors'); }
+  if (!Array.isArray(value) || value.some((s) => typeof s !== 'string' || !s.trim() || s !== s.trim())) {
+    throw new Error('JOURNEY_CAPTURE_MASK must be a JSON array of selectors');
+  }
+  return [...new Set(value)];
+}
+
+export async function captureStageScreenshot(page, path, masks, maxHtmlBytes) {
+  if (masks === undefined && maxHtmlBytes === undefined) return page.screenshot({ path });
+  if (maxHtmlBytes !== undefined && Buffer.byteLength(await page.content()) > maxHtmlBytes) {
+    throw new Error('capture page exceeds max_html_mb');
+  }
+  const locators = [];
+  for (const selector of masks ?? []) {
+    const locator = page.locator(selector);
+    if (!await locator.count()) throw new Error('cannot apply requested capture mask');
+    locators.push(locator);
+  }
+  // Never catch and fall back to an unmasked screenshot.
+  return page.screenshot({ path, mask: locators });
+}

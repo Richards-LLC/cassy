@@ -77,7 +77,7 @@ Screenshots are the evidence here, so this report embeds raster images where
 other reports draw SVG. Record this exception in the brief's *Deliberately
 omitted* field.
 
-- Embed JPEG at quality 80, 1440px wide at most. `capture.mjs` writes both
+- Embed JPEG at quality 80, 1440px wide at most. `cas deliverable capture` writes both
   this copy and a full-resolution PNG.
 - Aim for under 250 KB per image and under 8 MB per file. Above that, crop
   to the region that proves the row rather than lowering the quality further.

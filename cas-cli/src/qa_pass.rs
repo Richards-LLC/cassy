@@ -928,7 +928,7 @@ pub(crate) fn validate_round_evidence(
                 task_id: &task.id,
                 task_artifacts_dir: ledger_path.parent().ok_or("API ledger has no parent")?,
                 repo: &repo, delivered_head: &pass.bound_head, notes: "",
-                deployed_origins: &qa.deployed_origins, rebind_scope: None,
+                deployed_origins: &qa.deployed_origins, capture_configured: false, rebind_scope: None,
             };
             if verdict == cas_types::QaVerdict::Approved {
                 crate::qa_evidence::validate_ledger(&ctx).map_err(|e| e.problem)?;
@@ -1410,11 +1410,10 @@ pub fn qa_task_description(
             delivery.id, ledger_dir.display(),
         );
     }
-    let [baseline] = match crate::worktree::GitOperations::git_remedies([&[
-        "merge-base",
-        parent_branch,
-        &pass.bound_head,
-    ]]) {
+    let [baseline, capture_command] = match crate::worktree::GitOperations::shell_remedies([
+        ("git", &["merge-base", parent_branch, &pass.bound_head]),
+        ("cas", &["deliverable", "capture", "--task", &delivery.id, "--target", parent_branch, "--side", "both"]),
+    ]) {
         Ok(commands) => commands,
         Err(refusal) => return refusal,
     };
@@ -1444,7 +1443,10 @@ pub fn qa_task_description(
          walk the adjacent paths (empty, loading, error, long content, phone 390px, dark, \
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \
-         screenshots. When a check fails, repeat it on the base build \
+         screenshots. For visual changes, run {capture_command} \
+         and cite files.pairs with pairs_status, or record pairs_status \"unavailable\" and a one-line pairs_reason. \
+         For deploy-only projects, capture --side before at task start, before deploying the change. \
+         When a check fails, repeat it on the base build \
          ({baseline}) before you count it: a failure the base shares is \
          pre-existing. For visual QA, run the base build over the same pages into \
          visual-qa-baseline/ and set visual_qa_status \"scoped\" with \
@@ -2001,6 +2003,7 @@ mod tests {
             &["demo_statement".into()], Path::new("/artifacts/qa"), "epic/{a,b}!e");
         // pin: the baseline command must preserve the configured parent ref.
         assert!(special.contains("git merge-base 'epic/{a,b}!e' aaaa1111"), "{special}");
+        assert!(special.contains("--target 'epic/{a,b}!e' --side both"), "{special}");
         let round = pass("aaaa1111", cas_types::QaPassState::Pending);
         let text = qa_task_description(
             &task(),
@@ -2029,6 +2032,7 @@ mod tests {
             "head_sha aaaa1111",
             "never the production URL",
             "Recording closes this QA task and cannot be revised",
+            "cas deliverable capture --task cas-ui1 --target epic/x --side both",
             "asking for request_changes on cas-ui1",
         ] {
             assert!(text.contains(pinned), "missing {pinned:?} in:\n{text}");

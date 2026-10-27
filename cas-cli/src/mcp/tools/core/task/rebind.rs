@@ -274,8 +274,13 @@ impl CasCore {
             "\n\n[{}] DELIVERY BRANCH REBOUND: {audit}",
             rebound.updated_at.format("%Y-%m-%d %H:%M")
         ));
+        // cas-b403: the guarded write every caller uses. A logged-in store
+        // (SyncingTaskStore) implements only this entry: it stages the sync
+        // intent and binds it as the receipt of the inner store's guarded
+        // write. The receipt variant is the inner store's API, and reached
+        // through the wrapper it failed closed.
         tasks
-            .update_if_current_with_mutation_receipt(&rebound, &expected, "")
+            .update_if_current(&rebound, &expected)
             .map_err(|error| refused(error.to_string()))?;
         Ok(Self::success(format!(
             "Task {id} delivery branch rebound to {branch} at {tip}.\nPrevious branch {} at {} is retained in the audit.\nAssignment, target, leases and normal close gates are unchanged.",

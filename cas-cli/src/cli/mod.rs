@@ -42,7 +42,8 @@ mod worktree;
 // `pub` so integration tests in `cas-cli/tests/` can reach
 // `cli::cloud::execute_team_push` (cas-1f44 T4). Internal; no stable API.
 pub mod cloud;
-mod config;
+// cas-f0ea0: pub(crate) so hook tests drive the operator write-roots path.
+pub(crate) mod config;
 mod config_tui;
 mod coordination;
 mod device;
@@ -667,8 +668,20 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
         .to_owned()
 }
 
-/// Run the CLI with the given arguments
+/// Read-only factory daemon admission, called before process-wide startup
+/// logging/telemetry and again for library callers of `run`.
+pub fn validate_process_startup(cli: &Cli) -> anyhow::Result<()> {
+    if let Some(Commands::Factory(args)) = &cli.command
+        && let Some(factory::FactoryCommands::Daemon { session, cwd, .. }) = &args.command
+    {
+        crate::ui::factory::validate_daemon_start(session, cwd)?;
+    }
+    Ok(())
+}
+
+/// Run the CLI with the given arguments.
 pub fn run(cli: Cli) -> anyhow::Result<()> {
+    validate_process_startup(&cli)?;
     let tracer_timer = std::time::Instant::now();
     let dev_tracing_enabled = initialize_dev_tracer();
     let command_name = get_command_name(&cli.command);

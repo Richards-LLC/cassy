@@ -163,6 +163,12 @@ pub(crate) fn started_delivery(
             continue;
         }
         if subject_claims_another_task(message, &identity) {
+            // cas-aa98: a no-code task delivers no commits, so the worker's
+            // next task committing on this lane is that task's work, not
+            // foreign work inside this delivery.
+            if task.execution_note.as_deref() == Some("no-code") {
+                continue;
+            }
             let subject = message.trim().lines().next().unwrap_or("");
             return Err(refuse(&format!(
                 "foreign commit {sha} ({subject}) follows the base"

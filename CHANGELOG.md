@@ -13,6 +13,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   reconnecting. A temporarily empty device count now reports held delivery;
   reattach recovers the same reply instead of losing it before it is queued.
 
+- Visual QA waits for rendered images to decode before resting and journey
+  screenshots. Broken or timed-out images produce a finding instead of a blank
+  capture marked PASS, including when visual exceptions are configured.
+
+### Added
+
+- Release notes select verified before/after JPGs from the released commit range
+  and attach them to the reply describing the change. Release reports accept
+  `Pair: <task-id>/<shot-id>` alongside explicit `Before:`/`After:` captures;
+  missing or incomplete evidence shows no image.
+
 ## [3.82.0] - 2026-10-26
 
 ### Added — every report, page and note wears the target project's DESIGN.md

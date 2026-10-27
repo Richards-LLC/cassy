@@ -1663,6 +1663,30 @@ fn cas_2d63_build_guard_rejects_invalid_limits_without_mutating_config() {
 
 #[test]
 fn qa_capture_intent_and_runtime_pointer_findings_cas_db23() {
+    // Every capture field is also checked after direct deserialization; hand
+    // editing TOML must not bypass the config-set validators.
+    for (name, invalid) in [
+        ("base_url", serde_json::json!("file:///secret")),
+        ("serve", serde_json::json!("pnpm dev")),
+        ("ready_path", serde_json::json!("https://other.example")),
+        ("shots", serde_json::json!("../credentials")),
+        ("credentials_env", serde_json::json!("/tmp/credentials")),
+        ("login_path", serde_json::json!("//other.example/login")),
+        ("success_url", serde_json::json!("/dashboard")),
+        ("email_sel", serde_json::json!("")),
+        ("password_sel", serde_json::json!("")),
+        ("submit_sel", serde_json::json!("")),
+        ("mask", serde_json::json!([""])),
+        ("viewports", serde_json::json!(["desktop"])),
+        ("max_shots", serde_json::json!(7)),
+        ("timeout_secs", serde_json::json!(241)),
+        ("max_html_mb", serde_json::json!(9)),
+    ] {
+        let mut value = serde_json::to_value(QaCaptureConfig::default()).unwrap();
+        value[name] = invalid;
+        let capture: QaCaptureConfig = serde_json::from_value(value).unwrap();
+        assert!(capture.validate().unwrap_err().contains(&format!("qa.capture.{name}")));
+    }
     let mut env = TestEnvGuard::temp_home();
     env.remove("PROJECT_QA_CREDENTIALS");
     let mut config = Config::default();

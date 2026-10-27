@@ -32,8 +32,15 @@ publication date/time line, and a verdict paragraph. Then provide these exact
    definitions; name zero and unmeasured values in the counting note instead.
 3. `What you can do now`: `###` themes and `####` change titles; each change has
    `Was: ...`, a blank line, `Now: ...`, and optional `Source: ...` paragraphs.
-   A change with a real before/after capture pair adds `Before: <path>` and
-   `After: <path>` paragraphs between `Now:` and `Source:`. Before is the earlier
+   A change with a captured pair adds `Pair: <task-id>/<shot-id>` between
+   `Now:` and `Source:`. The renderer invokes `cas --json deliverable pairs
+   --task <task-id> --root <project-root>` to resolve the durable
+   `qa/pairs/pairs.json`, using only verified `pairs[]`, never `unpaired[]`.
+   Missing, incomplete or invalid evidence shows no figure and prints a warning;
+   no pair means nothing shown. `cas release report` supplies its own executable;
+   a standalone render uses `cas` on PATH (override with `--cas-bin`).
+   Alternatively add explicit `Before: <path>` and `After: <path>` paragraphs.
+   Choose one form per change. Before is the earlier
    capture of the same surface (a previous visual-QA or QA baseline, a base
    build's run or the prior release's shot); After is the delivery's own
    capture. Paths are absolute or relative to the project root; PNG, JPEG or

@@ -856,8 +856,9 @@ pub struct FactoryConfig {
     /// Operator-only: set with `cas config set factory.write_roots`, which
     /// stores canonical absolute paths. `Config::set` refuses the key, so MCP,
     /// the config editor and imports cannot widen it, and the PreToolUse hook
-    /// refuses agent writes to `.cas/config.toml`. Empty keeps the default
-    /// workspace contract.
+    /// refuses agent writes to `.cas/config.toml`. In the user-level
+    /// `~/.cas/config.toml` the list applies to every project (cas-f0ea0);
+    /// the Downloads folder is always a root and needs no entry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub write_roots: Vec<String>,
 

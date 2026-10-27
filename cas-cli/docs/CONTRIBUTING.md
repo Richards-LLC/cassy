@@ -281,6 +281,14 @@ recording `merge_conflicted`, the conflicting paths and the attempted target tip
 The worker receives one notice and can start, resolve and re-deliver directly.
 Target drift and pre-existing checkout residue keep their existing recovery paths.
 
+Factory daemon startup validates both Unix socket pathnames against the target
+ABI before logs, processes or agent registration: Linux has 108 address bytes,
+macOS 104, including the terminating NUL. An oversized HOME/session path is
+refused with its byte count and a shorter-path remedy. A daemon also refuses an
+inherited CAS_ROOT that does not belong to its declared project; canonical and
+worktree aliases of that project's store remain valid. For an isolated QA rig,
+initialize its own project and clear inherited CAS_ROOT before starting it.
+
 After a published merge, an enforced registry or documentation upkeep gate
 returns the parked task Open to its assignee through the same `request_changes`
 core. Cassy retains the gate text in task notes, sends one corrective notice,
@@ -1537,6 +1545,31 @@ Consumers use `QaCaptureConfig::is_configured() -> Result<bool, String>`:
 settings alone do not enable capture. A configured target with broken runtime
 credentials returns a finding in `Err`; evidence gates must refuse that finding.
 `credential_file()` checks the pointer without reading its contents.
+
+Use `cas deliverable capture --task <task> --target <branch> --side both` for
+one bounded merge-base/head run. The default target comes from the task's
+work target; the explicit flag is useful for a disposable project. Capture
+clones immutable revisions (only Git objects are hardlinked), reuses delivered
+`node_modules`, leases ports, masks requested selectors and tears down servers
+on every exit. It writes `<task-artifacts>/qa/pairs/pairs.json` plus PNG/JPGs.
+A failed login or missing mask gives a finding without an unmasked fallback.
+
+The committed shot catalog is an array, for example
+`[{"id":"roster","path":"/drivers/","ready":"main","mask":[".email"]}]`.
+Optional `touches` globs select affected shots. Without a catalog, affected
+journey runs at each revision supply their last-stage screenshot, only when
+both assertion receipts pass. `journey-eval.sh --compare BASE HEAD` and
+`JOURNEY_CAPTURE_MASK` are opt-in; ordinary QA runs keep their existing path.
+The base uses only head's producer instrumentation, recorded by SHA, while its
+application, bundle and tests remain at the base revision.
+
+`cas deliverable pairs --task <task>` verifies complete pairs and their image
+digests. `--range BASE..HEAD` resolves tasks through commit provenance; commits
+without an unambiguous link stay explicitly unlinked. `--side before` or
+`--side after` supports deployed targets, preserving their deployment source.
+A missing side remains unpaired and is excluded from report evidence.
+Global `--json` returns the full receipt. Exit codes are 0 for success,
+1 for an evidence finding and 2 for invalid input or unavailable runtime.
 
 ## Build, assembly and CI policy
 
@@ -3053,14 +3086,30 @@ worktree, `factory.artifacts_root/<project-key>/<task-id>/`, the configured
 scratch root and the harness scratchpad. An operator can add directories
 outside these:
 
+- **Downloads, built in.** The user's Downloads folder is a root for every
+  project's supervisor and workers with no setup: on Linux the
+  `XDG_DOWNLOAD_DIR` from `$XDG_CONFIG_HOME/user-dirs.dirs` (default
+  `~/.config/user-dirs.dirs`), else `~/Downloads`; on macOS `~/Downloads`. It
+  passes the same safety checks as a configured root, and a missing folder
+  admits nothing. On its own it does not turn on the in-place edit judging
+  described below.
+- **User-level write roots.** Running `cas config set factory.write_roots
+  "<dir>,<dir>"` from `$HOME` writes `[factory] write_roots` to the user-level
+  `~/.cas/config.toml` (that is the store `$HOME` resolves to). These roots
+  apply to every project, merged with each project's own list. Folders
+  inside `~/.cas`, such as `~/.cas/qa-rig`, may be roots here; `~/.cas`
+  itself, its config files and `~/.cas/operator/` may not. Each root is
+  checked against both the user store and the project.
 - **Project write roots.** Run `cas config set factory.write_roots
-  "~/Downloads,/mnt/shockwave/ai/pooled_assets/llm"`. This writes
+  "/mnt/shockwave/ai/pooled_assets/llm"` in the project. This writes
   `[factory] write_roots = [...]` to the project's `.cas/config.toml`, so
   `cas config list` and `cas config get factory.write_roots` show it. Each
   root lets the project's supervisor and workers create, edit, rename and
-  delete files beneath it. An empty value clears it. Roots are per project:
-  a worker reads them from its owning project's `.cas/config.toml`, also in
-  an isolated worktree, and another project's agents never get them.
+  delete files beneath it. An empty value clears it. Project roots are per
+  project: a worker reads them from its owning project's `.cas/config.toml`,
+  also in an isolated worktree, and another project's agents never get them.
+  `cas config get factory.write_roots` prints the project's list and notes
+  the user-level and Downloads roots on stderr.
 - **One-off task grants.** Run `cas config grant-write --task <id> --path <dir>
   --mode create+edit --reason "<why>"`. The grant applies to the worker
   holding the task and to the supervisor until the task closes. It is
@@ -3081,8 +3130,8 @@ them too).
 For a support loop, the operator can include `~/.gabber-support` in the
 owning project's `factory.write_roots`, preserving any existing entries when
 setting the list. This admits `state.json` beneath that directory; a sibling
-such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
-`~/.cas/config.toml` does not grant project writes.
+such as `~/.gabber-support-other` stays blocked. Setting it in the user-level
+`~/.cas/config.toml` instead grants it to every project.
 
 Each grant admits only its modes; a project root admits all three:
 
@@ -3108,8 +3157,9 @@ payloads so each write can be attributed to a root.
 
 **Operator-only, guardrail-grade (not security-grade).** The operator and the
 agents share a Unix user. The PreToolUse hook is the actual gate against
-agents; the CLI checks are defence in depth. With no roots and no policy
-file, the default contract is unchanged. The layers are:
+agents; the CLI checks are defence in depth. With no configured roots and no
+policy file, the default contract is unchanged apart from the Downloads
+root. The layers are:
 
 - `cas config set factory.write_roots` refuses only inside a factory worker or
   server cgroup. The operator usually runs it as `! cas …` inside an agent

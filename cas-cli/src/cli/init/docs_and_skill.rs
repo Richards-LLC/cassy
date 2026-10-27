@@ -21,6 +21,7 @@ Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's p
 Slack transport: use the `violet` skill and the Violet proxy for every Slack read (`violet.violet_read`) and post (`violet.violet_post`). Never use the Claude Slack connector or Codex Slack app. Pre-tool hooks deny non-Violet Slack writes by default; only an explicit operator setting `slack.transport=any` disables that guard.
 
 Bug routing: `cas config get issues.repo` names this project's tracker, and `issues.components.{cassy,violet,cloud}` name the Cassy, Violet and Cloud trackers. File an operational bug in the matching tracker before moving on; in the Cassy source repo itself, a Cassy bug becomes a task there. If `issues.repo` is unset, record the bug as a task note.
+Deliverables: use `cas-sow-delivery-report` for SOW deliveries, `cas-feature-report` for feature reports, `cas-release-notes` + `cas-release-report` for internal releases, and `cas-customer-release-notes` for client updates; follow DESIGN.md and use real before/after pairs.
 Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md."#;
 
 /// The Claude Code directive: import the neutral AGENTS.md block, plus the
@@ -500,10 +501,20 @@ mod tests {
         let root = temp.path();
 
         assert!(update_agents_md(root).unwrap());
-        assert_eq!(
-            fs::read_to_string(root.join("AGENTS.md")).unwrap(),
-            format!("{}\n", build_agents_section())
-        );
+        let installed = fs::read_to_string(root.join("AGENTS.md")).unwrap();
+        for skill in [
+            "cas-sow-delivery-report",
+            "cas-feature-report",
+            "cas-release-notes",
+            "cas-release-report",
+            "cas-customer-release-notes",
+        ] {
+            assert!(
+                installed.contains(&format!("`{skill}`")),
+                "managed AGENTS.md must advertise {skill}"
+            );
+        }
+        assert_eq!(installed, format!("{}\n", build_agents_section()));
         assert!(!update_agents_md(root).unwrap(), "idempotent");
 
         let stale = format!("# Repo\n\n{CAS_SECTION_BEGIN}\nold\n{CAS_SECTION_END}\n\nKeep me.\n");

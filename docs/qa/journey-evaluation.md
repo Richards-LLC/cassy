@@ -62,7 +62,10 @@ For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
   depends on data a double cannot fake honestly, the catalog says so.
 - **Receipts per journey.** Each journey is one cas-qa-craft evidence
   bundle in `<artifact-dir>/journeys/<ID>/`, and its `bundle.json` names
-  `journey` as the producer. The bundle holds:
+  `journey` as the producer. Its `task_id` comes from the resolved task in
+  `journey-selection.json`, including `--task` overrides; a nested output
+  directory such as `cas-1234/corrective` does not rename the owning task.
+  The bundle holds:
   - one passing-run `trace.zip` and `trace-actions.txt` per bundle, required
     by `qa_evidence`; failed or incomplete cell traces are also retained for
     diagnosis. The bundler moves retained traces out of Playwright output and

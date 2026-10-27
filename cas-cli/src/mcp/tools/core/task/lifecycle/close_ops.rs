@@ -6558,8 +6558,11 @@ impl CasCore {
         let candidate = resolve_branch_sha(repo_path, &format!("{candidate}^{{commit}}"))?;
         // cas-43d2: a pushed delivery is what origin holds. An unpushed local
         // rebase must not replace it, or the pushed tip reads as superseded.
+        let lane = task.deliverables.parked_branch.clone().or_else(|| {
+            task.assignee.as_deref().map(crate::factory_isolation::expected_worker_branch)
+        });
         if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
-            && commit_is_absent_from_origin(repo_path, &candidate)
+            && commit_is_absent_from_origin(repo_path, &candidate, lane.as_deref())
         {
             return None;
         }
@@ -9640,6 +9643,18 @@ impl CasCore {
                                         anchor_commits,
                                     )
                                 }
+                                .and_then(|proof| {
+                                    // cas-defb: a no-code delivery is its external
+                                    // proof; pin the reviewed commit so a sibling
+                                    // merge or the lane's next task cannot stale it.
+                                    if epic_proof_ref.is_none()
+                                        && task.execution_note.as_deref() == Some("no-code")
+                                    {
+                                        crate::mcp::tools::core::task::lifecycle::repository_proof::pin_repository_proof_to_head(&proof)
+                                    } else {
+                                        Ok(proof)
+                                    }
+                                })
                                 .map_err(|error| McpError {
                                     code: ErrorCode::INVALID_PARAMS,
                                     message: Cow::from(format!(
@@ -21416,14 +21431,24 @@ fn own_lane_subjects(
 
 /// cas-43d2: no `refs/remotes/origin/*` ref contains `commit`. A repository
 /// without an origin remote has nothing to compare, so it answers false.
-fn commit_is_absent_from_origin(repo_path: &std::path::Path, commit: &str) -> bool {
+/// cas-16e1: the delivery lane's own `origin/<lane>` answers first; only a
+/// commit it lacks pays for the scan of every remote ref.
+fn commit_is_absent_from_origin(repo_path: &std::path::Path, commit: &str, lane: Option<&str>) -> bool {
     let has_origin = std::process::Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(repo_path)
         .output()
         .is_ok_and(|output| output.status.success());
-    has_origin
-        && git_stdout_lines(
+    if !has_origin {
+        return false;
+    }
+    if let Some(lane) = lane {
+        let remote = format!("refs/remotes/origin/{}", lane.strip_prefix("origin/").unwrap_or(lane));
+        if git_ref_exists(repo_path, &remote) && git_commit_is_ancestor(repo_path, commit, &remote) {
+            return false;
+        }
+    }
+    git_stdout_lines(
             repo_path,
             &["for-each-ref", "--format=%(refname)", "--contains", commit, "refs/remotes/origin"],
         )
@@ -32397,8 +32422,17 @@ esac
         core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
         assert_eq!(anchor(&store), Some(parked_at), "an unpushed commit is not the delivery");
         git(p, &["push", "-q", "origin", "factory/worker"]);
+        // cas-16e1: the lane's own origin branch answers before any scan of
+        // every remote ref.
+        let trace = temp.path().join("git-trace.log");
+        let mut env = crate::test_support::TestEnvGuard::new();
+        env.set("GIT_TRACE", &trace);
         core.advance_awaiting_merge_anchor(&store, &parked, p, "main", Some(&own)).unwrap();
+        drop(env);
         assert_eq!(anchor(&store), Some(own), "the pushed continuation advances it");
+        let scans = std::fs::read_to_string(&trace).unwrap_or_default().lines()
+            .filter(|line| line.contains("for-each-ref") && line.contains("refs/remotes/origin")).count();
+        assert_eq!(scans, 0);
     }
 
     /// cas-ba4a: a parked task resolves to its anchor; an anchor that cannot
@@ -40630,6 +40664,81 @@ mod zero_change_close_tests {
         service.task(Parameters(request)).await.unwrap();
         let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &epic.id).unwrap().unwrap();
         assert_eq!(retry.id, dispatch.id, "close retries must reuse the release dispatch");
+    }
+
+    /// cas-defb: a no-code delivery is its validated external proof, not the
+    /// moving epic head. A sibling merge into the epic during review must not
+    /// stale its dispatch (three re-dispatches in 20 minutes on 2026-10-27).
+    #[tokio::test]
+    async fn no_code_dispatch_survives_a_sibling_merge_into_its_epic_cas_defb() {
+        use crate::mcp::CasService;
+        use crate::test_support::TestEnvGuard;
+        use crate::store::{
+            open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store,
+        };
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, _origin) = init_worker_repo_with_origin();
+        let p = dir.path();
+        git(p, &["checkout", "-q", "-b", "epic/live", "main"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+
+        let cas_dir = p.join(".cas");
+        std::fs::create_dir_all(&cas_dir).unwrap();
+        env.set("CAS_ROOT", &cas_dir);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", "codex");
+        std::fs::write(cas_dir.join("config.toml"), "[project]\ncanonical_id = \"cas-defb-fixture\"\n[verification]\nenabled = true\n").unwrap();
+        open_store(&cas_dir).unwrap().init().unwrap();
+        open_rule_store(&cas_dir).unwrap().init().unwrap();
+        open_skill_store(&cas_dir).unwrap().init().unwrap();
+        let store = open_task_store(&cas_dir).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&cas_dir).unwrap();
+        agents.init().unwrap();
+        let actor = "cas-defb-supervisor";
+        agents.register(&Agent::new_with_role(
+            actor.into(), "supervisor".into(), AgentRole::Supervisor,
+        )).unwrap();
+        let worker = "cas-defb-worker";
+        agents.register(&Agent::new_with_role(
+            worker.into(), "qa-worker".into(), AgentRole::Worker,
+        )).unwrap();
+        let mut task = Task::new("cas-defb-qa".into(), "no-code QA pass".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.into());
+        task.task_type = TaskType::Chore;
+        task.risk = vec![TaskRisk::None];
+        task.execution_note = Some("no-code".into());
+        task.external_ref = Some("https://example.test/qa/ledger".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-defb-fixture".into(),
+            target_branch: "epic/live".into(),
+        });
+        store.add(&task).unwrap();
+        let core = CasCore::with_daemon(cas_dir.clone(), None, None);
+        core.set_agent_id_for_testing(actor.into());
+        let service = CasService::new(core, None);
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "reason": "QA ledger published",
+        })).unwrap();
+        let response = service.task(Parameters(request.clone())).await.unwrap();
+        let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id)
+            .unwrap().unwrap_or_else(|| panic!("close must dispatch verification: {response:?}"));
+        let repository = dispatch.repository.clone().expect("dispatch binds a repository proof");
+
+        git(p, &["checkout", "-q", "-b", "factory/sibling", "epic/live"]);
+        commit_file(p, "sibling.rs", "feat: an unrelated sibling task");
+        git(p, &["checkout", "-q", "epic/live"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/sibling", "-m", "merge sibling"]);
+        git(p, &["push", "-q", "origin", "epic/live"]);
+        crate::mcp::tools::core::task::lifecycle::repository_proof::verify_repository_proof(&repository)
+            .expect("a sibling merge into the epic must not stale a no-code dispatch");
+        service.task(Parameters(request)).await.unwrap();
+        let retry = cas_store::get_latest_verification_dispatch(&cas_dir, &task.id).unwrap().unwrap();
+        assert_eq!(retry.id, dispatch.id, "close retries must reuse the no-code dispatch");
     }
 
     #[test]

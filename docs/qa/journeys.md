@@ -197,6 +197,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".
 - Once the supervisor has replied since, a "Not confirmed" message stops offering Retry; only a quiet "Send again" remains.
 - A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
+- Replaying a delivery receipt while reply history rebuilds keeps an answered message answered.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 #### Edge paths
@@ -582,6 +583,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
 - A refused operation shows the hub's detail on the row.
+- A fleet change that overlaps an older catalog heartbeat still refreshes the roster: a stopped worker disappears without waiting for the next heartbeat (cas-66ea).
+- That refresh still happens when the older heartbeat read it waits for fails or times out (cas-1966).
 - On a phone, a pending operation keeps its notice above the composer through a shell rebuild and Raw output; a completion that lands while Raw output is open keeps its Undo or refusal, reachable by keyboard once the sheet closes (M12).
 
 ### HUB-J18 · Interrupt or read the supervisor from its conversation

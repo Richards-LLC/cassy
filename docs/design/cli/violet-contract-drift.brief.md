@@ -32,3 +32,18 @@ refer to a complete truncated path followed by the separate word `to`.
 
 Scored by the implementing worker on 2026-10-27. A pre-existing project note
 claims live agreement before probing; follow-up `cas-a109` tracks that wording.
+
+## Codex account homes
+
+| Field | Contract |
+| --- | --- |
+| First two lines | Integration retains its existing verdict; account rows distinguish written configuration from an absent Codex account. |
+| Scannable | Each registered Codex configuration gets a state row, and an empty registry prints `codex: no account`. |
+| Readable | Full file receipts identify the account configuration or its shared base target; the retired default home is never recreated. |
+| Machine output | VioletReport keeps harness entries with path, state and note; an absent account is skipped with a `no account` note and no credential values. |
+| Omitted | No account selection, login, or Codex directory creation is performed to invent a missing profile. |
+
+An explicit `CODEX_HOME` remains authoritative. Otherwise the shared accounts
+resolver supplies every registered home. A config link installed by Cassy to
+its known Codex base is written at that regular base file, preserving the link;
+arbitrary config symlinks retain the filesystem refusal.

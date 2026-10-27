@@ -4,7 +4,7 @@
 | --- | --- |
 | First two lines | Doctor keeps its existing verdict and finding count; a Violet finding identifies which dispatch contract needs repair. |
 | Scannable | The Violet row names hub tools absent from the effective allowlist and stale routes, with the authoritative machine or project file. |
-| Readable | Known contract drift directs the operator to `cas integrate violet`; a hub contract this build cannot install directs an explicit edit of that file's Violet routes. |
+| Readable | The project note describes this build's canonical routes; the live probe alone establishes hub agreement. Known drift names `cas integrate violet`; an unknown contract names the authoritative policy edit. |
 | Machine output | Doctor retains one checks array with status, message and remediation; integration retains one VioletReport with drift and remedy, with no credential values. |
 | Omitted | No tool call or Slack write is needed to inspect the contract; schema and credential failures retain their existing separate remedies. |
 
@@ -30,5 +30,5 @@ refer to a complete truncated path followed by the separate word `to`.
 | Theme safety | 5 | Four palettes, NO_COLOR, piped and C-locale captures pass. |
 | Machine contract | 5 | Actual integration and doctor emit one JSON document with explicit drift/status and no fixture credentials. |
 
-Scored by the implementing worker on 2026-10-27. A pre-existing project note
-claims live agreement before probing; follow-up `cas-a109` tracks that wording.
+Scored by the implementing worker on 2026-10-27. The project note must describe
+structural agreement with this build, while the drift verdict describes the live hub.

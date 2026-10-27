@@ -6,6 +6,14 @@ This is the Cassy-side summary of the hub's `docs/TOOL_CONTRACT.md` (violet_ps,
 `{"ok": false, "error": {"code", "message", "retryable"}}`, with optional
 `retry_after_ms` and a safe `error.upstream` object. There is no `ts` field.
 
+## `violet_reconcile_reply`
+
+Pass the original reply intent's `coordination_operation_id` after an
+`outcome_unknown` write. This tool reads Slack to settle the intent; it never
+posts. Already-settled intents return their stored `posted` or `rejected` state
+with reason `intent_not_unresolved`. `retry_after` is in seconds; Violet handles
+retries with a new Cloud `request_id`. Never repost to resolve an uncertain write.
+
 ## `violet_read`
 
 `channel` is the only required input; unknown fields are rejected.

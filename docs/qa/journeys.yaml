@@ -196,7 +196,7 @@ invariants:
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
 bug_families:
   recovered_session_attention:
-    title: Dead daemon viewers close and fresh replacement sessions retire outage attention while retaining history
+    title: Dead daemon viewers close, catalog-gap retries re-subscribe, and fresh replacement sessions retire outage attention while retaining history
     found: '2026-10-27'
     fixed_by: [b8b8d0d234daa7f6ce565138ff5a61ae45288f95]
     tasks: [cas-d53c]

@@ -1035,7 +1035,7 @@ describe("Commander live connection lifecycle", () => {
     }, { timeout: 250, interval: 10 });
   });
 
-  it("reattaches after a replacement is absent between Closed and session_added (cas-d53c)", async () => {
+  it.each(["session_not_found", "daemon_offline"])("reattaches after a replacement is absent between Closed and session_added (%s, cas-d53c)", async (code) => {
     transport(true);
     TransportSocket.instances = [];
     vi.stubGlobal("WebSocket", TransportSocket);
@@ -1059,7 +1059,7 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(subscriptions()).toHaveLength(2);
     // The real catalog has removed the old daemon but not yet found its replacement.
-    socket.receive({ channel: "pty:session-a", error: { code: "session_not_found" } });
+    socket.receive({ channel: "pty:session-a", error: { code } });
     socket.receive({ channel: "events", event: { kind: "session_added", session: "session-a", sequence: 1 } });
     expect(connection.hasLiveAttach("session-a")).toBe(false);
     await vi.advanceTimersByTimeAsync(2_000);

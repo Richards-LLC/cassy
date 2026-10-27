@@ -490,6 +490,7 @@ fn launch_links_empty_shared_slots_first_and_still_launches_on_a_real_item() {
     for provider in ["claude", "codex"] {
         let home = TempDir::new().unwrap();
         let h = home.path();
+        std::fs::create_dir(h.join("bin")).unwrap();
         cas::test_paths::warm_stub(
             &h.join("bin").join(provider),
             r#"#!/bin/sh

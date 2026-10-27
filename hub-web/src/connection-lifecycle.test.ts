@@ -84,6 +84,19 @@ function transport(multiplex = false) {
   };
 }
 
+// Keep the real signer, but let event delivery get ahead of its asynchronous
+// completion deterministically instead of relying on a loaded host (cas-33167).
+function pauseSigning(): () => void {
+  const sign = crypto.subtle.sign.bind(crypto.subtle);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(crypto.subtle, "sign").mockImplementation(async (...args) => {
+    await gate;
+    return sign(...args);
+  });
+  return release;
+}
+
 class TransportSocket {
   static readonly OPEN = 1;
   static readonly CONNECTING = 0;
@@ -331,10 +344,12 @@ describe("Commander live connection lifecycle", () => {
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
+    const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
     await vi.waitFor(() => expect(events).toHaveLength(100));
+    releaseSigning();
     const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
     connection.stop();
     await Promise.all(manual);
   });
@@ -391,9 +406,11 @@ describe("Commander live connection lifecycle", () => {
     connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
+    const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i, revision: 0 });
     await vi.waitFor(() => expect(events).toHaveLength(100));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    releaseSigning();
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
   });
   it("resyncs gaps, accepts replay revisions, and resets on a new epoch (cas-2b3a5)", async () => {
     const hub = transport();
@@ -1010,8 +1027,12 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().phase).toBe("backoff");
     const streams = hub.streams.length;
     recovered.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
-    await vi.waitFor(() => expect(hub.streams).toHaveLength(streams + 1), { timeout: 250, interval: 10 });
-    expect(connection.snapshot().phase).toBe("live");
+    // Opening the event response precedes the recovery catalog read and the
+    // live transition; wait for the public outcome as well as the new stream.
+    await vi.waitFor(() => {
+      expect(hub.streams).toHaveLength(streams + 1);
+      expect(connection.snapshot().phase).toBe("live");
+    }, { timeout: 250, interval: 10 });
   });
 
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {

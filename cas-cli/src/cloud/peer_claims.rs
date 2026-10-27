@@ -2276,7 +2276,11 @@ mod tests {
             .and(path_regex(r"^/api/agents/tasks/[^/]+/claim$"))
             .and(body_partial_json(serde_json::json!({"agent_id": "holder"})))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": "success", "result": "claimed"
+                "status": "success", "result": "claimed", "lock": {
+                    "id": "file-lock", "task_id": "file-key", "agent_id": "holder", "status": "active",
+                    "expires_at": (Utc::now() + chrono::Duration::minutes(10)).to_rfc3339(),
+                    "renewed_at": Utc::now().to_rfc3339(), "renewal_count": 0, "claim_reason": null
+                }
             })))
             .mount(&server).await;
         Mock::given(method("POST"))

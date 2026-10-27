@@ -1194,12 +1194,41 @@ async function settlePage(page) {
  * print/screen switch. Network load/complete alone does not mean an async image
  * is ready to paint. All frames share one concurrent, bounded wait. */
 async function capturePage(page, path, timeoutMs, recordFinding) {
-  const frames = await Promise.all(page.frames().map((frame, frameIndex) => frame.evaluate(async ({ timeoutMs, frameIndex }) => {
+  const frames = await Promise.all(page.frames().map(async (frame, frameIndex) => {
+    try { return await frame.evaluate(async ({ timeoutMs, frameIndex }) => {
     const images = [...document.images].filter(image => {
       const rect = image.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0
-        && rect.bottom + scrollY > 0 && rect.top + scrollY < document.documentElement.scrollHeight
-        && (!image.checkVisibility || image.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }));
+      if (image.checkVisibility && !image.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+      // Root captures include the whole document, but an iframe only paints
+      // its viewport. Intersect with clipping ancestors before considering
+      // decode readiness; sr-only helpers and tracking pixels are not evidence.
+      let left = Math.max(rect.left, frameIndex ? 0 : -scrollX), top = Math.max(rect.top, frameIndex ? 0 : -scrollY);
+      let right = Math.min(rect.right, frameIndex ? innerWidth : document.documentElement.scrollWidth - scrollX);
+      let bottom = Math.min(rect.bottom, frameIndex ? innerHeight : document.documentElement.scrollHeight - scrollY);
+      for (let element = image; element; element = element.parentElement) {
+        const style = getComputedStyle(element), box = element.getBoundingClientRect();
+        if (element !== image) {
+          if (/^(hidden|clip|auto|scroll)$/.test(style.overflowX)) {
+            left = Math.max(left, box.left + element.clientLeft);
+            right = Math.min(right, box.left + element.clientLeft + element.clientWidth);
+          }
+          if (/^(hidden|clip|auto|scroll)$/.test(style.overflowY)) {
+            top = Math.max(top, box.top + element.clientTop);
+            bottom = Math.min(bottom, box.top + element.clientTop + element.clientHeight);
+          }
+        }
+        const clip = style.clip.match(/^rect\(([^)]+)\)$/);
+        if (clip && /^(absolute|fixed)$/.test(style.position)) {
+          const [t, r, b, l] = clip[1].split(/[,\s]+/).map(value => value === 'auto' ? null : parseFloat(value));
+          if (l != null) left = Math.max(left, box.left + l);
+          if (r != null) right = Math.min(right, box.left + r);
+          if (t != null) top = Math.max(top, box.top + t);
+          if (b != null) bottom = Math.min(bottom, box.top + b);
+        }
+        // Modern sr-only helpers commonly replace clip:rect with inset(50%).
+        if (/^inset\(\s*50%\s*(?:round\b[^)]*)?\)$/.test(style.clipPath)) return false;
+      }
+      return right - left > 1 && bottom - top > 1;
     });
     const identity = image => {
       const parts = [];
@@ -1230,7 +1259,14 @@ async function capturePage(page, path, timeoutMs, recordFinding) {
     } finally { clearTimeout(timer); }
     for (const image of pending) findings.push({ ...identity(image), reason: `image decoding exceeded ${timeoutMs} ms before capture` });
     return findings;
-  }, { timeoutMs, frameIndex })));
+    }, { timeoutMs, frameIndex });
+    } catch (error) {
+      // A child removed or navigated by the page cannot contribute its old
+      // document to this screenshot. Keep genuine evaluation failures visible.
+      if (frameIndex && (frame.isDetached() || /Execution context was destroyed|Frame was detached|Cannot find context with specified id/.test(error.message))) return [];
+      throw error;
+    }
+  }));
   for (const finding of frames.flat()) recordFinding(finding);
   // decode resolves before the next paint; flush that paint without a sleep.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));

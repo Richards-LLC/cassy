@@ -29,6 +29,10 @@ this concurrent decode wait (default5000ms); rejected or timed-out images emit
 `image-not-decoded` with their selector and alt label. Visual allowlists cannot
 suppress capture readiness failures. Two animation frames flush decoded pixels
 before capture; no arbitrary delay or retry is used.
+Only images with more than one CSS pixel in each painted dimension participate:
+document bounds and ancestor clipping exclude off-canvas, sr-only and tracking
+images. A child frame removed or navigated during decoding no longer contributes
+its old document to the capture; other evaluation failures still surface.
 
 ## Critique
 

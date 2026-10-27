@@ -204,11 +204,13 @@ test('undecoded images fail strict captures even with a visual allowlist', async
   }
 });
 
-test('a child frame disappearing during image decode does not abort capture', async () => {
-  const result = await render(`<main><h1>Stable report</h1><p>The main document remains ready.</p></main>
-    <iframe title="Ephemeral content" srcdoc='<img src="data:image/png;base64,broken" width="50" height="50"><script>
-      document.querySelector("img").decode=()=>{frameElement.remove();return new Promise(()=>{});};
-    </script>'></iframe>`);
-  assert.equal(result.status, 'PASS', JSON.stringify(result.findings));
-  assert.equal(result.screenshots.length, 1);
+test('a child frame disappearing or navigating during image decode does not abort capture', async () => {
+  for (const change of ['frameElement.remove()', 'frameElement.srcdoc="<p>Replacement frame</p>"']) {
+    const result = await render(`<main><h1>Stable report</h1><p>The main document remains ready.</p></main>
+      <iframe title="Ephemeral content" srcdoc='<img src="data:image/png;base64,broken" width="50" height="50"><script>
+        document.querySelector("img").decode=()=>{${change};return new Promise(()=>{});};
+      </script>'></iframe>`);
+    assert.equal(result.status, 'PASS', JSON.stringify(result.findings));
+    assert.equal(result.screenshots.length, 1);
+  }
 });

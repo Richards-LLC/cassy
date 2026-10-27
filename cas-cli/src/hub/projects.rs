@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn registered_worktrees_collapse_to_one_main_project_and_bind_live_session() {
-        let (_temp, main, linked) = fixture();
+        let (temp, main, linked) = fixture();
         let now = Utc::now();
         let rows = vec![
             KnownRepo {
@@ -457,6 +457,21 @@ mod tests {
         assert_eq!(projects[0].path, main);
         assert_eq!(projects[0].touch_count, 5);
         assert_eq!(projects[0].running_session.as_deref(), Some("factory-main"));
+
+        // cas-0273: a project running a live session is offered for Attach
+        // even when the host registry never recorded it; a stale one is not.
+        let unregistered = temp.path().join("unregistered");
+        fs::create_dir(&unregistered).unwrap();
+        git(&unregistered, &["init"]);
+        let mut sessions = vec![sessions[0].clone(), sessions[0].clone()];
+        sessions[0].name = "live-unregistered".into();
+        sessions[0].project_dir = Some(unregistered.to_string_lossy().into_owned());
+        sessions[1].name = "stale-unregistered".into();
+        sessions[1].project_dir = Some(unregistered.join("..").join("main").to_string_lossy().into_owned());
+        sessions[1].liveness = DaemonLiveness::StaleMetadata;
+        let projects = projects_from_rows(Vec::new(), &sessions, true);
+        let listed: Vec<_> = projects.iter().map(|p| (p.path.clone(), p.running_session.as_deref())).collect();
+        assert_eq!(listed, vec![(unregistered.canonicalize().unwrap(), Some("live-unregistered"))]);
     }
 
     #[test]

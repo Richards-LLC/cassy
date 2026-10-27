@@ -26,6 +26,7 @@ describe("committed dist", () => {
 
   it("carries no dynamic import the hub could not serve", () => {
     const app = readFileSync(new URL("app.js", dist), "utf8");
+    // pin: Deployed literal chunk imports must resolve through the embedded routes.
     for (const match of app.matchAll(/import\(\s*["'`](\.\/?chunk-[^"'`]+)["'`]/g)) {
       const name = match[1].replace(/^\.\//, "");
       expect(chunkName.test(name), `unsupported dynamic chunk: ${name}`).toBe(true);

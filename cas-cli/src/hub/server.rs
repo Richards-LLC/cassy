@@ -770,7 +770,7 @@ async fn projects<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = authorize(
+    let context = match authorize(
         &state,
         HubAction::MachineRead,
         Scope::MachineRead,
@@ -778,11 +778,18 @@ async fn projects<R: SessionReadModel>(
         "GET",
         "/v1/projects",
     ) {
-        return with_cors(unauthorized_for(&error), &headers);
-    }
-    let sessions = match state.catalog.list().await {
-        Ok(sessions) => sessions,
-        Err(error) => return internal_error(error),
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    // cas-2c559: a live session's project (cas-0273) is session data, so a
+    // pairing that cannot read sessions sees only the registry's projects.
+    let sessions = if context.as_ref().is_none_or(|context| context.has(Scope::SessionRead)) {
+        match state.catalog.list().await {
+            Ok(sessions) => sessions,
+            Err(error) => return internal_error(error),
+        }
+    } else {
+        Vec::new()
     };
     match tokio::task::spawn_blocking(move || {
         Ok::<_, anyhow::Error>(ProjectsResponse {

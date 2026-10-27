@@ -1,0 +1,241 @@
+// Measurement, not a synthetic scale test: replay captured real Commander rows.
+// No real credentials; no sends, dismissals, control claims or live service writes.
+import { test, expect, type CDPSession, type Page } from "@playwright/test";
+import { createServer, type Server } from "node:http";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { resolve, extname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { decode } from "@jridgewell/sourcemap-codec";
+import { HubDouble, type HistoryPage } from "./hub-double";
+
+type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[] };
+const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
+const capture: Capture = JSON.parse(await readFile(process.env.CONVERSATION_PERF_CAPTURE!, "utf8"));
+const dist = resolve("dist");
+let server: Server;
+let origin: string;
+test.beforeAll(async () => {
+  server = createServer(async (req, res) => {
+    const pathname = new URL(req.url!, "http://localhost").pathname;
+    const file = resolve(dist, `.${pathname.replace(/^\/commander/, "") || "/index.html"}`.replace(/\/$/, "/index.html"));
+    if (!file.startsWith(`${dist}/`)) { res.writeHead(403).end(); return; }
+    try {
+      const bytes = await readFile(file);
+      res.setHeader("Content-Type", ({ ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml", ".woff2": "font/woff2" } as Record<string, string>)[extname(file)] ?? "application/octet-stream");
+      res.setHeader("Cache-Control", "no-store");
+      res.end(bytes);
+    } catch { res.writeHead(404).end(); }
+  });
+  await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+  const address = server.address();
+  if (!address || typeof address === "string") throw Error("server did not bind");
+  origin = `http://127.0.0.1:${address.port}`;
+});
+test.afterAll(async () => { server.closeAllConnections(); await new Promise<void>((ok) => server.close(() => ok())); });
+
+// Browser-side measurements contain sizes/times only, never message bodies.
+function installProbe() {
+  const w = window as typeof window & { perfProbe: any };
+  const probe = w.perfProbe = { t0: 0, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], longTasks: [] as any[] };
+  const parse = JSON.parse;
+  JSON.parse = function (text, reviver) {
+    const start = performance.now();
+    try { return parse(text, reviver); }
+    finally { if (text.length > 1024) probe.parse.push({ at: start, ms: performance.now() - start, chars: text.length }); }
+  };
+  new PerformanceObserver((list) => {
+    for (const entry of list.getEntries()) probe.longTasks.push({ at: entry.startTime, ms: entry.duration });
+  }).observe({ type: "longtask", buffered: true });
+  const Socket = window.WebSocket;
+  window.WebSocket = class extends Socket {
+    constructor(url: string | URL, protocols?: string | string[]) {
+      super(url, protocols);
+      this.addEventListener("message", (event: MessageEvent) => {
+        if (typeof event.data === "string") probe.frames.push({ at: performance.now(), bytes: new TextEncoder().encode(event.data).length, history: event.data.includes('"ConversationHistory":') });
+      });
+    }
+    send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
+      if (typeof data === "string" && data.includes('"ConversationHistoryRequest":')) probe.requests.push({ at: performance.now(), bytes: new TextEncoder().encode(data).length });
+      return super.send(data);
+    }
+  };
+  // The click event is the tap origin, excluding Playwright's actionability wait.
+  document.addEventListener("click", (event) => {
+    if ((event.target as Element).closest('nav[aria-label="Choose a supervisor"] button')) probe.t0 = performance.now();
+  }, true);
+  document.addEventListener("DOMContentLoaded", () => {
+    new MutationObserver(() => {
+      probe.lastMutation = performance.now();
+      if (!probe.paintEnabled || !probe.t0 || probe.latestPaint) return;
+      // Two rAFs: an opportunity for the changed DOM to be presented between them.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const thread = document.querySelector(".conversation-reading.thread");
+        const turns = [...document.querySelectorAll(".msgs .conversation-turn")];
+        if (!thread || !turns.length) return;
+        const bounds = thread.getBoundingClientRect();
+        const visible = (node: Element) => { const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom; };
+        if (!probe.firstPaint && turns.some(visible)) probe.firstPaint = performance.now();
+        if (visible(turns[turns.length - 1])) probe.latestPaint = performance.now();
+      }));
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+}
+
+async function settle(page: Page) {
+  await page.waitForFunction(() => {
+    const p = (window as any).perfProbe;
+    return document.querySelector(".msgs .conversation-turn") && performance.now() - p.lastMutation > 350;
+  });
+  await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+}
+
+async function startProfile(cdp: CDPSession) {
+  await cdp.send("Profiler.start");
+  await cdp.send("Tracing.start", { categories: "devtools.timeline,v8,blink.user_timing", transferMode: "ReturnAsStream" });
+  return cdp.send("Performance.getMetrics");
+}
+
+async function endProfile(cdp: CDPSession, directory: string, phase: string) {
+  const metrics = await cdp.send("Performance.getMetrics");
+  const profile = await cdp.send("Profiler.stop");
+  const completed = new Promise<any>((ok) => cdp.once("Tracing.tracingComplete", ok));
+  await cdp.send("Tracing.end");
+  const { stream } = await completed;
+  let trace = "";
+  while (true) {
+    const chunk = await cdp.send("IO.read", { handle: stream });
+    trace += chunk.base64Encoded ? Buffer.from(chunk.data, "base64").toString("utf8") : chunk.data;
+    if (chunk.eof) break;
+  }
+  await cdp.send("IO.close", { handle: stream });
+  await writeFile(join(directory, `${phase}.trace.json`), trace);
+  await writeFile(join(directory, `${phase}.cpuprofile`), JSON.stringify(profile.profile));
+  const sourceSamples = await attributeSamples(profile.profile);
+  return { metrics, sourceSamples };
+}
+
+// Exclusive sampled leaf cost. Parent-inclusive values are separately labelled.
+// Decode the production bundle's source map rather than inventing function timings.
+async function attributeSamples(profile: any) {
+  const parents = new Map<number, number>();
+  for (const node of profile.nodes) for (const child of node.children ?? []) parents.set(child, node.id);
+  const maps = new Map<string, any>();
+  async function source(frame: any): Promise<string> {
+    if (!frame.url.startsWith(origin) || frame.lineNumber < 0) return frame.functionName || "native/idle";
+    const name = new URL(frame.url).pathname.replace(/^\/commander\//, "");
+    if (!maps.has(name)) {
+      try { const map = JSON.parse(await readFile(join(dist, `${name}.map`), "utf8")); maps.set(name, { ...map, lines: decode(map.mappings) }); }
+      catch { maps.set(name, null); }
+    }
+    const map = maps.get(name);
+    const segments = map?.lines[frame.lineNumber] ?? [];
+    let mapped: number[] | undefined;
+    for (const segment of segments) { if (segment[0] > frame.columnNumber) break; if (segment.length > 1) mapped = segment; }
+    return mapped ? map.sources[mapped[1]].replace(/^.*src\//, "src/") : name;
+  }
+  const leaf: Record<string, number> = {}, inclusive: Record<string, number> = {};
+  const labels = new Map<number, string>();
+  for (const node of profile.nodes) labels.set(node.id, await source(node.callFrame));
+  for (const [index, id] of (profile.samples ?? []).entries()) {
+    const ms = (profile.timeDeltas[index] ?? 0) / 1000;
+    const label = labels.get(id) ?? "unknown";
+    leaf[label] = (leaf[label] ?? 0) + ms;
+    const seen = new Set<string>();
+    let cursor: number | undefined = id;
+    while (cursor !== undefined) { seen.add(labels.get(cursor) ?? "unknown"); cursor = parents.get(cursor); }
+    for (const parent of seen) inclusive[parent] = (inclusive[parent] ?? 0) + ms;
+  }
+  const sorted = (values: Record<string, number>) => Object.fromEntries(Object.entries(values).sort((a, b) => b[1] - a[1]));
+  return { leaf_ms: sorted(leaf), inclusive_ms_do_not_sum: sorted(inclusive) };
+}
+
+for (const profile of [
+  { name: "desktop", viewport: { width: 1440, height: 900 }, cpu: 1 },
+  { name: "phone", viewport: { width: 390, height: 844 }, cpu: 4 },
+]) test(`conversation opening baseline ${profile.name}`, async ({ browser }, info) => {
+  const directory = join(output, `${profile.name}-${info.repeatEachIndex}`);
+  await mkdir(directory, { recursive: true });
+  const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone" });
+  const page = await context.newPage();
+  const cdp = await context.newCDPSession(page);
+  await cdp.send("Emulation.setCPUThrottlingRate", { rate: profile.cpu });
+  await cdp.send("Performance.enable");
+  await cdp.send("Profiler.enable");
+  await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
+  const hub = new HubDouble(page, {
+    time: { now: Date.now, delay: (callback, ms) => { setTimeout(callback, ms); } },
+    paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" }] }],
+    history: { [capture.session]: capture.pages },
+  });
+  await hub.install();
+  await page.addInitScript(installProbe);
+  const results: Record<string, any> = {};
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  try {
+    await page.goto(`${origin}/commander/`);
+    await hub.seedPaired();
+    await page.reload();
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+    await expect(row).toBeVisible();
+    const measure = async (phase: string, action: () => Promise<void>) => {
+      const base = await startProfile(cdp);
+      const since = await page.evaluate((phase) => { const p = (window as any).perfProbe; p.paintEnabled = phase === "initial"; p.t0 = performance.now(); p.firstPaint = 0; p.latestPaint = 0; return p.t0; }, phase);
+      const requestStart = hub.historyRequests.length;
+      await action();
+      const composer = page.getByRole("textbox", { name: "Your message", exact: true });
+      await expect(composer).toBeVisible();
+      const interactive = await page.evaluate(async () => {
+        const start = performance.now();
+        const input = document.querySelector<HTMLTextAreaElement>("#message-text")!;
+        input.focus();
+        input.value = "Performance probe (never sent)";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)));
+        const result = { at: performance.now(), input_ack_ms: performance.now() - start, value_retained: input.value === "Performance probe (never sent)" };
+        input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true }));
+        return result;
+      });
+      expect(interactive.value_retained).toBe(true);
+      await settle(page);
+      const probe = await page.evaluate((since) => {
+        const p = (window as any).perfProbe;
+        return { tap_at: p.t0, first_turn_painted_ms: p.firstPaint ? p.firstPaint - p.t0 : null, latest_turn_painted_ms: p.latestPaint ? p.latestPaint - p.t0 : null,
+          parses: p.parse.filter((entry: any) => entry.at >= since), requests: p.requests.filter((entry: any) => entry.at >= since),
+          frames: p.frames.filter((entry: any) => entry.at >= since), long_tasks: p.longTasks.filter((entry: any) => entry.at >= since),
+          dom_elements: document.querySelectorAll("*").length, rendered_turns: document.querySelectorAll(".msgs .conversation-turn").length };
+      }, since);
+      const costs = await endProfile(cdp, directory, phase);
+      const metrics = Object.fromEntries(costs.metrics.metrics.map((m: any) => [m.name, m.value]));
+      const before = Object.fromEntries(base.metrics.map((m: any) => [m.name, m.value]));
+      results[phase] = { ...probe, interactive_upper_bound_ms: interactive.at - probe.tap_at, input_ack_ms: interactive.input_ack_ms,
+        history_requests: hub.historyRequests.length - requestStart,
+        websocket_payload_bytes: probe.frames.reduce((sum: number, f: any) => sum + f.bytes, 0),
+        history_payload_bytes: probe.frames.filter((f: any) => f.history).reduce((sum: number, f: any) => sum + f.bytes, 0),
+        replay_request_to_response_ms: probe.frames.filter((f: any) => f.history).map((frame: any, index: number) => frame.at - probe.requests[index]?.at),
+        json_parse_ms: probe.parses.reduce((sum: number, entry: any) => sum + entry.ms, 0),
+        script_ms: (metrics.ScriptDuration - before.ScriptDuration) * 1000,
+        layout_ms: (metrics.LayoutDuration - before.LayoutDuration) * 1000,
+        style_ms: (metrics.RecalcStyleDuration - before.RecalcStyleDuration) * 1000,
+        heap_used_bytes: metrics.JSHeapUsedSize, dom_nodes: metrics.Nodes,
+        heap: await cdp.send("Runtime.getHeapUsage"), cpu: costs.sourceSamples,
+        long_task_total_ms: probe.longTasks.reduce((sum: number, entry: any) => sum + entry.ms, 0),
+        long_task_max_ms: Math.max(0, ...probe.longTasks.map((entry: any) => entry.ms)) };
+      await writeFile(join(directory, "receipt.json"), JSON.stringify({ status: "PASS", profile, browser: browser.version(), source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms,
+        label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
+    };
+    await measure("initial", async () => { await row.click(); await expect(page.locator(".msgs .conversation-turn").first()).toBeAttached(); });
+    expect(results.initial.history_requests).toBe(1);
+    await measure("accumulated", async () => {
+      for (let index = 1; index < capture.pages.length; index++) {
+        const count = hub.historyRequests.length;
+        await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+        await expect.poll(() => hub.historyRequests.length).toBe(count + 1);
+        await settle(page);
+      }
+    });
+    expect(results.accumulated.history_requests).toBe(capture.pages.length - 1);
+    expect(errors).toEqual([]);
+  } finally { await context.close(); }
+});

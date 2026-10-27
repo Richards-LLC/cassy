@@ -334,7 +334,12 @@ describe("Commander live connection lifecycle", () => {
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
     await vi.waitFor(() => expect(events).toHaveLength(100));
     const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    // The shared flight's GET leaves only after its request is signed, which
+    // is asynchronous: wait for it, then check that no second one follows.
+    const catalogReads = () => hub.requests.filter(row => row.path === "/v1/sessions").length - before;
+    await vi.waitFor(() => expect(catalogReads()).toBe(1));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(catalogReads()).toBe(1);
     connection.stop();
     await Promise.all(manual);
   });

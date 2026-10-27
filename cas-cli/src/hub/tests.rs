@@ -5239,8 +5239,8 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
     let id = uuid::Uuid::new_v4();
-    let send = |session: &str, name: &str, data: &[u8], access: u8| {
-        let uri = format!("/v1/sessions/{session}/uploads/{id}");
+    let send = |session: &str, upload_id: uuid::Uuid, name: &str, data: &[u8], access: u8| {
+        let uri = format!("/v1/sessions/{session}/uploads/{upload_id}");
         let mut request = Request::post(&uri).header("origin", "https://controller.example").header("content-type", "application/json");
         if access > 0 {
             let (signing, token) = if access == 1 { (&signing, &credential.credential) } else { (&read_signing, &read_credential.credential) };
@@ -5250,12 +5250,12 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         request.body(Body::from(serde_json::json!({"name":name,"data":base64::engine::general_purpose::STANDARD.encode(data)}).to_string())).unwrap()
     };
     for (session, access, expected) in [("factory-a", 0, StatusCode::UNAUTHORIZED), ("factory-a", 2, StatusCode::FORBIDDEN), ("missing", 1, StatusCode::FORBIDDEN)] {
-        assert_eq!(app.clone().oneshot(send(session, "test.txt", b"hello", access)).await.unwrap().status(), expected);
+        assert_eq!(app.clone().oneshot(send(session, id, "test.txt", b"hello", access)).await.unwrap().status(), expected);
         assert!(!artifacts.exists(), "refused requests must not write bytes");
     }
     let mut first = None;
     for name in ["../../outside.txt", "../renamed.txt"] {
-        let response = app.clone().oneshot(send("factory-a", name, b"hello", 1)).await.unwrap();
+        let response = app.clone().oneshot(send("factory-a", id, name, b"hello", 1)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         let path = std::path::Path::new(body["path"].as_str().unwrap());
@@ -5265,11 +5265,18 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         assert_eq!(body["mime"], "text/plain");
         if let Some(first) = &first { assert_eq!(&body, first); } else { first = Some(body); }
     }
-    assert_eq!(app.clone().oneshot(send("factory-a", "outside.txt", b"different", 1)).await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(app.clone().oneshot(send("factory-a", id, "outside.txt", b"different", 1)).await.unwrap().status(), StatusCode::CONFLICT);
     for (data, expected) in [(vec![0,1,2,3], StatusCode::UNSUPPORTED_MEDIA_TYPE), (vec![b'x'; 10*1024*1024+1], StatusCode::PAYLOAD_TOO_LARGE)] {
         // Invalid uploads must be refused before any idempotent replay lookup.
-        assert_eq!(app.clone().oneshot(send("factory-a", "bad", &data, 1)).await.unwrap().status(), expected);
+        assert_eq!(app.clone().oneshot(send("factory-a", id, "bad", &data, 1)).await.unwrap().status(), expected);
     }
+    // A misleading extension never controls MIME: this is a real PNG named .txt.
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0l8AAAAASUVORK5CYII=").unwrap();
+    let image = app.clone().oneshot(send("factory-a", uuid::Uuid::new_v4(), "photo.txt", &png, 1)).await.unwrap();
+    assert_eq!(image.status(), StatusCode::OK);
+    let image: serde_json::Value = serde_json::from_slice(&to_bytes(image.into_body(), 65536).await.unwrap()).unwrap();
+    assert_eq!(image["mime"], "image/png");
+    assert_eq!(std::fs::read(image["path"].as_str().unwrap()).unwrap(), png);
     let artifact = first.unwrap();
     let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
     assert_eq!(store.get(artifact["artifact_id"].as_str().unwrap()).unwrap().unwrap().mime, "text/plain");

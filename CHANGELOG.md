@@ -7,6 +7,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+
+- **A usage-limited worker waits on its current account** — Automatic account
+  switching has been removed. One notice per limit episode names the worker,
+  account, held tasks and absolute local reset date and time, or states that the
+  reset time is unavailable. No replacement is queued, no account directory is
+  rewritten, and queued switches from older versions are refused. Episode
+  records and supervisor notice dedupe survive restarts. Picker recommendations
+  and account selection for a new spawn without `config_dir` are unchanged.
+
 ## [3.84.0] - 2026-10-27
 
 ### Added — every subscription named, listed and picked for you
@@ -58,14 +68,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Now: `cas doctor` reports account link drift in one row, `cas doctor --fix`
   restores the links with a backup, and every launch checks and restores the
   chosen account's shared links before starting.
-- **A worker that hits its usage limit restarts on the next account** — Was: a
-  limited worker stopped until someone switched it by hand. → Now: the factory
-  restarts it once per limit episode on the next recommended account, resuming
-  its task in the same worktree and branch, and tells the supervisor which
-  account it moved to. When no account is eligible, the notice says when the
-  first one will be ("no eligible account until …"). A switch error still sends
-  one notice that names the error. The supervisor itself is never switched.
-  `worker_status` labels Claude and Codex limits correctly.
+- **Worker limit notices** — `worker_status` labels Claude and Codex limits
+  correctly. The automatic account rotation originally shipped in this release
+  was subsequently removed; see Unreleased for the current wait-and-report policy.
 
 ### Changed
 

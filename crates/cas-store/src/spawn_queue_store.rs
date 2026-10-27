@@ -368,16 +368,9 @@ pub trait SpawnQueueStore: Send + Sync {
         factory_session: Option<&str>,
     ) -> Result<i64>;
 
-    /// Atomically remember an episode and optionally enqueue its replacement.
-    /// Replays return the original decision and cannot enqueue a second recycle.
-    fn record_limit_episode(
-        &self,
-        episode: &str,
-        worker: &str,
-        session: &str,
-        spec_json: Option<&str>,
-        detail: &str,
-    ) -> Result<(Option<i64>, String)>;
+    /// Remember a usage-limit episode without queueing any lifecycle action.
+    /// Replays return the original record, including historical request IDs.
+    fn record_limit_episode(&self, episode: &str, detail: &str) -> Result<(Option<i64>, String)>;
 
     fn limit_episode(&self, episode: &str) -> Result<Option<(Option<i64>, String)>>;
 
@@ -704,14 +697,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         )
     }
 
-    fn record_limit_episode(
-        &self,
-        episode: &str,
-        worker: &str,
-        session: &str,
-        spec_json: Option<&str>,
-        detail: &str,
-    ) -> Result<(Option<i64>, String)> {
+    fn record_limit_episode(&self, episode: &str, detail: &str) -> Result<(Option<i64>, String)> {
         crate::shared_db::with_write_retry(|| {
             let mut conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -726,24 +712,13 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
                 tx.commit()?;
                 return Ok(existing);
             }
-            let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM spawn_queue WHERE processed_at IS NULL AND (factory_session=? OR factory_session IS NULL) AND instr(',' || coalesce(worker_names,'') || ',', ',' || ? || ',') > 0)", params![session,worker], |r| r.get(0))?;
-            let detail = if spec_json.is_some() && busy {
-                format!("blocked switch for {worker}: lifecycle request already queued. {detail}")
-            } else {
-                detail.to_owned()
-            };
-            let request_id = if let Some(spec) = spec_json.filter(|_| !busy) {
-                tx.execute("INSERT INTO spawn_queue(action,worker_names,isolate,worker_spec,factory_session,spawn_state,spawn_state_at) VALUES ('recycle',?,1,?,?,'queued',?)", params![worker,spec,session,Utc::now().to_rfc3339()])?;
-                Some(tx.last_insert_rowid())
-            } else {
-                None
-            };
+            let request_id: Option<i64> = None;
             tx.execute(
                 "INSERT INTO usage_limit_episodes(episode,detail,request_id) VALUES (?,?,?)",
                 params![episode, detail, request_id],
             )?;
             tx.commit()?;
-            Ok((request_id, detail))
+            Ok((request_id, detail.to_owned()))
         })
     }
 
@@ -998,32 +973,19 @@ mod tests {
     fn limit_episode_is_atomic_and_survives_reopen_and_queue_cleanup() {
         let (dir, store) = create_test_store();
         let first = store
-            .record_limit_episode(
-                "agent:timestamp",
-                "worker",
-                "session-a",
-                Some("{}"),
-                "old -> next",
-            )
+            .record_limit_episode("agent:timestamp", "waiting for reset")
             .unwrap();
-        assert!(first.0.is_some());
-        assert_eq!(store.peek(10).unwrap().len(), 1);
+        assert!(first.0.is_none());
+        assert!(store.peek(10).unwrap().is_empty());
         drop(store);
         let store = SqliteSpawnQueueStore::open(dir.path()).unwrap();
         store.init().unwrap();
         assert_eq!(
             store
-                .record_limit_episode(
-                    "agent:timestamp",
-                    "worker",
-                    "session-a",
-                    Some("{}"),
-                    "changed"
-                )
+                .record_limit_episode("agent:timestamp", "changed")
                 .unwrap(),
             first
         );
-        assert_eq!(store.peek(10).unwrap().len(), 1);
         store
             .conn
             .lock()
@@ -1031,28 +993,20 @@ mod tests {
             .execute("DELETE FROM spawn_queue", [])
             .unwrap();
         assert_eq!(store.limit_episode("agent:timestamp").unwrap(), Some(first));
-        let blocked = store
-            .record_limit_episode(
-                "agent:later",
-                "worker",
-                "session-a",
-                None,
-                "no eligible account until tomorrow",
-            )
-            .unwrap();
-        assert_eq!(blocked.0, None);
+        // A legacy decision remains readable without enqueuing its replacement.
+        store.conn.lock().unwrap().execute("INSERT INTO usage_limit_episodes(episode,detail,request_id) VALUES ('legacy','old switch',73)", []).unwrap();
         assert_eq!(
             store
-                .record_limit_episode("agent:later", "worker", "session-a", Some("{}"), "retry")
-                .unwrap(),
-            blocked
+                .record_limit_episode("legacy", "new notice")
+                .unwrap()
+                .0,
+            Some(73)
         );
         assert!(store.peek(10).unwrap().is_empty());
-        // A failed queue insert must also roll back the episode decision.
-        store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_recycle BEFORE INSERT ON spawn_queue BEGIN SELECT RAISE(ABORT, 'fixture'); END").unwrap();
+        store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_episode BEFORE INSERT ON usage_limit_episodes BEGIN SELECT RAISE(ABORT, 'fixture'); END").unwrap();
         assert!(
             store
-                .record_limit_episode("agent:error", "worker", "session-a", Some("{}"), "switch")
+                .record_limit_episode("agent:error", "waiting")
                 .is_err()
         );
         assert!(store.limit_episode("agent:error").unwrap().is_none());

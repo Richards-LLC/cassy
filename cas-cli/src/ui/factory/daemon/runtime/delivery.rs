@@ -928,6 +928,10 @@ impl FactoryDaemon {
                 let key = SendKey::new(attribution.device_id.as_deref(), client_ref.as_deref());
                 let fingerprint = send_fingerprint(&target, &text, in_reply_to, urgent);
                 let mut receipts = std::mem::take(&mut self.send_receipts);
+                // Loaded for live viewers inside the send's grant, so that a
+                // saved row is not left unbroadcast because the reload ran
+                // under the spent pass budget.
+                let mut live_view = None;
                 let outcome = dedupe_send(
                     &mut receipts,
                     key,
@@ -947,6 +951,7 @@ impl FactoryDaemon {
                             in_reply_to,
                             &attribution,
                         )?;
+                        live_view = Some(self.live_operator_message(outcome.id()));
                         Ok(SendReceipt {
                             notification_id: outcome.id(),
                             stamped: operator_stamp(&attribution).verified,
@@ -978,8 +983,8 @@ impl FactoryDaemon {
                     );
                 }
                 let receipt = outcome.receipt();
-                if matches!(outcome, SendOutcome::Enqueued(_)) {
-                    match self.live_operator_message(receipt.notification_id) {
+                if let Some(live_view) = live_view {
+                    match live_view {
                         Ok(Some(message)) => self.broadcast_daemon_message(
                             &crate::ui::factory::DaemonMessage::OperatorMessage(message),
                         ),

@@ -66,6 +66,8 @@ describe("sheets in the thread", () => {
     expect(sheets[1]?.querySelector(".plate")?.textContent).toBe("HTML");
     expect(turn.querySelectorAll("time")).toHaveLength(1);
     const first = sheets[0]!;
+    history.markReplyPersisted(71); view.update();
+    expect(view.element.querySelector(".sheet")).toBe(first);
     history.reply(reply(72, "Also tagged.", undefined, "answer"), at(9, 53)); view.update();
     expect(view.element.querySelector(".sheet")).toBe(first);
     expect(view.element.querySelector<HTMLElement>(".bub")?.classList.contains("group-first")).toBe(true);

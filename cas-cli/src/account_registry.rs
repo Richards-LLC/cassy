@@ -225,12 +225,13 @@ fn set_login(account: &mut Account, state: LoginState) {
 }
 
 fn mark_duplicates_and_order(accounts: &mut [Account]) {
-    // Prefer a folder named after the email over a legacy alias, then use
-    // folder order. The canonical choice is stable across probe completion order.
+    // Prefer a physical directory over a symlink alias, then email/name order.
+    // The canonical choice is stable across probe completion order.
     let mut order: Vec<usize> = (0..accounts.len()).collect();
     order.sort_by_key(|&i| {
         let a = &accounts[i];
         (
+            a.folder.is_symlink(),
             a.email.as_deref() != Some(a.name.as_str()),
             a.folder.clone(),
         )

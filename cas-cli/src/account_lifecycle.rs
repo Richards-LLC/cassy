@@ -236,11 +236,16 @@ pub(crate) fn disabled(home: &Path, folder: &Path) -> bool {
             values
                 .iter()
                 .filter_map(|v| v.as_str())
-                .any(|v| Path::new(v) == folder)
+                .any(|v| same_path(Path::new(v), folder))
         })
 }
 
 pub(crate) fn set_disabled(home: &Path, folder: &Path, disabled: bool) -> Result<()> {
+    // Store the physical account; legacy alias entries still match on read and
+    // are removed together when either spelling is enabled.
+    let folder = folder
+        .canonicalize()
+        .unwrap_or_else(|_| folder.to_path_buf());
     let mut policy = read_policy(home)?;
     let accounts = policy
         .get("accounts")
@@ -258,10 +263,10 @@ pub(crate) fn set_disabled(home: &Path, folder: &Path, disabled: bool) -> Result
         list.iter().any(|value| {
             value
                 .as_str()
-                .is_some_and(|value| Path::new(value) == folder)
+                .is_some_and(|value| same_path(Path::new(value), &folder))
         })
     });
-    if current == disabled {
+    if !current && !disabled {
         return Ok(());
     }
     let table = policy
@@ -277,7 +282,7 @@ pub(crate) fn set_disabled(home: &Path, folder: &Path, disabled: bool) -> Result
         .or_insert_with(|| toml::Value::Array(Vec::new()))
         .as_array_mut()
         .context("accounts.disabled must be an array")?;
-    list.retain(|v| v.as_str().is_none_or(|v| Path::new(v) != folder));
+    list.retain(|v| v.as_str().is_none_or(|v| !same_path(Path::new(v), &folder)));
     if disabled {
         list.push(toml::Value::String(folder.to_string_lossy().into_owned()));
     }
@@ -295,6 +300,26 @@ pub(crate) fn remove(target: &Target, home: &Path) -> Result<()> {
     remove_with(target, home, cfg!(target_os = "macos"), &mut security)
 }
 
+/// Incoming profile links are part of a physical account's removal plan.
+/// Removing a link itself only unlinks that alias.
+pub(crate) fn removal_aliases(target: &Target, home: &Path) -> Result<Vec<PathBuf>> {
+    if target.folder.is_symlink() {
+        return Ok(Vec::new());
+    }
+    let mut aliases = Vec::new();
+    for dir in accounts::discover_aliases(target.provider, home)? {
+        if dir.path.is_symlink() && same_path(&dir.path, &target.folder) {
+            anyhow::ensure!(
+                dir.path != home.join(format!(".{}", target.provider.name())),
+                "The main account is protected"
+            );
+            aliases.push(dir.path);
+        }
+    }
+    aliases.sort();
+    Ok(aliases)
+}
+
 fn remove_with(
     target: &Target,
     home: &Path,
@@ -303,23 +328,44 @@ fn remove_with(
 ) -> Result<()> {
     ensure_idle(target, home)?;
     read_policy(home)?;
+    let aliases = removal_aliases(target, home)?;
     // remove_dir_all unlinks symlinks within the tree, never traverses them.
     if std::fs::symlink_metadata(&target.folder)?
         .file_type()
         .is_symlink()
     {
+        // Keep a disabled physical login disabled when only its alias is removed,
+        // including old policy files that still store the alias spelling.
+        if disabled(home, &target.folder) {
+            set_disabled(home, &target.folder, true)?;
+        }
         std::fs::remove_file(&target.folder)?;
     } else {
         std::fs::remove_dir_all(&target.folder)?;
+        for alias in &aliases {
+            std::fs::remove_file(alias)?;
+        }
     }
     // Once the directory is gone, a failed Keychain deletion must still leave
     // policy truthful. Report both failures rather than losing the remedy.
     let credentials = if macos && target.provider == Provider::Claude {
-        keychain_delete(&target.folder, run)
+        let mut failure = None;
+        for folder in std::iter::once(&target.folder).chain(&aliases) {
+            if let Err(error) = keychain_delete(folder, run) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
     } else {
         Ok(())
     };
-    let policy = set_disabled(home, &target.folder, false);
+    let policy = (|| -> Result<()> {
+        set_disabled(home, &target.folder, false)?;
+        for alias in &aliases {
+            set_disabled(home, alias, false)?;
+        }
+        Ok(())
+    })();
     match (credentials, policy) {
         (Err(error), Err(policy)) => {
             Err(error.context(format!("Cannot update account policy: {policy:#}")))

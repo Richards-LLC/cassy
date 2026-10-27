@@ -190,9 +190,8 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     let start: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "start",
         "id": target_id,
-        "brief": true,
     }))
-    .expect("deserialize brief start request");
+    .expect("deserialize default brief start request");
     let response = service.task(Parameters(start)).await.expect("brief start");
     let text = extract_text(response);
 
@@ -211,7 +210,7 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
         "brief start leaked epic context: {text}"
     );
     assert!(
-        text.len() < 8_192,
+        text.len() <= 2_000,
         "brief start response must stay context-affordable; got {} bytes",
         text.len()
     );
@@ -224,6 +223,54 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
         cas::types::TaskStatus::InProgress,
         "brief output must not change normal start lifecycle effects"
     );
+}
+
+/// The public read boundary must preserve newest decisions/proofs without
+/// replaying a task's entire history. Full and byte pages keep every byte reachable.
+#[tokio::test]
+async fn task_read_byte_budget_and_lossless_pages() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let store = open_task_store(&temp.path().join(".cas")).unwrap();
+    let mut task = Task::new("cas-read-budget".into(), "Bound task reads".into());
+    task.description = "Current scope: preserve evidence".into();
+    task.acceptance_criteria = "All evidence remains reachable".into();
+    task.execution_note = Some("test-first".into());
+    task.notes = format!(
+        "[2026-10-01 12:00] PROGRESS {}\n\n[2026-10-02 12:00] ✅ DECISION use bounded reads\n\n[2026-10-03 12:00] 🧪 PLATFORM_PROOF art-sanitized proof.md\n\n[2026-10-04 12:00] PROGRESS latest checkpoint",
+        "Older evidence α🧪\n".repeat(800)
+    );
+    store.add(&task).unwrap();
+    let service = CasService::new(core, None);
+    for action in ["show", "notes"] {
+        let read = |extra: serde_json::Value| {
+            let mut value = serde_json::json!({"action": action, "id": task.id});
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(value).unwrap())
+        };
+        let brief = extract_text(service.task(read(serde_json::json!({}))).await.unwrap());
+        assert!(brief.len() <= 2_000, "{action} emitted {} bytes", brief.len());
+        for required in ["DECISION", "art-sanitized", "latest checkpoint", "full=true"] {
+            assert!(brief.contains(required), "{action} lost {required}: {brief}");
+        }
+        if action == "show" {
+            assert!(brief.contains("Current scope") && brief.contains("test-first"), "{brief}");
+        }
+        let full = extract_text(service.task(read(serde_json::json!({"full": true}))).await.unwrap());
+        assert!(full.contains(&task.notes), "{action} full lost evidence");
+        let mut body = String::new();
+        let mut offset = 0;
+        loop {
+            let page = extract_text(service.task(read(serde_json::json!({"offset": offset, "limit": 317}))).await.unwrap());
+            assert!(page.len() <= 2_000, "page exceeded byte ceiling");
+            let (header, text) = page.split_once("\n\n").expect("page header and body");
+            body.push_str(text);
+            let next = header.split("next=").nth(1).unwrap().split_whitespace().next().unwrap();
+            if next == "end" { break; }
+            offset = next.parse::<usize>().unwrap();
+        }
+        assert_eq!(body, full, "{action} pages must reproduce full output byte for byte");
+    }
 }
 
 /// GH #515: close returns the committed epic outcome as a compact receipt and

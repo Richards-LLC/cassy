@@ -61,12 +61,11 @@ for API-only reasons; otherwise follow
    write the **evidence bundle** to `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md), including its trace, ARIA and
    polish requirements even when `visual_change: false`. For a visual change, also write its
-   before/after screenshots with `cas deliverable capture --task <task-id> --target <target> --side both`
-   to `qa/pairs/` ([pairs](references/evidence-bundle.md#beforeafter-pairs)); cite `files.pairs`
-   and `pairs_status`. If capture is unavailable, omit `files.pairs` and record
-   `pairs_status: "unavailable"` with a one-line `pairs_reason` in the bundle.
-   On deploy-only projects, run `cas deliverable capture --task <task-id> --side before`
-   at task start, before deploying the change. Reports and release notes read pairs from there. Cite `bundle.json` in a `platform_proof` note and the close reason. API-only changes
+   before/after with `cas deliverable capture --task <task-id> --target <target> --side both` to `qa/pairs/`;
+   cite `files.pairs` and `pairs_status` ([pairs](references/evidence-bundle.md#beforeafter-pairs)).
+   If unavailable, omit `files.pairs`; set `pairs_status: "unavailable"` and a one-line `pairs_reason`.
+   Deploy-only: run `cas deliverable capture --task <task-id> --side before` at task start, before deploying.
+   Reports and release notes read pairs there. Cite `bundle.json` in a `platform_proof` note and the close reason. API-only changes
    use the transcript and diff, with credentials redacted; record sandbox reset and the check that
    no smoke rows remain inline.
 6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`, `THRESHOLD`, `GRACE`,
@@ -115,8 +114,6 @@ missing.
 
 ## Boundaries
 
-Keep this skill focused on user-flow evidence; the worked matrix is in
-[references/exemplar.md](references/exemplar.md). Check output against the delivery's `design:` line
-([DESIGN.md first](../design-spec/references/design-md-first.md)). `cas-playwright-debug` owns
-diagnosis, `cas-servers` process lifecycle, the task verifier judgment. Log automation-caused
-artifacts in the ledger's honesty section; never modify the verifier to pass a missing capture.
+Keep user-flow evidence here; see the [worked matrix](references/exemplar.md) and check the delivery's `design:` against
+[DESIGN.md first](../design-spec/references/design-md-first.md). `cas-playwright-debug` owns diagnosis, `cas-servers` process lifecycle, the task verifier judgment.
+Log automation-caused artifacts in the ledger's honesty section; never modify the verifier to pass a missing capture.

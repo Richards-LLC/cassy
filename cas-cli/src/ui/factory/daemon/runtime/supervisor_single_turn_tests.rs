@@ -134,15 +134,23 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     if !fixture_child("codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft") {
         return;
     }
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
     let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+    env.set("CAS_FACTORY_SESSION", &daemon.session_name);
     let cas = daemon.app.cas_dir().to_path_buf();
     let name = daemon.app.supervisor_name().to_string();
     let draft = "operator draft: keep this text";
     daemon.app.mux.get(&name).unwrap()
         .deliver_user_input(draft.as_bytes(), cas_mux::UserInputKind::KeyStream).await.unwrap();
-    let id = event(&daemon, "Actionable supervisor relay behind a draft");
     let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    // Use the production typed-relay producer, not a hand-written envelope.
+    assert!(matches!(super::lifecycle::enqueue_supervisor_unread_relay(
+        &cas, "waiting-worker", 1400, 1,
+    ), super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }));
+    let relay = queue.peek_all(10).unwrap().into_iter()
+        .find(|row| row.source.starts_with("lifecycle-wake:worker-attention:")).unwrap();
+    assert!(relay.prompt.contains("kind=\"supervisor_unread\""));
+    let id = relay.id;
     let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
     // Advance durable time, never sleep through a 15-minute retry window.
     conn.execute(
@@ -187,7 +195,7 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
         .deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
     conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
         rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
-    typed_once(&root, &mut daemon, "Actionable supervisor relay behind a draft").await;
+    typed_once(&root, &mut daemon, "1 message addressed to you has gone unread").await;
     settle_injected_writes(&mut daemon).await;
     let delivered = queue.message_delivery_report(id).unwrap().unwrap();
     assert!(delivered.delivered_at.is_some());

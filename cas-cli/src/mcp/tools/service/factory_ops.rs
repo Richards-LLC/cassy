@@ -14292,7 +14292,8 @@ mod tests {
         for index in 0..12 {
             assert!(output.contains(&format!("held-relay-{index:02}")), "detail hides a deferred relay: {output}");
         }
-        assert_eq!(output.matches("age ").count(), 12, "each deferred relay needs its age: {output}");
+        assert_eq!(output.lines().filter(|line| line.trim_start().starts_with("age ")).count(), 12,
+            "each deferred relay needs its age: {output}");
         assert_eq!(output.matches("next: recheck ").count(), 12, "each deferred relay needs its next action: {output}");
         assert!(output.contains(&next.to_rfc3339()), "next action uses the durable recheck time: {output}");
     }

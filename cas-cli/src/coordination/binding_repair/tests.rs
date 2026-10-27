@@ -289,7 +289,7 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         .unwrap();
         true
     });
-    let inventory = RuntimeSnapshot::capture(false);
+    let inventory = RuntimeSnapshot::capture(true);
     env.set("CAS_AGENT_ROLE", "supervisor");
     env.set("CAS_FACTORY_SESSION", "bind-fx");
     env.set("CAS_AGENT_NAME", "supervisor");

@@ -126,13 +126,16 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
     use crate::ui::factory::{SessionManager, gui_socket_path};
     let env = crate::test_support::TestEnvGuard::temp_home();
     let manager = SessionManager::new();
+    let runtime_root = env.home().join("runtime/.cas");
+    std::fs::create_dir_all(&runtime_root).unwrap();
+    std::fs::write(runtime_root.join("config.toml"), "[project]\n").unwrap();
     let mut metadata = crate::ui::factory::create_metadata(
         "active9299",
         std::process::id(),
         "supervisor",
         &[],
         None,
-        None,
+        runtime_root.parent().unwrap().to_str(),
         None,
     );
     manager.save_metadata(&metadata).unwrap();
@@ -209,6 +212,15 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         );
     }
     remote.join().unwrap();
+    let mut probes = 0;
+    while let Ok((stream, _)) = listener.accept() {
+        probes += 1;
+        drop(stream);
+    }
+    assert_eq!(
+        probes, 1,
+        "one shared update inventory across projects and channels"
+    );
     SessionManager::new()
         .save_metadata(&crate::ui::factory::create_metadata(
             "new9299",
@@ -263,15 +275,6 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         }
         manager.save_metadata(&metadata).unwrap();
     }
-    let mut probes = 0;
-    while let Ok((stream, _)) = listener.accept() {
-        probes += 1;
-        drop(stream);
-    }
-    assert_eq!(
-        probes, 1,
-        "one shared update inventory across projects and channels"
-    );
     let before_unlink = RuntimeSnapshot::capture(false);
     drop(listener);
     manager.list_sessions().unwrap();

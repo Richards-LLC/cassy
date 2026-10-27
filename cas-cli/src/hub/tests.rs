@@ -420,7 +420,11 @@ fn h1_death_05_fixture_process_entry() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        std::fs::write(port_file, listener.local_addr().unwrap().port().to_string()).unwrap();
+        // Publish only complete contents: write() creates an empty file before
+        // filling it, which races the parent's readiness reader.
+        let ready = std::path::Path::new(&port_file).with_extension("ready");
+        std::fs::write(&ready, listener.local_addr().unwrap().port().to_string()).unwrap();
+        std::fs::rename(ready, port_file).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         let welcome = DaemonMessage::Welcome {

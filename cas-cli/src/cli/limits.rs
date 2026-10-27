@@ -579,6 +579,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn structured_auth_needed_marks_stale_without_matching_error_prose() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".credentials.json"), "{}").unwrap();
+        let usage = account_usage(crate::accounts::Provider::Claude, home.path());
+        assert!(usage.rejected, "auth-needed is a login failure regardless of detail text");
+        std::fs::remove_file(home.path().join(".credentials.json")).unwrap();
+        assert!(!account_usage(crate::accounts::Provider::Claude, home.path()).rejected,
+            "absent credentials are not rejected credentials");
+    }
+
+    #[test]
     fn parses_codex_primary_and_secondary_windows() {
         let value: Value = serde_json::json!({"primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1787011690},"secondary":{"used_percent":7.0,"window_minutes":300,"resets_at":1786651690},"plan_type":"pro"});
         let windows = parse_codex_limits(&value);

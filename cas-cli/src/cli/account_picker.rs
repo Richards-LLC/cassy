@@ -525,6 +525,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        std::fs::copy(alt.join("auth.json"), home.path().join(".codex-work/auth.json")).unwrap();
         let profiles = scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
             if name == "alt" {
                 LoginState::LoggedIn
@@ -542,9 +543,11 @@ mod tests {
         assert!(
             rows[1]
                 .to_string()
-                .starts_with("operator@example.com — logged in")
+                .starts_with("operator@example.com (alt) — logged in")
         );
         assert!(matches!(&rows[1], ProfileChoice::Existing { name, .. } if name == "alt"));
+        assert!(rows[2].to_string().starts_with("operator@example.com (work) —"));
+        assert_ne!(rows[1].to_string(), rows[2].to_string());
     }
 
     #[test]

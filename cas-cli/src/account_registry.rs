@@ -417,6 +417,11 @@ mod tests {
                     "{provider:?}/{name}"
                 );
                 assert_eq!(row.display_name, email);
+                let identity = serde_json::to_value(&row.identity).unwrap();
+                assert!(identity.is_object(), "identity must be structured, not JSON text");
+                assert_eq!(identity["account_id"].as_str(), id);
+                assert_eq!(identity["workspace_id"].as_str(), id.map(|_| workspace));
+                assert_eq!(identity["email"].as_str(), if id.is_none() { Some(email) } else { None });
             }
             for name in [
                 "empty",

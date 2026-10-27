@@ -439,6 +439,23 @@ describe("accounts (cas-9666)", () => {
     await vi.waitFor(() => expect(calls.launches[0]?.request).toEqual({ target: { kind: "project", id: "p-cas-src" }, supervisor_cli: "claude", profile: "support@petrastella.io" }));
   });
 
+  it("preselects the recommendation with its reason and lets the operator choose another", async () => {
+    const profiles = structuredClone(ACCOUNTS);
+    Object.assign(profiles.claude!.profiles[1], { recommendation: "resets in 6h, 41% left" });
+    const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
+    s.open();
+    await flush();
+    const recommended = dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="support@petrastella.io"]')!;
+    expect(recommended.checked).toBe(true);
+    expect(recommended.closest("label")!.textContent).toContain("Recommended");
+    expect(recommended.closest("label")!.textContent).toContain("resets in 6h, 41% left");
+    expect(calls.launches).toHaveLength(0);
+    pick(dialog(), 'input[name="launch-project"]');
+    pick(dialog(), 'input[name="launch-account"][value="main"]');
+    dialog().querySelector<HTMLButtonElement>('[data-launch-action="start"]')!.click();
+    await vi.waitFor(() => expect(calls.launches[0]?.request.profile).toBe("main"));
+  });
+
   it("hides the step for Grok, shows a failed check with a retry for Codex, and sends no account for either", async () => {
     const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles: ACCOUNTS, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
     s.open();

@@ -31,6 +31,8 @@ pub enum LoginState {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 #[non_exhaustive]
 pub struct AccountFlags {
+    /// Excluded from automatic selection; manual choices remain available.
+    pub disabled: bool,
     /// Canonical account folder with the same provider identity, if any.
     pub duplicate_of: Option<PathBuf>,
     /// Neither a stored credential nor evidence of a previous login was found.

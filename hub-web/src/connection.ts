@@ -229,7 +229,15 @@ export class HubConnectionSupervisor {
       // A heartbeat/manual read may predate this event. Joining that flight
       // alone swallows the invalidation (a stopped worker stays in the roster).
       // Drain it first, then read the changed catalog within the same deadline.
-      if (this.catalogRequest) await this.refreshSessions(signal);
+      // A drained read that fails or times out is the older read's loss, not
+      // this event's (cas-1966): only a refused pairing skips the fresh read.
+      if (this.catalogRequest) {
+        try {
+          await this.refreshSessions(signal);
+        } catch (error) {
+          if (error instanceof AuthenticationError) throw error;
+        }
+      }
       if (!this.desired || this.lifecycle.phase !== "live" || stream !== this.eventAbort) return;
       await this.refreshSessions(signal);
     } catch (error) {

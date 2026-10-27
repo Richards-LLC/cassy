@@ -4,6 +4,7 @@
 
 mod account;
 mod installation;
+mod media;
 pub use account::{CHALLENGE_TTL_SECONDS, EnrollmentAssertion, EnrollmentRefusal};
 pub use installation::{AccountEnrollment, InstallationAction, InstallationProof};
 
@@ -788,6 +789,8 @@ struct AuthInner {
     /// The writer's failure as last recorded, loaded from AUDIT_HEALTH_FILE at
     /// open so a success after a restart still clears it (cas-0140).
     audit_health: Mutex<Option<AuditHealth>>,
+    // Per-process key: restarting the hub safely invalidates short-lived media tickets.
+    media_ticket_key: [u8; 32],
 }
 
 struct AuthFileLock<'a>(&'a File);
@@ -851,6 +854,7 @@ impl AuthStore {
             lock_file,
             revocations,
             audit_health: Mutex::new(None),
+            media_ticket_key: rand::random(),
         }));
         // A failure recorded by a previous hub process stays visible until
         // this one writes a row. An unreadable record says nothing true, so

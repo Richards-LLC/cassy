@@ -82,7 +82,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// tools. Each names only what the parameter does for coordination's own
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
-    ("action", "Operation. inbox=inbox_poll; interrupt=message urgent=true."),
+    ("action", "Operation. `inbox` is an alias of `inbox_poll`; `interrupt` is `message` with urgent=true."),
     ("id", "Agent id (default self); message_status: message id."),
     ("target", "Recipient: agent, supervisor, all_workers, operator, commander:<label>; remind: self."),
     ("message", "Body chars (configurable): 1200; blocker/merge 2500; notes 1500. Over-cap operator/Commander refused; supervisor-to-agent spills to artifact."),

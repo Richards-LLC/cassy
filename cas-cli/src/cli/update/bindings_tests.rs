@@ -170,7 +170,16 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         metadata.held_workers = vec![format!("worker-{index}")];
         manager.save_metadata(&metadata).unwrap();
     }
-    inventory.validate().expect("routine metadata writes must preserve update inventory");
+    let after_metadata = inventory.validate();
+    let after_metadata_inventory = RuntimeSnapshot::capture(false);
+    for _ in 0..4 {
+        manager.list_sessions().unwrap();
+    }
+    let after_cleanup = after_metadata_inventory.validate();
+    assert!(
+        after_metadata.is_ok() && after_cleanup.is_ok(),
+        "routine writes and no-op cleanup must preserve inventory: metadata={after_metadata:?}, cleanup={after_cleanup:?}"
+    );
     for name in ["first", "second"] {
         let root = env.home().join(name).join(".cas");
         std::fs::create_dir_all(&root).unwrap();
@@ -248,4 +257,9 @@ fn update_inventory_probes_each_socket_once_cas_9299() {
         probes, 1,
         "one shared update inventory across projects and channels"
     );
+    let before_unlink = RuntimeSnapshot::capture(false);
+    drop(listener);
+    manager.list_sessions().unwrap();
+    assert!(!gui_socket_path("probe9299").exists(), "unheld orphan is reclaimed");
+    assert!(before_unlink.validate().is_err(), "actual socket unlink invalidates inventory");
 }

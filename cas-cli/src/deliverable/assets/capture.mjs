@@ -136,7 +136,7 @@ async function capture(plan) {
                 result.failures.push(finding);
               }
               if (!finding.sides.includes(phase.side)) finding.sides.push(phase.side);
-              finding.message = `Requested mask selector ${finding.selector} is missing on ${finding.sides.join(', ')}; check the selector`;
+              finding.message = `Mask ${JSON.stringify(finding.selector)} missing on ${finding.sides.join(', ')}; check selector`;
             } else {
               result.failures.push({id:s.id,side:phase.side,code:known.includes(error.message)?error.message:'capture-shot',message:'Shot failed; verify its route, readiness and selectors'});
             }

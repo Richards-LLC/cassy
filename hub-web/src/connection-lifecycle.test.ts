@@ -373,6 +373,40 @@ describe("Commander live connection lifecycle", () => {
     // The event must obtain a post-change catalog without another heartbeat.
     await vi.waitFor(() => expect(latest).toBe("catalog-2"));
   });
+  it("refreshes a fleet change even when the overlapping heartbeat's read fails (cas-1966)", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    let latest: string | undefined;
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("heartbeat-fleet-change-failed"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+
+    // The heartbeat's catalog read is in flight when Stop changes the fleet,
+    // and then fails on a flaky network.
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let fail!: () => void;
+    const pending = new Promise<void>(resolve => { fail = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/sessions" && !held) {
+        held = true;
+        await pending;
+        throw new TypeError("Failed to fetch");
+      }
+      return fetchNow(input, init);
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(held).toBe(true));
+    hub.catalogRevision(2);
+    hub.event({ kind: "fleet_changed", session: "session-a" });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    fail();
+
+    // The drained read's failure must not cost the fresh read.
+    await vi.waitFor(() => expect(latest).toBe("catalog-2"));
+  });
   it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {
     const hub = transport(multiplex);
     TransportSocket.instances = [];

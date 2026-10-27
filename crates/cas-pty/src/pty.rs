@@ -143,6 +143,14 @@ pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
     // AGENTS.md, so the contract itself must hand voice and style to the
     // operator's user-level instructions, or "facts, not narration" overrides
     // them and reads as "flat".
+    // cas-6e08: the Codex contract lacked this sentence while Claude and Grok
+    // carried it; Codex supervisors then looped on sleep + inbox_poll inside
+    // one turn (7.6 polls/h vs 0.2/h for Claude).
+    ContractElement {
+        id: "act-on-injected-signal",
+        markers: &["act on the injected signal", "do not poll"],
+        all: true,
+    },
     ContractElement {
         id: "user-instructions-voice",
         markers: &["user-level instructions", "govern voice and style"],

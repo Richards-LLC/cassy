@@ -1,5 +1,5 @@
-import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
+import { IDBFactory, IDBDatabase } from "fake-indexeddb";
+import { describe, expect, it, vi } from "vitest";
 import { CommanderJournal, deliveryScope, DELIVERY_DB, scopeKey, type CredentialFence, type DeliveryScope, type StoredReply } from "./commander-journal";
 import type { PendingSend } from "./conversation-store";
 import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
@@ -459,6 +459,41 @@ describe("atomic Commander journal", () => {
     const stored = (await reload.read(scope)).replies;
     expect(stored).toHaveLength(1);
     expect(stored[0].reply.message).toBe("Reply");
+  });
+  it("a reply waiting behind a busy writer commits before authorizing ACK even after five seconds (cas-c641)", async () => {
+    const { a, db, make } = journals();
+    await a.read(scope);
+    const peer = await new Promise<IDBDatabase>((resolve) => { const request = db.open(DELIVERY_DB, 1); request.onsuccess = () => resolve(request.result); });
+    const busy = peer.transaction("replies", "readwrite");
+    let release = false;
+    const hold = () => { if (!release) busy.objectStore("replies").get("peer").onsuccess = hold; };
+    hold();
+    const finished = new Promise<void>(resolve => { busy.oncomplete = () => resolve(); });
+    let queued!: () => void;
+    const waiting = new Promise<void>(resolve => { queued = resolve; });
+    const transact = IDBDatabase.prototype.transaction;
+    vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(function(this: IDBDatabase, names, mode, options) {
+      const tx = transact.call(this, names, mode, options);
+      if (Array.isArray(names) && names.includes("blocks")) queued();
+      return tx;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let authorized = false;
+    const persisted = a.persistReply(scope, reply, fence).then(saved => { authorized = saved; return saved; });
+    try {
+      await waiting;
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(authorized, "no ACK before the queued write commits").toBe(false);
+      release = true;
+      await finished;
+      expect(await persisted, "a busy browser must not discard a valid pending reply").toBe(true);
+      expect((await make().read(scope)).replies.map(row => row.reply.notification_id)).toEqual([reply.notification_id]);
+    } finally {
+      release = true;
+      await finished;
+      peer.close(); a.close();
+      vi.useRealTimers(); vi.restoreAllMocks();
+    }
   });
   it("storage failure and oversized content authorize neither send nor application ACK", async () => {
     const a = new CommanderJournal(undefined, async () => fence, () => 1_000, false);

@@ -312,6 +312,12 @@ impl Snapshot {
         })
     }
     fn validate(&self) -> Result<(), String> {
+        // save_metadata writes under the namespace lock; wait for a complete
+        // receipt and for any socket unlink's revision to be published.
+        let manager = crate::ui::factory::SessionManager::new();
+        let _transition = manager
+            .lock_inventory(false)
+            .map_err(|_| "runtime inventory lock unavailable")?;
         // Progress, hold and epic-focus writes replace JSON files atomically.
         // They are safe when the runtime identity and session names stay put.
         let unchanged = Self::revision(&self.directory).is_ok_and(|value| value == self.revision)

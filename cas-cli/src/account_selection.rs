@@ -166,11 +166,24 @@ pub fn load_policy(cas_root: Option<&std::path::Path>) -> AccountsConfig {
     let global = crate::config::load_global_config()
         .accounts
         .unwrap_or_default();
-    let mut policy = cas_root
-        .and_then(|root| crate::config::Config::load(root).ok())
-        .and_then(|c| c.accounts)
-        .unwrap_or_else(|| global.clone());
-    policy.disabled = global.disabled;
+    // Deserialize optional overrides separately: serde defaults in AccountsConfig
+    // cannot distinguish an omitted field from an explicit default value.
+    #[derive(Default, serde::Deserialize)]
+    struct Overrides { selection: Option<AccountSelection>, threshold: Option<u8> }
+    #[derive(Default, serde::Deserialize)]
+    struct Project { accounts: Option<Overrides> }
+    let project = cas_root.and_then(|root| {
+        crate::config::Config::load(root).ok()?;
+        if let Ok(raw) = std::fs::read_to_string(root.join("config.toml")) {
+            toml::from_str::<Project>(&raw).ok()
+        } else {
+            std::fs::read_to_string(root.join("config.yaml")).ok()
+                .and_then(|raw| serde_yaml::from_str::<Project>(&raw).ok())
+        }
+    }).and_then(|p| p.accounts).unwrap_or_default();
+    let mut policy = global;
+    if let Some(selection) = project.selection { policy.selection = selection; }
+    if let Some(threshold) = project.threshold { policy.threshold = threshold; }
     policy
 }
 

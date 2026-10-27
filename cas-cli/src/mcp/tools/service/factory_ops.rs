@@ -1481,14 +1481,17 @@ fn recommend_spawn_accounts(
     let mut notices = Vec::new();
     for (provider, cli) in [(crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
         (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex)] {
-        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none() && s.requester_config_dir.is_none()) { continue }
+        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none()) { continue }
         let accounts = match collect(provider) {
             Ok(rows) => rows,
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
         if let Some(recommended) = selection.recommended {
-            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none() && s.requester_config_dir.is_none()) {
+            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none()) {
+                if let Some(inherited) = spec.requester_config_dir.as_deref() {
+                    notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
+                }
                 spec.config_dir = Some(recommended.account.folder.to_string_lossy().into_owned());
             }
             notices.push(format!("{} recommended account={} ({}): {}", provider.name(), recommended.account.display_name,
@@ -2814,12 +2817,7 @@ impl CasService {
                 .requester_from_env
                 .then(|| requester_secure_storage_dir(spec.cli))
                 .flatten();
-            if spec.cli == cas_mux::SupervisorCli::Codex
-                && let Some(config_dir) = spec.config_dir.as_deref()
-            {
-                preflight_codex_config_dir(config_dir)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-            }
+
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
@@ -2847,6 +2845,12 @@ impl CasService {
         };
         let mut config_dir_warnings = Vec::new();
         for spec in &specs {
+            if spec.cli == cas_mux::SupervisorCli::Codex
+                && let Some(config_dir) = spec.config_dir.as_deref().or(spec.requester_config_dir.as_deref())
+            {
+                preflight_codex_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
             if spec.cli == cas_mux::SupervisorCli::Claude
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
@@ -11127,7 +11131,7 @@ fn codex_rollout_usage_limit_evidence(
     rollout: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
 ) -> UsageLimitEvidence {
-    if cli != cas_mux::SupervisorCli::Codex {
+    if !matches!(cli, cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Claude) {
         return UsageLimitEvidence::Recovered;
     }
     let Some(rollout) = rollout else {
@@ -11145,10 +11149,19 @@ fn codex_rollout_usage_limit_evidence(
     // not a byte offset, counting from the first whole line after the cut.
     let mut latest_terminal = None;
     for (line_index, line) in tail.lines().enumerate() {
-        let limited = line.contains("You've hit your usage limit")
-            && (line.contains("\"has_credits\":false") || line.contains("\"has_credits\": false"));
-        let completed = line.contains("\"type\":\"task_complete\"")
-            || line.contains("\"type\": \"task_complete\"");
+        // Read only harness records. A user quoting a limit is not an outage.
+        let record = serde_json::from_str::<serde_json::Value>(line).ok();
+        let (limited, completed) = if cli == cas_mux::SupervisorCli::Claude {
+            let assistant = record.as_ref().and_then(|r| r.get("type")).and_then(|v| v.as_str()) == Some("assistant");
+            let api_error = record.as_ref().and_then(|r| r.get("isApiErrorMessage")).and_then(|v| v.as_bool()) == Some(true);
+            let text = line.to_ascii_lowercase();
+            (assistant && api_error && (text.contains("you've hit your limit") || text.contains("you've hit your usage limit")
+                || record.as_ref().and_then(|r| r.get("error")).and_then(|v| v.as_str()) == Some("rate_limit")), assistant && !api_error)
+        } else {
+            (line.contains("You've hit your usage limit")
+                && (line.contains("\"has_credits\":false") || line.contains("\"has_credits\": false")),
+             line.contains("\"type\":\"task_complete\"") || line.contains("\"type\": \"task_complete\""))
+        };
         if limited {
             let timestamp = serde_json::from_str::<serde_json::Value>(line)
                 .ok()
@@ -11159,9 +11172,9 @@ fn codex_rollout_usage_limit_evidence(
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| format!("tail-{}", start + line_index as u64));
-            latest_terminal = Some(UsageLimitEvidence::Limited {
-                first_evidence: timestamp,
-            });
+            if !matches!(latest_terminal, Some(UsageLimitEvidence::Limited { .. })) {
+                latest_terminal = Some(UsageLimitEvidence::Limited { first_evidence: timestamp });
+            }
         } else if completed {
             latest_terminal = Some(UsageLimitEvidence::Recovered);
         }

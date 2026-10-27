@@ -1869,6 +1869,8 @@ journeys:
   - hub-web/src/rich-content.css
   - hub-web/src/attachment-sheet.ts
   - hub-web/e2e/journeys/rich-content.journey.ts
+  - hub-web/playwright.rich-content-hub.config.ts
+  - hub-web/scripts/rich-content-visual-qa.mjs
   invariants: [HUB-J22-GOAL]
   traffic:
     share_pct: null

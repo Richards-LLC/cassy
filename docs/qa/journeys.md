@@ -716,6 +716,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Read the real PDF first page inline
 6. Play video and audio on demand; unavailable files keep Open
 
+The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named journey against a registered local candidate at `HUB_RICH_HUB_URL` (its `/commander/` URL). It starts no server and keeps the same protocol double; the hub binary supplies the HTML, scripts, styles and lazy assets.
+
 #### Expected experience
 
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.

@@ -31,6 +31,10 @@ home="$scratch/home"
 project="$scratch/project"
 mkdir -p "$home" "$project" "$scratch/bin"
 ln -s "$cas_bin" "$scratch/bin/cas"
+# `cas claude <account>` refuses unknown account names (3.84), so the smoke
+# launches a fixture account folder in the throwaway HOME rather than a made-up
+# name. It holds no credentials; --check-launch stops before any login.
+mkdir -p "$home/.claude-smoke"
 
 # The operator's own shell: nothing from the caller's environment survives.
 operator_env=(

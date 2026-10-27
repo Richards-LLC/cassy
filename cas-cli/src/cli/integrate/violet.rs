@@ -4909,9 +4909,13 @@ auth = "env:{token}"
         use crate::accounts::Provider;
         use std::os::unix::fs::symlink;
         let original = "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-mcp\"\n";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture_root = env.home().to_path_buf();
         for mode in ["foreign", "registered", "explicit", "none"] {
-            let mut env = crate::test_support::TestEnvGuard::temp_home();
-            let home = env.home().to_path_buf();
+            let home = fixture_root.join(mode);
+            fs::create_dir_all(&home).unwrap();
+            env.set("HOME", &home);
+            env.remove("CODEX_HOME");
             env.set("XDG_CONFIG_HOME", home.join(".config"));
             env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
             env.set("SHELL", "/bin/bash");

@@ -204,7 +204,7 @@ pub enum RoutingError {
     #[error("unknown lane {0:?}")]
     UnknownLane(String),
 
-    #[error("lane {lane:?} has no active recipe candidates: {}", .skipped.join("; "))]
+    #[error("lane {lane:?} has no active recipe candidates{}", if .skipped.is_empty() { String::new() } else { format!(": {}", .skipped.join("; ")) })]
     NoActiveRecipe { lane: String, skipped: Vec<String> },
 
     #[error("lane {lane:?} references unknown recipe or lane {reference:?}")]

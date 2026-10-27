@@ -320,12 +320,11 @@ fn email_shaped(name: &str) -> bool {
 }
 
 /// Find the provider's account directories under `home`: the retiring
-/// defaults first, then the named ones in name order. Symlinked directories
-/// and non-account siblings (`.lock`, `.bak`, ...) are skipped.
+/// defaults first, then the named ones in name order. Directory symlinks are
+/// followed; unreadable entries and non-account siblings (`.lock`, `.bak`, ...)
+/// are skipped, matching the launchers' historical best-effort discovery.
 pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> {
-    let real_dir = |path: &Path| {
-        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
-    };
+    let real_dir = |path: &Path| path.is_dir();
     let account = |label: String, path: PathBuf, retiring: bool| AccountDir {
         email: provider.login_email(home, &path),
         has_login: path.join(provider.credentials()).exists(),
@@ -341,21 +340,22 @@ pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> 
         }
     }
     let mut named = Vec::new();
-    for entry in std::fs::read_dir(home)? {
-        let entry = entry?;
-        let Some(label) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
-        let Some(name) = label.strip_prefix(provider.prefix()) else {
-            continue;
-        };
-        if provider.retiring().contains(&label.as_str())
-            || !crate::cli::account_picker::is_account_profile_name(name)
-            || !real_dir(&entry.path())
-        {
-            continue;
+    if let Ok(entries) = std::fs::read_dir(home) {
+        for entry in entries.flatten() {
+            let Some(label) = entry.file_name().to_str().map(str::to_string) else {
+                continue;
+            };
+            let Some(name) = label.strip_prefix(provider.prefix()) else {
+                continue;
+            };
+            if provider.retiring().contains(&label.as_str())
+                || !crate::cli::account_picker::is_account_profile_name(name)
+                || !real_dir(&entry.path())
+            {
+                continue;
+            }
+            named.push(label);
         }
-        named.push(label);
     }
     named.sort();
     for label in named {

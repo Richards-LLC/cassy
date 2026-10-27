@@ -454,11 +454,10 @@ impl NewLogin {
             })?
             .into_iter()
             .find(|account| {
-                // TODO(cas-5952): typed AccountIdentity uses account_id.is_none() for fallback.
                 let strong = |a: &crate::account_registry::Account| {
                     a.identity
-                        .as_deref()
-                        .is_some_and(|id| !id.starts_with("email:"))
+                        .as_ref()
+                        .is_some_and(|id| id.account_id.is_some())
                 };
                 if strong(account) && strong(&pending) {
                     account.identity == pending.identity

@@ -223,23 +223,44 @@ pub(crate) fn login_state_label(state: LoginState) -> &'static str {
 pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
     let mut choices: Vec<ProfileChoice> = profiles
         .iter()
-        .map(|profile| ProfileChoice::Existing {
-            name: profile.name.clone(),
-            label: disabled_label(profile.disabled, format!(
-                "{} — {}{}{}{}{}",
-                profile.display_name,
+        .map(|profile| {
+            let alias = if profile.display_name == profile.name {
+                String::new()
+            } else {
+                format!(" ({})", profile.name)
+            };
+            let state = format!(
+                " — {}{}{}",
                 login_state_label(profile.login_state),
                 if profile.active { ", active" } else { "" },
-                if profile.disabled { ", disabled" } else { "" },
-                profile.recommendation.as_deref()
-                    .map(|reason| format!(", recommended: {reason}"))
-                    .or_else(|| profile.exclusion.as_deref().filter(|_| !profile.disabled).map(|reason| format!(", {reason}")))
-                    .unwrap_or_default(),
-                profile.usage.as_deref()
-                    .filter(|_| profile.recommendation.is_none() && profile.exclusion.is_none())
-                    .map(|usage| format!(": {usage}"))
-                    .unwrap_or_default()
-            )),
+                if profile.disabled { ", disabled" } else { "" }
+            );
+            let display = shorten_picker_text(
+                &profile.display_name,
+                76usize.saturating_sub(text_width(&alias) + text_width(&state)),
+            );
+            let mut label = format!("{display}{alias}{state}");
+            let policy_detail = profile.recommendation.as_deref()
+                .map(|reason| format!(", recommended: {reason}"))
+                .or_else(|| profile.exclusion.as_deref().filter(|_| !profile.disabled)
+                    .map(|reason| format!(", {reason}")));
+            if let Some(detail) = policy_detail {
+                label.push_str(&shorten_picker_text(&detail, 76usize.saturating_sub(text_width(&label))));
+            } else if let Some(usage) = &profile.usage {
+                let compact =
+                    usage.replace("reset, usage unknown until next session", "reset/unknown");
+                let mut parts: Vec<_> = compact.split(", ").collect();
+                parts.sort_by_key(|part| !part.contains("reset/unknown"));
+                let compact = parts.join(", ");
+                label.push_str(&shorten_picker_text(
+                    &format!(": {compact}"),
+                    76usize.saturating_sub(text_width(&label)),
+                ));
+            }
+            ProfileChoice::Existing {
+                name: profile.name.clone(),
+                label: disabled_label(profile.disabled, label),
+            }
         })
         .collect();
     choices.push(ProfileChoice::NewLogin);
@@ -253,6 +274,28 @@ fn disabled_label(disabled: bool, label: String) -> String {
     } else {
         label
     }
+}
+
+fn text_width(value: &str) -> usize {
+    ratatui::text::Line::from(value).width()
+}
+
+fn shorten_picker_text(value: &str, width: usize) -> String {
+    if text_width(value) <= width {
+        return value.to_string();
+    }
+    if width < 3 {
+        return String::new();
+    }
+    let mut result = String::new();
+    for c in value.chars() {
+        if text_width(&result) + text_width(&c.to_string()) + 3 > width {
+            break;
+        }
+        result.push(c);
+    }
+    result.push_str("...");
+    result
 }
 
 /// Index of the account the environment currently points at, for cursor start.
@@ -330,7 +373,8 @@ pub(crate) fn prompt_for_selection(
         .with_starting_cursor(starting_cursor)
         .with_page_size(page_size)
         .with_help_message(&format!(
-            "This selection applies only to this {provider_label} session"
+            "Session only. Full aliases and usage: cas {} --list-profiles",
+            provider_label.to_ascii_lowercase()
         ))
         .prompt()
         .with_context(|| format!("{provider_label} account selection cancelled"))?;
@@ -525,26 +569,41 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let profiles = scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
-            if name == "alt" {
-                LoginState::LoggedIn
-            } else {
-                LoginState::Unknown
-            }
-        })
+        std::fs::copy(
+            alt.join("auth.json"),
+            home.path().join(".codex-work/auth.json"),
+        )
         .unwrap();
+        let mut profiles =
+            scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
+                if name == "alt" {
+                    LoginState::LoggedIn
+                } else {
+                    LoginState::Unknown
+                }
+            })
+            .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["main", "alt", "work"]);
         assert!(profiles[1].active);
         assert!(!profiles[0].active);
+        profiles[2].usage = Some("weekly 99%, 5h reset, usage unknown until next session".into());
         let rows = profile_choices(&profiles);
         assert!(
             rows[1]
                 .to_string()
-                .starts_with("operator@example.com — logged in")
+                .starts_with("operator@example.com (alt) — logged in")
         );
         assert!(matches!(&rows[1], ProfileChoice::Existing { name, .. } if name == "alt"));
+        assert!(
+            rows[2]
+                .to_string()
+                .starts_with("operator@example.com (work) —")
+        );
+        assert_ne!(rows[1].to_string(), rows[2].to_string());
+        assert!(rows[2].to_string().contains("reset/unknown"));
+        assert!(rows.iter().all(|row| text_width(&row.to_string()) <= 76));
     }
 
     #[test]

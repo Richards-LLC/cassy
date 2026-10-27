@@ -84,3 +84,28 @@ The shared API is `account_registry::{Account, AccountFlags, LoginState,
 UsageWindow, collect, discover_with}`. `Account.name` is the launch alias and
 `Account.folder` is the stable directory key. Selection code must check login,
 usage windows and flags independently; `windows: []` is unknown capacity.
+
+### Limits JSON reset timestamps
+
+`cas limits --json` now returns each window's `reset_at` as an RFC3339 UTC
+instant (for example `2026-10-27T17:00:00+00:00`), replacing the old localized
+`YYYY-MM-DD HH:MM ZONE` display string. Consumers should parse the datetime,
+rather than split or compare localized text. `cas limits` and picker summaries
+still render local time for people. `cas accounts list --json` uses the plural
+field `resets_at`, also an absolute UTC instant; unknown resets are `null`.
+
+### Launch by email or folder alias
+
+Claude and Codex try an exact existing folder alias first, then a unique login
+email. If several folders share that email, choose one of the aliases named in
+the error. A typo refuses before launch or spawn, suggests the closest alias
+and names the explicit login command; launching never creates an unknown
+account folder. Worker `config_dir` accepts the same aliases/emails as well as
+existing directory paths.
+
+Registry `identity` is an object with `account_id`, `workspace_id` (the Claude
+organization) and `email` (populated only for a fallback without provider IDs).
+Codex folders sharing that identity use the newest completed usage snapshot.
+A window whose reset has passed says `reset, usage unknown until next session`;
+its JSON percentage is `null` until a new transcript reports usage. Canonical
+accounts precede the duplicates that point to them.

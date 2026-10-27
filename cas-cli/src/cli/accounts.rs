@@ -261,6 +261,14 @@ fn render_list(
             out.push_str(&format!("    folder: {}\n", cell(&folder, 64)));
             for name in ["5h", "weekly"] {
                 let w = a.windows.iter().find(|w| w.name == name);
+                if w.and_then(|w| w.resets_at)
+                    .is_some_and(|reset| reset <= chrono::Utc::now())
+                {
+                    out.push_str(&format!(
+                        "    {name:>6}: reset, usage unknown until next session\n"
+                    ));
+                    continue;
+                }
                 let used = w
                     .and_then(|w| w.used_percent)
                     .map(|used| format!("{used:.0}%"));

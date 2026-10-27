@@ -2783,6 +2783,11 @@ impl CasService {
                 (specs, String::new(), Vec::new(), sources_notice)
             };
 
+        if let Some(home) = dirs::home_dir() {
+            crate::account_registry::resolve_worker_accounts(&mut specs, &home)
+                .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        }
+
         // Hosted DashScope is an explicit route with its own auth/model
         // preflight.  This is intentionally after spec resolution and before
         // queue insertion: an invalid hosted key cannot leave an apparently

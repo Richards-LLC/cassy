@@ -82,8 +82,8 @@ pub fn resolve(
     let recommended = if profile.is_none() && configured.is_none() {
         recommended_profile(cli, &home)
     } else { None };
-    let profile_name = choose_profile_name(profile, configured.as_deref(), recommended.as_deref());
-    if !valid_profile_name(profile_name) {
+    let mut profile_name = choose_profile_name(profile, configured.as_deref(), recommended.as_deref()).to_string();
+    if !valid_profile_name(&profile_name) {
         return Err(LaunchError::ProbeFailed {
             cli: name,
             detail: "invalid profile name".into(),
@@ -98,11 +98,19 @@ pub fn resolve(
     } else {
         None
     };
-    let profile_dir = ambient_dir.or_else(|| match cli {
-        SupervisorCli::Claude => Some(crate::cli::claude::resolve_profile_dir(&home, profile_name)),
-        SupervisorCli::Codex => Some(crate::cli::codex::resolve_profile_dir(&home, profile_name)),
-        _ => None,
-    });
+    let profile_dir = if let Some(dir) = ambient_dir { Some(dir) } else {
+        let provider = match cli {
+            SupervisorCli::Claude => Some(crate::accounts::Provider::Claude),
+            SupervisorCli::Codex => Some(crate::accounts::Provider::Codex),
+            _ => None,
+        };
+        if let Some(provider) = provider {
+            let account = crate::account_registry::resolve_existing(provider, &home, &profile_name)
+                .map_err(|error| LaunchError::ProbeFailed { cli: name, detail: error.to_string() })?;
+            profile_name = account.name;
+            Some(account.folder)
+        } else { None }
+    };
     if let Some(dir) = &profile_dir {
         if !dir.is_dir() {
             return Err(LaunchError::ProfileMissing {
@@ -162,7 +170,7 @@ pub fn resolve(
                 cli: name,
                 profile: profile_dir
                     .as_ref()
-                    .map_or_else(|| profile_name.into(), |p| p.display().to_string()),
+                    .map_or_else(|| profile_name.clone(), |p| p.display().to_string()),
             });
         }
     }

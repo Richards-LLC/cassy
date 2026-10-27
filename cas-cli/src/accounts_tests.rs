@@ -14,6 +14,28 @@ fn login(dir: &Path, email: &str) {
     );
 }
 
+#[test]
+fn discover_follows_directory_symlinks_and_skips_unreadable_entries() {
+    let home = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    for provider in Provider::ALL {
+        let linked = home.path().join(format!("{}linked", provider.prefix()));
+        std::os::unix::fs::symlink(target.path(), &linked).unwrap();
+        let broken = home.path().join(format!("{}broken", provider.prefix()));
+        std::os::unix::fs::symlink(home.path().join("missing"), broken).unwrap();
+        let unreadable = home.path().join(format!("{}loop", provider.prefix()));
+        std::os::unix::fs::symlink(&unreadable, &unreadable).unwrap();
+        write(&home.path().join(format!("{}not-a-directory", provider.prefix())), "file");
+        let rows = discover(provider, home.path()).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, linked);
+        assert!(discover(provider, &home.path().join("missing")).unwrap().is_empty());
+    }
+    let not_directory = home.path().join("file");
+    write(&not_directory, "file");
+    assert!(discover(Provider::Claude, &not_directory).unwrap().is_empty());
+}
+
 /// A home with a default account, an alt, two named accounts and a typo.
 fn claude_home() -> tempfile::TempDir {
     let home = tempfile::tempdir().unwrap();

@@ -153,18 +153,39 @@ fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
 }
 
 fn collect_codex(account: &str, root: &Path) -> AccountLimit {
-    let Some((plan, windows)) = latest_codex_limits(root) else {
-        return unavailable(account, "codex", "absent", "no rollout rate_limits found");
+    collect_codex_snapshot(account, root).0
+}
+
+fn collect_codex_snapshot(account: &str, root: &Path) -> (AccountLimit, Option<DateTime<Utc>>) {
+    let Some((plan, mut windows, observed_at)) = latest_codex_limits(root) else {
+        return (
+            unavailable(account, "codex", "absent", "no rollout rate_limits found"),
+            None,
+        );
     };
-    AccountLimit {
-        account: account.to_string(),
-        provider: "codex".to_string(),
-        plan,
-        state: "active".to_string(),
-        source: "live transcript".to_string(),
-        windows,
-        detail: None,
+    for window in &mut windows {
+        if expired(window.reset_at.as_deref()) {
+            window.used_percent = None;
+        }
     }
+    (
+        AccountLimit {
+            account: account.to_string(),
+            provider: "codex".to_string(),
+            plan,
+            state: "active".to_string(),
+            source: "live transcript".to_string(),
+            windows,
+            detail: None,
+        },
+        Some(observed_at),
+    )
+}
+
+pub(crate) fn expired(reset: Option<&str>) -> bool {
+    reset
+        .and_then(|reset| DateTime::parse_from_rfc3339(reset).ok())
+        .is_some_and(|reset| reset <= Utc::now())
 }
 
 /// Every Claude and Codex account directory with its report label:
@@ -190,19 +211,11 @@ fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::pat
     found
 }
 
-/// One line of live usage for an account picker (cas-e1f4): `limit hit,
-/// resets <time>` when a window is used up, else the busiest windows.
-pub(crate) fn usage_summary(provider: crate::accounts::Provider, dir: &Path) -> Option<String> {
-    let limit = match provider {
-        crate::accounts::Provider::Claude => collect_claude("account", dir),
-        crate::accounts::Provider::Codex => collect_codex("account", dir),
-    };
-    summarize(&limit)
-}
-
 /// Structured account usage for the shared registry. The collector remains
 /// provider-owned, including its credential-store implementation.
+#[derive(Clone)]
 pub(crate) struct AccountUsage {
+    pub observed_at: Option<DateTime<Utc>>,
     pub plan: Option<String>,
     pub windows: Vec<crate::account_registry::UsageWindow>,
     pub rejected: bool,
@@ -210,17 +223,14 @@ pub(crate) struct AccountUsage {
 }
 
 pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> AccountUsage {
-    let limit = match provider {
-        crate::accounts::Provider::Claude => collect_claude("account", dir),
-        crate::accounts::Provider::Codex => collect_codex("account", dir),
+    let (limit, observed_at) = match provider {
+        crate::accounts::Provider::Claude => (collect_claude("account", dir), None),
+        crate::accounts::Provider::Codex => collect_codex_snapshot("account", dir),
     };
     AccountUsage {
+        observed_at,
         plan: limit.plan,
-        rejected: limit.state == "auth-needed"
-            && limit
-                .detail
-                .as_deref()
-                .is_some_and(|detail| detail.contains("rejected")),
+        rejected: limit.state == "auth-needed",
         authenticated: provider == crate::accounts::Provider::Claude && limit.state == "active",
         windows: limit
             .windows
@@ -249,23 +259,41 @@ fn display_reset(value: &str) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
-/// Reuse the picker summary without another provider request.
 pub(crate) fn summarize_windows(windows: &[crate::account_registry::UsageWindow]) -> Option<String> {
     summarize(&AccountLimit {
-        account: String::new(), provider: String::new(), plan: None,
-        state: String::new(), source: String::new(), detail: None,
-        windows: windows.iter().map(|w| LimitWindow {
-            name: w.name.clone(), used_percent: w.used_percent,
-            reset_at: w.resets_at.map(|at| at.to_rfc3339()), spend_dollars: None,
-        }).collect(),
+        account: String::new(),
+        provider: String::new(),
+        plan: None,
+        state: String::new(),
+        source: String::new(),
+        detail: None,
+        windows: windows
+            .iter()
+            .map(|window| LimitWindow {
+                name: window.name.clone(),
+                used_percent: window.used_percent,
+                reset_at: window.resets_at.map(|reset| reset.to_rfc3339()),
+                spend_dollars: None,
+            })
+            .collect(),
     })
 }
 
 fn summarize(limit: &AccountLimit) -> Option<String> {
+    let expired_windows: Vec<_> = limit
+        .windows
+        .iter()
+        .filter(|w| expired(w.reset_at.as_deref()))
+        .map(|w| format!("{} reset, usage unknown until next session", w.name))
+        .collect();
     let windows: Vec<&LimitWindow> = limit
         .windows
         .iter()
-        .filter(|window| window.used_percent.is_some() && window.name != "extra usage")
+        .filter(|window| {
+            window.used_percent.is_some()
+                && window.name != "extra usage"
+                && !expired(window.reset_at.as_deref())
+        })
         .collect();
     if let Some(full) = windows
         .iter()
@@ -277,41 +305,22 @@ fn summarize(limit: &AccountLimit) -> Option<String> {
             None => format!("{} limit hit", full.name),
         });
     }
-    let parts: Vec<String> = windows
-        .iter()
-        .map(|window| format!("{} {:.0}%", window.name, window.used_percent.unwrap_or(0.0)))
-        .collect();
+    // Unknown capacity is the first thing a picker must keep visible when
+    // a long account name leaves room for only part of the usage summary.
+    let mut parts = expired_windows;
+    parts.extend(windows.iter()
+        .map(|window| format!("{} {:.0}%", window.name, window.used_percent.unwrap_or(0.0))));
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// [`usage_summary`] for several accounts at once, each on its own thread;
-/// whatever has not answered by `deadline` is left out.
+/// Shared registry capacity for several accounts at once. Duplicate Codex
+/// folders use their newest snapshot; unfinished work is left out at deadline.
 pub(crate) fn usage_summaries(
     provider: crate::accounts::Provider,
     accounts: Vec<(String, std::path::PathBuf)>,
     deadline: std::time::Duration,
 ) -> std::collections::HashMap<String, String> {
-    let (sender, receiver) = std::sync::mpsc::channel();
-    for (name, dir) in accounts {
-        let sender = sender.clone();
-        std::thread::spawn(move || {
-            if let Some(summary) = usage_summary(provider, &dir) {
-                let _ = sender.send((name, summary));
-            }
-        });
-    }
-    drop(sender);
-    let until = std::time::Instant::now() + deadline;
-    let mut summaries = std::collections::HashMap::new();
-    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
-        match receiver.recv_timeout(left) {
-            Ok((name, summary)) => {
-                summaries.insert(name, summary);
-            }
-            Err(_) => break,
-        }
-    }
-    summaries
+    crate::account_registry::picker_usage_summaries(provider, accounts, deadline)
 }
 
 fn collect_exa() -> AccountLimit {
@@ -424,9 +433,9 @@ fn parse_claude_usage(value: Value) -> Vec<LimitWindow> {
     windows
 }
 
-fn latest_codex_limits(root: &Path) -> Option<(Option<String>, Vec<LimitWindow>)> {
+fn latest_codex_limits(root: &Path) -> Option<(Option<String>, Vec<LimitWindow>, DateTime<Utc>)> {
     let sessions = root.join("sessions");
-    let newest = WalkDir::new(sessions)
+    let (modified, newest) = WalkDir::new(sessions)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|entry| {
@@ -440,8 +449,7 @@ fn latest_codex_limits(root: &Path) -> Option<(Option<String>, Vec<LimitWindow>)
                     .map(|modified| (modified, entry.into_path()))
             })
         })
-        .max_by_key(|(modified, _)| *modified)?
-        .1;
+        .max_by_key(|(modified, _)| *modified)?;
     let contents = fs::read_to_string(newest).ok()?;
     for line in contents.lines().rev() {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
@@ -458,6 +466,12 @@ fn latest_codex_limits(root: &Path) -> Option<(Option<String>, Vec<LimitWindow>)
                     .and_then(Value::as_str)
                     .map(str::to_string),
                 windows,
+                value
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .and_then(|time| DateTime::parse_from_rfc3339(time).ok())
+                    .map(|time| time.with_timezone(&Utc))
+                    .unwrap_or_else(|| modified.into()),
             ));
         }
     }
@@ -517,7 +531,16 @@ fn compact_line(report: &LimitsReport) -> String {
             let windows = account
                 .windows
                 .iter()
-                .map(|window| format!("{}:{:.0}%", window.name, window.used_percent.unwrap_or(0.0)))
+                .map(|window| {
+                    if expired(window.reset_at.as_deref()) {
+                        format!("{}:reset/unknown", window.name)
+                    } else {
+                        window
+                            .used_percent
+                            .map(|used| format!("{}:{used:.0}%", window.name))
+                            .unwrap_or_else(|| format!("{}:unknown", window.name))
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(",");
             if windows.is_empty() {
@@ -543,10 +566,14 @@ fn print_human(report: &LimitsReport) {
             account.account, plan, account.state, account.source
         );
         for window in &account.windows {
-            let used = window
-                .used_percent
-                .map(|value| format!("{value:.1}% used"))
-                .unwrap_or_else(|| "usage unavailable".to_string());
+            let used = if expired(window.reset_at.as_deref()) {
+                "reset, usage unknown until next session".to_string()
+            } else {
+                window
+                    .used_percent
+                    .map(|value| format!("{value:.1}% used"))
+                    .unwrap_or_else(|| "usage unavailable".to_string())
+            };
             let reset = window
                 .reset_at
                 .as_deref()
@@ -579,6 +606,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn structured_auth_needed_marks_stale_without_matching_error_prose() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join(".credentials.json"), "{}").unwrap();
+        let usage = account_usage(crate::accounts::Provider::Claude, home.path());
+        assert!(
+            usage.rejected,
+            "auth-needed is a login failure regardless of detail text"
+        );
+        std::fs::remove_file(home.path().join(".credentials.json")).unwrap();
+        assert!(
+            !account_usage(crate::accounts::Provider::Claude, home.path()).rejected,
+            "absent credentials are not rejected credentials"
+        );
+    }
+
+    #[test]
     fn parses_codex_primary_and_secondary_windows() {
         let value: Value = serde_json::json!({"primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1787011690},"secondary":{"used_percent":7.0,"window_minutes":300,"resets_at":1786651690},"plan_type":"pro"});
         let windows = parse_codex_limits(&value);
@@ -596,7 +639,12 @@ mod tests {
         let usage = account_usage(crate::accounts::Provider::Codex, home.path());
         assert_eq!(usage.plan.as_deref(), Some("pro"));
         assert_eq!(usage.windows[0].resets_at.unwrap().timestamp(), 1787011690);
-        assert_eq!(usage.windows[1].used_percent, Some(7.0));
+        assert_eq!(usage.windows[1].used_percent, None);
+        assert!(
+            summarize_windows(&usage.windows)
+                .unwrap()
+                .contains("reset, usage unknown until next session")
+        );
         assert!(
             !usage.authenticated,
             "a transcript does not prove a current login"

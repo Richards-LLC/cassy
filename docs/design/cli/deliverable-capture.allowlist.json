@@ -1,7 +1,0 @@
-[
-  {
-    "check": "unicode-without-fallback",
-    "match": "\"codepoints\":[\"U+2022\"]",
-    "reason": "cas-9f8d: pre-existing styled bullet at cas-cli/src/ui/components/formatter.rs:423-427 ignores C-locale fallback. Supervisor decision #4209717 permits only this single U+2022 codepoint for C6 diagnostic captures; remove this file in the same commit that fixes Formatter::bullet, before release."
-  }
-]

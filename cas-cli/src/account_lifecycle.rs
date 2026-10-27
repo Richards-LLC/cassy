@@ -193,26 +193,55 @@ fn in_use(folder: &Path, home: &Path) -> Result<bool> {
         }
     }
     for root in roots.into_iter().filter(|r| r.join("cas.db").is_file()) {
-        use crate::store::AgentStore;
-        let store = crate::store::SqliteAgentStore::open(&root)?;
-        for agent in store.list(None)? {
-            if matches!(agent.status, cas_types::AgentStatus::Shutdown) {
-                continue;
-            }
-            for key in [
-                "worker_account_dir",
-                "config_dir",
-                "claude_config_dir",
-                "codex_home",
-            ] {
-                if let Some(value) = agent.metadata.get(key) {
-                    let path = value
-                        .strip_prefix("~/")
-                        .map(|v| home.join(v))
-                        .unwrap_or_else(|| PathBuf::from(value));
-                    if same_path(&path, folder) {
-                        return Ok(true);
-                    }
+        if registered_account_in_use(&root, folder, home).map_err(|error| {
+            tracing::debug!(%error, "Cannot inspect registered agents");
+            anyhow::anyhow!("Cannot inspect registered agents; account kept\nRun: cas update")
+        })? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+// Account guards only need status and metadata, which predate the host repo
+// registry. AgentStore::list also selects newer liveness/session columns and
+// cannot read those older schemas. Do not migrate a host DB just to remove an
+// idle account; inspect the relevant projection without mutating its schema.
+fn registered_account_in_use(root: &Path, folder: &Path, home: &Path) -> Result<bool> {
+    let shared = cas_store::shared_db::shared_connection(&root.join("cas.db"))?;
+    let conn = shared
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Agent database lock poisoned"))?;
+    let mut schema = conn.prepare("PRAGMA table_info(agents)")?;
+    let columns = schema
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if !["status", "metadata"].iter().all(|required| {
+        columns
+            .iter()
+            .any(|column| column.eq_ignore_ascii_case(required))
+    }) {
+        // No agent table/selectors on this host. Live env/process checks have
+        // already run; a missing optional schema is not a database failure.
+        return Ok(false);
+    }
+    let mut statement = conn.prepare("SELECT metadata FROM agents WHERE status <> 'shutdown'")?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for row in rows {
+        let metadata: std::collections::HashMap<String, String> = serde_json::from_str(&row?)?;
+        for key in [
+            "worker_account_dir",
+            "config_dir",
+            "claude_config_dir",
+            "codex_home",
+        ] {
+            if let Some(value) = metadata.get(key) {
+                let path = value
+                    .strip_prefix("~/")
+                    .map(|v| home.join(v))
+                    .unwrap_or_else(|| PathBuf::from(value));
+                if same_path(&path, folder) {
+                    return Ok(true);
                 }
             }
         }

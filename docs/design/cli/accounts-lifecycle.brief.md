@@ -78,3 +78,16 @@ terminal-qa: PASS accounts-recovery · 11 runs · 0 fail · 0 warn · 0 allowed
 
 Scored by warm-crane-68 on 2026-10-27. The exact-build candidate, captures and
 receipt are in cas-f140's delivery evidence; live macOS Keychain is unexercised.
+
+### Historical host agents (cas-f140 round 2)
+
+The registered-agent guard probes the schema and reads only status and account
+metadata. Pre-m199 and pre-m204 hosts retain their active-agent protection without
+needing newer process/session columns or a schema update. An absent agent table
+or selector columns falls back to the live environment and process guards; a
+corrupt or unreadable database refuses with `account kept` and `Run: cas update`.
+
+The picker's email input uses inquire's private crossterm event buffer, which is
+separate from shared stdin. Type-ahead entered there for the later duplicate
+question remains a known limitation, tracked as cas-5b4e per supervisor decision
+#4211400. Queued/shared-stdin answers and Ctrl-C at the duplicate question work.

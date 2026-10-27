@@ -12,9 +12,9 @@ const variants = [
 ] as const;
 
 for (const [index, variant] of variants.entries()) {
+  test.describe(variant.name, () => {
+  test.use({ viewport: { width: variant.width, height: variant.height }, colorScheme: variant.scheme });
   test(`HUB-J22 read diagrams, media and diffs · ${variant.name}`, index === 0 ? {} : journeyPart, async ({ page, journey }) => {
-    await page.setViewportSize({ width: variant.width, height: variant.height });
-    await page.emulateMedia({ colorScheme: variant.scheme });
     const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
     const richRequests: string[] = [];
     page.on("request", (request) => { if (/chunk-(rich-|pdf-)/.test(request.url())) richRequests.push(request.url()); });
@@ -23,6 +23,7 @@ for (const [index, variant] of variants.entries()) {
     await journey.stage("Open plain text without loading rich renderers", async () => {
       await journey.open();
       await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await expect(page.locator("#conversation-connection")).toContainText("Live");
       hub.supervisorSays(PELICAN, "Evidence is ready to inspect.");
       await expect(log.getByText("Evidence is ready to inspect.")).toBeVisible();
       expect(richRequests).toEqual([]);
@@ -95,8 +96,9 @@ for (const [index, variant] of variants.entries()) {
       await page.route("https://store.test/view/art-inline-audio?*", (route) => route.fulfill({ contentType: "audio/wav", body: readFileSync(new URL("../media/evidence.wav", import.meta.url)) }));
       hub.supervisorSays(PELICAN, "The recording and audio are attached.", { attachments: [file("art-inline-video", "Evidence video.webm", "video/webm"), file("art-inline-audio", "Evidence audio.wav", "audio/wav"), file("art-local-preview", "Local screenshot.png", "image/png")] });
       for (const tag of ["video", "audio"]) {
+        await log.locator(`.rich-attachment:has(a[data-artifact-id="art-inline-${tag}"]) .rich-media`).scrollIntoViewIfNeeded();
         const player = log.locator(tag);
-        await player.scrollIntoViewIfNeeded();
+        await expect(player).toBeVisible();
         await expect(player).toHaveAttribute("preload", "none");
         expect(await player.evaluate(async (node: HTMLMediaElement) => { await node.play(); node.pause(); return node.duration; })).toBeGreaterThan(0);
       }
@@ -108,5 +110,6 @@ for (const [index, variant] of variants.entries()) {
       for (const id of ["art-inline-image", "art-inline-pdf", "art-inline-video", "art-inline-audio", "art-local-preview"]) expect(hub.artifactRequests.filter((value) => value === id)).toHaveLength(1);
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
     });
+  });
   });
 }

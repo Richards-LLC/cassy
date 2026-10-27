@@ -12,14 +12,21 @@ function previewElement(document: Document): Preview {
     loadPreview?: () => Promise<void>;
     private observer?: IntersectionObserver;
     private loading = false;
+    private complete = false;
     connectedCallback(): void {
-      if (this.querySelector("img,video,audio,canvas") || this.textContent?.startsWith("Preview unavailable")) return;
+      this.observer?.disconnect(); this.observer = undefined;
+      if (this.querySelector("img,video,audio,canvas") || this.textContent?.startsWith("Preview unavailable")) this.complete = true;
+      if (this.complete || this.loading) return;
       const load = async () => {
         this.observer?.disconnect(); this.observer = undefined;
-        if (this.loading || !this.isConnected) return;
+        if (this.complete || this.loading || !this.isConnected) return;
         this.loading = true;
         try { await this.loadPreview?.(); }
-        finally { this.loading = false; if (this.isConnected && this.textContent === "Loading preview…") this.connectedCallback(); }
+        finally {
+          this.complete = this.textContent !== "Loading preview…";
+          this.loading = false;
+          if (this.isConnected && !this.complete) this.connectedCallback();
+        }
       };
       if (!view.IntersectionObserver) { void load(); return; }
       this.observer = new view.IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) void load(); });

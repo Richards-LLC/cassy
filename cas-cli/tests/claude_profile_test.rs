@@ -774,7 +774,7 @@ fn new_login_is_atomic_for_both_providers_and_reports_existing_email() {
             r#"#!/bin/sh
 if [ "$1" = auth ] && [ "$2" = status ]; then echo '{{"loggedIn":true}}'; exit 0; fi
 if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
-[ "$FAIL_LOGIN" = 1 ] && { echo AUTH_RAN; exit 1; }
+[ "$FAIL_LOGIN" = 1 ] && {{ echo AUTH_RAN; exit 1; }}
 dir="${{CLAUDE_CONFIG_DIR:-$CODEX_HOME}}"
 if [ "{provider}" = claude ]; then
   printf '{{"oauthAccount":{{"emailAddress":"real@example.com","accountUuid":"%s","organizationUuid":"org"}}}}' "${{LOGIN_ACCOUNT_ID:-one}}" > "$dir/.claude.json"

@@ -188,7 +188,8 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// worktrees were cut, four workers registered, and every first turn died in
 /// about a second.
 ///
-/// Only an affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
+/// Codex also requires an explicit or captured account selection. For a
+/// selected account, only affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
 /// probe that timed out, a harness with no account plumbing — must not block a
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
@@ -196,6 +197,51 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     // cas-c8de: the account probes and the codex version probe share one
     // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+    if specs.iter().any(|spec| {
+        spec.cli == cas_mux::SupervisorCli::Codex
+            && spec
+                .config_dir
+                .as_deref()
+                .filter(|dir| !dir.trim().is_empty())
+                .is_none()
+            && spec
+                .requester_config_dir
+                .as_deref()
+                .filter(|dir| !dir.trim().is_empty())
+                .is_none()
+    }) {
+        // Capability can aggregate accounts; a worker must use one account
+        // chosen by its caller. Never silently select a different login.
+        let homes =
+            dirs::home_dir().and_then(|home| crate::accounts::codex_homes(&home, None).ok());
+        let logged_in = homes.map(|homes| {
+            homes
+                .into_iter()
+                .filter(|home| {
+                    home.to_str().is_some_and(|home| {
+                        crate::capability::probe_account_auth(
+                            cas_mux::SupervisorCli::Codex,
+                            Some(home),
+                            deadline,
+                        )
+                        .availability
+                            == cas_factory::CapabilityAvailability::Available
+                    })
+                })
+                .map(|home| home.display().to_string())
+                .collect::<Vec<_>>()
+        });
+        let accounts = match logged_in {
+            Some(homes) if !homes.is_empty() => homes.join(", "),
+            Some(_) => "none confirmed; run `codex login` under the intended CODEX_HOME".into(),
+            None => "account registry unreadable".into(),
+        };
+        return Err(format!(
+            "spawn refused: no Codex account selected. Pass config_dir with the intended CODEX_HOME \
+             (or launch the supervisor with CODEX_HOME set). Registered logged-in Codex homes: {accounts}. \
+             No worktree was created and no task was assigned."
+        ));
+    }
     preflight_account_auth_with(
         specs,
         |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
@@ -12590,7 +12636,12 @@ mod spawn_lifecycle_tests {
                 .env("PATH", &bin)
                 .env("CODEX_SPAWN_FIXTURE_CHILD", "1")
                 .output().unwrap();
-            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             return;
         }
         let logged_in = env.home().join(".codex-b@example.com");
@@ -12599,11 +12650,19 @@ mod spawn_lifecycle_tests {
         let logged_out = env.home().join(".codex-a@example.com");
         std::fs::create_dir_all(&logged_out).unwrap();
         let mut spec = spec_for(cas_mux::SupervisorCli::Codex, None);
-        let error = preflight_account_auth(&[spec.clone()]).expect_err("unselected account must refuse before launch");
-        for detail in ["config_dir", logged_in.to_str().unwrap(), "No worktree was created"] {
+        let error = preflight_account_auth(&[spec.clone()])
+            .expect_err("unselected account must refuse before launch");
+        for detail in [
+            "config_dir",
+            logged_in.to_str().unwrap(),
+            "No worktree was created",
+        ] {
             assert!(error.contains(detail), "missing {detail:?}: {error}");
         }
-        assert!(!error.contains(logged_out.to_str().unwrap()), "logged-out home must not be offered: {error}");
+        assert!(
+            !error.contains(logged_out.to_str().unwrap()),
+            "logged-out home must not be offered: {error}"
+        );
         spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
         preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
         spec.requester_config_dir = spec.config_dir.take();

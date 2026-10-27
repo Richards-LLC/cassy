@@ -59,3 +59,16 @@ cas claude --bare <profile> --continue   # resume the last session in this folde
 
 The picker shows the same usage marks. Sessions resume across accounts
 because `projects/` lives in the base. `cas codex` works the same way.
+
+## Choose the Codex account for a factory worker
+
+Factory capability checks inspect registered Codex homes when `CODEX_HOME` is
+unset. An authenticated named account keeps Codex lanes available after the
+legacy `~/.codex` is retired. An explicit `CODEX_HOME` limits the check to that
+account.
+
+Spawning a Codex worker still requires an account choice: pass its home as
+`config_dir`, or start the requesting supervisor with `CODEX_HOME` set.
+Without either selection, spawn refuses before creating a worktree or assigning
+a task, lists the registered homes confirmed logged in, and asks for
+`config_dir`. Cassy does not select an account automatically.

@@ -365,6 +365,22 @@ pub fn discover(provider: Provider, home: &Path) -> io::Result<Vec<AccountDir>> 
     Ok(found)
 }
 
+/// Resolve existing registered Codex homes, or the explicitly selected home.
+///
+/// An explicit selection is authoritative even if it does not exist. Otherwise
+/// use the account registry (legacy default first, then named accounts), without
+/// inventing a retired `~/.codex`. This read-only resolver serves capability
+/// probes and machine configuration writers alike; it never chooses an account.
+pub fn codex_homes(home: &Path, selected: Option<&Path>) -> io::Result<Vec<PathBuf>> {
+    if let Some(selected) = selected.filter(|path| !path.as_os_str().is_empty()) {
+        return Ok(vec![selected.to_path_buf()]);
+    }
+    Ok(discover(Provider::Codex, home)?
+        .into_iter()
+        .map(|account| account.path)
+        .collect())
+}
+
 /// Build the plan for `provider` under `home`. Reads only.
 pub fn plan(provider: Provider, home: &Path) -> Result<Plan> {
     let base = provider.base_dir(home);

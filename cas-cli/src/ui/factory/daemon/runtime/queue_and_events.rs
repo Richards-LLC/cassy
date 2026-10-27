@@ -12896,7 +12896,7 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn limit_switch_error_notifies_once_per_episode_even_after_daemon_restart() {
+    fn limit_notice_reports_reset_once_without_switch_even_after_daemon_restart() {
         use crate::mcp::tools::service::factory_ops::UsageLimitEvidence;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "provision-test");
@@ -12910,6 +12910,17 @@ mod tests {
             let mut worker = cas_types::Agent::new_with_role(cli.into(), cli.into(), cas_types::AgentRole::Worker);
             worker.factory_session = Some("provision-test".into());
             worker.metadata.insert("worker_cli".into(), cli.into());
+            let account = env.home().join(format!(".{cli}-limited"));
+            worker.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into());
+            std::fs::create_dir_all(account.join("sessions")).unwrap();
+            if cli == "codex" {
+                std::fs::write(account.join("sessions/rollout.jsonl"), serde_json::json!({
+                    "payload": {"rate_limits": {"primary": {
+                        "used_percent": 100.0, "window_minutes": 300,
+                        "resets_at": 4071038400i64
+                    }}}
+                }).to_string()).unwrap();
+            }
             agents.register(&worker).unwrap();
             let mut task = cas_types::Task::new(format!("cas-{cli}"), "held task".into());
             task.assignee = Some(cli.into());
@@ -12933,10 +12944,15 @@ mod tests {
         assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
         for row in rows {
             assert_eq!(row.target, "supervisor");
-            // pin: a fallback must preserve the concrete switch error for the supervisor.
-            assert!(row.prompt.contains("worker worktree missing; nothing stopped"), "{}", row.prompt);
-            // pin: a failed switch still needs the existing recovery instruction.
-            assert!(row.prompt.contains("reassign or recover"), "fallback still needs attention: {}", row.prompt);
+            assert!(row.prompt.contains("limited"), "account must be named: {}", row.prompt);
+            if row.prompt.contains("Worker codex") {
+                let reset = chrono::DateTime::from_timestamp(4071038400, 0).unwrap()
+                    .with_timezone(&chrono::Local).format("%Y-%m-%d %I:%M %p %Z").to_string();
+                assert!(row.prompt.contains(&reset), "absolute local reset missing: {}", row.prompt);
+            } else {
+                assert!(row.prompt.contains("reset time unavailable"), "{}", row.prompt);
+            }
+            assert!(row.prompt.contains("reassign or recover"), "{}", row.prompt);
         }
         assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());
     }

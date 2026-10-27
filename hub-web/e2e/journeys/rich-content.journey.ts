@@ -77,9 +77,13 @@ for (const [index, variant] of variants.entries()) {
       const preview = log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-pdf"]) .rich-media');
       await preview.scrollIntoViewIfNeeded();
       const before = await preview.boundingBox();
-      const canvas = preview.getByRole("img", { name: /PDF preview, page 1 of 1/ });
-      await expect(canvas).toBeVisible();
-      expect(await canvas.evaluate((node: HTMLCanvasElement) => [...node.getContext("2d")!.getImageData(50, 50, 1, 1).data])).not.toEqual([0, 0, 0, 0]);
+      const pixels = preview.getByRole("img", { name: /PDF preview, page 1 of 1/ });
+      await expect(pixels).toBeVisible();
+      expect(await pixels.evaluate((node: HTMLImageElement) => {
+        const canvas = document.createElement("canvas"); canvas.width = 100; canvas.height = 100;
+        const context = canvas.getContext("2d")!; context.drawImage(node, 0, 0);
+        return [...context.getImageData(50, 50, 1, 1).data];
+      })).not.toEqual([0, 0, 0, 0]);
       const after = await preview.boundingBox();
       expect(after!.height).toBeCloseTo(before!.height, 0);
       await expect(log.locator('a[data-artifact-id="art-inline-pdf"]')).toBeVisible();

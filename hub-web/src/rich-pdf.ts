@@ -17,8 +17,13 @@ export async function pdfPreview(viewport: HTMLElement, url: string, name: strin
     const original = page.getViewport({ scale: 1 });
     const rendered = page.getViewport({ scale: Math.min(2, 640 / original.width, 800 / original.height) });
     const canvas = viewport.ownerDocument.createElement("canvas"); canvas.width = Math.ceil(rendered.width); canvas.height = Math.ceil(rendered.height);
-    canvas.setAttribute("role", "img"); canvas.setAttribute("aria-label", `${name} · PDF preview, page 1 of ${pdf.numPages}. Open the file below to read all pages.`);
     await page.render({ canvas, viewport: rendered, annotationMode: 0 }).promise;
-    if (viewport.isConnected) viewport.replaceChildren(canvas);
+    if (viewport.isConnected) {
+      const image = viewport.ownerDocument.createElement("img");
+      image.width = canvas.width; image.height = canvas.height;
+      image.alt = `${name} · PDF preview, page 1 of ${pdf.numPages}. Open the file below to read all pages.`;
+      image.src = canvas.toDataURL("image/png");
+      viewport.replaceChildren(image);
+    }
   } finally { await task.destroy(); }
 }

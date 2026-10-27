@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_grok_post_tool_use_input() {
+    fn test_parse_grok_hook_input_spellings() {
         // Exact Grok Build command-hook envelope shape from the official
         // hooks guide: common and tool fields are camelCase, terminal calls
         // use run_terminal_command, and PostToolUse output is toolResult.
@@ -947,6 +947,64 @@ mod tests {
         );
         assert_eq!(input.tool_use_id.as_deref(), Some("tool-use-456"));
         assert_eq!(input.tool_input_truncated, Some(false));
+
+        // Captured from the official 1.0.70 binary's native SessionStart,
+        // without submitting a prompt. Only ids and paths were sanitized.
+        let captured = include_str!("fixtures/grok-1.0.70-session-start.json");
+        let input: HookInput = serde_json::from_str(captured).unwrap();
+        assert_eq!(input.hook_event_name, "SessionStart");
+
+        // Every compatibility alias follows the same precedence, including
+        // non-camelCase prompt/delta and an explicitly null canonical value.
+        let cases = [
+            ("session_id", "sessionId", serde_json::json!("snake-session"), serde_json::json!("alias-session")),
+            ("transcript_path", "transcriptPath", serde_json::json!("/snake/transcript"), serde_json::json!("/alias/transcript")),
+            ("permission_mode", "permissionMode", serde_json::json!("plan"), serde_json::json!("default")),
+            ("hook_event_name", "hookEventName", serde_json::json!("PreToolUse"), serde_json::json!("pre_tool_use")),
+            ("tool_name", "toolName", serde_json::json!("Write"), serde_json::json!("run_terminal_command")),
+            ("tool_input", "toolInput", serde_json::json!({"command":"snake"}), serde_json::json!({"command":"alias"})),
+            ("tool_response", "toolResult", serde_json::json!({"exitCode":0}), serde_json::json!({"exitCode":1})),
+            ("tool_use_id", "toolUseId", serde_json::json!("snake-call"), serde_json::json!("alias-call")),
+            ("user_prompt", "userPrompt", serde_json::json!("snake prompt"), serde_json::json!("alias prompt")),
+            ("user_prompt", "prompt", serde_json::json!("snake prompt"), serde_json::json!("alias prompt")),
+            ("subagent_type", "subagentType", serde_json::json!("snake-child"), serde_json::json!("alias-child")),
+            ("stop_hook_active", "stopHookActive", serde_json::json!(false), serde_json::json!(true)),
+            ("agent_id", "agentId", serde_json::json!("snake-agent"), serde_json::json!("alias-agent")),
+            ("agent_type", "agentType", serde_json::json!("snake-type"), serde_json::json!("alias-type")),
+            ("subagent_prompt", "subagentPrompt", serde_json::json!("snake child prompt"), serde_json::json!("alias child prompt")),
+            ("message", "delta", serde_json::json!("snake message"), serde_json::json!("alias message")),
+        ];
+        let mut base: serde_json::Value = serde_json::from_str(captured).unwrap();
+        for (snake, alias, _, _) in &cases {
+            base.as_object_mut().unwrap().remove(*snake);
+            base.as_object_mut().unwrap().remove(*alias);
+        }
+        for (snake, alias, snake_value, alias_value) in cases {
+            for spelling in ["snake", "alias", "both", "null"] {
+                if spelling == "null" && matches!(snake, "session_id" | "hook_event_name") {
+                    continue;
+                }
+                let mut payload = base.clone();
+                if spelling != "alias" {
+                    payload[snake] = if spelling == "null" { serde_json::Value::Null } else { snake_value.clone() };
+                }
+                if spelling != "snake" {
+                    payload[alias] = alias_value.clone();
+                }
+                let decoded: HookInput = serde_json::from_value(payload)
+                    .unwrap_or_else(|error| panic!("{snake}/{alias} ({spelling}): {error}"));
+                let observed = serde_json::to_value(decoded).unwrap();
+                let expected = match spelling {
+                    "alias" => &alias_value,
+                    "null" => &serde_json::Value::Null,
+                    _ => &snake_value,
+                };
+                assert_eq!(&observed[snake], expected, "{snake}/{alias} ({spelling})");
+            }
+        }
+        assert!(serde_json::from_str::<HookInput>(
+            r#"{"tool_name":"first","tool_name":"second"}"#
+        ).is_err(), "same-spelling duplicates must still be rejected");
     }
 
     #[test]

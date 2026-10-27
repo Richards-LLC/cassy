@@ -74,7 +74,7 @@ pub struct ReleaseReportArgs {
 
     /// A standalone `release-latency.receipt` from
     /// `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run
-    /// directory is read alongside ~/.cas/artifacts/release
+    /// directory is read alongside `<[factory] artifacts_root>/release`
     #[arg(long, value_name = "PATH")]
     pub latency_receipt: Option<PathBuf>,
 
@@ -1084,10 +1084,10 @@ fn acquire_sources(
         ));
     }
     if !release_evidence.has_reportable_publication_timing() {
-        warnings.push(
-            "release receipts: green-to-published latency is unavailable under ~/.cas/artifacts/release/; pass --latency-receipt <run-dir>/release-latency.receipt for a standalone measurement"
-                .to_string(),
-        );
+        warnings.push(format!(
+            "release receipts: green-to-published latency is unavailable under {}/release/; pass --latency-receipt <run-dir>/release-latency.receipt for a standalone measurement",
+            release_artifacts_root(config).1.trim_end_matches('/')
+        ));
     }
 
     let issue_count = issues.len();
@@ -2565,28 +2565,47 @@ fn find_release_evidence(
     latency_receipt: Option<&Path>,
     config: &Config,
 ) -> ReleaseEvidence {
-    let _ = config;
-    let Some(home) = dirs::home_dir() else {
-        return ReleaseEvidence::default();
-    };
-    let artifacts_root = home.join(".cas/artifacts");
-    let release_root = artifacts_root.join("release");
+    let (artifacts_root, root_label) = release_artifacts_root(config);
     find_release_evidence_in(
         tag,
         release,
-        &release_root,
+        &artifacts_root.join("release"),
         latency_receipt.and_then(Path::parent),
         &artifacts_root,
+        &root_label,
     )
 }
 
+/// cas-0dd1: the `[factory] artifacts_root` that release runs write under,
+/// and how the report names it: the configured value as written, or
+/// `~/.cas/artifacts` when unset.
+fn release_artifacts_root(config: &Config) -> (PathBuf, String) {
+    let configured = config.factory().artifacts_root;
+    let configured = configured.as_deref().map(str::trim).filter(|value| !value.is_empty());
+    (
+        crate::config::resolved_factory_artifacts_root(configured),
+        configured
+            .unwrap_or(crate::config::FACTORY_ARTIFACTS_ROOT_DEFAULT)
+            .to_string(),
+    )
+}
+
+/// Release evidence under an artifacts root laid out as release runs write
+/// it, `<root>/release/<run>/`.
 #[cfg(test)]
 fn find_release_evidence_under(
     tag: &str,
     release: &Option<ReleaseMetadata>,
-    root: &Path,
+    artifacts_root: &Path,
 ) -> ReleaseEvidence {
-    find_release_evidence_in(tag, release, root, None, root)
+    find_release_evidence_in(
+        tag,
+        release,
+        &artifacts_root.join("release"),
+        None,
+        artifacts_root,
+        crate::config::FACTORY_ARTIFACTS_ROOT_DEFAULT,
+    )
 }
 
 /// Files under `root` count when their path names the tag. A standalone
@@ -2598,6 +2617,7 @@ fn find_release_evidence_in(
     root: &Path,
     run_dir: Option<&Path>,
     artifacts_root: &Path,
+    root_label: &str,
 ) -> ReleaseEvidence {
     let wanted = tag.to_ascii_lowercase();
     let bare = wanted.trim_start_matches('v');
@@ -2657,7 +2677,7 @@ fn find_release_evidence_in(
         {
             evidence.receipt_reference = Some(match path.strip_prefix(artifacts_root) {
                 Ok(relative) => ReceiptReference::ArtifactsRootRelative {
-                    root_label: "~/.cas/artifacts".to_string(),
+                    root_label: root_label.to_string(),
                     path: relative.to_string_lossy().replace('\\', "/"),
                 },
                 Err(_) => ReceiptReference::StandaloneInput,
@@ -2721,11 +2741,9 @@ impl LessonRecurrence {
 }
 
 /// Every recorded release run's lesson recurrence, newest version first.
-pub(crate) fn lesson_recurrences() -> Vec<LessonRecurrence> {
-    let Some(home) = dirs::home_dir() else {
-        return Vec::new();
-    };
-    let mut runs: Vec<LessonRecurrence> = fs::read_dir(home.join(".cas/artifacts/release"))
+pub(crate) fn lesson_recurrences(config: &Config) -> Vec<LessonRecurrence> {
+    let (artifacts_root, _) = release_artifacts_root(config);
+    let mut runs: Vec<LessonRecurrence> = fs::read_dir(artifacts_root.join("release"))
         .into_iter()
         .flatten()
         .flatten()
@@ -3283,7 +3301,7 @@ mod tests {
     #[test]
     fn main_push_receipts_report_green_or_main_fallback_without_unavailable_warning() {
         let green_root = tempfile::tempdir().unwrap();
-        let green_dir = green_root.path().join("v3.55.0-latency");
+        let green_dir = green_root.path().join("release/v3.55.0-latency");
         fs::create_dir_all(&green_dir).unwrap();
         fs::write(
             green_dir.join("release-latency.receipt"),
@@ -3301,7 +3319,7 @@ mod tests {
         );
 
         let fallback_root = tempfile::tempdir().unwrap();
-        let fallback_dir = fallback_root.path().join("v3.55.0-latency");
+        let fallback_dir = fallback_root.path().join("release/v3.55.0-latency");
         fs::create_dir_all(&fallback_dir).unwrap();
         fs::write(fallback_dir.join("gate.green.epoch"), "1792079228\n").unwrap();
         fs::write(fallback_dir.join("main.landed.epoch"), "1792079238\n").unwrap();

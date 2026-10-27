@@ -4406,6 +4406,32 @@ mod tests {
                             code, 0,
                             "ambient file/tool context requested Code implicitly"
                         );
+                        for prompt in [
+                            "Suppress unrequested Code recall for supervisors",
+                            "Do not search code",
+                            "Code symbols are unrelated",
+                        ] {
+                            let negative = RecallQuery::build(
+                                &identity,
+                                &RecallRequest {
+                                    prompt: prompt.into(),
+                                    ..Default::default()
+                                },
+                            )
+                            .unwrap();
+                            let rows = render_packet(
+                                &identity,
+                                &negative,
+                                &candidates,
+                                &mut RecallLedger::default(),
+                            )
+                            .map(|(_, rows)| rows)
+                            .unwrap_or_default();
+                            assert!(
+                                rows.iter().all(|row| row.surface != EvidenceSurface::Code),
+                                "mentioning unwanted Code opted in: {prompt}"
+                            );
+                        }
                     }
                 } else {
                     assert!(code > 0, "worker code recall was suppressed");
@@ -4420,10 +4446,16 @@ mod tests {
         }
         // Keep numeric replay evidence inspectable when nextest hides passing
         // stdout. This is ignored build output, never a source snapshot.
-        let report =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/supervisor-recall-replay.json");
-        fs::create_dir_all(report.parent().unwrap()).unwrap();
-        fs::write(report, serde_json::to_vec_pretty(&measurements).unwrap()).unwrap();
+        let workspace = crate::test_paths::workspace_root();
+        if workspace.join("Cargo.toml").is_file() {
+            let report = workspace.join("target/supervisor-recall-replay.json");
+            fs::create_dir_all(report.parent().unwrap()).unwrap();
+            fs::write(report, serde_json::to_vec_pretty(&measurements).unwrap()).unwrap();
+        } else {
+            eprintln!(
+                "SKIP numeric replay artifact: source checkout absent; all replay assertions ran"
+            );
+        }
     }
 
     #[test]

@@ -243,6 +243,9 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
             if let Some(usage) = &profile.usage {
                 let compact =
                     usage.replace("reset, usage unknown until next session", "reset/unknown");
+                let mut parts: Vec<_> = compact.split(", ").collect();
+                parts.sort_by_key(|part| !part.contains("reset/unknown"));
+                let compact = parts.join(", ");
                 label.push_str(&shorten_picker_text(
                     &format!(": {compact}"),
                     76usize.saturating_sub(text_width(&label)),

@@ -80,9 +80,11 @@ pub(crate) fn is_account_profile_name(name: &str) -> bool {
         return false;
     }
     // Dotted scratch names like `foo.bak.1777306474` are not accounts either,
-    // but `support@petrastella.io` must survive: only reject a marker segment.
+    // but `support@petrastella.io` must survive: only reject a marker segment
+    // after a dot. A whole alias such as `old` or `backup` is a real account.
     !lowered
-        .rsplit('.')
+        .split('.')
+        .skip(1)
         .any(|segment| matches!(segment, "lock" | "tmp" | "bak" | "old" | "backup"))
 }
 
@@ -534,20 +536,32 @@ mod tests {
 
     #[test]
     fn lock_and_scratch_siblings_are_not_accounts_but_dotted_emails_are() {
-        assert!(is_account_profile_name("support@petrastella.io"));
-        assert!(is_account_profile_name("alt"));
-
-        for rejected in [
-            "",
-            "support@petrastella.io.lock",
-            "work.bak",
-            "work.tmp.1777306474",
-            "old-profile.old",
+        // Only a marker segment after a dot is scratch; a whole alias such as
+        // `old` names a real account (cas-deb5). Login staging stays hidden.
+        for (name, account) in [
+            ("support@petrastella.io", true),
+            ("alt", true),
+            ("old", true),
+            ("backup", true),
+            ("", false),
+            ("support@petrastella.io.lock", false),
+            ("work.bak", false),
+            ("work.tmp.1777306474", false),
+            ("old-profile.old", false),
+            ("login.tmp.AbC123", false),
         ] {
-            assert!(
-                !is_account_profile_name(rejected),
-                "{rejected:?} should not be treated as an account"
-            );
+            assert_eq!(is_account_profile_name(name), account, "{name:?}");
+        }
+        for layout in [CLAUDE, CODEX] {
+            let home = TempDir::new().unwrap();
+            for name in ["old", "backup", "login.tmp.AbC123", "work.old"] {
+                std::fs::create_dir(home.path().join(format!("{}{name}", layout.named_prefix)))
+                    .unwrap();
+            }
+            let profiles =
+                scan_profiles_with(layout, home.path(), None, |_, _| LoginState::Unknown).unwrap();
+            let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+            assert_eq!(names, ["main", "backup", "old"], "{}", layout.named_prefix);
         }
     }
 

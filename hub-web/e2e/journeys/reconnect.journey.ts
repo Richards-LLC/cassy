@@ -172,9 +172,8 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
     await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
-    // cas-5a8f: once the held send is out on a live machine and delivered,
-    // the supervisor has it and the thread says it is working again.
-    await expect(page.getByRole("log").locator(".working")).toHaveCount(1);
+    // cas-3f40: a transport receipt proves handoff, not supervisor execution.
+    await expect(page.getByRole("log").locator(".working")).toHaveCount(0);
     // A second flush would come from a timer: the page clock runs the next
     // second at once, and a round trip carries anything it sent to the double
     // (cas-c4b2).

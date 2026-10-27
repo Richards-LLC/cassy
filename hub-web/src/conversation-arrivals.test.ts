@@ -14,6 +14,17 @@ const message = (id: number, at: number): Parameters<ConversationHistory["hydrat
 const stampedReply = (id: number, parent: number, at: number): Parameters<ConversationHistory["hydrateReply"]>[0] => ({ ...reply(id, parent), session, at: new Date(at).toISOString() });
 
 describe("observed turn times survive repeated reloads (cas-940f)", () => {
+  it("uses a first-page attention snapshot for deep decisions and retires them on reconnect", () => {
+    const history = new ConversationHistory(); history.currentSession = session;
+    history.hydrateReply({ ...stampedReply(10, 1, noon), kind: "ask" });
+    history.setOpenAttention([{ ...stampedReply(2, 1, noon), kind: "ask" }], 50);
+    expect(history.waiting().map(reply => reply.notification_id)).toEqual([2]);
+    history.receive({ ...reply(51, 50), kind: "ask" }, noon + MINUTE, session);
+    expect(history.waiting().map(reply => reply.notification_id)).toEqual([2, 51]);
+    history.setOpenAttention([], 60);
+    expect(history.waiting()).toEqual([]);
+    expect(history.events).toHaveLength(3);
+  });
   it("keeps an older pending replay before the durable latest exchange", () => {
     const history = new ConversationHistory();
     history.currentSession = session;

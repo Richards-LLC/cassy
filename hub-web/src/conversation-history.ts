@@ -127,6 +127,7 @@ export interface EarlierSession {
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
+  setOpenAttention(_replies: readonly ConversationHistoryReply[], _through: number): void {}
   readonly events: ConversationEvent[] = [];
   /** Other sessions' turns, by session (cas-55a4). Never waiting, pinned or previewed. */
   private readonly others = new Map<string, ConversationEvent[]>();

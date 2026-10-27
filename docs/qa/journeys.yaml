@@ -169,6 +169,8 @@ invariants:
   HUB-J18-CONTROL-LIFETIME:
     statement: Input control is released when I close raw output or leave a conversation; a delayed take cannot renew a departed view. A refused Send explains why visibly and through its accessible description.
     check: Run HUB-J18 navigation, delayed-take and phone-back stages; verify DELETE lease requests, no abandoned InterruptPane, and the read-only Send visible text plus aria-describedby (cas-5ca4).
+    bug:
+      task: cas-5ca4
   HUB-J19-GOAL:
     statement: I sign in with my account alone, read the supervisor's messages from the last weeks, and leave a
       reply that waits for soundwave until it is back and receives it

@@ -9,7 +9,11 @@ use std::{
     process::Command,
 };
 
+#[path = "src/hub/chunk_assets.rs"]
+mod chunk_assets;
+
 fn main() {
+    generate_commander_chunks();
     generate_archive_fixture_sources();
     generate_init_design_captures();
     println!("cargo:rerun-if-changed=../hub-web/dist/index.html");
@@ -59,6 +63,48 @@ fn main() {
     // Rebuild if .env changes
     watch_optional_path(Path::new("../.env"));
     watch_optional_path(Path::new(".env"));
+}
+
+/// Embed only regular dist-root chunk files; additions and removals must
+/// invalidate Cargo's fingerprint as well as edits to an existing chunk.
+fn generate_commander_chunks() {
+    let manifest =
+        PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
+    let mut generated = String::from("&[\n");
+    for (directory, test_only) in [
+        ("../hub-web/dist", false),
+        ("tests/fixtures/commander-dist", true),
+    ] {
+        let root = manifest.join(directory);
+        if test_only && !root.is_dir() {
+            continue;
+        }
+        println!("cargo:rerun-if-changed={}", root.display());
+        let mut entries: Vec<_> = fs::read_dir(&root)
+            .unwrap_or_else(|error| panic!("read Commander assets {}: {error}", root.display()))
+            .map(|entry| entry.expect("Commander asset entry"))
+            .collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if !entry.file_type().expect("Commander asset type").is_file()
+                || chunk_assets::content_type(name).is_none()
+            {
+                continue;
+            }
+            if test_only {
+                generated.push_str("    #[cfg(test)]\n");
+            }
+            generated.push_str(&format!(
+                "    ({name:?}, include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {path:?})) as &'static [u8]),\n",
+                path = format!("/{directory}/{name}")
+            ));
+        }
+    }
+    generated.push_str("]\n");
+    let out = PathBuf::from(std::env::var_os("OUT_DIR").expect("build output directory"));
+    fs::write(out.join("commander_chunks.rs"), generated).expect("write Commander chunk manifest");
 }
 
 /// Embed every init capture so the portability test covers new captures while

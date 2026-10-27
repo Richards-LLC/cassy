@@ -758,7 +758,7 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
         ("/commander/chunk-test-Ab1-_cd3.css", StatusCode::OK, Some("text/css; charset=utf-8"), Some("public, max-age=31536000, immutable"), Some(&b".fixture { color: red; }\n"[..])),
         ("/commander/app.js", StatusCode::OK, Some("text/javascript; charset=utf-8"), Some("no-cache, no-store, must-revalidate"), None),
         ("/commander/", StatusCode::OK, Some("text/html; charset=utf-8"), Some("no-cache, no-store, must-revalidate"), None),
-                ("/commander/chunk-missing-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-missing-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
         ("/commander/chunk-test.js", StatusCode::NOT_FOUND, None, None, None),
         ("/commander/chunk-test-Ab12_cd3.js.map", StatusCode::NOT_FOUND, None, None, None),
         ("/commander/chunk-test-Ab12_cd3.html", StatusCode::NOT_FOUND, None, None, None),

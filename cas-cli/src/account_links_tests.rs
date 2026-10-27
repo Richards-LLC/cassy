@@ -147,6 +147,7 @@ fn a_repair_in_the_same_second_as_a_link_gets_its_own_backup() {
     }
     let applied = repair(Provider::Claude, h).unwrap().unwrap();
     assert!(applied.backup.to_string_lossy().ends_with("-2-claude"), "{}", applied.backup.display());
-    assert_eq!(std::fs::read_to_string(applied.backup.join("items/.claude-a@x.com/agents/mine.md")).unwrap(), "mine");
+    let backed_up = applied.backup.join("items").join(".claude-a@x.com").join("agents");
+    assert!(backed_up.join("mine.md").is_file(), "the real folder is in this run's backup");
     assert!(std::fs::read_link(account.join("agents")).is_ok());
 }

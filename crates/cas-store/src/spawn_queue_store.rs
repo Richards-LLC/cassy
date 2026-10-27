@@ -371,8 +371,12 @@ pub trait SpawnQueueStore: Send + Sync {
     /// Atomically remember an episode and optionally enqueue its replacement.
     /// Replays return the original decision and cannot enqueue a second recycle.
     fn record_limit_episode(
-        &self, episode: &str, worker: &str, session: &str,
-        spec_json: Option<&str>, detail: &str,
+        &self,
+        episode: &str,
+        worker: &str,
+        session: &str,
+        spec_json: Option<&str>,
+        detail: &str,
     ) -> Result<(Option<i64>, String)>;
 
     fn limit_episode(&self, episode: &str) -> Result<Option<(Option<i64>, String)>>;
@@ -700,8 +704,12 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     }
 
     fn record_limit_episode(
-        &self, _episode: &str, _worker: &str, _session: &str,
-        _spec_json: Option<&str>, detail: &str,
+        &self,
+        _episode: &str,
+        _worker: &str,
+        _session: &str,
+        _spec_json: Option<&str>,
+        detail: &str,
     ) -> Result<(Option<i64>, String)> {
         Ok((None, detail.to_owned()))
     }
@@ -949,23 +957,64 @@ mod tests {
     #[test]
     fn limit_episode_is_atomic_and_survives_reopen_and_queue_cleanup() {
         let (dir, store) = create_test_store();
-        let first = store.record_limit_episode("agent:timestamp", "worker", "session-a", Some("{}"), "old -> next").unwrap();
+        let first = store
+            .record_limit_episode(
+                "agent:timestamp",
+                "worker",
+                "session-a",
+                Some("{}"),
+                "old -> next",
+            )
+            .unwrap();
         assert!(first.0.is_some());
         assert_eq!(store.peek(10).unwrap().len(), 1);
         drop(store);
         let store = SqliteSpawnQueueStore::open(dir.path()).unwrap();
         store.init().unwrap();
-        assert_eq!(store.record_limit_episode("agent:timestamp", "worker", "session-a", Some("{}"), "changed").unwrap(), first);
+        assert_eq!(
+            store
+                .record_limit_episode(
+                    "agent:timestamp",
+                    "worker",
+                    "session-a",
+                    Some("{}"),
+                    "changed"
+                )
+                .unwrap(),
+            first
+        );
         assert_eq!(store.peek(10).unwrap().len(), 1);
-        store.conn.lock().unwrap().execute("DELETE FROM spawn_queue", []).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM spawn_queue", [])
+            .unwrap();
         assert_eq!(store.limit_episode("agent:timestamp").unwrap(), Some(first));
-        let blocked = store.record_limit_episode("agent:later", "worker", "session-a", None, "no eligible account until tomorrow").unwrap();
+        let blocked = store
+            .record_limit_episode(
+                "agent:later",
+                "worker",
+                "session-a",
+                None,
+                "no eligible account until tomorrow",
+            )
+            .unwrap();
         assert_eq!(blocked.0, None);
-        assert_eq!(store.record_limit_episode("agent:later", "worker", "session-a", Some("{}"), "retry").unwrap(), blocked);
+        assert_eq!(
+            store
+                .record_limit_episode("agent:later", "worker", "session-a", Some("{}"), "retry")
+                .unwrap(),
+            blocked
+        );
         assert!(store.peek(10).unwrap().is_empty());
         // A failed queue insert must also roll back the episode decision.
         store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_recycle BEFORE INSERT ON spawn_queue BEGIN SELECT RAISE(ABORT, 'fixture'); END").unwrap();
-        assert!(store.record_limit_episode("agent:error", "worker", "session-a", Some("{}"), "switch").is_err());
+        assert!(
+            store
+                .record_limit_episode("agent:error", "worker", "session-a", Some("{}"), "switch")
+                .is_err()
+        );
         assert!(store.limit_episode("agent:error").unwrap().is_none());
     }
 

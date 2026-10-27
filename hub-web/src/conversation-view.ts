@@ -507,6 +507,13 @@ export class ConversationView {
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
+    this.element.addEventListener("conversation-reveal-turn", event => {
+      const id = (event as CustomEvent<{ notificationId: number }>).detail?.notificationId;
+      if (!Number.isSafeInteger(id)) return;
+      this.following = false;
+      this.window.show(`reply:${id}`);
+      this.update();
+    });
     this.head = document.createElement("header"); this.head.className = "thead";
     const identity = document.createElement("div"); identity.className = "id";
     const name = document.createElement("b"); name.className = "codename"; name.textContent = supervisor;
@@ -976,6 +983,8 @@ export class ConversationView {
   private restoreUnsent(): void {
     const restored = this.history.restoreDismissed();
     if (!restored.length) return;
+    this.following = false;
+    this.window.show(`send:${restored[0]!.id}`);
     this.update();
     this.options.dismissalsChanged?.();
     const key = `send:${restored[0]!.id}`;

@@ -150,6 +150,8 @@ export interface ConversationHistoryReply extends OperatorReply {
 }
 
 export interface ConversationHistoryPage {
+  /** Complete open decisions, independent of the tail cursor. Absent on older daemons/pages. */
+  open_attention?: ConversationHistoryReply[];
   request_id: string;
   messages: ConversationHistoryMessage[];
   replies: ConversationHistoryReply[];

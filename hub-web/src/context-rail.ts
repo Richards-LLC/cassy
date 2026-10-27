@@ -113,6 +113,9 @@ export function entryText(message: string): string {
 
 /** Bring a thread turn into view and give it focus, so a jump from the rail lands somewhere a keyboard user can continue from. */
 function jumpToTurn(document: Document, notificationId: number): void {
+  for (const thread of document.querySelectorAll(".conversation-reading.thread")) {
+    thread.dispatchEvent(new CustomEvent("conversation-reveal-turn", { detail: { notificationId } }));
+  }
   const turn = document.querySelector<HTMLElement>(`.thread [data-key="reply:${notificationId}"]`);
   if (!turn) return;
   if (!turn.hasAttribute("tabindex")) turn.tabIndex = -1;

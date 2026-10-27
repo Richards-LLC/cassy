@@ -964,6 +964,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (cursor.loading) countUsage("history.older");
       applyHistoryCursor(cursor, page);
       const history = conversationHistory(key, session);
+      if (page.open_attention !== undefined) {
+        const through = Math.max(0, ...page.messages.map(row => row.notification_id), ...page.replies.map(row => row.notification_id), ...page.open_attention.map(row => row.notification_id));
+        history.setOpenAttention(page.open_attention, through);
+      }
       // cas-55a4: the thread is this session's own turns. Other sessions'
       // turns (the page's earlier_* section, or a project-wide page from an
       // older daemon) are filed beside it by session, never into it.

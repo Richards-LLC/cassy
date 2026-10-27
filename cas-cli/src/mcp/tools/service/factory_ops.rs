@@ -11002,19 +11002,26 @@ fn worker_usage_reset_lines(agent: &cas_types::Agent, transcript: Option<&std::p
 const STATUS_ROLLOUT_ENTRIES: usize = 256;
 const STATUS_ROLLOUT_FILES: usize = 8;
 fn status_codex_rollout_entries(root: &std::path::Path) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
-    walkdir::WalkDir::new(root.join("sessions")).into_iter()
+    // Codex uses sessions/YYYY/MM/DD/rollout-*.jsonl. New calendar folders
+    // come first; never follow symlinks or enumerate the full account history.
+    walkdir::WalkDir::new(root.join("sessions")).max_depth(4)
+        .sort_by(|a, b| b.file_name().cmp(a.file_name()))
+        .into_iter().take(STATUS_ROLLOUT_ENTRIES)
 }
 
 fn status_codex_windows(root: &std::path::Path) -> Vec<crate::account_registry::UsageWindow> {
-    let newest = status_codex_rollout_entries(root).filter_map(Result::ok)
+    let mut candidates = status_codex_rollout_entries(root).filter_map(Result::ok)
         .filter(|entry| entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl"))
         .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.into_path())))
-        .max_by_key(|(modified, _)| *modified);
-    let Some((_, path)) = newest else { return Vec::new() };
-    let Ok(tail) = std::fs::read_to_string(path) else { return Vec::new() };
-    tail.lines().rev().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .map(|value| crate::cli::limits::transcript_windows(&value))
-        .find(|windows| !windows.is_empty()).unwrap_or_default()
+        .collect::<Vec<_>>();
+    candidates.sort_by(|a, b| b.cmp(a));
+    for (_, path) in candidates.into_iter().take(STATUS_ROLLOUT_FILES) {
+        let Some((_, tail)) = super::worker_liveness::read_jsonl_tail(&path, 256 * 1024) else { continue };
+        if let Some(windows) = tail.lines().rev().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .map(|value| crate::cli::limits::transcript_windows(&value))
+            .find(|windows| !windows.is_empty()) { return windows; }
+    }
+    Vec::new()
 }
 
 /// Whether a resolved Codex rollout records the terminal account-limit failure

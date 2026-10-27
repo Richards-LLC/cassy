@@ -35,3 +35,8 @@ Terminal receipts: `terminal-qa: PASS account-resets · 12 runs · 0 fail · 0 w
 | Hierarchy | 4 | Account identity leads, recommendation follows, then the two reset rows; Start stays visible on phone. |
 | Craft | 4 | Strict visual QA PASS, eight desktop/390px captures across light/dark including the scrolled selected account; zero findings. |
 | Accessibility | 4 | Native radios and wrapping secondary text remain keyboard reachable; strict contrast, print and layout checks pass with the application's reviewed JavaScript declaration. |
+
+
+## Follow-up: extra usage and long waits (cas-dd77)
+
+Extra usage is spend data, not a reset window; summaries omit it and retain 5h, weekly and existing model-specific weekly windows. Under24h waits round hours up; at24h and later show complete days plus remaining whole hours (47h56m is1d23h). The status-only Codex fallback visits at most256 entries in reverse calendar order, considers newest8 files by mtime and reads256KiB tails; unavailable data remains unknown. Explicit account inventory is unchanged.

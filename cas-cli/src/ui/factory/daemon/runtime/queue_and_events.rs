@@ -12916,6 +12916,11 @@ mod tests {
                 )).collect());
                 daemon.drain_relay_jobs();
             }
+            drop(daemon);
+            // The fixture listeners leave their socket files after drop.
+            for socket in ["test.sock", "gui.sock"] {
+                std::fs::remove_file(root.join(socket)).unwrap();
+            }
         }
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
         assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");

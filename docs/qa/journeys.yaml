@@ -70,6 +70,11 @@ invariants:
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: delivery by a running
       daemon and operator stamping are doubled'
+  HUB-J5-RECEIPT-STAGES:
+    statement: A send never regresses across reload or paired devices; Queued means durable acceptance, Delivered requires actual transport proof, and a connected machine is never called unreachable because its supervisor has not taken the message.
+    check: Send through a real candidate hub and compare live, reloaded and peer-device status with the queue's transport_delivered_at; retain queue-only and actual-delivery evidence separately. Run the correlated history/receipt model and real enqueue-to-history regressions, and HUB-J5/HUB-J12 without inferring supervisor execution from a receipt.
+    bug:
+      task: cas-3f40
   HUB-J6-GOAL:
     statement: I speak my reply, check it, and send it
     check: 'Walk HUB-J6 in hub-web/e2e/journeys/reply-voice.journey.ts; verify the expected experience and edge
@@ -594,6 +599,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -1084,6 +1090,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J12-GOAL
+  - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

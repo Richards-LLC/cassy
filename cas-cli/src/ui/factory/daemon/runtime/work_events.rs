@@ -9,11 +9,11 @@
 //! result or a thinking block's full text are read on demand, and both are
 //! redacted before they leave the daemon. Schema: `docs/guides/commander-work-events.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cas_store::{SqliteEventStore, SqliteSupervisorQueueStore, SupervisorQueueStore};
 use cas_types::EventType;
@@ -125,6 +125,9 @@ pub(crate) struct SupervisorSource {
 pub(crate) struct WorkEventScope {
     pub session: String,
     pub supervisors: Vec<SupervisorSource>,
+    /// The session's workers, read only for one worker's own timeline
+    /// (cas-ff22); `SupervisorSource` describes any agent's transcript.
+    pub workers: Vec<SupervisorSource>,
     /// Every agent of the session: id -> name.
     pub agents: HashMap<String, String>,
     /// No hook event of the session is older than this.
@@ -138,21 +141,25 @@ impl WorkEventScope {
             .iter()
             .filter(|agent| agent.factory_session.as_deref() == Some(session))
             .collect();
-        let supervisors = members
-            .iter()
-            .filter(|agent| agent.role == cas_types::AgentRole::Supervisor)
-            .map(|agent| SupervisorSource {
-                agent_id: agent.id.clone(),
-                agent_name: agent.name.clone(),
-                harness_session: agent.cc_session_id.clone().unwrap_or_else(|| agent.id.clone()),
-                cli: agent
-                    .metadata
-                    .get("supervisor_cli")
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(cas_mux::SupervisorCli::Claude),
-                account_dir: agent.metadata.get("supervisor_account_dir").cloned(),
-            })
-            .collect();
+        let sources = |role: cas_types::AgentRole, prefix: &str| -> Vec<SupervisorSource> {
+            members
+                .iter()
+                .filter(|agent| agent.role == role)
+                .map(|agent| SupervisorSource {
+                    agent_id: agent.id.clone(),
+                    agent_name: agent.name.clone(),
+                    harness_session: agent.cc_session_id.clone().unwrap_or_else(|| agent.id.clone()),
+                    cli: agent
+                        .metadata
+                        .get(&format!("{prefix}_cli"))
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(cas_mux::SupervisorCli::Claude),
+                    account_dir: agent.metadata.get(&format!("{prefix}_account_dir")).cloned(),
+                })
+                .collect()
+        };
+        let supervisors = sources(cas_types::AgentRole::Supervisor, "supervisor");
+        let workers = sources(cas_types::AgentRole::Worker, "worker");
         let floor = members
             .iter()
             .map(|agent| agent.registered_at)
@@ -162,12 +169,26 @@ impl WorkEventScope {
         Self {
             session: session.to_owned(),
             supervisors,
+            workers,
             agents: members
                 .iter()
                 .map(|agent| (agent.id.clone(), agent.name.clone()))
                 .collect(),
             floor,
         }
+    }
+
+    /// The transcripts one page reads: the supervisors' for the session
+    /// stream, or the named agent's own for its timeline.
+    fn transcripts(&self, agent: Option<&str>) -> Vec<&SupervisorSource> {
+        match agent {
+            None => self.supervisors.iter().collect(),
+            Some(name) => self.members().filter(|source| source.agent_name == name).collect(),
+        }
+    }
+
+    fn members(&self) -> impl Iterator<Item = &SupervisorSource> {
+        self.supervisors.iter().chain(&self.workers)
     }
 }
 
@@ -694,13 +715,16 @@ pub(crate) type TranscriptResolver<'a> = &'a dyn Fn(&SupervisorSource) -> Option
 #[derive(Default)]
 pub(crate) struct WorkEventIndex {
     transcripts: HashMap<String, TranscriptIndex>,
+    /// Worker transcript paths the change probe stats (cas-ff22), resolved
+    /// once per agent.
+    probe_paths: HashMap<String, PathBuf>,
 }
 
 impl WorkEventIndex {
-    fn refresh(&mut self, scope: &WorkEventScope, resolve: TranscriptResolver<'_>) {
+    fn refresh(&mut self, scope: &WorkEventScope, sources: &[&SupervisorSource], resolve: TranscriptResolver<'_>) {
         self.transcripts
-            .retain(|id, _| scope.supervisors.iter().any(|source| &source.agent_id == id));
-        for source in &scope.supervisors {
+            .retain(|id, _| scope.members().any(|source| &source.agent_id == id));
+        for &source in sources {
             let cached = self
                 .transcripts
                 .get(&source.agent_id)
@@ -736,6 +760,7 @@ impl WorkEventIndex {
         request_id: String,
         before: Option<&str>,
         limit: u16,
+        agent: Option<&str>,
     ) -> anyhow::Result<DaemonMessage> {
         let cursor = match before {
             Some(cursor) => Some(
@@ -752,9 +777,15 @@ impl WorkEventIndex {
             .as_ref()
             .and_then(|cursor| DateTime::<Utc>::from_timestamp_millis(cursor.at_ms + 1));
 
-        self.refresh(scope, resolve);
+        let sources = scope.transcripts(agent);
+        self.refresh(scope, &sources, resolve);
+        let ours = |event: &WorkEvent| agent.is_none_or(|name| event.agent.as_deref() == Some(name));
         let mut candidates: Vec<(SortKey, WorkEvent)> = Vec::new();
-        for index in self.transcripts.values() {
+        let read: Vec<&TranscriptIndex> = sources
+            .iter()
+            .filter_map(|source| self.transcripts.get(&source.agent_id))
+            .collect();
+        for index in read {
             let mut eligible: Vec<&Indexed> =
                 index.events.iter().filter(|indexed| earlier(&indexed.key)).collect();
             eligible.sort_by(|left, right| right.key.cmp(&left.key));
@@ -770,13 +801,18 @@ impl WorkEventIndex {
                 scope.supervisors.iter().map(|source| source.agent_id.clone()).collect();
             for row in queue.list_for_session_until(&scope.session, &supervisors, until, wanted + BOUNDARY_SLACK)? {
                 let (key, event) = queue_event(&scope.session, &row);
-                if earlier(&key) {
+                if earlier(&key) && ours(&event) {
                     candidates.push((key, event));
                 }
             }
         }
         if let Some(events) = &stores.events {
-            let agents: Vec<String> = scope.agents.keys().cloned().collect();
+            let agents: Vec<String> = scope
+                .agents
+                .iter()
+                .filter(|(_, name)| agent.is_none_or(|agent| agent == name.as_str()))
+                .map(|(id, _)| id.clone())
+                .collect();
             for row in events.list_for_sessions_until(
                 &agents,
                 HOOK_EVENT_TYPES,
@@ -803,6 +839,33 @@ impl WorkEventIndex {
             has_earlier,
             next_before,
         })
+    }
+
+    /// A fingerprint of the stream's newest state (cas-ff22): the session
+    /// stream's newest event and the length of each worker's transcript. A
+    /// worker's transcript is only stat'ed here, never indexed; it is read
+    /// when a client asks for that worker's timeline.
+    pub(crate) fn fingerprint(
+        &mut self,
+        scope: &WorkEventScope,
+        stores: &WorkEventStores,
+        resolve: TranscriptResolver<'_>,
+    ) -> anyhow::Result<String> {
+        let newest = match self.page(scope, stores, resolve, String::new(), None, 1, None)? {
+            DaemonMessage::WorkEvents { events, .. } => events.last().map(|event| event.id.clone()),
+            _ => None,
+        };
+        self.probe_paths
+            .retain(|id, _| scope.workers.iter().any(|source| &source.agent_id == id));
+        let mut fingerprint = newest.unwrap_or_default();
+        for source in &scope.workers {
+            let cached = self.probe_paths.get(&source.agent_id).filter(|path| path.is_file()).cloned();
+            let Some(path) = cached.or_else(|| resolve(source)) else { continue };
+            let len = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+            self.probe_paths.insert(source.agent_id.clone(), path);
+            fingerprint.push_str(&format!("|{}={len}", source.agent_id));
+        }
+        Ok(fingerprint)
     }
 
     /// The redacted detail of one event of this session.
@@ -841,11 +904,9 @@ impl WorkEventIndex {
         match parts.next()? {
             "t" => {
                 let (agent, line, block) = (parts.next()?, parts.next()?, parts.next()?);
-                if !scope.supervisors.iter().any(|source| source.agent_id == agent) {
-                    return None;
-                }
+                let source = scope.members().find(|source| source.agent_id == agent)?;
                 if !self.transcripts.contains_key(agent) {
-                    self.refresh(scope, resolve);
+                    self.refresh(scope, &[source], resolve);
                 }
                 self.transcripts
                     .get(agent)?
@@ -876,9 +937,13 @@ impl WorkEventIndex {
 
 /// A request the job lane answers.
 pub(crate) enum WorkEventRequest {
-    Page { before: Option<String>, limit: u16 },
+    Page { before: Option<String>, limit: u16, agent: Option<String> },
     Detail { event_id: String },
 }
+
+/// How often the change probe runs while a client follows the stream.
+pub(crate) const PROBE_INTERVAL: Duration = Duration::from_secs(2);
+const PROBE_KEY: &str = "WorkEvents:probe";
 
 /// The daemon's handle: one shared index, and the requests in flight so a
 /// dropped or failed job still answers its client.
@@ -887,6 +952,12 @@ pub(crate) struct WorkEventService {
     index: Arc<Mutex<WorkEventIndex>>,
     next: u64,
     pending: HashMap<String, (usize, String)>,
+    /// Clients that have read a page; they are told when the stream grows.
+    subscribers: HashSet<usize>,
+    probe_in_flight: bool,
+    last_probe: Option<Instant>,
+    /// `None` until the first probe sets the baseline.
+    fingerprint: Option<String>,
 }
 
 /// One answer for one WebSocket client.
@@ -908,6 +979,9 @@ impl WorkEventService {
         project_path: PathBuf,
         session: String,
     ) -> Option<WorkEventReply> {
+        if matches!(request, WorkEventRequest::Page { .. }) {
+            self.subscribers.insert(client_id);
+        }
         self.next += 1;
         let key = format!("{JOB_KIND}:{client_id}:{}", self.next);
         self.pending.insert(key.clone(), (client_id, request_id.clone()));
@@ -941,15 +1015,89 @@ impl WorkEventService {
         }
     }
 
-    /// Answers whose jobs finished, including failures.
+    /// Whether the change probe should run: a live client follows the stream
+    /// and the last probe is `PROBE_INTERVAL` old (cas-ff22). The probe runs
+    /// on the blocking lane like a page; the loop only compares strings.
+    pub(crate) fn probe_due(&mut self, now: Instant, live: impl Fn(usize) -> bool) -> bool {
+        self.subscribers.retain(|client| live(*client));
+        if self.subscribers.is_empty() {
+            self.fingerprint = None;
+            return false;
+        }
+        !self.probe_in_flight && self.last_probe.is_none_or(|last| now.duration_since(last) >= PROBE_INTERVAL)
+    }
+
+    pub(crate) fn start_probe(
+        &mut self,
+        jobs: &mut QueueJobs,
+        now: Instant,
+        cas_dir: PathBuf,
+        project_path: PathBuf,
+        session: String,
+    ) {
+        self.last_probe = Some(now);
+        self.next += 1;
+        let index = Arc::clone(&self.index);
+        let spec = JobSpec {
+            kind: JOB_KIND,
+            key: PROBE_KEY.to_owned(),
+            lane: Lane::Blocking,
+            criticality: Criticality::Refresh,
+            generation: self.next,
+            budget: JOB_BUDGET,
+        };
+        let submitted = jobs.submit_external(spec, move || {
+            Box::new(probe(&index, &cas_dir, &project_path, &session)) as Box<dyn std::any::Any + Send>
+        });
+        use super::jobs::Submitted;
+        self.probe_in_flight = matches!(
+            submitted,
+            Submitted::Queued | Submitted::QueuedBehindKey | Submitted::QueuedDroppedOldest { .. } | Submitted::Coalesced { .. }
+        );
+    }
+
+    /// A finished probe: the subscribers to tell, when the stream changed.
+    fn settle_probe(&mut self, fingerprint: Option<String>) -> Vec<WorkEventReply> {
+        self.probe_in_flight = false;
+        let Some(fingerprint) = fingerprint else {
+            return Vec::new();
+        };
+        let changed = self.fingerprint.as_ref().is_some_and(|previous| previous != &fingerprint);
+        self.fingerprint = Some(fingerprint);
+        if !changed {
+            return Vec::new();
+        }
+        let mut clients: Vec<usize> = self.subscribers.iter().copied().collect();
+        clients.sort_unstable();
+        clients
+            .into_iter()
+            .map(|client_id| WorkEventReply {
+                client_id,
+                message: DaemonMessage::WorkEventsAppended { schema_version: WORK_EVENT_SCHEMA_VERSION },
+            })
+            .collect()
+    }
+
+    /// Answers whose jobs finished, including failures, and the change
+    /// notices a finished probe produced.
     pub(crate) fn take(&mut self, jobs: &mut QueueJobs) -> Vec<WorkEventReply> {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && !self.probe_in_flight {
             return Vec::new();
         }
         jobs.apply_completions();
-        jobs.take_external_completions_where(|kind| kind == JOB_KIND)
+        let mut notices = Vec::new();
+        let mut replies: Vec<WorkEventReply> = jobs
+            .take_external_completions_where(|kind| kind == JOB_KIND)
             .into_iter()
             .filter_map(|result| {
+                if result.key == PROBE_KEY {
+                    let fingerprint = match result.outcome {
+                        Ok(ExternalOutcome::Done(done)) => done.downcast::<Option<String>>().ok().and_then(|found| *found),
+                        _ => None,
+                    };
+                    notices.extend(self.settle_probe(fingerprint));
+                    return None;
+                }
                 let (client_id, request_id) = self.pending.remove(&result.key)?;
                 let message = match result.outcome {
                     Ok(ExternalOutcome::Done(done)) => match done.downcast::<DaemonMessage>() {
@@ -964,7 +1112,9 @@ impl WorkEventService {
                 };
                 Some(WorkEventReply { client_id, message })
             })
-            .collect()
+            .collect();
+        replies.extend(notices);
+        replies
     }
 }
 
@@ -975,21 +1125,15 @@ fn failure(request_id: String, message: &str) -> DaemonMessage {
     }
 }
 
-fn answer(
+/// The live session scope and its stores, with the shared index locked.
+fn with_index<T>(
     index: &Mutex<WorkEventIndex>,
     cas_dir: &Path,
     project_path: &Path,
     session: &str,
-    request_id: String,
-    request: WorkEventRequest,
-) -> DaemonMessage {
-    let agents = crate::store::open_agent_store(cas_dir)
-        .map_err(anyhow::Error::from)
-        .and_then(|store| store.list(None).map_err(anyhow::Error::from));
-    let agents = match agents {
-        Ok(agents) => agents,
-        Err(error) => return failure(request_id, &format!("work events failed: {error}")),
-    };
+    run: impl FnOnce(&mut WorkEventIndex, &WorkEventScope, &WorkEventStores, TranscriptResolver<'_>) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
     let scope = WorkEventScope::from_agents(session, &agents);
     let stores = WorkEventStores::open(cas_dir);
     let resolve = |source: &SupervisorSource| {
@@ -1001,14 +1145,35 @@ fn answer(
         )
     };
     let mut index = index.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    match request {
-        WorkEventRequest::Page { before, limit } => index
-            .page(&scope, &stores, &resolve, request_id.clone(), before.as_deref(), limit)
-            .unwrap_or_else(|error| failure(request_id, &format!("work events failed: {error}"))),
-        WorkEventRequest::Detail { event_id } => {
-            index.detail(&scope, &stores, &resolve, request_id, event_id)
+    run(&mut index, &scope, &stores, &resolve)
+}
+
+fn answer(
+    index: &Mutex<WorkEventIndex>,
+    cas_dir: &Path,
+    project_path: &Path,
+    session: &str,
+    request_id: String,
+    request: WorkEventRequest,
+) -> DaemonMessage {
+    let id = request_id.clone();
+    with_index(index, cas_dir, project_path, session, |index, scope, stores, resolve| match request {
+        WorkEventRequest::Page { before, limit, agent } => {
+            index.page(scope, stores, resolve, request_id, before.as_deref(), limit, agent.as_deref())
         }
-    }
+        WorkEventRequest::Detail { event_id } => Ok(index.detail(scope, stores, resolve, request_id, event_id)),
+    })
+    .unwrap_or_else(|error| failure(id, &format!("work events failed: {error}")))
+}
+
+/// The change probe's job: the stream's fingerprint, or `None` when the
+/// stores cannot be read this time.
+fn probe(index: &Mutex<WorkEventIndex>, cas_dir: &Path, project_path: &Path, session: &str) -> Option<String> {
+    with_index(index, cas_dir, project_path, session, |index, scope, stores, resolve| {
+        index.fingerprint(scope, stores, resolve)
+    })
+    .inspect_err(|error| tracing::debug!(%error, "work events: change probe failed"))
+    .ok()
 }
 
 #[cfg(test)]

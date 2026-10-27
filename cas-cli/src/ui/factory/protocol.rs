@@ -42,6 +42,10 @@ pub enum ProtocolCapability {
     /// their on-demand detail (cas-8f88). A client sends `WorkEventsRequest`
     /// only to a daemon that advertises this.
     WorkEvents,
+    /// The daemon pushes `WorkEventsAppended` to a client that has read a
+    /// work-events page whenever the stream gains events (cas-ff22), and
+    /// answers `WorkEventsRequest.agent` with one agent's own timeline.
+    WorkEventsLive,
 }
 
 pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
@@ -53,6 +57,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::ConversationHistory,
         ProtocolCapability::MessageClientRefDedupe,
         ProtocolCapability::WorkEvents,
+        ProtocolCapability::WorkEventsLive,
     ]
 }
 
@@ -499,6 +504,10 @@ pub enum ClientMessage {
         before: Option<String>,
         #[serde(default)]
         limit: u16,
+        /// One agent's own timeline (cas-ff22): that agent's transcript,
+        /// task-DB rows and hook events. `None` is the session stream.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
 
     /// Request the redacted detail of one work event (cas-8f88): a tool's
@@ -638,6 +647,11 @@ pub enum DaemonMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_before: Option<String>,
     },
+
+    /// The session's work-event stream gained events since the last notice
+    /// (cas-ff22). Sent only to clients that have read a work-events page;
+    /// it carries no event content, so the client asks for the newest page.
+    WorkEventsAppended { schema_version: u32 },
 
     /// The redacted detail of one work event (cas-8f88). `detail` is `None`
     /// when the event no longer resolves (rotated transcript, pruned row).

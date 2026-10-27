@@ -3398,7 +3398,15 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 pub(crate) enum PendingRefKind {
     Send,
     History,
+    /// Not a pending answer: this socket has read a work-events page, so the
+    /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
+    /// [`WORK_EVENTS_FOLLOWER`] and never consumed.
+    WorkEventsFollower,
 }
+
+/// The `PendingRefs` key that marks a socket following a session's work
+/// events. A NUL never appears in a browser-supplied request id.
+const WORK_EVENTS_FOLLOWER: &str = "\u{0}work-events";
 
 /// One authenticated socket's outstanding references, keyed by session and
 /// client reference.
@@ -3547,7 +3555,7 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
             Some(PendingRefKind::History) => Correlation::Consumed(None),
-            None => Correlation::Refused,
+            Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
@@ -3563,8 +3571,25 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             client_ref: Some(client_ref),
             message,
         }) => consume(client_ref, Some(Err(message))),
+        Ok(DaemonMessage::WorkEvents { request_id, .. }) => {
+            let answered = consume(request_id, None);
+            if matches!(answered, Correlation::Consumed(_)) {
+                pending.insert(
+                    (session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned()),
+                    PendingRefKind::WorkEventsFollower,
+                );
+            }
+            answered
+        }
+        // Only a socket that reads work events hears that more arrived.
+        Ok(DaemonMessage::WorkEventsAppended { .. }) => {
+            if pending.contains_key(&(session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned())) {
+                Correlation::Uncorrelated
+            } else {
+                Correlation::Refused
+            }
+        }
         Ok(DaemonMessage::ConversationHistory { request_id, .. })
-        | Ok(DaemonMessage::WorkEvents { request_id, .. })
         | Ok(DaemonMessage::WorkEventDetail { request_id, .. }) => consume(request_id, None),
         _ => Correlation::Uncorrelated,
     }

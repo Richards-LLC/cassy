@@ -589,6 +589,7 @@ impl DaemonInitPhase {
             reported_permission_requests: std::collections::HashSet::new(),
             relay_jobs: Default::default(),
             last_commander_mirror_scan: None,
+            work_events: Default::default(),
             queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
         last_auth_failure_scan: None,

@@ -112,8 +112,14 @@ fn extract_output_text(value: &Value) -> Option<&str> {
 
 /// Redact secret assignments, bearer credentials, and PEM-style BEGIN blocks.
 pub(crate) fn redact_string(text: &str) -> String {
-    let assignment = Regex::new(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]").unwrap();
-    let bearer = Regex::new(r"(?i)(authorization\s*:\s*)?bearer\s+[A-Za-z0-9._~+/=-]+").unwrap();
+    static ASSIGNMENT: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static BEARER: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    let assignment = ASSIGNMENT.get_or_init(|| {
+        Regex::new(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]").unwrap()
+    });
+    let bearer = BEARER.get_or_init(|| {
+        Regex::new(r"(?i)(authorization\s*:\s*)?bearer\s+[A-Za-z0-9._~+/=-]+").unwrap()
+    });
     let mut in_begin_block = false;
     let mut output = Vec::new();
     for line in text.lines() {

@@ -2885,6 +2885,8 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
         ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::WorkEventsRequest { .. }
+            | ClientMessage::WorkEventDetailRequest { .. }
             | ClientMessage::OperatorReplyPersisted { .. }
     )
 }
@@ -3376,8 +3378,12 @@ fn client_message_ref(bytes: &[u8]) -> Option<String> {
     client_ref
 }
 
+/// The request id of a private read whose answer only its requester may
+/// receive: a history page, or a work-events page or detail (cas-8f88).
 fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
-    let ClientMessage::ConversationHistoryRequest { request_id, .. } =
+    let (ClientMessage::ConversationHistoryRequest { request_id, .. }
+    | ClientMessage::WorkEventsRequest { request_id, .. }
+    | ClientMessage::WorkEventDetailRequest { request_id, .. }) =
         serde_json::from_slice::<ClientMessage>(bytes).ok()?
     else {
         return None;
@@ -3398,7 +3404,7 @@ pub(crate) enum PendingRefKind {
 /// client reference.
 pub(crate) type PendingRefs = HashMap<(String, String), PendingRefKind>;
 
-fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
+pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
     client_message_ref(bytes)
         .map(|client_ref| (client_ref, PendingRefKind::Send))
         .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
@@ -3557,7 +3563,9 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             client_ref: Some(client_ref),
             message,
         }) => consume(client_ref, Some(Err(message))),
-        Ok(DaemonMessage::ConversationHistory { request_id, .. }) => consume(request_id, None),
+        Ok(DaemonMessage::ConversationHistory { request_id, .. })
+        | Ok(DaemonMessage::WorkEvents { request_id, .. })
+        | Ok(DaemonMessage::WorkEventDetail { request_id, .. }) => consume(request_id, None),
         _ => Correlation::Uncorrelated,
     }
 }

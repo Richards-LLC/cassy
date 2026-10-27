@@ -38,6 +38,10 @@ pub enum ProtocolCapability {
     /// first `MessageQueued` receipt and queued once (cas-bea6), so a client
     /// may resend a send whose receipt it never saw.
     MessageClientRefDedupe,
+    /// Paged work events (thinking, tool calls, task and worker events) and
+    /// their on-demand detail (cas-8f88). A client sends `WorkEventsRequest`
+    /// only to a daemon that advertises this.
+    WorkEvents,
 }
 
 pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
@@ -48,6 +52,7 @@ pub fn daemon_capabilities() -> Vec<ProtocolCapability> {
         ProtocolCapability::PagedScrollback,
         ProtocolCapability::ConversationHistory,
         ProtocolCapability::MessageClientRefDedupe,
+        ProtocolCapability::WorkEvents,
     ]
 }
 
@@ -249,6 +254,59 @@ pub struct ConversationHistoryReply {
     pub reply_to_session: Option<String>,
 }
 
+/// Version of the [`WorkEvent`] schema; documented in
+/// `docs/guides/commander-work-events.md` (cas-8f88).
+pub const WORK_EVENT_SCHEMA_VERSION: u32 = 1;
+/// Default and largest page of work events.
+pub const WORK_EVENT_PAGE_SIZE: u16 = 100;
+
+/// What a work event shows. Kinds a client does not know decode as `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEventKind {
+    /// A thinking block or reasoning summary as the transcript recorded it.
+    Thinking,
+    /// One tool call; its input and result are the detail.
+    Tool,
+    /// A todo or plan update.
+    Todo,
+    /// A task transition: started, blocked, parked, merged, closed.
+    Task,
+    /// A worker lifecycle or hook event: died, idle, committed.
+    Worker,
+    /// Another factory notice addressed to the session's supervisor.
+    Notice,
+    #[serde(other)]
+    Other,
+}
+
+/// One item of a session's work stream (cas-8f88). Read from transcripts,
+/// hook events and the task DB already on disk; producing it spends no model
+/// tokens. `label` is short, single-line and redacted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkEvent {
+    /// Stable identity, also the key for `WorkEventDetailRequest`.
+    pub id: String,
+    pub kind: WorkEventKind,
+    /// Factory session the event belongs to.
+    pub session: String,
+    /// Agent name that produced it, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The transcript turn it happened in (Claude prompt id, Codex turn id).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
+    /// RFC 3339 time.
+    pub at: String,
+    pub label: String,
+    /// True when `WorkEventDetailRequest` has more to show.
+    #[serde(default)]
+    pub has_detail: bool,
+    /// The tool call failed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub error: bool,
+}
+
 impl MessageAttribution {
     /// Durable prompt-queue sender label. The fixed `commander:` namespace
     /// prevents a remote label from impersonating `supervisor` or `mcp`.
@@ -433,6 +491,20 @@ pub enum ClientMessage {
         device_id: String,
     },
 
+    /// Request a bounded page of work events, newest first from `before`
+    /// (cas-8f88). `before` is the opaque `next_before` of the previous page.
+    WorkEventsRequest {
+        request_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default)]
+        limit: u16,
+    },
+
+    /// Request the redacted detail of one work event (cas-8f88): a tool's
+    /// input and result, or a thinking block's full text.
+    WorkEventDetailRequest { request_id: String, event_id: String },
+
     /// Request current state snapshot
     GetState,
 
@@ -555,6 +627,28 @@ pub enum DaemonMessage {
 
     /// A newly queued operator send visible to other paired viewers.
     OperatorMessage(ConversationHistoryMessage),
+
+    /// A request-correlated page of work events, oldest first (cas-8f88).
+    /// `next_before` pages further back while `has_earlier` is true.
+    WorkEvents {
+        request_id: String,
+        schema_version: u32,
+        events: Vec<WorkEvent>,
+        has_earlier: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next_before: Option<String>,
+    },
+
+    /// The redacted detail of one work event (cas-8f88). `detail` is `None`
+    /// when the event no longer resolves (rotated transcript, pruned row).
+    WorkEventDetail {
+        request_id: String,
+        event_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default)]
+        truncated: bool,
+    },
 
     /// Durable queue acceptance for a Commander semantic message.
     /// This does not prove recipient transport delivery or execution.

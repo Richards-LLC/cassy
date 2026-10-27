@@ -41,7 +41,7 @@ Remove keeps the login intact if deleting its folder fails. A later Keychain
 failure names the remaining item with one copyable command on its own line:
 `security delete-generic-password -s 'Claude Code-credentials-<hash>'`.
 An unreadable known-repo registry refuses the mutation with `account kept` and
-`Run: cas doctor`; database diagnostics stay in debug logs so the command stays
+`Run: cas update`; database diagnostics stay in debug logs so the command stays
 copyable. An enabled account's removal leaves the policy bytes unchanged.
 
 New-account auth catches SIGINT and SIGTERM until its staging folder is cleaned,
@@ -51,3 +51,15 @@ auth transaction survive. Signal death is preserved after cleanup.
 
 The cas-7450 ledger records final candidate captures and terminal-qa separately;
 the earlier critique above applies to the original lifecycle delivery.
+
+## Recovery compatibility (cas-f140)
+
+A host database without a `known_repos` table has no registered repositories;
+removal still checks its agents and live process selectors. Corrupt databases,
+open failures and unreadable lists keep the account with `Run: cas update`.
+
+Stale cleanup is best-effort for both login entry points. One warning per failed
+folder names its full path and cause on separate lines, says login continues,
+and proceeds to other folders and auth. Fresh, symlinked and locked folders stay
+protected. The duplicate question reads the same stdin buffer as earlier prompts
+and remains cancellable. Machine mutation receipts and stdout stay unchanged.

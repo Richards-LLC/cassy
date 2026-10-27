@@ -121,7 +121,7 @@ fn repo_inspection_error(error: impl std::fmt::Display) -> anyhow::Error {
     tracing::debug!(%error, "Cannot inspect known repositories");
     // The CLI prints anyhow chains on the same line. Keep the suggested
     // command separate and copyable instead of appending SQLite's SQL to it.
-    anyhow::anyhow!("Cannot inspect known repositories; account kept\nRun: cas doctor")
+    anyhow::anyhow!("Cannot inspect known repositories; account kept\nRun: cas update")
 }
 
 fn in_use(folder: &Path, home: &Path) -> Result<bool> {
@@ -166,10 +166,26 @@ fn in_use(folder: &Path, home: &Path) -> Result<bool> {
         .try_exists()
         .map_err(repo_inspection_error)?
     {
-        let store =
-            crate::store::SqliteKnownRepoStore::open(&host).map_err(repo_inspection_error)?;
-        let repos = store.list().map_err(repo_inspection_error)?;
-        roots.extend(repos.into_iter().map(|r| r.path.join(".cas")));
+        // Older hosts can have an agent database predating the repo registry.
+        // Only an absent table means "no registered repos"; schema/open/list
+        // failures still refuse the mutation, without changing the host schema.
+        let conn = cas_store::shared_db::shared_connection(&host.join("cas.db"))
+            .map_err(repo_inspection_error)?;
+        let has_repos: bool = conn
+            .lock()
+            .map_err(repo_inspection_error)?
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'known_repos')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(repo_inspection_error)?;
+        if has_repos {
+            let store =
+                crate::store::SqliteKnownRepoStore::open(&host).map_err(repo_inspection_error)?;
+            let repos = store.list().map_err(repo_inspection_error)?;
+            roots.extend(repos.into_iter().map(|r| r.path.join(".cas")));
+        }
     }
     if let Ok(root) = crate::store::find_cas_root() {
         if !roots.contains(&root) {
@@ -538,51 +554,30 @@ impl LoginSignals {
     }
 
     fn answer(&self) -> Result<String> {
-        #[cfg(unix)]
-        {
-            // read_line retries EINTR internally. Poll/read without that retry
-            // so Ctrl-C also cancels the post-auth duplicate-account question.
-            let mut answer = Vec::new();
-            loop {
-                self.check()?;
-                let mut fd = libc::pollfd {
-                    fd: libc::STDIN_FILENO,
-                    events: libc::POLLIN,
-                    revents: 0,
-                };
-                let ready = unsafe { libc::poll(&mut fd, 1, 50) };
-                if ready < 0 {
-                    let error = std::io::Error::last_os_error();
-                    if error.kind() == std::io::ErrorKind::Interrupted {
-                        continue;
-                    }
-                    return Err(error.into());
-                }
-                if ready == 0 {
-                    continue;
-                }
-                let mut byte = 0u8;
-                match unsafe { libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1) } {
-                    0 => break,
-                    1 if byte == b'\n' => break,
-                    1 => answer.push(byte),
-                    _ => {
-                        let error = std::io::Error::last_os_error();
-                        if error.kind() != std::io::ErrorKind::Interrupted {
-                            return Err(error.into());
-                        }
-                    }
-                }
-            }
+        // Use the shared stdin buffer, including bytes prefetched by an earlier
+        // prompt. read_line retries EINTR, so read on a separate thread while
+        // the login owner remains able to notice cancellation and clean up.
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("login-answer".into())
+            .spawn(move || {
+                let mut answer = String::new();
+                let result = std::io::stdin().read_line(&mut answer).map(|_| answer);
+                let _ = send.send(result);
+            })?;
+        loop {
             self.check()?;
-            Ok(String::from_utf8(answer)?)
+            match receive.recv_timeout(std::time::Duration::from_millis(50)) {
+                Ok(answer) => {
+                    self.check()?;
+                    return Ok(answer?);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(error) => return Err(error.into()),
+            }
         }
-        #[cfg(not(unix))]
-        {
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer)?;
-            Ok(answer)
-        }
+        // On cancellation the reader may remain blocked; LoginSignals::drop
+        // restores and re-raises the signal after NewLogin's folder is cleaned.
     }
 }
 
@@ -617,9 +612,28 @@ fn open_login_dir(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// Sweep abandoned transactions only. A directory flock keeps a still-running
 /// login safe even when the user leaves its auth prompt open for over an hour.
-pub(crate) fn sweep_stale_logins(home: &Path) -> Result<()> {
-    for entry in std::fs::read_dir(home)? {
-        let entry = entry?;
+pub(crate) fn sweep_stale_logins(home: &Path) {
+    let warn = |folder: &Path, error: anyhow::Error| {
+        eprintln!(
+            "Warning: stale login cleanup failed; continuing login\nFolder: {}\nCause: {error:#}",
+            folder.display()
+        );
+    };
+    let entries = match std::fs::read_dir(home) {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn(home, error.into());
+            return;
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warn(home, error.into());
+                continue;
+            }
+        };
         if !Provider::ALL.iter().any(|p| {
             entry
                 .file_name()
@@ -628,42 +642,52 @@ pub(crate) fn sweep_stale_logins(home: &Path) -> Result<()> {
         }) {
             continue;
         }
-        let metadata = match std::fs::symlink_metadata(entry.path()) {
-            Ok(metadata) => metadata,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+        if let Err(error) = sweep_stale_login(&entry.path()) {
+            warn(&entry.path(), error);
+        }
+    }
+}
+
+fn sweep_stale_login(folder: &Path) -> Result<()> {
+    let metadata = match std::fs::symlink_metadata(folder) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    if !metadata.is_dir()
+        || !metadata
+            .modified()?
+            .elapsed()
+            .is_ok_and(|age| age > std::time::Duration::from_secs(3600))
+    {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    let _lease = {
+        let file = match open_login_dir(folder) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        if !metadata.is_dir()
-            || !metadata
-                .modified()?
-                .elapsed()
-                .is_ok_and(|age| age > std::time::Duration::from_secs(3600))
-        {
-            continue;
-        }
-        #[cfg(unix)]
-        let _lease = {
-            let Ok(file) = open_login_dir(&entry.path()) else {
-                continue;
-            };
-            if fs2::FileExt::try_lock_exclusive(&file).is_err() {
-                continue;
-            }
-            file
-        };
-        match std::fs::remove_dir_all(entry.path()) {
+        match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
             Err(e) => return Err(e.into()),
         }
-        if cfg!(target_os = "macos")
-            && entry
-                .file_name()
-                .to_string_lossy()
+        file
+    };
+    match std::fs::remove_dir_all(folder) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    }
+    if cfg!(target_os = "macos")
+        && folder.file_name().is_some_and(|name| {
+            name.to_string_lossy()
                 .starts_with(Provider::Claude.prefix())
-        {
-            keychain_delete(&entry.path(), &mut security)?;
-        }
+        })
+    {
+        keychain_delete(folder, &mut security)?;
     }
     Ok(())
 }

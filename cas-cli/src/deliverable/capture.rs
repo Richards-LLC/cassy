@@ -151,11 +151,30 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
         )],
     };
     pairs::write_manifest(&dir, &manifest)?;
-    let catalog = git_optional(
+    // cas-301e: from here a receipt exists, so a budget that runs out before
+    // any server starts is a capture-timeout finding in that receipt, as it is
+    // once serving has begun; never a bare error with an empty stdout.
+    let expired = |error: anyhow::Error,
+                   mut receipt: CaptureReceipt,
+                   manifest: &mut PairManifest|
+     -> anyhow::Result<CaptureReceipt> {
+        if !deadline.remaining().is_zero() {
+            return Err(error);
+        }
+        receipt.findings.push(timeout_finding(capture.timeout_secs, started));
+        manifest.findings = receipt.findings.clone();
+        pairs::write_manifest(&dir, manifest)?;
+        receipt.elapsed_ms = started.elapsed().as_millis() as u64;
+        Ok(receipt)
+    };
+    let catalog = match git_optional(
         &request.root,
         &["show", &format!("{head}:{}", capture.shots)],
         deadline,
-    )?;
+    ) {
+        Ok(catalog) => catalog,
+        Err(error) => return expired(error, receipt, &mut manifest),
+    };
     let Some(catalog) = catalog else {
         return journeys::capture(
             request, &config, &capture, &base, &head, &dir, deadline, started, receipt,
@@ -166,11 +185,14 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
     }
     let mut shots: Vec<Value> = serde_json::from_str(&catalog)
         .map_err(|_| UsageError("shot catalog must be a JSON array".into()))?;
-    let changed = git(
+    let changed = match git(
         &request.root,
         &["diff", "--name-only", &base, &head],
         deadline,
-    )?;
+    ) {
+        Ok(changed) => changed,
+        Err(error) => return expired(error, receipt, &mut manifest),
+    };
     if request.side == Side::Both {
         shots.retain(|shot| {
             shot.get("touches")
@@ -196,7 +218,10 @@ pub fn capture(request: &CaptureRequest) -> anyhow::Result<CaptureReceipt> {
     let plan_path = workspace.path("plan.json");
     let mut plan = json!({"root":request.root,"config":capture,"credentials_file":credentials,"shots":shots,"out":dir,"phases":[]});
     fs::write(&plan_path, serde_json::to_vec(&plan)?)?;
-    let checked = node(&workspace, &plan_path, true, &request.root, deadline)?;
+    let checked = match node(&workspace, &plan_path, true, &request.root, deadline) {
+        Ok(checked) => checked,
+        Err(error) => return expired(error, receipt, &mut manifest),
+    };
     if let Some(error) = checked.get("code").and_then(Value::as_str) {
         return Err(UsageError(format!(
             "{error}: invalid shot catalog; check IDs, paths, selectors and budget"

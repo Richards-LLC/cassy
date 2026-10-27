@@ -71,6 +71,8 @@ export class ComposerUploads {
     }
     strip.replaceChildren();
     strip.hidden = !this.files.length && !this.error;
+    const list = document.createElement("div"); list.className = "composer-upload-files";
+    strip.append(list);
     for (const entry of this.files) {
       const chip = document.createElement("div"); chip.className = "composer-file";
       if (entry.thumbnail) { const image = document.createElement("img"); image.src = entry.thumbnail; image.alt = ""; chip.append(image); }
@@ -82,7 +84,7 @@ export class ComposerUploads {
       remove.onclick = () => { if (entry.thumbnail) URL.revokeObjectURL(entry.thumbnail); this.files = this.files.filter(item => item !== entry); this.paint(); };
       chip.append(remove);
       if (entry.preview) { const preview = document.createElement("pre"); preview.textContent = entry.preview; chip.append(preview); }
-      strip.append(chip);
+      list.append(chip);
     }
     const status = document.createElement("p"); status.setAttribute("role", "status");
     status.textContent = this.error || (this.sending ? "Uploading files…" : this.files.length ? "Files stay here through reconnects. Send before closing this page." : "");

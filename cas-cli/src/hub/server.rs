@@ -2191,6 +2191,39 @@ fn spawn_factory_daemon(
 mod launch_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn machine_hub_launch_does_not_inherit_its_originating_project_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let grok = bin.join("grok");
+        std::fs::write(&grok, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("CAS_ROOT", "/hub-origin/.cas");
+        let environment = super::super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).unwrap();
+        // Execute with the same environment application as the direct/cgroup
+        // daemon path: --cwd must choose the store, not the hub's launch cwd.
+        let mut child = std::process::Command::new("/bin/sh");
+        child.args(["-c", "printf '%s' \"${CAS_ROOT-unset}\""]);
+        apply_launch_environment(&mut child, &environment);
+        let output = child.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "unset");
+        #[cfg(target_os = "linux")]
+        {
+            let command = systemd_unit_command(
+                std::path::Path::new("/usr/bin/cas"),
+                std::path::Path::new("/projects/chosen"), "chosen", 0,
+                cas_mux::SupervisorCli::Grok, &environment,
+                std::path::Path::new("/tmp/chosen.log"),
+            );
+            assert!(command.get_args().any(|arg| arg == "--property=UnsetEnvironment=CAS_ROOT"),
+                "the login manager's environment must also drop the originating store");
+        }
+    }
+
     #[test]
     fn daemon_arguments_keep_project_path_as_one_argument() {
         let args = factory_daemon_args(

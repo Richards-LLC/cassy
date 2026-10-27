@@ -1208,6 +1208,10 @@ journeys:
   - hub-web/src/connection.ts
   - hub-web/src/conversation-shell.ts
   - hub-web/e2e/journeys/launch-session.journey.ts
+  - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-server.mjs
+  - cas-cli/src/hub/server.rs
+  - cas-cli/src/hub/launch_env.rs
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/artifact-open.ts
@@ -1252,8 +1256,9 @@ journeys:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/launch-session.journey.ts
-  catalog_gaps: the hub's project catalog, folder browse and session start are doubled; that a hub-started session
-    survives a hub restart and the tab closing is proven at epic assembly on a real machine
+  catalog_gaps: The catalog suite doubles the hub protocol. The separate real-hub HUB-J13 part covers project browse,
+    session start, reaper/daemon/PTY startup, first message and reply with a foreign originating CAS_ROOT.
+    Provider and service placement alone are inert; official model action remains a bounded live check.
 - id: HUB-J14
   name: Tell a project's live sessions apart
   status: live

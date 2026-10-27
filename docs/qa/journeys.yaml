@@ -150,6 +150,12 @@ invariants:
     check: 'Run hub-web/src/connection-lifecycle.test.ts case "refreshes a fleet change after an overlapping heartbeat"
       and HUB-J17; verify Stop removes the row and returns its task to Open.'
     bug: {task: cas-66ea}
+  HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN:
+    statement: A fleet change still obtains a fresh catalog when the older heartbeat read it drains fails or times
+      out; only a refused pairing skips it.
+    check: 'Run hub-web/src/connection-lifecycle.test.ts case "refreshes a fleet change even when the overlapping
+      heartbeat''s read fails" and HUB-J17; verify Stop on a flaky connection removes the row at once.'
+    bug: {task: cas-1966}
   HUB-J18-GOAL:
     statement: I stop what the supervisor is doing, or read what its terminal shows, without leaving the conversation,
       from the keyboard alone
@@ -1477,6 +1483,7 @@ journeys:
   invariants:
   - HUB-J17-GOAL
   - HUB-J17-FLEET-INVALIDATION
+  - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

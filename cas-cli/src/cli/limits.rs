@@ -211,16 +211,6 @@ fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::pat
     found
 }
 
-/// One line of live usage for an account picker (cas-e1f4): `limit hit,
-/// resets <time>` when a window is used up, else the busiest windows.
-pub(crate) fn usage_summary(provider: crate::accounts::Provider, dir: &Path) -> Option<String> {
-    let limit = match provider {
-        crate::accounts::Provider::Claude => collect_claude("account", dir),
-        crate::accounts::Provider::Codex => collect_codex("account", dir),
-    };
-    summarize(&limit)
-}
-
 /// Structured account usage for the shared registry. The collector remains
 /// provider-owned, including its credential-store implementation.
 #[derive(Clone)]
@@ -323,8 +313,8 @@ fn summarize(limit: &AccountLimit) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// [`usage_summary`] for several accounts at once, each on its own thread;
-/// whatever has not answered by `deadline` is left out.
+/// Shared registry capacity for several accounts at once. Duplicate Codex
+/// folders use their newest snapshot; unfinished work is left out at deadline.
 pub(crate) fn usage_summaries(
     provider: crate::accounts::Provider,
     accounts: Vec<(String, std::path::PathBuf)>,
@@ -651,7 +641,7 @@ mod tests {
         assert_eq!(usage.windows[0].resets_at.unwrap().timestamp(), 1787011690);
         assert_eq!(usage.windows[1].used_percent, None);
         assert!(
-            usage_summary(crate::accounts::Provider::Codex, home.path())
+            summarize_usage(&usage.windows)
                 .unwrap()
                 .contains("reset, usage unknown until next session")
         );

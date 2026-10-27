@@ -138,6 +138,15 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     std::fs::write(canonical.join("sessions/rollout.jsonl"), serde_json::json!({"timestamp": "2026-01-02T00:00:00Z", "rate_limits": {
         "plan_type": "pro", "primary": {"window_minutes": 300, "used_percent": 45, "resets_at": future_reset}
     }}).to_string()).unwrap();
+    let past = home.path().join(".codex-past");
+    std::fs::create_dir_all(past.join("sessions")).unwrap();
+    let mut past_auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex.join("auth.json")).unwrap()).unwrap();
+    past_auth["tokens"]["account_id"] = "past".into();
+    std::fs::write(past.join("auth.json"), past_auth.to_string()).unwrap();
+    std::fs::write(past.join("sessions/rollout.jsonl"), serde_json::json!({"rate_limits": {
+        "primary": {"window_minutes": 300, "used_percent": 99, "resets_at": future_reset - 172800}
+    }}).to_string()).unwrap();
     // Keep the login probe deterministic and local for this fixture home.
     cas::test_paths::warm_stub(
         &home.path().join("bin/codex"),
@@ -152,7 +161,7 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let rows = json["accounts"].as_array().unwrap();
-    assert_eq!(rows.len(), 6);
+    assert_eq!(rows.len(), 7);
     let row = |provider, name| {
         rows.iter()
             .find(|a| a["provider"] == provider && a["name"] == name)
@@ -173,6 +182,7 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     );
     let team = row("codex", "team");
     assert_eq!(team["plan"], "pro");
+    assert!(row("codex", "past")["windows"][0]["used_percent"].is_null());
     assert_eq!(team["windows"][0]["used_percent"], 45.0);
     assert_eq!(row("codex", "team@example.com")["windows"], team["windows"]);
     assert!(
@@ -200,6 +210,7 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     assert!(human.contains("operator@example.com"));
     assert!(human.contains("usage unknown"));
     assert!(human.contains("stale login"));
+    assert!(human.contains("reset, usage unknown until next session"));
     assert!(human.lines().all(|line| line.len() <= 80));
 }
 
@@ -262,6 +273,16 @@ printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
             .assert()
             .success()
             .stdout(predicate::str::contains("SELECTED=main"));
+        cas_cmd(home.path())
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .args([provider, "main@example.com"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                "Factory mode requires an interactive terminal",
+            ));
         assert!(
             !home
                 .path()

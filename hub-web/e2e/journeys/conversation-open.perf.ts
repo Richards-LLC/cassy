@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { decode } from "@jridgewell/sourcemap-codec";
 import { HubDouble, type HistoryPage } from "./hub-double";
 
-type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[] };
+type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[] };
 const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
 const capture: Capture = JSON.parse(await readFile(process.env.CONVERSATION_PERF_CAPTURE!, "utf8"));
 const dist = resolve("dist");
@@ -36,7 +36,9 @@ test.afterAll(async () => { server.closeAllConnections(); await new Promise<void
 // Browser-side measurements contain sizes/times only, never message bodies.
 function installProbe() {
   const w = window as typeof window & { perfProbe: any };
-  const probe = w.perfProbe = { t0: 0, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], longTasks: [] as any[] };
+  const resuming = sessionStorage.getItem("perf:reload") === "1";
+  sessionStorage.removeItem("perf:reload");
+  const probe = w.perfProbe = { t0: 0, active: resuming, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], longTasks: [] as any[], tailSamples: [] as any[] };
   const parse = JSON.parse;
   JSON.parse = function (text, reviver) {
     const start = performance.now();
@@ -51,7 +53,7 @@ function installProbe() {
     constructor(url: string | URL, protocols?: string | string[]) {
       super(url, protocols);
       this.addEventListener("message", (event: MessageEvent) => {
-        if (typeof event.data === "string") probe.frames.push({ at: performance.now(), bytes: new TextEncoder().encode(event.data).length, history: event.data.includes('"ConversationHistory":') });
+        if (typeof event.data === "string") probe.frames.push({ at: performance.now(), bytes: new TextEncoder().encode(event.data).length, history: event.data.includes('"ConversationHistory":'), live_reply: event.data.includes('"OperatorReply":') });
       });
     }
     send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
@@ -61,21 +63,25 @@ function installProbe() {
   };
   // The click event is the tap origin, excluding Playwright's actionability wait.
   document.addEventListener("click", (event) => {
-    if ((event.target as Element).closest('nav[aria-label="Choose a supervisor"] button')) probe.t0 = performance.now();
+    if ((event.target as Element).closest('nav[aria-label="Choose a supervisor"] button')) { probe.t0 = performance.now(); probe.active = true; }
   }, true);
   document.addEventListener("DOMContentLoaded", () => {
+    let scheduled = false;
     new MutationObserver(() => {
       probe.lastMutation = performance.now();
-      if (!probe.paintEnabled || !probe.t0 || probe.latestPaint) return;
+      if (!probe.paintEnabled || !probe.active || scheduled) return;
+      scheduled = true;
       // Two rAFs: an opportunity for the changed DOM to be presented between them.
       requestAnimationFrame(() => requestAnimationFrame(() => {
-        const thread = document.querySelector(".conversation-reading.thread");
+        scheduled = false;
+        const thread = document.querySelector<HTMLElement>(".conversation-reading.thread");
         const turns = [...document.querySelectorAll(".msgs .conversation-turn")];
         if (!thread || !turns.length) return;
         const bounds = thread.getBoundingClientRect();
         const visible = (node: Element) => { const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.bottom > bounds.top && rect.top < bounds.bottom; };
         if (!probe.firstPaint && turns.some(visible)) probe.firstPaint = performance.now();
-        if (visible(turns[turns.length - 1])) probe.latestPaint = performance.now();
+        if (!probe.latestPaint && visible(turns[turns.length - 1])) probe.latestPaint = performance.now();
+        probe.tailSamples.push({ at: performance.now() - probe.t0, turns: turns.length, tail_gap_px: thread.scrollHeight - thread.clientHeight - thread.scrollTop, last_key: (turns.at(-1) as HTMLElement).dataset.key });
       }));
     }).observe(document.body, { childList: true, subtree: true, characterData: true });
   });
@@ -172,6 +178,14 @@ for (const profile of [
   const results: Record<string, any> = {};
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  const drainPending = async () => {
+    for (let index = 0; index < capture.pending_replies!.length; index += 10) {
+      // Real authenticated persistence ACKs remove pending daemon rows.
+      const acked = new Set(hub.persistedReplies.map((reply) => reply.notification_id));
+      for (const reply of capture.pending_replies!.slice(index, index + 10)) if (!acked.has(reply.notification_id as number)) hub.send(capture.session, { OperatorReply: reply });
+      await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
+    }
+  };
   try {
     await page.goto(`${origin}/commander/`);
     await hub.seedPaired();
@@ -180,7 +194,7 @@ for (const profile of [
     await expect(row).toBeVisible();
     const measure = async (phase: string, action: () => Promise<void>) => {
       const base = await startProfile(cdp);
-      const since = await page.evaluate((phase) => { const p = (window as any).perfProbe; p.paintEnabled = phase === "initial"; p.t0 = performance.now(); p.firstPaint = 0; p.latestPaint = 0; return p.t0; }, phase);
+      const since = phase === "reload_resume" ? 0 : await page.evaluate((phase) => { const p = (window as any).perfProbe; p.paintEnabled = phase !== "accumulated"; p.active = true; p.t0 = performance.now(); p.firstPaint = 0; p.latestPaint = 0; p.tailSamples = []; return p.t0; }, phase);
       const requestStart = hub.historyRequests.length;
       await action();
       const composer = page.getByRole("textbox", { name: "Your message", exact: true });
@@ -203,7 +217,7 @@ for (const profile of [
         return { tap_at: p.t0, first_turn_painted_ms: p.firstPaint ? p.firstPaint - p.t0 : null, latest_turn_painted_ms: p.latestPaint ? p.latestPaint - p.t0 : null,
           parses: p.parse.filter((entry: any) => entry.at >= since), requests: p.requests.filter((entry: any) => entry.at >= since),
           frames: p.frames.filter((entry: any) => entry.at >= since), long_tasks: p.longTasks.filter((entry: any) => entry.at >= since),
-          dom_elements: document.querySelectorAll("*").length, rendered_turns: document.querySelectorAll(".msgs .conversation-turn").length };
+          tail_samples: p.tailSamples, dom_elements: document.querySelectorAll("*").length, rendered_turns: document.querySelectorAll(".msgs .conversation-turn").length };
       }, since);
       const costs = await endProfile(cdp, directory, phase);
       const metrics = Object.fromEntries(costs.metrics.metrics.map((m: any) => [m.name, m.value]));
@@ -212,22 +226,35 @@ for (const profile of [
         history_requests: hub.historyRequests.length - requestStart,
         websocket_payload_bytes: probe.frames.reduce((sum: number, f: any) => sum + f.bytes, 0),
         history_payload_bytes: probe.frames.filter((f: any) => f.history).reduce((sum: number, f: any) => sum + f.bytes, 0),
+        live_reply_frames: probe.frames.filter((f: any) => f.live_reply).length,
+        last_live_reply_ms: probe.frames.filter((f: any) => f.live_reply).at(-1)?.at - probe.tap_at || null,
+        final_paint_opportunity_ms: probe.tail_samples.at(-1)?.at ?? null,
+        final_tail_gap_px: probe.tail_samples.at(-1)?.tail_gap_px ?? null,
         replay_request_to_response_ms: probe.frames.filter((f: any) => f.history).map((frame: any, index: number) => frame.at - probe.requests[index]?.at),
         json_parse_ms: probe.parses.reduce((sum: number, entry: any) => sum + entry.ms, 0),
         script_ms: (metrics.ScriptDuration - before.ScriptDuration) * 1000,
         layout_ms: (metrics.LayoutDuration - before.LayoutDuration) * 1000,
         style_ms: (metrics.RecalcStyleDuration - before.RecalcStyleDuration) * 1000,
         heap_used_bytes: metrics.JSHeapUsedSize, dom_nodes: metrics.Nodes,
+        persisted_reply_acks_total: hub.persistedReplies.length,
         heap: await cdp.send("Runtime.getHeapUsage"), cpu: costs.sourceSamples,
         long_task_total_ms: probe.long_tasks.reduce((sum: number, entry: any) => sum + entry.ms, 0),
         long_task_max_ms: Math.max(0, ...probe.long_tasks.map((entry: any) => entry.ms)) };
       await writeFile(join(directory, "receipt.json"), JSON.stringify({ status: "PASS", profile, browser: browser.version(), source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-        source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms,
+        source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms, pending_replies: capture.pending_replies?.length,
+        flow: process.env.CONVERSATION_PERF_FLOW ?? "history", replay_cadence: "history response plus batches of ten pending OperatorReply frames, paced by browser rAF; fastest-case replay, daemon scheduling/network excluded",
         label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
     };
-    await measure("initial", async () => { await row.click(); await expect(page.locator(".msgs .conversation-turn").first()).toBeAttached(); });
+    const backlog = process.env.CONVERSATION_PERF_FLOW === "backlog";
+    if (backlog) expect(capture.pending_replies?.length, "capture real pending rows, not fabricated history").toBeGreaterThan(50);
+    await measure("initial", async () => {
+      await row.click();
+      await expect(page.locator(".msgs .conversation-turn").first()).toBeAttached();
+      if (backlog) await drainPending();
+    });
     expect(results.initial.history_requests).toBe(1);
-    await measure("accumulated", async () => {
+    if (backlog) expect(results.initial.rendered_turns).toBeGreaterThan(250);
+    if (!backlog) await measure("accumulated", async () => {
       for (let index = 1; index < capture.pages.length; index++) {
         const count = hub.historyRequests.length;
         await page.getByRole("button", { name: "Load earlier", exact: true }).click();
@@ -235,7 +262,28 @@ for (const profile of [
         await settle(page);
       }
     });
-    expect(results.accumulated.history_requests).toBe(capture.pages.length - 1);
+    if (!backlog) expect(results.accumulated.history_requests).toBe(capture.pages.length - 1);
+    if (backlog && profile.name === "phone") {
+      await page.locator("#conversation-back").click();
+      await expect(row).toBeVisible();
+      await measure("warm_reopen", async () => { await row.click(); });
+      const attaches = hub.attaches.length;
+      await measure("reconnect", async () => {
+        hub.drop(capture.session);
+        await expect.poll(() => hub.attaches.length, { timeout: 20_000 }).toBeGreaterThan(attaches);
+        await expect(page.locator("#conversation-connection")).toContainText("Live");
+        await drainPending();
+      });
+      await page.evaluate(() => sessionStorage.setItem("perf:reload", "1"));
+      await measure("reload_resume", async () => {
+        await page.reload();
+        await expect(page.locator(".msgs .conversation-turn").first()).toBeAttached();
+        await drainPending();
+      });
+      expect(results.warm_reopen.rendered_turns).toBeGreaterThan(250);
+      expect(results.reconnect.rendered_turns).toBeGreaterThan(250);
+      expect(results.reload_resume.rendered_turns).toBeGreaterThan(250);
+    }
     expect(errors).toEqual([]);
   } finally { await context.close(); }
 });

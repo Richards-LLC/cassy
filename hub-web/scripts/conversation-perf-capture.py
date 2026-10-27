@@ -34,7 +34,16 @@ def turns(rows):
                 continue
             if payload.get("schema_version") not in [1, 2]:
                 continue
-            replies.append({**payload, **common})
+            reply = {**payload, **common}
+            reply.pop("schema_version", None)
+            # ConversationHistoryReply skips these absent optionals; live
+            # OperatorReply deliberately serializes operator_label as null.
+            for key in ["operator_label", "reply_to_session"]:
+                if reply.get(key) is None:
+                    reply.pop(key, None)
+            if not reply.get("options"):
+                reply.pop("options", None)
+            replies.append(reply)
         else:
             match = re.match(r"\[CAS reply: explicitly acknowledges notification_id=(\d+)\]\n", row["prompt"])
             messages.append({**common, "target": row["target"],
@@ -73,7 +82,23 @@ capture = dict(session=args.session, raw_queue_rows=raw_count,
                commander_turns=sum(len(p["messages"]) + len(p["replies"]) for p in pages),
                query_ms=queries, pages=pages,
                caveat="Read-only SQL plus protocol replay; Rust serialization, hub auth and real network latency are not measured.")
+pending_rows = db.execute(f"SELECT {columns} FROM prompt_queue WHERE factory_session=? "
+                          "AND lower(target)='operator' AND processed_at IS NULL "
+                          "ORDER BY priority ASC,id ASC", (args.session,)).fetchall()
+# Daemon live OperatorReply omits the durable history timestamp/session.
+capture["pending_replies"] = []
+for row in pending_rows:
+    payload = json.loads(row["prompt"])
+    if payload.get("schema_version") not in [1, 2]:
+        continue
+    payload.pop("schema_version", None)
+    payload["notification_id"] = row["id"]
+    payload.setdefault("operator_label", None)
+    if not payload.get("options"):
+        payload.pop("options", None)
+    capture["pending_replies"].append(payload)
 fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as stream:
     json.dump(capture, stream)
-print(json.dumps({k: v for k, v in capture.items() if k != "pages"}))
+print(json.dumps({**{k: v for k, v in capture.items() if k not in ["pages", "pending_replies"]},
+                  "pending_replies": len(capture["pending_replies"])}))

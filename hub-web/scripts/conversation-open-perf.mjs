@@ -11,12 +11,14 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const { values } = parseArgs({ options: {
   db: { type: "string" }, session: { type: "string" }, output: { type: "string" },
   capture: { type: "string" }, repeats: { type: "string", default: "3" },
+  flow: { type: "string", default: "backlog" },
 } });
 if (!values.output || (!values.capture && (!values.db || !values.session))) {
   throw Error("Usage: node scripts/conversation-open-perf.mjs --db /project/.cas/cas.db --session SESSION --output TASK_ARTIFACT_DIR [--repeats 3]\nOr --capture PRIVATE_CAPTURE_JSON to replay the identical input.");
 }
 const repeats = Number(values.repeats);
 if (!Number.isSafeInteger(repeats) || repeats < 1 || repeats > 10) throw Error("repeats must be 1..10");
+if (!["history", "backlog"].includes(values.flow)) throw Error("flow must be history or backlog");
 const output = resolve(values.output);
 mkdirSync(output, { recursive: true });
 const capture = values.capture ? resolve(values.capture) : resolve(output, "private-history.json");
@@ -31,11 +33,12 @@ if (!values.capture) run("python3", ["scripts/conversation-perf-capture.py", "--
 run("npm", ["run", "build", "--", "--sourcemap"]);
 run("npx", ["playwright", "test", "--config", "e2e/conversation-perf.config.ts", "conversation-open.perf.ts", "--workers=1", `--repeat-each=${repeats}`], {
   CONVERSATION_PERF_CAPTURE: capture, CONVERSATION_PERF_OUTPUT: output,
+  CONVERSATION_PERF_FLOW: values.flow,
 });
 const receipts = readdirSync(output).filter((name) => /^(desktop|phone)-\d+$/.test(name)).map((name) => JSON.parse(readFileSync(resolve(output, name, "receipt.json"), "utf8")));
-const metrics = ["first_turn_painted_ms", "latest_turn_painted_ms", "interactive_upper_bound_ms", "input_ack_ms", "history_requests", "history_payload_bytes", "json_parse_ms", "script_ms", "layout_ms", "style_ms", "dom_elements", "dom_nodes", "rendered_turns", "heap_used_bytes", "long_task_total_ms", "long_task_max_ms"];
+const metrics = ["first_turn_painted_ms", "latest_turn_painted_ms", "final_paint_opportunity_ms", "final_tail_gap_px", "interactive_upper_bound_ms", "input_ack_ms", "history_requests", "history_payload_bytes", "websocket_payload_bytes", "live_reply_frames", "last_live_reply_ms", "json_parse_ms", "script_ms", "layout_ms", "style_ms", "dom_elements", "dom_nodes", "rendered_turns", "heap_used_bytes", "long_task_total_ms", "long_task_max_ms"];
 const summary = { machine, label: receipts[0].label, source_head: receipts[0].source_head, source_session: receipts[0].source_session, raw_queue_rows: receipts[0].raw_queue_rows, commander_turns: receipts[0].commander_turns, runs: [] };
-for (const profile of ["desktop", "phone"]) for (const phase of ["initial", "accumulated"]) {
+for (const profile of ["desktop", "phone"]) for (const phase of new Set(receipts.filter((receipt) => receipt.profile.name === profile).flatMap((receipt) => Object.keys(receipt.results)))) {
   const group = receipts.filter((receipt) => receipt.profile.name === profile).map((receipt) => receipt.results[phase]);
   summary.runs.push({ profile, phase, repetitions: group.length, metrics: Object.fromEntries(metrics.map((metric) => {
     const ordered = group.map((run) => run[metric]).filter((value) => typeof value === "number").sort((a, b) => a - b);

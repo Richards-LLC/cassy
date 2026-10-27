@@ -637,7 +637,8 @@ export class ConversationHistory {
     send.value.stamped = receipt.stamped;
     // Live/history rows carry the person's name. A later journal receipt's
     // hardware label is only a fallback, never a replacement for that name.
-    if (receipt.device_label && !send.value.deviceLabel) send.value.deviceLabel = receipt.device_label;
+    if (receipt.operator_label) send.value.deviceLabel = receipt.operator_label;
+    else if (receipt.device_label && !send.value.deviceLabel) send.value.deviceLabel = receipt.device_label;
     // cas-8d52: the time this message shows, for the thread a reload rebuilds.
     const shown = send.shownAt ?? send.at;
     if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }

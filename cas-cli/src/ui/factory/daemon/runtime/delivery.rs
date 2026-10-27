@@ -999,6 +999,7 @@ impl FactoryDaemon {
                     target,
                     stamped: receipt.stamped,
                     device_label: attribution.device_label,
+                    operator_label: attribution.operator_label,
                 }))
             }
         }

@@ -167,6 +167,7 @@ export interface MessageQueued {
   target: string;
   stamped: boolean;
   device_label?: string;
+  operator_label?: string;
 }
 
 export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";

@@ -72,7 +72,8 @@ describe('conversation evidence', () => {
   it('shows the other device send live before its reply and labels the sender receipt', () => {
     const history = new ConversationHistory();
     history.submit('own', 'supervisor', 'Mine');
-    history.acknowledge({ client_ref: 'own', notification_id: 40, target: 'supervisor', stamped: true, device_label: 'Desktop' });
+    history.acknowledge({ client_ref: 'own', notification_id: 40, target: 'supervisor', stamped: true, device_label: 'Desktop', operator_label: 'Daniel' });
+    expect(history.events[0]).toMatchObject({ value: { deviceLabel: 'Daniel' } });
     // A durable live/history row names the person. Replaying the correlated
     // receipt from the journal must not replace that with a hardware label.
     history.hydrateSend({ notification_id: 40, target: 'supervisor', text: 'Mine', state: 'acknowledged', stamped: true, device_id: 'desktop', operator_label: 'Daniel', session: 'factory-a', at: '2026-09-29T15:59:59Z' });

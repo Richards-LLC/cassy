@@ -4404,6 +4404,7 @@ mod machine_protocol_tests {
             target: "patient-pelican-9".to_owned(),
             stamped: true,
             device_label: None,
+            operator_label: None,
         })
         .unwrap();
         assert!(correlated_daemon_frame_allowed(

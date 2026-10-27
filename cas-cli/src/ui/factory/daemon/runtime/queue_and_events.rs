@@ -12161,7 +12161,13 @@ pub(super) fn commander_history_send(
         device_id: operator.map_or_else(|| "terminal".to_string(), |stamp| stamp.device_id.clone()),
         operator_label: Some(operator.map_or_else(
             || "Terminal".to_string(),
-            |stamp| stamp.device_label.clone(),
+            |stamp| {
+                if stamp.operator.trim().is_empty() {
+                    stamp.device_label.clone()
+                } else {
+                    stamp.operator.clone()
+                }
+            },
         )),
         session: row.factory_session.unwrap_or_else(|| fallback_session.to_string()),
         at: row.created_at.to_rfc3339(),

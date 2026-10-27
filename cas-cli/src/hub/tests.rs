@@ -2594,6 +2594,7 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         target: "supervisor".into(),
         stamped: true,
         device_label: Some("Android".into()),
+        operator_label: None,
     })
     .unwrap();
     let refused = serde_json::to_vec(&DaemonMessage::Error {

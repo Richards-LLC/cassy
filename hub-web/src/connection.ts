@@ -1969,6 +1969,7 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
     target: value.target,
     stamped: value.stamped === true,
     ...(typeof value.device_label === "string" ? { device_label: value.device_label } : {}),
+    ...(typeof value.operator_label === "string" ? { operator_label: value.operator_label } : {}),
   };
 }
 

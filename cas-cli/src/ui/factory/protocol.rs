@@ -565,6 +565,9 @@ pub enum DaemonMessage {
         stamped: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_label: Option<String>,
+        /// Person recorded by the authenticated pairing; older peers omit it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator_label: Option<String>,
     },
 
     /// An authoritative ANSI serialization of the pane's current terminal state.
@@ -1103,6 +1106,7 @@ mod tests {
             target: "patient-pelican-9".to_string(),
             stamped: true,
             device_label: None,
+            operator_label: None,
         };
         let json = serde_json::to_string(&message).unwrap();
         assert_eq!(
@@ -1117,6 +1121,7 @@ mod tests {
                 target,
                 stamped: true,
                 device_label: None,
+                operator_label: None,
             } if client_ref == "send-42" && target == "patient-pelican-9"
         ));
     }

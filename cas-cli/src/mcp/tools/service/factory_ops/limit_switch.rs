@@ -25,6 +25,29 @@ pub(crate) fn queue_limit_switch(
     agent_id: &str,
     occurrence: &str,
 ) -> anyhow::Result<String> {
+    queue_limit_switch_with(
+        root,
+        agent_id,
+        occurrence,
+        chrono::Utc::now(),
+        |provider| {
+            let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home unavailable"))?;
+            crate::account_registry::collect_for(provider, &home, true)
+        },
+        preflight_limit_spec,
+    )
+}
+
+fn queue_limit_switch_with(
+    root: &Path,
+    agent_id: &str,
+    occurrence: &str,
+    now: chrono::DateTime<chrono::Utc>,
+    collect: impl FnOnce(
+        crate::accounts::Provider,
+    ) -> std::io::Result<Vec<crate::account_registry::Account>>,
+    preflight: impl FnOnce(&cas_mux::WorkerSpec) -> Result<(), String>,
+) -> anyhow::Result<String> {
     let queue = crate::store::open_spawn_queue_store(root)?;
     if let Some((_, detail)) = queue.limit_episode(occurrence)? {
         return Ok(detail);
@@ -58,7 +81,7 @@ pub(crate) fn queue_limit_switch(
         cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
         _ => anyhow::bail!("unsupported usage-limit provider"),
     };
-    let accounts = crate::account_registry::collect_for(provider, &home, true)?;
+    let accounts = collect(provider)?;
     let old = agent
         .metadata
         .get("worker_account_dir")
@@ -88,9 +111,9 @@ pub(crate) fn queue_limit_switch(
         &agent,
         &metadata,
         &accounts,
-        chrono::Utc::now(),
+        now,
         &crate::account_selection::load_policy(Some(root)),
-        preflight_limit_spec,
+        preflight,
     );
     let (_, persisted) =
         queue.record_limit_episode(occurrence, &agent.name, session, spec.as_deref(), &detail)?;
@@ -207,6 +230,23 @@ pub(crate) fn prepare_limit_resume(
             ),
         "worker generation changed; nothing stopped"
     );
+    let current_account = agent
+        .metadata
+        .get("worker_account_dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| meta.old_account.clone());
+    anyhow::ensure!(
+        same_folder(&current_account, &meta.old_account),
+        "worker account changed; nothing stopped"
+    );
+    let held = crate::store::open_task_store(root)?.list(None)?;
+    anyhow::ensure!(
+        held.iter()
+            .any(|task| task.assignee.as_deref() == Some(name)
+                && !task.is_terminal()
+                && meta.task_ids.contains(&task.id)),
+        "task binding changed; nothing stopped"
+    );
     let evidence = worker_usage_limit_evidence(root, &agent);
     anyhow::ensure!(
         matches!(evidence, UsageLimitEvidence::Limited { ref first_evidence }
@@ -292,7 +332,13 @@ fn copy_resume_transcript(
             .write(true)
             .create_new(true)
             .open(&target)?;
-        std::io::copy(&mut std::fs::File::open(&source)?, &mut output)?;
+        let copied = std::io::copy(&mut std::fs::File::open(&source)?, &mut output);
+        if let Err(error) = copied {
+            drop(output);
+            let _ = std::fs::remove_file(&target);
+            return Err(error.into());
+        }
+        output.sync_all()?;
         Ok(id)
     })();
     match result {
@@ -309,6 +355,128 @@ fn copy_resume_transcript(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fixture_queue_keeps_dirty_worktree_task_branch_and_dedupes_after_reopen() {
+        crate::test_support::TestEnvGuard::run_with_temp_home(|home| {
+            let project = home.join("project");
+            std::fs::create_dir_all(&project).unwrap();
+            let root = crate::store::init_cas_dir(&project).unwrap();
+            let cwd = root.join("worktrees/worker");
+            std::fs::create_dir_all(&cwd).unwrap();
+            for args in [
+                &["init"][..],
+                &["config", "user.name", "Fixture"],
+                &["config", "user.email", "fixture@example.invalid"],
+                &["commit", "--allow-empty", "-m", "unpublished"],
+                &["checkout", "-b", "factory/held-task"],
+            ] {
+                assert!(
+                    std::process::Command::new("git")
+                        .args(args)
+                        .current_dir(&cwd)
+                        .output()
+                        .unwrap()
+                        .status
+                        .success()
+                );
+            }
+            std::fs::write(cwd.join("uncommitted.txt"), b"keep every byte\0").unwrap();
+            let mut agent = cas_types::Agent::new_with_role(
+                "old-agent".into(),
+                "worker".into(),
+                cas_types::AgentRole::Worker,
+            );
+            agent.factory_session = Some("session".into());
+            agent.metadata.insert("worker_cli".into(), "codex".into());
+            agent
+                .metadata
+                .insert("clone_path".into(), cwd.to_string_lossy().into());
+            let provider = crate::accounts::Provider::Codex;
+            let old = crate::account_selection::tests::row(provider, "old", 1, 100., 100.);
+            let next = crate::account_selection::tests::row(provider, "next", 8, 20., 20.);
+            agent.metadata.insert(
+                "worker_account_dir".into(),
+                old.folder.to_string_lossy().into(),
+            );
+            let agents = crate::store::open_agent_store(&root).unwrap();
+            agents.register(&agent).unwrap();
+            let mut task = cas_types::Task::new("cas-held".into(), "unfinished".into());
+            task.assignee = Some("worker".into());
+            task.status = cas_types::TaskStatus::InProgress;
+            crate::store::open_task_store(&root)
+                .unwrap()
+                .add(&task)
+                .unwrap();
+            let now = "2026-10-27T12:00:00Z".parse().unwrap();
+            let episode = episode_key("session", "worker", "first");
+            let detail = queue_limit_switch_with(
+                &root,
+                &agent.id,
+                &episode,
+                now,
+                |_| Ok(vec![old, next]),
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert!(detail.contains("old -> next"));
+            let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+            let rows = queue.peek(10).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].action, cas_store::SpawnAction::Recycle);
+            assert_eq!(rows[0].worker_names, vec!["worker"]);
+            let replay = queue_limit_switch_with(
+                &root,
+                &agent.id,
+                &episode,
+                now,
+                |_| panic!("persisted episode must not rescan accounts"),
+                |_| panic!("persisted episode must not preflight"),
+            )
+            .unwrap();
+            assert_eq!(detail, replay);
+            assert_eq!(queue.peek(10).unwrap().len(), 1);
+            assert_eq!(
+                std::fs::read(cwd.join("uncommitted.txt")).unwrap(),
+                b"keep every byte\0"
+            );
+            assert_eq!(
+                run_git(&cwd, &["branch", "--show-current"]).unwrap(),
+                "factory/held-task"
+            );
+            assert_eq!(
+                crate::store::open_task_store(&root)
+                    .unwrap()
+                    .get("cas-held")
+                    .unwrap()
+                    .assignee
+                    .as_deref(),
+                Some("worker")
+            );
+            // Neither direct queueing nor stale queued metadata can target a supervisor.
+            agent.role = cas_types::AgentRole::Supervisor;
+            agents.update(&agent).unwrap();
+            assert!(
+                queue_limit_switch_with(
+                    &root,
+                    &agent.id,
+                    "new-episode",
+                    now,
+                    |_| panic!(),
+                    |_| panic!()
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("supervisor")
+            );
+            let value: serde_json::Value =
+                serde_json::from_str(rows[0].worker_spec.as_deref().unwrap()).unwrap();
+            let meta: LimitRecycle =
+                serde_json::from_value(value["limit_recycle"].clone()).unwrap();
+            let spec = serde_json::from_value(value).unwrap();
+            assert!(prepare_limit_resume(&root, "worker", &meta, &spec).is_err());
+        });
+    }
+
     #[test]
     fn paired_provider_switch_excludes_limited_identity_and_persists_recipe_or_refusal() {
         for (provider, cli) in [

@@ -4,7 +4,7 @@
 //! Factory TUI polls this queue and processes the requests.
 
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -546,6 +546,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     fn init(&self) -> Result<()> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(SPAWN_QUEUE_SCHEMA)?;
+        conn.execute_batch(USAGE_LIMIT_EPISODE_SCHEMA)?;
         // Note: force/isolate columns are now in SPAWN_QUEUE_SCHEMA inline.
         // Old DBs are upgraded via migration m193_spawn_queue_force_isolate.
         Ok(())
@@ -705,17 +706,56 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
 
     fn record_limit_episode(
         &self,
-        _episode: &str,
-        _worker: &str,
-        _session: &str,
-        _spec_json: Option<&str>,
+        episode: &str,
+        worker: &str,
+        session: &str,
+        spec_json: Option<&str>,
         detail: &str,
     ) -> Result<(Option<i64>, String)> {
-        Ok((None, detail.to_owned()))
+        crate::shared_db::with_write_retry(|| {
+            let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let existing = tx
+                .query_row(
+                    "SELECT request_id, detail FROM usage_limit_episodes WHERE episode=?",
+                    [episode],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM spawn_queue WHERE processed_at IS NULL AND (factory_session=? OR factory_session IS NULL) AND instr(',' || coalesce(worker_names,'') || ',', ',' || ? || ',') > 0)", params![session,worker], |r| r.get(0))?;
+            let detail = if spec_json.is_some() && busy {
+                format!("blocked switch for {worker}: lifecycle request already queued. {detail}")
+            } else {
+                detail.to_owned()
+            };
+            let request_id = if let Some(spec) = spec_json.filter(|_| !busy) {
+                tx.execute("INSERT INTO spawn_queue(action,worker_names,isolate,worker_spec,factory_session,spawn_state,spawn_state_at) VALUES ('recycle',?,1,?,?,'queued',?)", params![worker,spec,session,Utc::now().to_rfc3339()])?;
+                Some(tx.last_insert_rowid())
+            } else {
+                None
+            };
+            tx.execute(
+                "INSERT INTO usage_limit_episodes(episode,detail,request_id) VALUES (?,?,?)",
+                params![episode, detail, request_id],
+            )?;
+            tx.commit()?;
+            Ok((request_id, detail))
+        })
     }
 
-    fn limit_episode(&self, _episode: &str) -> Result<Option<(Option<i64>, String)>> {
-        Ok(None)
+    fn limit_episode(&self, episode: &str) -> Result<Option<(Option<i64>, String)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn
+            .query_row(
+                "SELECT request_id,detail FROM usage_limit_episodes WHERE episode=?",
+                [episode],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>> {

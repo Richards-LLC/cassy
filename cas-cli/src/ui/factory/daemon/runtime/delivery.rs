@@ -934,6 +934,11 @@ impl FactoryDaemon {
                     fingerprint,
                     std::time::Instant::now(),
                     || {
+                        // cas-cd73: the send's own bounded grant, not the
+                        // pass's leftovers; it ends with this closure.
+                        let _send_budget = cas_store::wait_budget::grant_waits_for(
+                            super::store_worker::COMMANDER_SEND_STORE_WAIT_BUDGET,
+                        );
                         let outcome = self.enqueue_attributed_message(
                             &target,
                             &text,

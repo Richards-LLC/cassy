@@ -2495,7 +2495,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     );
     assert!(
         !super::server::is_pane_read_message(&semantic),
-        "SendMessage remains a leased mutation"
+        "SendMessage is a semantic mutation, not a pane read"
     );
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));

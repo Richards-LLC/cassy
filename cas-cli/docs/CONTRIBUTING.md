@@ -1,5 +1,13 @@
 # Contributing to Cassy
 
+## Commander message and terminal permissions
+
+A supervisor message requires `message:send`; it does not acquire or require a
+pane input lease. A message-only pairing can therefore send while another
+paired device controls the terminal. Raw terminal input still requires both
+`pane:input` and that device's active session lease. Message permission never
+grants terminal input authority.
+
 ## Automatic supervisor replies
 
 Completed supervisor replies are mirrored to local operator conversation history

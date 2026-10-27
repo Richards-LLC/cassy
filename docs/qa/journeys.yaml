@@ -70,6 +70,11 @@ invariants:
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: delivery by a running
       daemon and operator stamping are doubled'
+  HUB-J5-SEND-WITHOUT-PANE-LEASE:
+    statement: A message-only pairing sends without a pane input lease and never gains raw terminal input authority
+    check: 'Run hub::server::upstream_unavailable_tests and the HUB-J5 message-only/Send again journey parts;
+      verify semantic messages reach the authenticated upstream and raw Input is still forbidden.'
+    bug: {task: cas-d402}
   HUB-J6-GOAL:
     statement: I speak my reply, check it, and send it
     check: 'Walk HUB-J6 in hub-web/e2e/journeys/reply-voice.journey.ts; verify the expected experience and edge
@@ -583,6 +588,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-SEND-WITHOUT-PANE-LEASE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

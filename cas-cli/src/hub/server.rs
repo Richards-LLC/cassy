@@ -2713,6 +2713,10 @@ async fn proxy_socket(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal.")]
+struct PaneInputPermissionRequired;
+
 async fn handle_client_message(
     connector: &DaemonConnector,
     session: &str,
@@ -2727,6 +2731,9 @@ async fn handle_client_message(
     store.ensure_active_context(context, now)?;
     let allowed = if read_message {
         context.has(Scope::PaneRead)
+    } else if matches!(&message, ClientMessage::SendMessage { .. }) {
+        // A queued supervisor message does not write to the shared terminal.
+        context.has(Scope::MessageSend)
     } else {
         context.has(scope) && store.has_active_lease(context, session, now)?
     };
@@ -2743,6 +2750,9 @@ async fn handle_client_message(
             Some(session),
             now,
         )?;
+        if scope == Scope::PaneInput && !context.has(scope) {
+            return Err(PaneInputPermissionRequired.into());
+        }
         anyhow::bail!("authorization refused")
     }
     if let ClientMessage::SendMessage { attribution, .. } = &mut message {
@@ -3356,7 +3366,9 @@ fn is_upstream_unavailable(failure: &anyhow::Error) -> bool {
 /// missing, otherwise the unchanged `forbidden` refusal.
 fn legacy_send_error(failure: &anyhow::Error, client_ref: Option<&str>) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
-        return legacy_forbidden_error(client_ref);
+        let mut error = legacy_forbidden_error(client_ref);
+        describe_pane_input_permission(failure, &mut error);
+        return error;
     }
     let mut error = serde_json::json!({
         "error": crate::hub::connector::UPSTREAM_UNAVAILABLE,
@@ -3377,7 +3389,9 @@ fn multiplex_send_error(
     client_ref: Option<&str>,
 ) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
-        return multiplex_forbidden_error(session, client_ref);
+        let mut error = multiplex_forbidden_error(session, client_ref);
+        describe_pane_input_permission(failure, &mut error["error"]);
+        return error;
     }
     let mut error = serde_json::json!({
         "channel": format!("pty:{session}"),
@@ -3391,6 +3405,14 @@ fn multiplex_send_error(
         error["error"]["client_ref"] = serde_json::Value::String(client_ref.to_owned());
     }
     error
+}
+
+/// Explain a missing terminal grant without changing the refusal code.
+fn describe_pane_input_permission(failure: &anyhow::Error, error: &mut serde_json::Value) {
+    if failure.is::<PaneInputPermissionRequired>() {
+        error["required_scope"] = serde_json::json!(Scope::PaneInput.as_str());
+        error["message"] = serde_json::json!(PaneInputPermissionRequired.to_string());
+    }
 }
 
 /// Preserve the submitted reference on a legacy attach refusal without
@@ -3812,6 +3834,13 @@ async fn acquire_lease<R: SessionReadModel>(
     ) {
         Ok(Some(context)) => context,
         Ok(None) => return unauthorized(),
+        Err(error) if error.to_string() == "scope denied" && required_scope == Scope::PaneInput => {
+            return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "scope_denied",
+                "required_scope": Scope::PaneInput.as_str(),
+                "message": PaneInputPermissionRequired.to_string(),
+            }))).into_response(), &headers);
+        }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
     match state.auth.as_ref().unwrap().acquire_or_force_lease(
@@ -4388,10 +4417,8 @@ mod upstream_unavailable_tests {
     use super::*;
     use crate::hub::SessionMultiplexer;
 
-    /// The 2026-09-26 22:52Z field shape: a controlling device's send
-    /// reached the hub while no daemon upstream could take it. It came back
-    /// `forbidden` with no audit row. It now fails with the retryable
-    /// upstream error and leaves an `unavailable` audit row.
+    /// Semantic sends need message:send alone, even without a pane lease.
+    /// They reach the upstream boundary; raw terminal input remains refused.
     #[tokio::test]
     async fn a_send_with_no_daemon_upstream_is_audited_and_retryable_cas_a0e2() {
         let temp = crate::test_support::private_hub_tempdir();
@@ -4419,7 +4446,6 @@ mod upstream_unavailable_tests {
             scopes,
             request_id: "request-a0e2".into(),
         };
-        auth.acquire_lease(&phone, "factory-a", now).unwrap();
         let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
         let frame = serde_json::json!({
             "SendMessage": {
@@ -4460,21 +4486,26 @@ mod upstream_unavailable_tests {
         assert_eq!(row["target_session"], "factory-a");
         assert_eq!(row["request_id"], "request-a0e2");
 
-        // A device without the lease is still refused as before, and that
-        // refusal stays `forbidden`.
-        auth.release_lease(&phone, "factory-a", now).unwrap();
+        // Giving this send-only device a lease must not grant raw pane input.
+        auth.acquire_lease(&phone, "factory-a", now).unwrap();
+        let input = serde_json::to_vec(&ClientMessage::Input {
+            pane_id: "supervisor".into(),
+            data: b"whoami\n".to_vec(),
+        }).unwrap();
         let refused = handle_client_message(
             &connector,
             "factory-a",
             &Some((auth.clone(), phone)),
-            &bytes,
+            &input,
         )
         .await
-        .expect_err("no lease");
+        .expect_err("message:send and a lease do not grant pane:input");
         assert!(!is_upstream_unavailable(&refused));
-        assert_eq!(
-            legacy_send_error(&refused, Some("send-a0e2"))["error"],
-            "forbidden"
-        );
+        let legacy = legacy_send_error(&refused, Some("send-a0e2"));
+        assert_eq!(legacy["error"], "forbidden");
+        assert_eq!(legacy["required_scope"], "pane:input");
+        assert!(legacy["message"].as_str().unwrap().contains("Pair this device again"));
+        let multiplex = multiplex_send_error(&refused, "factory-a", Some("send-a0e2"));
+        assert_eq!(multiplex["error"]["message"], legacy["message"]);
     }
 }

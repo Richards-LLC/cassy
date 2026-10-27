@@ -97,11 +97,11 @@ describe("Cassy Cloud supervisor send plan", () => {
     expect(planSupervisorSend(context())).toEqual({ kind: "send" });
   });
 
-  it("takes control first when nobody controls the session, and says so", () => {
-    const plan = planSupervisorSend(context({ leaseHeldByMe: false }));
-    expect(plan.kind).toBe("take-control-then-send");
-    if (plan.kind !== "take-control-then-send") return;
-    expect(plan.notice).toContain("control");
+  it("sends with message-only scope regardless of the pane controller", () => {
+    for (const [leaseHeldByMe, leaseControllerLabel] of [[false, undefined], [false, "Daniel's phone"], [true, undefined]] as const) {
+      expect(planSupervisorSend(context({ scopes: ["message-send"], leaseHeldByMe, leaseControllerLabel })))
+        .toEqual({ kind: "send" });
+    }
   });
 
   it("refuses an empty message instead of sending whitespace to the supervisor", () => {
@@ -134,15 +134,6 @@ describe("Cassy Cloud supervisor send plan", () => {
       .toMatchObject({ kind: "blocked", block: "no-session" });
   });
 
-  it("names the operator holding control instead of failing silently", () => {
-    const plan = planSupervisorSend(context({ leaseHeldByMe: false, leaseControllerLabel: "Daniel's phone" }));
-    expect(plan).toMatchObject({ kind: "blocked", block: "controlled-elsewhere" });
-    if (plan.kind !== "blocked") return;
-    expect(plan.reason).toContain("Daniel's phone");
-    // Journey F5: plain words, no hub or controller vocabulary.
-    expect(plan.reason).toBe("Daniel's phone is in control of this session. Wait for it to release control, or take over with an administrator credential.");
-    expect(plan.reason).not.toMatch(/\bhub\b|controller/);
-  });
 
   it("blocks a session with no supervisor and a hub without Cassy Cloud control", () => {
     expect(planSupervisorSend(context({ supervisor: undefined })))
@@ -160,7 +151,6 @@ describe("Cassy Cloud supervisor send plan", () => {
       planSupervisorSend(context({ supervisor: undefined })),
       planSupervisorSend(context({ daemonAttach: false })),
       planSupervisorSend(context({ scopes: ["machine-read"] })),
-      planSupervisorSend(context({ leaseHeldByMe: false, leaseControllerLabel: "Studio Mac" })),
     ]) {
       expect(plan.kind).toBe("blocked");
       if (plan.kind !== "blocked") continue;

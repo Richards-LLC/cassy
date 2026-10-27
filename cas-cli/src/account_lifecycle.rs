@@ -875,17 +875,58 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_answer_reads_input_buffered_by_an_earlier_prompt() {
+        use std::io::{BufRead, Write};
+        const CHILD: &str = "CAS_TEST_BUFFERED_DUPLICATE_ANSWER";
+        if std::env::var_os(CHILD).is_some() {
+            let mut first = String::new();
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            input.read_line(&mut first).unwrap();
+            assert_eq!(first, "earlier\n");
+            assert_eq!(input.fill_buf().unwrap(), b"y\n", "answer must be buffered");
+            drop(input);
+            let signals = LoginSignals::enter().unwrap();
+            assert_eq!(signals.answer().unwrap().trim(), "y");
+            return;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "account_lifecycle::tests::duplicate_answer_reads_input_buffered_by_an_earlier_prompt", "--nocapture"])
+            .env(CHILD, "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn().unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"earlier\ny\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn remove_refuses_unreadable_known_repos() {
         use crate::store::{AgentStore, SqliteAgentStore};
-        for corrupt in [false, true] {
+        for schema in ["missing", "corrupt", "malformed"] {
             let env = crate::test_support::TestEnvGuard::temp_home();
             let root = env.home().join(".cas");
-            if corrupt {
+            if schema == "corrupt" {
                 std::fs::write(root.join("cas.db"), "not a sqlite database").unwrap();
             } else {
-                // A healthy agent DB with an unreadable/missing repo table must
-                // not silently turn into an empty list of registered repositories.
                 SqliteAgentStore::open(&root).unwrap().init().unwrap();
+                if schema == "malformed" {
+                    let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+                    conn.execute_batch("CREATE TABLE known_repos (unexpected TEXT)")
+                        .unwrap();
+                }
             }
             let target = Target {
                 provider: Provider::Codex,
@@ -895,14 +936,19 @@ mod tests {
             };
             std::fs::create_dir(&target.folder).unwrap();
             let result = remove(&target, env.home());
+            if schema == "missing" {
+                result.expect("a legacy host with no repo table has no registered repositories");
+                assert!(!target.folder.exists());
+                continue;
+            }
             assert!(
                 result.is_err(),
-                "an unreadable repo list must refuse removal"
+                "{schema}: unreadable repo list must refuse removal"
             );
             let error = format!("{:#}", result.unwrap_err());
             assert!(error.contains("known repositories"));
             // pin: the final line must remain a copyable diagnostic command.
-            assert!(error.ends_with("\nRun: cas doctor"));
+            assert!(error.ends_with("\nRun: cas update"));
             assert!(target.folder.is_dir());
         }
     }

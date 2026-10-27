@@ -89,7 +89,7 @@ async function healthy() {
 }
 async function startHub() {
   state.hub = launch(
-    ["hub", "serve", "--port", String(hubPort)],
+    ["hub", "serve", "--no-tailscale-serve", "--port", String(hubPort)],
     "hub-process.log",
   );
   const end = performance.now() + 15000;
@@ -107,6 +107,13 @@ async function cleanup() {
   if (state.paused) state.hub.kill("SIGCONT");
   await stop(state.hub);
   await stop(state.daemon);
+  const ownedLaunch = join(state.home, "launched-pid");
+  if (existsSync(ownedLaunch)) {
+    const pid = Number(await readFile(ownedLaunch, "utf8"));
+    if (Number.isSafeInteger(pid) && pid > 1) {
+      try { process.kill(-pid, "SIGTERM"); } catch (e) { if (e.code !== "ESRCH") throw e; }
+    }
+  }
   if (state.tls) {
     for (const socket of state.sockets) socket.destroy();
     state.tls.closeAllConnections();
@@ -137,7 +144,7 @@ function startDaemon() {
     "daemon-process.log",
   );
 }
-async function reset({ messageControl = false } = {}) {
+async function reset({ messageControl = false, newSession = false } = {}) {
   await cleanup();
   const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
@@ -147,12 +154,41 @@ async function reset({ messageControl = false } = {}) {
   await mkdir(bin);
   await writeFile(
     join(bin, "claude"),
-    `#!/usr/bin/python3\nimport sys,time\nif '--version' in sys.argv: print('2.1.47');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Claude Code disposable test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`,
+    `#!/usr/bin/python3\nimport sys,time\nif sys.argv[1:3] == ['auth','status']: print('{\"loggedIn\":true}');sys.exit(0)\nif '--version' in sys.argv: print('2.1.47');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Claude Code disposable test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`,
     { mode: 0o700 },
   );
+  if (newSession) await writeFile(join(bin, "claude"), `#!/usr/bin/python3
+import sys,os,json,subprocess
+if sys.argv[1:3] == ['auth','status']: print('{"loggedIn":true}');sys.exit(0)
+if '--version' in sys.argv: print('2.1.47');sys.exit(0)
+if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)
+def reply(message):
+ payload=json.dumps(dict(schema_version=2,reply_to=None,message=message,summary=message,device_id='*',kind='status',attachments=[]))
+ subprocess.run([${JSON.stringify(cli)},'--json','factory','message','--session',os.environ['CAS_FACTORY_SESSION'],'--project-dir',os.getcwd(),'--target','operator','--from','supervisor','--no-wrap','--message',payload],stdout=subprocess.DEVNULL,check=True)
+print('Claude Code disposable test supervisor\\n> ',flush=True)
+started=False
+for line in sys.stdin:
+ if not started:
+  reply('Supervisor ready');started=True
+ if 'ping launch supervisor' in line: reply('Launch supervisor answered')
+`, { mode: 0o700 });
+  await mkdir(join(home, ".claude"));
+  // The user-service manager is the sole host boundary: retain this fixture's
+  // HOME and containment instead of asking the real login manager to launch
+  // into the operator's HOME. The hub's actual reaper, daemon and PTY execute.
+  if (newSession) await writeFile(join(bin, "systemd-run"), `#!/usr/bin/python3
+import sys,os,subprocess
+args=sys.argv[1:]
+cwd=next(a.split('=',1)[1] for a in args if a.startswith('--working-directory='))
+log=next(a.split('append:',1)[1] for a in args if a.startswith('--property=StandardError=append:'))
+with open(log,'ab',buffering=0) as out:
+ p=subprocess.Popen(args[args.index('--')+1:],cwd=cwd,stdin=subprocess.DEVNULL,stdout=out,stderr=out,start_new_session=True)
+with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: f.write(str(p.pid))
+`, { mode: 0o700 });
   const env = {
     HOME: home,
     XDG_CONFIG_HOME: join(home, "config"),
+    XDG_RUNTIME_DIR: join(home, "runtime"),
     CAS_ROOT: join(project, ".cas"),
     CAS_AGENT_NAME: process.env.CAS_AGENT_NAME ?? "real-hub-qa",
     PATH: `${bin}:/usr/bin:/bin`,
@@ -169,10 +205,21 @@ async function reset({ messageControl = false } = {}) {
     join(project, ".cas", "config.toml"),
     "[factory]\nai_enrichment = false\n",
   );
-  startDaemon();
+  if (newSession) {
+    // A machine hub commonly inherits the project that originally started it.
+    const launcher = join(home, "launcher");
+    await mkdir(launcher);
+    await run("git", ["init", "-q", launcher], { env, timeout: 5000 });
+    await run(cli, ["init", "--yes", "--no-integrations"], {
+      cwd: launcher, env: { ...env, CAS_ROOT: join(launcher, ".cas") }, timeout: 15000,
+    });
+    state.env.CAS_ROOT = join(launcher, ".cas");
+    await writeFile(join(home, ".cas", "config.toml"), `[hub]\nlaunch_roots = [${JSON.stringify(home)}]\n`);
+  }
+  if (!newSession) startDaemon();
   const deadline = performance.now() + 20000;
   let meta;
-  while (performance.now() < deadline) {
+  while (!newSession && performance.now() < deadline) {
     const dir = join(home, ".cas", "sessions");
     if (existsSync(dir)) {
       for (const f of await readdir(dir)) {
@@ -186,7 +233,7 @@ async function reset({ messageControl = false } = {}) {
     if (state.daemon.exitCode !== null) break;
     await delay(100);
   }
-  if (!meta)
+  if (!newSession && !meta)
     throw Error(
       `real daemon startup failed: ${redactQaText(await readFile(join(home, "daemon-process.log"), "utf8"))}`,
     );
@@ -276,7 +323,7 @@ async function reset({ messageControl = false } = {}) {
         "--json",
         "hub",
         "pair",
-        ...(messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
+        ...(newSession ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send,session-launch"] : messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
         "--origin",
         origin,
         "--hub-url",
@@ -288,7 +335,8 @@ async function reset({ messageControl = false } = {}) {
     pairUrl: pair.url,
     session: state.session,
     hubUrl,
-    daemonPid: state.daemon.pid,
+    daemonPid: state.daemon?.pid,
+    project,
     hubPid: state.hub.pid,
     version: (await cas(["--version"])).stdout.trim(),
   };
@@ -378,6 +426,9 @@ async function evidence() {
     daemonLog: redactQaText(
       await readLogs(join(state.project, ".cas", "logs")),
     ),
+    launchLogs: existsSync(join(state.home, ".cas", "logs", "factory"))
+      ? await Promise.all((await readdir(join(state.home, ".cas", "logs", "factory"))).map(async (name) => ({ name, log: redactQaText(await readLogs(join(state.home, ".cas", "logs", "factory", name))) })))
+      : [],
     hubPid: state.hub?.pid,
     daemonPid: state.daemon?.pid,
   };

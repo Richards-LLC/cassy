@@ -5,6 +5,10 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::{Command, Output};
+use std::time::Duration;
+
+use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
 use chrono::{DateTime, Local, TimeZone, Utc};
 use clap::Args;
@@ -90,6 +94,24 @@ fn collect_limits() -> LimitsReport {
 }
 
 fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
+    collect_claude_with(
+        account,
+        config_dir,
+        cfg!(target_os = "macos"),
+        Deadline::after(Duration::from_secs(4)),
+        &mut run_command,
+        |request| request.call(),
+    )
+}
+
+fn collect_claude_with(
+    account: &str,
+    config_dir: &Path,
+    _macos: bool,
+    _deadline: Deadline,
+    _run: &mut impl FnMut(&mut Command, Deadline, Duration) -> Result<Output, BoundedCommandError>,
+    fetch: impl FnOnce(ureq::Request) -> Result<ureq::Response, ureq::Error>,
+) -> AccountLimit {
     let credentials_path = config_dir.join(".credentials.json");
     let credentials: ClaudeCredentials = match fs::read_to_string(&credentials_path)
         .ok()
@@ -107,13 +129,13 @@ fn collect_claude(account: &str, config_dir: &Path) -> AccountLimit {
         );
     };
     let plan = oauth.subscription_type;
-    let response = ureq::get(CLAUDE_USAGE_URL)
+    let request = ureq::get(CLAUDE_USAGE_URL)
         .set("Authorization", &format!("Bearer {}", oauth.access_token))
         .set("Accept", "application/json")
         .set("anthropic-version", "2023-06-01")
         .set("anthropic-beta", "oauth-2025-04-20")
-        .timeout(std::time::Duration::from_secs(8))
-        .call();
+        .timeout(std::time::Duration::from_secs(8));
+    let response = fetch(request);
     match response {
         Ok(response) => match response.into_json::<Value>().ok().map(parse_claude_usage) {
             Some(windows) if !windows.is_empty() => AccountLimit {
@@ -178,7 +200,11 @@ fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::pat
                 ".claude" => "claude-main".to_string(),
                 ".claude-alt" => "claude-alt".to_string(),
                 ".codex" => "codex".to_string(),
-                other => format!("{}-{}", provider.name(), other.trim_start_matches(provider.prefix())),
+                other => format!(
+                    "{}-{}",
+                    provider.name(),
+                    other.trim_start_matches(provider.prefix())
+                ),
             };
             found.push((provider, label, account.path));
         }
@@ -514,6 +540,63 @@ impl fmt::Debug for ClaudeOauth {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn cas_3870_main_keychain_usage_reaches_picker() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = env.home().join(".claude");
+        let mut called = false;
+        let limit = collect_claude_with(
+            "claude-main",
+            &dir,
+            true,
+            Deadline::after(Duration::from_secs(4)),
+            &mut |command, deadline, cap| {
+                called = true;
+                assert_eq!(command.get_program(), "security");
+                assert_eq!(
+                    command.get_args().collect::<Vec<_>>(),
+                    [
+                        "find-generic-password",
+                        "-s",
+                        "Claude Code-credentials",
+                        "-w"
+                    ]
+                );
+                assert!(deadline.remaining() <= Duration::from_secs(4));
+                assert!(cap <= Duration::from_secs(4));
+                Ok(Output {
+                    status: std::process::ExitStatus::from_raw(0),
+                    stdout: br#"{"claudeAiOauth":{"accessToken":"fixture-secret","subscriptionType":"max"}}"#.to_vec(),
+                    stderr: Vec::new(),
+                })
+            },
+            |request| {
+                assert_eq!(request.url(), CLAUDE_USAGE_URL);
+                assert!(request.header("Authorization") == Some("Bearer fixture-secret"));
+                ureq::Response::new(
+                    200,
+                    "OK",
+                    r#"{"five_hour":{"utilization":12},"seven_day":{"utilization":34}}"#,
+                )
+                .map_err(Into::into)
+            },
+        );
+        assert!(called);
+        assert_eq!(limit.state, "active");
+        assert_eq!(limit.plan.as_deref(), Some("max"));
+        assert_eq!(summarize(&limit).as_deref(), Some("5h 12%, weekly 34%"));
+        assert!(
+            !serde_json::to_string(&limit)
+                .unwrap()
+                .contains("fixture-secret")
+        );
+        assert!(!format!("{limit:?}").contains("fixture-secret"));
+        assert!(!dir.join(".credentials.json").exists());
+    }
+
     #[test]
     fn parses_codex_primary_and_secondary_windows() {
         let value: Value = serde_json::json!({"primary":{"used_percent":26.0,"window_minutes":10080,"resets_at":1787011690},"secondary":{"used_percent":7.0,"window_minutes":300,"resets_at":1786651690},"plan_type":"pro"});
@@ -575,8 +658,11 @@ mod tests {
         );
         // pin: the busiest windows when nothing is used up.
         assert_eq!(
-            summarize(&limit(vec![window("5h", 42.4, None), window("weekly", 82.0, None)]))
-                .as_deref(),
+            summarize(&limit(vec![
+                window("5h", 42.4, None),
+                window("weekly", 82.0, None)
+            ]))
+            .as_deref(),
             Some("5h 42%, weekly 82%")
         );
         assert_eq!(summarize(&limit(Vec::new())), None);

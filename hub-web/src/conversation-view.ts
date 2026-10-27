@@ -444,6 +444,7 @@ export class ConversationView {
   private readonly below: HTMLElement;
   private readonly loadLater: HTMLButtonElement;
   private windowFrame?: number;
+  private earlierIntent = false;
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
   /**
@@ -547,6 +548,17 @@ export class ConversationView {
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
+    // Browser pinning/focus recovery also emits scroll. Only a reading gesture
+    // may start an older network request; explicit Load earlier works as well.
+    this.element.addEventListener("wheel", event => { this.earlierIntent = event.deltaY < 0; }, { passive: true });
+    this.element.addEventListener("keydown", event => { this.earlierIntent = ["ArrowUp", "PageUp", "Home"].includes(event.key); });
+    let touchY: number | undefined;
+    this.element.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY; }, { passive: true });
+    this.element.addEventListener("touchmove", event => {
+      const next = event.touches[0]?.clientY;
+      if (next !== undefined && touchY !== undefined) this.earlierIntent = next > touchY;
+      touchY = next;
+    }, { passive: true });
     this.element.addEventListener("scroll", () => {
       // cas-6a9b: a scroll that moved the thread up and off its tail is the
       // reader, whatever else is in flight. Layout never does that: a pin
@@ -710,8 +722,9 @@ export class ConversationView {
     this.windowFrame = requestAnimationFrame(() => {
       this.windowFrame = undefined;
       if (this.disposed) return;
-      if (up && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)
+      if (up && this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)
         && !this.window.hasEarlier && this.options.hasEarlier?.() && !this.options.loadingEarlier?.()) {
+        this.earlierIntent = false;
         this.options.loadEarlier?.();
       } else this.update();
     });

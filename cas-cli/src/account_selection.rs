@@ -140,7 +140,7 @@ fn capacity(
         };
         // Past timestamps remain evidence of rollover even when the registry
         // clears the stale percentage. Null reset + known usage is unopened.
-        if w.resets_at.is_some_and(|reset| reset <= now) {
+        if w.resets_at.is_none_or(|reset| reset <= now) {
             return Ok((None, 0.0));
         }
         let used = w
@@ -262,6 +262,8 @@ pub(crate) mod tests {
                     resets_at: None,
                 },
             );
+            let mut unopened_without_percent = null_reset.clone();
+            unopened_without_percent.windows[0].used_percent = None;
             let mut expired_five = null_reset.clone();
             expired_five.windows[0].used_percent = Some(100.0);
             expired_five.windows[0].resets_at = Some(now);
@@ -355,6 +357,13 @@ pub(crate) mod tests {
                 (
                     "idle Claude null 5h reset",
                     vec![busy.clone(), null_reset],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("idle"),
+                ),
+                (
+                    "unopened 5h without percentage",
+                    vec![busy.clone(), unopened_without_percent],
                     AccountSelection::SoonestReset,
                     90,
                     Some("idle"),

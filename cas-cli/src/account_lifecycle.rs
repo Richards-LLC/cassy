@@ -374,16 +374,21 @@ fn remove_with(
     ensure_idle(target, home)?;
     read_policy(home)?;
     let aliases = removal_aliases(target, home)?;
-    // remove_dir_all unlinks symlinks within the tree, never traverses them.
-    if std::fs::symlink_metadata(&target.folder)?
+    let is_alias = std::fs::symlink_metadata(&target.folder)?
         .file_type()
-        .is_symlink()
-    {
-        // Keep a disabled physical login disabled when only its alias is removed,
-        // including old policy files that still store the alias spelling.
-        if disabled(home, &target.folder) {
-            set_disabled(home, &target.folder, true)?;
-        }
+        .is_symlink();
+    // Resolve identities while every path still exists (HOME itself may be a
+    // symlink). After deletion, canonicalize cannot recover these policy keys.
+    let canonical_paths: Vec<_> = std::iter::once(&target.folder)
+        .chain(&aliases)
+        .map(|path| path.canonicalize())
+        .collect::<std::io::Result<_>>()?;
+    // Normalize legacy alias policy entries before their spelling disappears.
+    if disabled(home, &target.folder) {
+        set_disabled(home, &target.folder, true)?;
+    }
+    // remove_dir_all unlinks symlinks within the tree, never traverses them.
+    if is_alias {
         std::fs::remove_file(&target.folder)?;
     } else {
         std::fs::remove_dir_all(&target.folder)?;
@@ -408,6 +413,12 @@ fn remove_with(
         set_disabled(home, &target.folder, false)?;
         for alias in &aliases {
             set_disabled(home, alias, false)?;
+        }
+        // Unlinking an alias must retain the physical login's disabled state.
+        if !is_alias {
+            for path in &canonical_paths {
+                set_disabled(home, path, false)?;
+            }
         }
         Ok(())
     })();
@@ -435,6 +446,11 @@ pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
         "Account folder already exists: {}",
         to.display()
     );
+    let old_canonical = target.folder.canonicalize()?;
+    let was_disabled = disabled(home, &target.folder);
+    if was_disabled {
+        set_disabled(home, &target.folder, true)?;
+    }
     std::fs::rename(&target.folder, &to)?;
     if cfg!(target_os = "macos") && target.provider == Provider::Claude {
         if let Err(error) = keychain_rekey(&target.folder, &to, &mut security) {
@@ -443,9 +459,10 @@ pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
             return Err(error);
         }
     }
-    if disabled(home, &target.folder) {
+    if was_disabled && old_canonical != to.canonicalize()? {
         set_disabled(home, &to, true)?;
         set_disabled(home, &target.folder, false)?;
+        set_disabled(home, &old_canonical, false)?;
     }
     Ok(())
 }

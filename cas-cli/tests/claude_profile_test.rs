@@ -760,7 +760,10 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         }
         // Lifecycle lookup must retain both aliases even though write scans
         // collapse their common physical target (legacy alt sorts first).
+        let physical_home = TempDir::new().unwrap();
         let aliases_home = TempDir::new().unwrap();
+        std::fs::remove_dir(aliases_home.path()).unwrap();
+        std::os::unix::fs::symlink(physical_home.path(), aliases_home.path()).unwrap();
         let real = aliases_home.path().join(format!(".{provider}-work"));
         let link = aliases_home.path().join(format!(".{provider}-alt"));
         std::fs::create_dir(&real).unwrap();
@@ -794,11 +797,32 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         }
         cas_cmd(aliases_home.path())
             .current_dir(aliases_home.path())
+            .args(["accounts", "disable", &format!("{provider}:work")])
+            .assert()
+            .success();
+        cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
             .args(["accounts", "rename", &format!("{provider}:work"), "renamed"])
             .assert()
             .success();
         let renamed = aliases_home.path().join(format!(".{provider}-renamed"));
         assert!(renamed.join("keep").is_file());
+        let output = cas_cmd(aliases_home.path())
+            .current_dir(aliases_home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
+        let rows: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let moved = rows["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "renamed")
+            .unwrap();
+        assert_eq!(
+            moved["flags"]["disabled"], true,
+            "renaming through a symlinked HOME retains disabled state"
+        );
         cas_cmd(aliases_home.path())
             .current_dir(aliases_home.path())
             .args(["accounts", "rename", &format!("{provider}:renamed"), "work"])

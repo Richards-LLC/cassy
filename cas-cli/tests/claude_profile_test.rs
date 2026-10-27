@@ -30,6 +30,7 @@ fn cas_cmd(home: &std::path::Path) -> Command {
 
 /// Configure a home dir with `~/.claude-alt` logged in and `~/.claude-work` not.
 fn setup_home_with_profiles(home: &std::path::Path) {
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
     let alt = home.join(".claude-alt");
     std::fs::create_dir_all(&alt).unwrap();
     std::fs::create_dir_all(home.join(".claude-work")).unwrap();
@@ -86,7 +87,7 @@ fn list_profiles_shows_detected_accounts_and_login_state() {
         .stdout(predicate::str::contains("Usage: cas claude <profile>"))
         // pin: cas-e1f4 two-line rows that fit 80 columns.
         .stdout(predicate::str::contains(
-            "  operator@example.com (logged in) (active)\n    ~/.claude-alt\n",
+            "  operator@example.com (alt) (logged in) (active)\n    ~/.claude-alt\n",
         ))
         .stdout(predicate::str::contains(
             "  main (not logged in)\n    ~/.claude\n",
@@ -151,7 +152,7 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let rows = json["accounts"].as_array().unwrap();
-    assert_eq!(rows.len(), 5);
+    assert_eq!(rows.len(), 6);
     let row = |provider, name| {
         rows.iter()
             .find(|a| a["provider"] == provider && a["name"] == name)
@@ -174,8 +175,12 @@ fn accounts_list_json_includes_both_providers_flags_and_absolute_resets() {
     assert_eq!(team["plan"], "pro");
     assert_eq!(team["windows"][0]["used_percent"], 45.0);
     assert_eq!(row("codex", "team@example.com")["windows"], team["windows"]);
-    assert!(rows.iter().position(|a| a["name"] == "team@example.com").unwrap()
-        < rows.iter().position(|a| a["name"] == "team").unwrap());
+    assert!(
+        rows.iter()
+            .position(|a| a["name"] == "team@example.com")
+            .unwrap()
+            < rows.iter().position(|a| a["name"] == "team").unwrap()
+    );
     assert_eq!(
         chrono::DateTime::parse_from_rfc3339(team["windows"][0]["resets_at"].as_str().unwrap())
             .unwrap()
@@ -204,40 +209,86 @@ fn account_launch_resolves_display_emails_and_refuses_ambiguous_or_unknown_names
     let home = home_with_profiles();
     let bin = home.path().join("bin");
     for provider in ["claude", "codex"] {
-        cas::test_paths::warm_stub(&bin.join(provider), r#"#!/bin/sh
+        cas::test_paths::warm_stub(
+            &bin.join(provider),
+            r#"#!/bin/sh
 if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true}'; exit 0; fi
 if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
 printf 'SELECTED=%s\n' "${CLAUDE_CONFIG_DIR:-${CODEX_HOME:-main}}"
-"#);
-        for (alias, email) in [("main", "main@example.com"), ("alt", "shared@example.com"), ("work", "shared@example.com")] {
-            let dir = home.path().join(if alias == "main" { format!(".{provider}") } else { format!(".{provider}-{alias}") });
+"#,
+        );
+        for (alias, email) in [
+            ("main", "main@example.com"),
+            ("alt", "shared@example.com"),
+            ("work", "shared@example.com"),
+        ] {
+            let dir = home.path().join(if alias == "main" {
+                format!(".{provider}")
+            } else {
+                format!(".{provider}-{alias}")
+            });
             std::fs::create_dir_all(&dir).unwrap();
             if provider == "claude" {
                 let json = serde_json::json!({"oauthAccount": {"emailAddress": email}}).to_string();
-                std::fs::write(if alias == "main" { home.path().join(".claude.json") } else { dir.join(".claude.json") }, json).unwrap();
+                std::fs::write(
+                    if alias == "main" {
+                        home.path().join(".claude.json")
+                    } else {
+                        dir.join(".claude.json")
+                    },
+                    json,
+                )
+                .unwrap();
             } else {
-                let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::json!({"email": email}).to_string());
-                std::fs::write(dir.join("auth.json"), serde_json::json!({"tokens": {"id_token": format!("h.{claims}.s")}}).to_string()).unwrap();
+                let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::json!({"email": email}).to_string());
+                std::fs::write(
+                    dir.join("auth.json"),
+                    serde_json::json!({"tokens": {"id_token": format!("h.{claims}.s")}})
+                        .to_string(),
+                )
+                .unwrap();
             }
         }
         let command = |name: &str| {
             let mut cmd = cas_cmd(home.path());
-            cmd.env_remove("CODEX_HOME").env_remove("CLAUDE_CONFIG_DIR").env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            cmd.env_remove("CODEX_HOME")
+                .env_remove("CLAUDE_CONFIG_DIR")
+                .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
                 .args([provider, "--bare", name, "--version"]);
             cmd
         };
-        command("main@example.com").assert().success().stdout(predicate::str::contains("SELECTED=main"));
-        assert!(!home.path().join(format!(".{provider}-main@example.com")).exists());
-        command("shared@example.com").assert().failure()
-            .stderr(predicate::str::contains("ambiguous")).stderr(predicate::str::contains("alt"))
+        command("main@example.com")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("SELECTED=main"));
+        assert!(
+            !home
+                .path()
+                .join(format!(".{provider}-main@example.com"))
+                .exists()
+        );
+        command("shared@example.com")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("ambiguous"))
+            .stderr(predicate::str::contains("alt"))
             .stderr(predicate::str::contains("work"));
-        command("altt").assert().failure().stderr(predicate::str::contains("alt"))
-            .stderr(predicate::str::contains(format!("cas {provider} login altt")));
+        command("altt")
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("alt"))
+            .stderr(predicate::str::contains(format!(
+                "cas {provider} login altt"
+            )));
         assert!(!home.path().join(format!(".{provider}-altt")).exists());
         // An exact existing folder alias wins even when its text is another login's email.
         let exact = home.path().join(format!(".{provider}-main@example.com"));
         std::fs::create_dir(&exact).unwrap();
-        command("main@example.com").assert().success().stdout(predicate::str::contains(exact.to_string_lossy().as_ref()));
+        command("main@example.com")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(exact.to_string_lossy().as_ref()));
     }
 }
 

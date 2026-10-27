@@ -3,6 +3,10 @@
 //! display names are presentation only. Consumers should require `LoggedIn`,
 //! known usage, and their own flag policy before automatically choosing an account.
 
+mod resolve;
+pub(crate) use resolve::resolve_worker_accounts;
+pub use resolve::{resolve_config_dir, resolve_existing};
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -316,6 +320,54 @@ fn refresh(accounts: &mut [Account]) {
     drop(sender);
     receive_updates(accounts, receiver, until);
     mark_duplicates(accounts);
+    accounts.sort_by_key(|a| {
+        (
+            a.provider.name(),
+            a.flags
+                .duplicate_of
+                .clone()
+                .unwrap_or_else(|| a.folder.clone()),
+            a.flags.duplicate_of.is_some(),
+            a.folder.clone(),
+        )
+    });
+}
+
+/// Refresh picker capacity through the same identity-sharing path as the list.
+pub(crate) fn picker_usage_summaries(
+    provider: Provider,
+    folders: Vec<(String, PathBuf)>,
+    deadline: Duration,
+) -> std::collections::HashMap<String, String> {
+    let mut rows: Vec<_> = folders
+        .into_iter()
+        .map(|(name, folder)| {
+            let home = folder.parent().unwrap_or(Path::new("/"));
+            let mut row = account(provider, home, folder.clone());
+            row.name = name;
+            row
+        })
+        .collect();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let until = Instant::now() + deadline;
+    for (i, row) in rows.iter().enumerate() {
+        let sender = sender.clone();
+        let folder = row.folder.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send((
+                i,
+                None,
+                Some(crate::cli::limits::account_usage(provider, &folder)),
+            ));
+        });
+    }
+    drop(sender);
+    receive_updates(&mut rows, receiver, until);
+    rows.into_iter()
+        .filter_map(|row| {
+            crate::cli::limits::summarize_windows(&row.windows).map(|summary| (row.name, summary))
+        })
+        .collect()
 }
 
 type ProbeUpdate = (
@@ -343,7 +395,43 @@ fn receive_updates(
             usage[i] = snapshot;
         }
     }
+    let mut newest = std::collections::HashMap::new();
+    for (i, a) in accounts.iter().enumerate() {
+        if a.provider != Provider::Codex {
+            continue;
+        }
+        if let (Some(identity), Some(snapshot)) = (&a.identity, &usage[i]) {
+            if snapshot.windows.is_empty() {
+                continue;
+            }
+            let key = (a.provider.name(), identity.clone());
+            let replace = newest.get(&key).is_none_or(|&previous: &usize| {
+                usage[previous].as_ref().unwrap().observed_at < snapshot.observed_at
+            });
+            if replace {
+                newest.insert(key, i);
+            }
+        }
+    }
+    let shared: Vec<_> = accounts
+        .iter()
+        .map(|a| {
+            a.identity
+                .as_ref()
+                .and_then(|id| newest.get(&(a.provider.name(), id.clone())))
+                .and_then(|&i| usage[i].clone())
+        })
+        .collect();
     for (i, a) in accounts.iter_mut().enumerate() {
+        // Login acceptance remains folder-local; only capacity/plan are shared.
+        if let Some(snapshot) = &shared[i] {
+            if let Some(own) = &mut usage[i] {
+                own.plan = snapshot.plan.clone();
+                own.windows = snapshot.windows.clone();
+            } else {
+                usage[i] = Some(snapshot.clone());
+            }
+        }
         if let Some(state) = states[i] {
             set_login(a, state);
         }
@@ -380,6 +468,7 @@ mod tests {
                 Some(LoginState::Unknown),
                 Some(crate::cli::limits::AccountUsage {
                     plan: Some("pro".into()),
+                    observed_at: None,
                     rejected: false,
                     authenticated: false,
                     windows: vec![UsageWindow {

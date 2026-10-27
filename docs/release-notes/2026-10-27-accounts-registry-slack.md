@@ -13,6 +13,12 @@ Live on production · User · Account choices now distinguish folders sharing on
 Was: accounts sharing a login appeared with the same email and no folder alias.
 → Now: the picker shows the alias beside the email so you can tell them apart.
 
+Was: choosing a displayed email or a mistyped name could start an empty account folder.
+→ Now: unique emails resolve to existing accounts; ambiguous emails and unknown names stop with an alias or login command.
+
+Was: expired or duplicate account snapshots could show misleading usage.
+→ Now: expired windows say usage is unknown, and folders sharing a subscription use the newest snapshot.
+
 Was: an account stored in a linked folder could disappear from the picker.
 → Now: linked account folders appear, and unreadable entries are skipped.
 

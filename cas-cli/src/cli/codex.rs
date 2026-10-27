@@ -214,7 +214,8 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
             "  {} ({login}){active}{usage}\n    {directory}\n",
-            profile.display_name,
+            if profile.display_name == profile.name { profile.name.clone() }
+            else { format!("{} ({})", profile.display_name, profile.name) },
         ));
     }
     output.push('\n');
@@ -441,7 +442,8 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
 
     let mut profile = match args.profile() {
         // An explicitly named account is the no-prompt fast path.
-        Some(profile) => profile.to_string(),
+        Some(profile) => crate::account_registry::resolve_existing(
+            crate::accounts::Provider::Codex, &home, profile)?.name,
         None => {
             let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
             let profiles = scan_profiles(&home, active_dir.as_deref()).with_context(|| {

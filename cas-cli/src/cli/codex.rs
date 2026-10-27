@@ -168,7 +168,7 @@ fn classify_login_output(success: bool, stdout: &str, stderr: &str) -> LoginStat
 }
 
 /// Ask the codex CLI itself whether this profile's credential is usable.
-fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
+pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
     if !profile_dir.is_dir() {
         return LoginState::LoggedOut;
     }
@@ -208,7 +208,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
             "  {} ({login}){active}{usage}\n    {directory}\n",
-            profile.name,
+            profile.display_name,
         ));
     }
     output.push('\n');

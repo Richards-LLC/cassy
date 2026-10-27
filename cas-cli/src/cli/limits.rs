@@ -178,7 +178,11 @@ fn account_dirs(home: &Path) -> Vec<(crate::accounts::Provider, String, std::pat
                 ".claude" => "claude-main".to_string(),
                 ".claude-alt" => "claude-alt".to_string(),
                 ".codex" => "codex".to_string(),
-                other => format!("{}-{}", provider.name(), other.trim_start_matches(provider.prefix())),
+                other => format!(
+                    "{}-{}",
+                    provider.name(),
+                    other.trim_start_matches(provider.prefix())
+                ),
             };
             found.push((provider, label, account.path));
         }
@@ -196,6 +200,55 @@ pub(crate) fn usage_summary(provider: crate::accounts::Provider, dir: &Path) -> 
     summarize(&limit)
 }
 
+/// Structured account usage for the shared registry. The collector remains
+/// provider-owned, including its credential-store implementation.
+pub(crate) struct AccountUsage {
+    pub plan: Option<String>,
+    pub windows: Vec<crate::account_registry::UsageWindow>,
+    pub rejected: bool,
+    pub authenticated: bool,
+}
+
+pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> AccountUsage {
+    let limit = match provider {
+        crate::accounts::Provider::Claude => collect_claude("account", dir),
+        crate::accounts::Provider::Codex => collect_codex("account", dir),
+    };
+    AccountUsage {
+        plan: limit.plan,
+        rejected: limit.state == "auth-needed"
+            && limit
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("rejected")),
+        authenticated: provider == crate::accounts::Provider::Claude && limit.state == "active",
+        windows: limit
+            .windows
+            .into_iter()
+            .map(|window| crate::account_registry::UsageWindow {
+                name: window.name,
+                used_percent: window.used_percent,
+                resets_at: window.reset_at.as_deref().and_then(|value| {
+                    DateTime::parse_from_rfc3339(value)
+                        .ok()
+                        .map(|time| time.with_timezone(&Utc))
+                }),
+            })
+            .collect(),
+    }
+}
+
+fn display_reset(value: &str) -> String {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|time| {
+            time.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M %Z")
+                .to_string()
+        })
+        .unwrap_or_else(|| value.to_string())
+}
+
 fn summarize(limit: &AccountLimit) -> Option<String> {
     let windows: Vec<&LimitWindow> = limit
         .windows
@@ -208,7 +261,7 @@ fn summarize(limit: &AccountLimit) -> Option<String> {
         .max_by(|a, b| a.reset_at.cmp(&b.reset_at))
     {
         return Some(match &full.reset_at {
-            Some(reset) => format!("{} limit hit, resets {reset}", full.name),
+            Some(reset) => format!("{} limit hit, resets {}", full.name, display_reset(reset)),
             None => format!("{} limit hit", full.name),
         });
     }
@@ -434,15 +487,14 @@ fn local_unix(timestamp: i64) -> Option<String> {
     Local
         .timestamp_opt(timestamp, 0)
         .single()
-        .map(|time| time.format("%Y-%m-%d %H:%M %Z").to_string())
+        .map(|time| time.with_timezone(&Utc).to_rfc3339())
 }
 
 fn local_rfc3339(timestamp: &str) -> Option<String> {
-    timestamp.parse::<DateTime<Utc>>().ok().map(|time| {
-        time.with_timezone(&Local)
-            .format("%Y-%m-%d %H:%M %Z")
-            .to_string()
-    })
+    timestamp
+        .parse::<DateTime<Utc>>()
+        .ok()
+        .map(|time| time.to_rfc3339())
 }
 
 fn compact_line(report: &LimitsReport) -> String {
@@ -486,7 +538,7 @@ fn print_human(report: &LimitsReport) {
             let reset = window
                 .reset_at
                 .as_deref()
-                .map(|value| format!(", resets {value}"))
+                .map(|value| format!(", resets {}", display_reset(value)))
                 .unwrap_or_default();
             let spend = window
                 .spend_dollars
@@ -522,6 +574,21 @@ mod tests {
         assert_eq!(windows[0].name, "weekly");
         assert_eq!(windows[1].name, "5h");
         assert_eq!(windows[0].used_percent, Some(26.0));
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join("sessions")).unwrap();
+        std::fs::write(
+            home.path().join("sessions/rollout.jsonl"),
+            serde_json::json!({"payload": {"rate_limits": value}}).to_string(),
+        )
+        .unwrap();
+        let usage = account_usage(crate::accounts::Provider::Codex, home.path());
+        assert_eq!(usage.plan.as_deref(), Some("pro"));
+        assert_eq!(usage.windows[0].resets_at.unwrap().timestamp(), 1787011690);
+        assert_eq!(usage.windows[1].used_percent, Some(7.0));
+        assert!(
+            !usage.authenticated,
+            "a transcript does not prove a current login"
+        );
     }
 
     #[test]
@@ -575,8 +642,11 @@ mod tests {
         );
         // pin: the busiest windows when nothing is used up.
         assert_eq!(
-            summarize(&limit(vec![window("5h", 42.4, None), window("weekly", 82.0, None)]))
-                .as_deref(),
+            summarize(&limit(vec![
+                window("5h", 42.4, None),
+                window("weekly", 82.0, None)
+            ]))
+            .as_deref(),
             Some("5h 42%, weekly 82%")
         );
         assert_eq!(summarize(&limit(Vec::new())), None);

@@ -129,7 +129,7 @@ fn scan_profiles(home: &Path, active_dir: Option<&Path>) -> io::Result<Vec<Profi
 ///
 /// File existence is not sufficient: macOS normally uses Keychain, and a
 /// stale `.credentials.json` may contain an expired or revoked credential.
-fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
+pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
     let mut command = Command::new("claude");
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(["auth", "status", "--json"]);
@@ -199,7 +199,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
             "  {} ({login}){active}{usage}\n    {directory}\n",
-            profile.name,
+            profile.display_name,
         ));
     }
     output.push('\n');

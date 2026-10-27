@@ -14,6 +14,8 @@ pub struct AccountsArgs {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum AccountsCommand {
+    /// List Claude and Codex subscriptions, usage, resets and login findings
+    List,
     /// Link every account's shared items (commands, skills, settings, project
     /// memory, ...) to one base folder; logins stay per account. Retires
     /// ~/.claude, ~/.claude-alt and ~/.codex as accounts. Everything replaced
@@ -53,6 +55,11 @@ impl ProviderArg {
 pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
     match &args.command {
+        AccountsCommand::List => {
+            let accounts = crate::account_registry::collect(&home)?;
+            print!("{}", render_list(&accounts, cli.json, &home)?);
+            Ok(())
+        }
         AccountsCommand::Link { dry_run, provider } => {
             let plans = provider
                 .providers()
@@ -84,17 +91,17 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
                     print!(
                         "{}",
                         crate::cloud::presence::wrap_line(&format!(
-                        "[OK] {}: {} file{} merged ({} conflict{} kept side by side), {} link{}, {} dir change{}",
-                        plan.provider.name(),
-                        done.merged,
-                        if done.merged == 1 { "" } else { "s" },
-                        done.conflicts,
-                        if done.conflicts == 1 { "" } else { "s" },
-                        done.linked,
-                        if done.linked == 1 { "" } else { "s" },
-                        done.dir_changes,
-                        if done.dir_changes == 1 { "" } else { "s" },
-                    ))
+                            "[OK] {}: {} file{} merged ({} conflict{} kept side by side), {} link{}, {} dir change{}",
+                            plan.provider.name(),
+                            done.merged,
+                            if done.merged == 1 { "" } else { "s" },
+                            done.conflicts,
+                            if done.conflicts == 1 { "" } else { "s" },
+                            done.linked,
+                            if done.linked == 1 { "" } else { "s" },
+                            done.dir_changes,
+                            if done.dir_changes == 1 { "" } else { "s" },
+                        ))
                     );
                     println!("  Backup: {}", done.backup.display());
                     println!("  Undo:   bash {}", done.restore.display());
@@ -141,5 +148,111 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// Both the command and its contract test use this serialization/render path.
+fn render_list(
+    accounts: &[crate::account_registry::Account],
+    json: bool,
+    home: &std::path::Path,
+) -> Result<String> {
+    if json {
+        return Ok(format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::json!({"accounts": accounts}))?
+        ));
+    }
+    let flagged = accounts
+        .iter()
+        .filter(|a| {
+            a.flags.duplicate_of.is_some() || a.flags.never_logged_in || a.flags.stale_login
+        })
+        .count();
+    let mut out = format!(
+        "[{}] {} accounts, {} flagged\n",
+        if flagged == 0 { "OK" } else { "WARN" },
+        accounts.len(),
+        flagged
+    );
+    for provider in Provider::ALL {
+        out.push_str(&format!("\n{}\n", provider.name()));
+        out.push_str(&format!("  {:<34} {:<12} {}\n", "ACCOUNT", "PLAN", "LOGIN"));
+        for a in accounts.iter().filter(|a| a.provider == provider) {
+            use crate::account_registry::LoginState;
+            let login = match a.login_state {
+                LoginState::LoggedIn => "logged in",
+                LoginState::LoggedOut => "logged out",
+                LoginState::NeverLoggedIn => "never logged in",
+                LoginState::StaleLogin => "stale login",
+                LoginState::Unknown => "login unknown",
+            };
+            out.push_str(&format!(
+                "  {:<34} {:<12} {}\n",
+                cell(&a.display_name, 34),
+                cell(a.plan.as_deref().unwrap_or("unknown"), 12),
+                login
+            ));
+            let folder = a
+                .folder
+                .strip_prefix(home)
+                .map(|rest| format!("~/{}", rest.display()))
+                .unwrap_or_else(|_| a.folder.display().to_string());
+            out.push_str(&format!("    folder: {}\n", cell(&folder, 64)));
+            for name in ["5h", "weekly"] {
+                let w = a.windows.iter().find(|w| w.name == name);
+                let used = w
+                    .and_then(|w| w.used_percent)
+                    .map(|used| format!("{used:.0}%"));
+                let reset = w
+                    .and_then(|w| w.resets_at)
+                    .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string());
+                out.push_str(&format!(
+                    "    {name:>6}: {:>13}  resets {}\n",
+                    used.as_deref().unwrap_or("usage unknown"),
+                    reset.as_deref().unwrap_or("unknown")
+                ));
+            }
+            if let Some(folder) = &a.flags.duplicate_of {
+                out.push_str(&format!(
+                    "    duplicate of: {}\n",
+                    cell(
+                        &folder.file_name().unwrap_or_default().to_string_lossy(),
+                        60
+                    )
+                ));
+            }
+            if a.flags.never_logged_in {
+                out.push_str("    flag: never logged in\n");
+            }
+            if a.flags.stale_login {
+                out.push_str("    flag: credential rejected\n");
+            }
+        }
+        if !accounts.iter().any(|a| a.provider == provider) {
+            out.push_str("  No accounts found.\n");
+        }
+    }
+    out.push_str("\nFull values: cas accounts list --json\n");
+    Ok(out)
+}
+
+// Keep terminal cells ASCII (also under LC_ALL=C), one line and bounded.
+// JSON preserves the exact values, including non-ASCII account names.
+fn cell(value: &str, width: usize) -> String {
+    let value: String = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if value.len() <= width {
+        value
+    } else {
+        format!("{}...", &value[..width.saturating_sub(3)])
     }
 }

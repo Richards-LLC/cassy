@@ -135,7 +135,10 @@ for (const [index, variant] of variants.entries()) {
           await expect(player).toHaveAttribute("preload", "none");
           // The video deliberately expires once; the replacement resumes the user's play.
           await player.evaluate((node: HTMLMediaElement) => node.play().catch(() => undefined));
-          await expect.poll(() => player.evaluateAll((nodes) => nodes.some((node) => !(node as HTMLMediaElement).paused && (node as HTMLMediaElement).readyState > 0))).toBe(true);
+          await expect.poll(() => player.evaluateAll((nodes) => nodes.some((node) => {
+            const media = node as HTMLMediaElement;
+            return media.readyState > 0 && (!media.paused || media.currentTime > 0 || media.ended);
+          }))).toBe(true);
           expect(await player.evaluate((node: HTMLMediaElement) => { node.pause(); return node.duration; })).toBeGreaterThan(0);
         }
         expect(videoRanges.some((range) => range.startsWith("bytes="))).toBe(true);

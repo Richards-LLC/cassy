@@ -506,7 +506,8 @@ dir="${CLAUDE_CONFIG_DIR:-$CODEX_HOME}"
         let account = h.join(format!(".{provider}-w@x.com"));
         std::fs::create_dir_all(account.join("agents")).unwrap();
         let login = if provider == "claude" { ".credentials.json" } else { "auth.json" };
-        std::fs::write(account.join(login), "{\"secret\":1}").unwrap();
+        let secret = b"{\"secret\":1}";
+        std::fs::write(account.join(login), secret).unwrap();
 
         let output = cas_cmd(h)
             .env_remove("CODEX_HOME")
@@ -522,11 +523,11 @@ dir="${CLAUDE_CONFIG_DIR:-$CODEX_HOME}"
         assert!(stderr.contains(&format!(
             "Linked 1 shared item in ~/.{provider}-w@x.com from ~/.cas/{provider}-base\n"
         )), "{stderr}");
-        assert!(stderr.contains(&format!(
-            "Warning: 1 shared item in ~/.{provider}-w@x.com not linked to ~/.cas/{provider}-base: agents. Fix: cas doctor --fix --yes\n"
-        )), "{stderr}");
+        // pin: the warning names the item and the exact fix command (task AC).
+        let warning = format!("Warning: 1 shared item in ~/.{provider}-w@x.com not linked to ~/.cas/{provider}-base: agents. Fix: cas doctor --fix --yes\n");
+        assert!(stderr.contains(&warning), "{stderr}");
         assert!(account.join("agents").is_dir() && !account.join("agents").is_symlink());
-        assert_eq!(std::fs::read_to_string(account.join(login)).unwrap(), "{\"secret\":1}");
+        assert_eq!(std::fs::read(account.join(login)).unwrap(), secret, "credentials untouched");
     }
 }
 

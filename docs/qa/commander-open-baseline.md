@@ -12,12 +12,12 @@ No product code was changed for this investigation.
 From `hub-web`, after `npm ci`, run this single finite command:
 
 ```bash
-node scripts/conversation-open-perf.mjs --db /home/pippenz/Petrastella/cassy/.cas/cas.db --session cassy-quiet-panther-51 --output /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/rerun --flow backlog --repeats 1
+node scripts/conversation-open-perf.mjs --db "<project>/.cas/cas.db" --session "<session>" --output "<task-artifacts>/rerun" --flow backlog --repeats 1
 ```
 
 For the identical frozen input, replace `--db ... --session ...` with
-`--capture /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/final/private-history.json`.
-Use a new output directory per run. `--flow history` measures the bounded
+`--capture "<task-artifacts>/final/private-history.json"`.
+Replace the angle-bracket placeholders with the project, session, artifact directory and candidate build for your machine. Use a new output directory per run. `--flow history` measures the bounded
 page and repeated explicit Load earlier separately, without the live backlog.
 `--repeats 3` produces median/min/max summaries. The measurement does not
 assert that hundreds of bubbles must remain, so the fix can reuse it.
@@ -191,8 +191,10 @@ source never replaced this worktree's product files.
 From `hub-web`, the fixed replay command is:
 
 ```bash
-node scripts/conversation-open-perf.mjs --capture /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/final/private-history.json --output /home/pippenz/.cas/artifacts/cassy-bbb8e75581403d3edc2689512df64eaf37780d70a032cb0d79850218dfada14a/cas-d1b1/fixed --flow backlog --repeats 1 --dist /home/pippenz/Petrastella/cassy/.cas/worktrees/quick-octopus-91/target/cas-d1b1-fixed/hub-web/dist --bundle-revision b7eeeaa33
+node scripts/conversation-open-perf.mjs --capture "<task-artifacts>/final/private-history.json" --output "<task-artifacts>/fixed" --flow backlog --repeats 1 --dist "<candidate-build>/hub-web/dist" --bundle-revision b7eeeaa33
 ```
+
+For persistence acceptance, add `--require-all-acked`: it asserts that every frozen pending notification ID was durably acknowledged before reconnect, rather than treating cumulative ACK counts as identity coverage. Each phase records expected/acknowledged/remaining IDs, replayed pending IDs and a timestamped ACK timeline. Baseline runs omit that flag so failed persistence can still be measured.
 
 The supplied `--dist` must be built with source maps from the stated revision.
 The probe revision and bundle revision are recorded separately in the receipt.
@@ -210,6 +212,24 @@ sample as a stable median. No physical network timing is inferred.
 | phone: reload_resume | 58298 | 36018 | 41 / 156 | 277 / 199 | 307 |
 
 ACK totals are cumulative observations at each phase, not unique-id counts or proof that all replies persisted. The null fix increases successful ACKs, but cold phone input is still **47.19 s**, essentially the original exploratory **47.3 s** experience. It does not meet the opening budget. The matched baseline/candidate runs each passed both named profile cases, but host one-minute load was 10.12 versus 20.53 on the same 32-logical-CPU machine, so these single samples do not establish a speedup/regression percentage. In particular, reconnect remains about 19.5 s, while hundreds of duplicate old frames still trigger view work. Remaining durable-write failures and transaction pressure need their own isolation; rendering/windowing remains required.
+
+## Follow-up persistence candidate: unique-ID coverage
+
+The opt-in identity gate also passed against candidate `c296c03ae` with the
+same frozen 327 pending IDs. Both desktop and phone acknowledged all **327
+unique IDs**, with no remaining IDs before reconnect. Phone reconnect and
+reload each replayed **zero** pending live replies. This resolves the
+incomplete-ACK uncertainty observed in the earlier null-label-only candidate;
+it does not yet implement presentation windowing.
+
+| Phone flow | Input acknowledged after flow, ms | Frozen IDs acknowledged | Pending live frames |
+| --- | ---: | ---: | ---: |
+| initial | 17722 | 327/327 | 283 |
+| warm_reopen | 855 | 327/327 | 0 |
+| reconnect | 2978 | 327/327 | 0 |
+| reload_resume | 2302 | 327/327 | 0 |
+
+Proof: `c296-identity.log`, `c296-identity/{desktop-0,phone-0}/receipt.json` and their timestamped ACK timelines and CPU/trace files. This is a separate single-sample run, not a controlled speedup percentage. The ambient-Date CI rejection was corrected by deriving the epoch from `performance.timeOrigin + performance.now()`; `npm run check:journey-clock` passes without a checker exception.
 
 ## Evidence
 

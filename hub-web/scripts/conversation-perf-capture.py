@@ -32,7 +32,7 @@ def turns(rows):
                 payload = json.loads(row["prompt"])
             except ValueError:
                 continue
-            if payload.get("schema_version") not in [1, 2]:
+            if not isinstance(payload, dict) or payload.get("schema_version") not in [1, 2]:
                 continue
             reply = {**payload, **common}
             reply.pop("schema_version", None)
@@ -88,8 +88,11 @@ pending_rows = db.execute(f"SELECT {columns} FROM prompt_queue WHERE factory_ses
 # Daemon live OperatorReply omits the durable history timestamp/session.
 capture["pending_replies"] = []
 for row in pending_rows:
-    payload = json.loads(row["prompt"])
-    if payload.get("schema_version") not in [1, 2]:
+    try:
+        payload = json.loads(row["prompt"])
+    except ValueError:
+        continue
+    if not isinstance(payload, dict) or payload.get("schema_version") not in [1, 2]:
         continue
     payload.pop("schema_version", None)
     payload["notification_id"] = row["id"]

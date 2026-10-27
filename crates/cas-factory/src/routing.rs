@@ -204,8 +204,8 @@ pub enum RoutingError {
     #[error("unknown lane {0:?}")]
     UnknownLane(String),
 
-    #[error("lane {lane:?} has no active recipe candidates")]
-    NoActiveRecipe { lane: String },
+    #[error("lane {lane:?} has no active recipe candidates: {}", .skipped.join("; "))]
+    NoActiveRecipe { lane: String, skipped: Vec<String> },
 
     #[error("lane {lane:?} references unknown recipe or lane {reference:?}")]
     UnknownReference { lane: String, reference: String },
@@ -734,6 +734,7 @@ pub fn resolve_lane_from_registry(
 
     Err(RoutingError::NoActiveRecipe {
         lane: lane_name.to_string(),
+        skipped,
     })
 }
 
@@ -1958,6 +1959,34 @@ candidates = ["primary", "fallback"]
             decision.warnings[0],
             "fallback: fallback (primary primary unavailable: Codex account is logged out)"
         );
+    }
+
+    #[test]
+    fn exhausted_lane_names_each_skipped_recipe_cas_cba9() {
+        let mut registry = embedded_registry().unwrap().clone();
+        registry.recipes.get_mut("codex_sol_6").unwrap().status = RecipeStatus::Suspended;
+        registry.recipes.get_mut("codex_sol_6").unwrap().reason = Some("maintenance".into());
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["codex_sol_6_1"], "default"),
+            CapabilityEvidence::new(
+                CapabilityAvailability::Unavailable,
+                CapabilitySnapshot::now_ms(),
+            )
+            .with_reason("Codex account is logged out"),
+        );
+        let error = resolve_lane_from_registry("standard", &snapshot, &registry)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no active recipe candidates"), "{error}");
+        for detail in [
+            "codex_sol_6_1",
+            "Codex account is logged out",
+            "codex_sol_6",
+            "maintenance",
+        ] {
+            assert!(error.contains(detail), "missing {detail:?}: {error}");
+        }
     }
 
     #[test]

@@ -188,7 +188,8 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// worktrees were cut, four workers registered, and every first turn died in
 /// about a second.
 ///
-/// Only an affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
+/// Codex also requires an explicit or captured account selection. For a
+/// selected account, only affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
 /// probe that timed out, a harness with no account plumbing — must not block a
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
@@ -196,6 +197,51 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     // cas-c8de: the account probes and the codex version probe share one
     // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+    if specs.iter().any(|spec| {
+        spec.cli == cas_mux::SupervisorCli::Codex
+            && spec
+                .config_dir
+                .as_deref()
+                .filter(|dir| !dir.trim().is_empty())
+                .is_none()
+            && spec
+                .requester_config_dir
+                .as_deref()
+                .filter(|dir| !dir.trim().is_empty())
+                .is_none()
+    }) {
+        // Capability can aggregate accounts; a worker must use one account
+        // chosen by its caller. Never silently select a different login.
+        let homes =
+            dirs::home_dir().and_then(|home| crate::accounts::codex_homes(&home, None).ok());
+        let logged_in = homes.map(|homes| {
+            homes
+                .into_iter()
+                .filter(|home| {
+                    home.to_str().is_some_and(|home| {
+                        crate::capability::probe_account_auth(
+                            cas_mux::SupervisorCli::Codex,
+                            Some(home),
+                            deadline,
+                        )
+                        .availability
+                            == cas_factory::CapabilityAvailability::Available
+                    })
+                })
+                .map(|home| home.display().to_string())
+                .collect::<Vec<_>>()
+        });
+        let accounts = match logged_in {
+            Some(homes) if !homes.is_empty() => homes.join(", "),
+            Some(_) => "none confirmed; run `codex login` under the intended CODEX_HOME".into(),
+            None => "account registry unreadable".into(),
+        };
+        return Err(format!(
+            "spawn refused: no Codex account selected. Pass config_dir with the intended CODEX_HOME \
+             (or launch the supervisor with CODEX_HOME set). Registered logged-in Codex homes: {accounts}. \
+             No worktree was created and no task was assigned."
+        ));
+    }
     preflight_account_auth_with(
         specs,
         |cli, account_dir| crate::capability::probe_account_auth(cli, account_dir, deadline),
@@ -2787,6 +2833,11 @@ impl CasService {
             }
         }
 
+        // Validate the chosen account before the legacy strict fallback can
+        // hide an unselected Codex account behind a default-home auth error.
+        // This gate runs before any queue insertion or worktree creation.
+        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
+
         // A caller who requested Codex must either receive Codex or an
         // actionable refusal. Rewriting the provider/tier to Claude here is
         // a cost and capability change the supervisor did not approve.
@@ -2821,11 +2872,6 @@ impl CasService {
                 ));
             }
         }
-        // cas-8a55: the last gate before this request becomes worktrees. A
-        // logged-out account is refused here, by name, instead of producing
-        // workers that register, take their task and die on the first turn
-        // while still heartbeating.
-        preflight_account_auth(&specs).map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e))?;
         for notice in notices.iter().chain(config_dir_warnings.iter()) {
             tracing::warn!(target: "cas::factory", "{notice}");
         }
@@ -12572,6 +12618,100 @@ mod spawn_lifecycle_tests {
         cache("0.146.0", &model);
         preflight_account_auth_with(&specs, logged_in, installed).unwrap();
         assert_eq!(probes.get(), 0, "a listed model needs no codex --version");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_spawn_requires_selected_account_cas_cba9() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.163.0'; exit 0; fi\nif [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in'; else echo 'Not logged in'; exit 1; fi\n").unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::env::var_os("CODEX_SPAWN_FIXTURE_CHILD").is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mcp::tools::service::factory_ops::spawn_lifecycle_tests::codex_spawn_requires_selected_account_cas_cba9", "--nocapture"])
+                .env("PATH", &bin)
+                .env("CODEX_SPAWN_FIXTURE_CHILD", "1")
+                .output().unwrap();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let logged_in = env.home().join(".codex-b@example.com");
+        std::fs::create_dir_all(&logged_in).unwrap();
+        std::fs::write(logged_in.join("auth.json"), "{}").unwrap();
+        let logged_out = env.home().join(".codex-a@example.com");
+        std::fs::create_dir_all(&logged_out).unwrap();
+        let mut spec = spec_for(cas_mux::SupervisorCli::Codex, None);
+        let error = preflight_account_auth(&[spec.clone()])
+            .expect_err("unselected account must refuse before launch");
+        for detail in [
+            "config_dir",
+            logged_in.to_str().unwrap(),
+            "No worktree was created",
+        ] {
+            assert!(error.contains(detail), "missing {detail:?}: {error}");
+        }
+        assert!(
+            !error.contains(logged_out.to_str().unwrap()),
+            "logged-out home must not be offered: {error}"
+        );
+        // The real direct-spawn entry must reach this refusal before the
+        // legacy strict fallback can replace it with a default-home error.
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        let mut epic =
+            cas_types::Task::new("cas-cba9-fixture".into(), "Codex account selection".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers", "count": 1, "cli": "codex"
+        }))
+        .unwrap();
+        let direct_error = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(service.factory_spawn_workers_in(
+                &crate::ops::fleet::FleetContext::operator("codex-account-fixture"),
+                request,
+            ))
+            .expect_err("direct spawn must refuse the unselected account");
+        for detail in ["config_dir", logged_in.to_str().unwrap()] {
+            assert!(
+                direct_error.message.contains(detail),
+                "missing {detail:?}: {direct_error}"
+            );
+        }
+        use cas_store::SpawnQueueStore;
+        assert!(
+            crate::store::open_spawn_queue_store(&cas_root)
+                .unwrap()
+                .peek(10)
+                .unwrap()
+                .is_empty()
+        );
+        spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
+        preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
+        spec.requester_config_dir = spec.config_dir.take();
+        preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
+        assert!(!env.home().join(".codex").exists());
     }
 
     #[test]

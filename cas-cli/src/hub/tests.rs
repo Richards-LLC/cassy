@@ -2567,6 +2567,67 @@ fn hub_forwards_the_operator_in_reply_to_reference_unchanged() {
     assert!(serde_json::to_value(&legacy).unwrap()["SendMessage"].get("in_reply_to").is_none());
 }
 
+/// cas-2109: the hub's `allowed` row is written when it forwards a send,
+/// before the daemon answers. The daemon's answer (queued id or refusal) is
+/// recorded too, keyed by client_ref, so a "Not sent" can be traced.
+#[test]
+fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_cas_2109() {
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let phone = AuthContext {
+        device_id: "phone".into(),
+        credential_id: "phone-credential".into(),
+        device_label: "Android".into(),
+        operator_label: "Daniel".into(),
+        controller_origin: "https://controller.example".into(),
+        scopes: [Scope::MessageSend].into_iter().collect(),
+        request_id: "request-2109".into(),
+    };
+    let auth = Some((AuthStore::open(&root, "machine-test").unwrap(), phone));
+    let mut pending = std::collections::HashSet::from([
+        ("factory-1".to_string(), "send-ok".to_string()),
+        ("factory-1".to_string(), "send-bad".to_string()),
+    ]);
+    let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
+        client_ref: Some("send-ok".into()),
+        notification_id: 77,
+        target: "supervisor".into(),
+        stamped: true,
+        device_label: Some("Android".into()),
+    })
+    .unwrap();
+    let refused = serde_json::to_vec(&DaemonMessage::Error {
+        message: "semantic message enqueue failed: database is locked".into(),
+        client_ref: Some("send-bad".into()),
+    })
+    .unwrap();
+    let admit = |pending: &mut std::collections::HashSet<(String, String)>, frame: &[u8]| {
+        super::server::admit_correlated_daemon_frame(pending, "factory-1", &auth, frame)
+    };
+    assert!(admit(&mut pending, &queued));
+    assert!(admit(&mut pending, &refused));
+    assert!(!admit(&mut pending, &queued), "a consumed answer is neither relayed nor audited again");
+
+    let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap_or_default();
+    let rows: Vec<serde_json::Value> = audit
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["action"] == "commander_send")
+        .collect();
+    assert_eq!(rows.len(), 2, "one outcome row per answered send:\n{audit}");
+    for row in &rows {
+        assert_eq!(row["target_session"], "factory-1");
+        assert_eq!(row["request_id"], "request-2109");
+        assert_eq!(row["device_id"], "phone");
+    }
+    assert_eq!(rows[0]["outcome"], "queued");
+    let detail = rows[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("client_ref=send-ok") && detail.contains("notification_id=77"), "{detail}");
+    assert_eq!(rows[1]["outcome"], "failed");
+    let detail = rows[1]["detail"].as_str().unwrap();
+    assert!(detail.contains("client_ref=send-bad") && detail.contains("database is locked"), "{detail}");
+}
+
 #[test]
 fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
     let mut pending = std::collections::HashSet::from([("factory-1".into(), "history-1".into())]);

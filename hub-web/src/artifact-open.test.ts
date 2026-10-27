@@ -137,10 +137,11 @@ describe("opening an artifact from Commander (cassy#910)", () => {
       credentialId: "credential-id", credential: "opaque", expiresAt: new Date(Date.now() + 60_000).toISOString(),
       scopes: ["session-read"], publicKey, privateKey,
     } satisfies StoredMachine;
-    const seen: Array<{ url: string; dpop: string | undefined }> = [];
+    const seen: Array<{ url: string; method?: string; dpop: string | undefined }> = [];
     vi.stubGlobal("fetch", async (input: URL | string, init?: RequestInit) => {
       const url = String(input);
-      seen.push({ url, dpop: (init?.headers as Record<string, string> | undefined)?.DPoP });
+      seen.push({ url, method: init?.method, dpop: (init?.headers as Record<string, string> | undefined)?.DPoP });
+      if (url.includes("art-preview")) return new Response(JSON.stringify({ ticket: "opaque-ticket", expires_at: "2030-01-01T00:00:00Z", url: "https://tracker.test/ignored" }), { status: 200 });
       if (url.includes("art-ok")) {
         return new Response(JSON.stringify({ artifact_id: "art-ok", url: "https://store.example/v?sig=1", expires_at: "2026-09-24T21:10:00Z" }), { status: 200 });
       }
@@ -155,5 +156,10 @@ describe("opening an artifact from Commander (cassy#910)", () => {
 
     const refused = await connection.artifactView("patient pelican", "art-local");
     expect(refused).toEqual({ ok: false, status: 409, code: "artifact_not_in_cloud", detail: "local" });
+    const preview = await connection.artifactPreview("patient pelican", "art-preview");
+    expect(preview).toEqual({ ok: true, view: { artifact_id: "art-preview", url: "https://atlas.test/v1/sessions/patient%20pelican/artifacts/art-preview/content?t=opaque-ticket", expires_at: "2030-01-01T00:00:00Z" } });
+    expect(seen.at(-1)?.url).toBe("https://atlas.test/v1/sessions/patient%20pelican/artifacts/art-preview/ticket");
+    expect(seen.at(-1)?.method).toBe("POST");
+    expect(seen.at(-1)?.dpop).toBeTruthy();
   });
 });

@@ -1034,11 +1034,12 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
-    /// Mirror only the effective pane values, after launch policy has removed
-    /// denied variables. Literal overrides leave operator `cs.env_vars` intact;
-    /// constructor-time snapshots could reintroduce values denied later by mux.
-    fn forward_codex_tool_caches(&mut self) {
-        for &name in TOOL_CACHE_ENV {
+    /// Mirror non-secret paths into Codex's curated CAS MCP environment after
+    /// launch policy. The effective account home must reach spawn_workers;
+    /// otherwise its availability check falls back to the default account.
+    /// Literal overrides preserve operator `cs.env_vars` and late pane overrides.
+    fn forward_codex_mcp_environment(&mut self) {
+        for name in std::iter::once("CODEX_HOME").chain(TOOL_CACHE_ENV.iter().copied()) {
             if self.env_remove.iter().any(|removed| removed == name) {
                 continue;
             }
@@ -1051,7 +1052,7 @@ impl PtyConfig {
                 .or_else(|| std::env::var(name).ok());
             if let Some(value) = value {
                 let value = serde_json::to_string(&value)
-                    .expect("serializing a cache path string cannot fail");
+                    .expect("serializing an MCP environment path string cannot fail");
                 self.args.extend([
                     "-c".to_string(),
                     format!("mcp_servers.cs.env.{name}={value}"),
@@ -2559,7 +2560,7 @@ impl Pty {
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
         if is_codex {
-            config.forward_codex_tool_caches();
+            config.forward_codex_mcp_environment();
         }
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as

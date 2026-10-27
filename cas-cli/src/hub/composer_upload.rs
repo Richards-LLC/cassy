@@ -14,7 +14,7 @@ const MAX_WIRE_BYTES: usize = 14 * 1024 * 1024;
 #[derive(Deserialize)]
 struct UploadRequest { name: String, data: String }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct UploadedFile { artifact_id: String, path: String, mime: String }
 
 pub(super) async fn upload<R: SessionReadModel>(

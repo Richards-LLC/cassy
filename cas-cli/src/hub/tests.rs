@@ -5225,6 +5225,11 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", [Scope::MessageSend].into_iter().collect());
     exchange.public_key_jwk = public_jwk(&signing);
     let credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
+    let read_signing = SigningKey::random(&mut OsRng);
+    let invitation = auth.mint_pairing("https://controller.example", Scope::default_read_only(), Utc::now()).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&read_signing);
+    let read_credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
     let mut session = fixture_session("factory-a");
     session.project_dir = Some(root.parent().unwrap().display().to_string());
     let events = MachineEventBus::new(16);
@@ -5234,22 +5239,23 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
     let id = uuid::Uuid::new_v4();
-    let send = |session: &str, name: &str, data: &[u8], signed: bool| {
+    let send = |session: &str, name: &str, data: &[u8], access: u8| {
         let uri = format!("/v1/sessions/{session}/uploads/{id}");
         let mut request = Request::post(&uri).header("origin", "https://controller.example").header("content-type", "application/json");
-        if signed {
-            request = request.header("authorization", format!("DPoP {}", credential.credential))
-                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()));
+        if access > 0 {
+            let (signing, token) = if access == 1 { (&signing, &credential.credential) } else { (&read_signing, &read_credential.credential) };
+            request = request.header("authorization", format!("DPoP {token}"))
+                .header("dpop", sign_dpop(signing, token, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()));
         }
         request.body(Body::from(serde_json::json!({"name":name,"data":base64::engine::general_purpose::STANDARD.encode(data)}).to_string())).unwrap()
     };
-    for (session, signed, expected) in [("factory-a", false, StatusCode::UNAUTHORIZED), ("missing", true, StatusCode::FORBIDDEN)] {
-        assert_eq!(app.clone().oneshot(send(session, "test.txt", b"hello", signed)).await.unwrap().status(), expected);
+    for (session, access, expected) in [("factory-a", 0, StatusCode::UNAUTHORIZED), ("factory-a", 2, StatusCode::FORBIDDEN), ("missing", 1, StatusCode::FORBIDDEN)] {
+        assert_eq!(app.clone().oneshot(send(session, "test.txt", b"hello", access)).await.unwrap().status(), expected);
         assert!(!artifacts.exists(), "refused requests must not write bytes");
     }
     let mut first = None;
     for name in ["../../outside.txt", "../renamed.txt"] {
-        let response = app.clone().oneshot(send("factory-a", name, b"hello", true)).await.unwrap();
+        let response = app.clone().oneshot(send("factory-a", name, b"hello", 1)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
         let path = std::path::Path::new(body["path"].as_str().unwrap());
@@ -5259,10 +5265,10 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         assert_eq!(body["mime"], "text/plain");
         if let Some(first) = &first { assert_eq!(&body, first); } else { first = Some(body); }
     }
-    assert_eq!(app.clone().oneshot(send("factory-a", "outside.txt", b"different", true)).await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(app.clone().oneshot(send("factory-a", "outside.txt", b"different", 1)).await.unwrap().status(), StatusCode::CONFLICT);
     for (data, expected) in [(vec![0,1,2,3], StatusCode::UNSUPPORTED_MEDIA_TYPE), (vec![b'x'; 10*1024*1024+1], StatusCode::PAYLOAD_TOO_LARGE)] {
         // Invalid uploads must be refused before any idempotent replay lookup.
-        assert_eq!(app.clone().oneshot(send("factory-a", "bad", &data, true)).await.unwrap().status(), expected);
+        assert_eq!(app.clone().oneshot(send("factory-a", "bad", &data, 1)).await.unwrap().status(), expected);
     }
     let artifact = first.unwrap();
     let store = cas_store::SqliteArtifactStore::open(&root).unwrap();

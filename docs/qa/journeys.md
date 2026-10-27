@@ -83,7 +83,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - The invitation is recognised at once, with no extra click to start.
-- Scopes the link did not grant are visibly unavailable, with the command to get them.
+- Scopes the link did not grant are visibly unavailable, with whom to ask for a link that grants them; the command that mints one is in Technical details, for the machine's owner (cas-b7c0).
+- A browser paired read-only shows a read-only composer that says, before anything is typed, whom to ask for a link that can send (cas-b7c0).
 - The hub address field says what to type (the placeholder shows a real example).
 
 #### Edge paths

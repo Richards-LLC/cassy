@@ -217,8 +217,9 @@ export async function phonePairLink(page: Page, journey: Journey, token: string,
     await expect(dialog.getByRole("textbox", { name: /Machine name/ })).toHaveValue("Studio Mac");
     await expect(dialog.locator(".pair-lead").first()).toHaveText("This browser will be able to: Read sessions and terminals");
     await expect(dialog.locator(".pair-withheld")).toContainText("This link does not let it: Type, send messages and interrupt");
-    await expect(dialog.getByRole("button", { name: "Copy command" })).toBeInViewport({ ratio: 1 });
-    await expect(dialog.locator(".pair-withheld-command code")).toHaveText(/^cas hub pair --origin \S+ --scopes machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt$/);
+    // cas-b7c0: the phone is told whom to ask, never a command it cannot run.
+    await expect(dialog.locator(".pair-withheld")).toContainText("ask whoever runs Studio Mac for a link that can");
+    await expect(dialog.locator(".pair-withheld")).not.toContainText("cas hub");
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Daniel");
     // The native phone goal reads the visible grant language. Raw disclosure
     // inspection stays in the desktop scenario; its touch defect is cas-207a.

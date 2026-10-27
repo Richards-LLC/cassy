@@ -4188,6 +4188,16 @@ mod tests {
                 );
                 if role == RecallRole::Supervisor {
                     assert!(
+                        injected.iter().all(|row| !row.stale),
+                        "stale evidence survived"
+                    );
+                    assert!(
+                        injected
+                            .iter()
+                            .all(|row| !row.evidence_id.starts_with("cas-kn-mig-")),
+                        "unbound migrated knowledge crowded out operator context"
+                    );
+                    assert!(
                         bytes <= 800,
                         "supervisor packet exceeds its budget: {bytes}"
                     );
@@ -4252,6 +4262,48 @@ mod tests {
             agent_role: Some("supervisor".into()),
             ..Default::default()
         };
+        for (id, content, kind, origin) in [
+            (
+                "mem-preference",
+                "Keep panes short and put commands in my clipboard.",
+                crate::types::EntryType::Preference,
+                None,
+            ),
+            (
+                "mem-correction",
+                "Operator corrected the report style: use actual design skills.",
+                crate::types::EntryType::Learning,
+                None,
+            ),
+            (
+                "mem-decision",
+                "Operator decided to keep precise evidence.",
+                crate::types::EntryType::Learning,
+                None,
+            ),
+            (
+                "mem-foreign",
+                "Keep panes short for this other customer.",
+                crate::types::EntryType::Preference,
+                Some("gabber-studio"),
+            ),
+            (
+                "mem-obsolete",
+                "Historical investigation for cas-target; its blanket claim that Codex has no lifecycle hooks is obsolete and must not guide current setup.",
+                crate::types::EntryType::Preference,
+                None,
+            ),
+        ] {
+            entries
+                .add(&Entry {
+                    id: id.into(),
+                    content: content.into(),
+                    entry_type: kind,
+                    origin_project: origin.map(str::to_owned),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
         let mut request = hook_request(&input, &root, &identity, "Review cas-target");
         assert_eq!(request.task_id.as_deref(), Some("cas-target"));
         // Session focus is supplied by the factory metadata resolver in the hook.
@@ -4267,6 +4319,15 @@ mod tests {
             rows: vec![noisy],
         };
         let candidates = retrieve_candidates(&identity, &request, &[&local, &noise]).unwrap();
+        for id in ["mem-preference", "mem-correction", "mem-decision"] {
+            assert!(
+                candidates
+                    .candidates
+                    .iter()
+                    .any(|row| row.evidence_id == id),
+                "operator context was not recalled: {id}"
+            );
+        }
         let (packet, injected) =
             render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
         let ids: Vec<_> = injected
@@ -4282,6 +4343,13 @@ mod tests {
             "exact epic evidence missing: {ids:?}"
         );
         assert!(!ids.contains(&"mem-neighbor"));
+        assert!(!ids.contains(&"mem-obsolete"));
+        assert!(!ids.contains(&"mem-foreign"));
+        assert!(!ids.contains(&"mem-tool-noise"));
+        assert!(
+            ids.contains(&"mem-preference"),
+            "operator preference lost the budget: {ids:?}"
+        );
         assert!(
             ids[..2].contains(&"mem-task") && ids[..2].contains(&"mem-epic"),
             "tool noise preceded task/epic bindings: {ids:?}"
@@ -4297,6 +4365,18 @@ mod tests {
             .expect("exact task evidence must survive the real hook path");
         assert!(hook_packet.full.contains("mem-task"));
         assert!(hook_packet.full.len() <= 800);
+        let personal = build_local_ambient_recall_context(
+            &cas_core::hooks::types::HookInput {
+                session_id: "supervisor-personal-turn".into(),
+                ..input
+            },
+            &root,
+            "Give me an update please",
+        )
+        .unwrap();
+        assert!(personal.full.contains("mem-preference"));
+        assert!(!personal.full.contains("mem-foreign"));
+        assert!(!personal.full.contains("cas-noise"));
     }
 
     #[test]

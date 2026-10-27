@@ -121,7 +121,7 @@ describe("atomic Commander journal", () => {
     expect(history.events).toHaveLength(1);
     expect(writes).toBe(1);
     const event = history.events[0];
-    expect(event.kind === "send" && history.showsDelivered(event.value)).toBe(true);
+    expect(event.kind === "send" && history.showsDeliveryStatus(event.value)).toBe(true);
   });
   it("an authoritative no-delivery refusal makes Cancel durable and strips the private payload", async () => {
     const { a, b, make, db } = journals();
@@ -203,7 +203,7 @@ describe("atomic Commander journal", () => {
       expect(snapshot.sends).toEqual([]);
       history.synchronizePending(snapshot.sends, 1_000, snapshot.receipts);
       const event = history.events[0];
-      expect(event?.kind === "send" && history.showsDelivered(event.value)).toBe(true);
+      expect(event?.kind === "send" && history.showsDeliveryStatus(event.value)).toBe(true);
       expect(event?.kind === "send" && history.isFailedSend(event.value)).toBe(false);
     }
     const request = db.open(DELIVERY_DB, 1);

@@ -161,6 +161,7 @@ fn queue_team_tree_incident(
         device_id: "*".to_string(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
     })?;
@@ -928,6 +929,10 @@ impl FactoryDaemon {
                 let key = SendKey::new(attribution.device_id.as_deref(), client_ref.as_deref());
                 let fingerprint = send_fingerprint(&target, &text, in_reply_to, urgent);
                 let mut receipts = std::mem::take(&mut self.send_receipts);
+                // Loaded for live viewers inside the send's grant, so that a
+                // saved row is not left unbroadcast because the reload ran
+                // under the spent pass budget.
+                let mut live_view = None;
                 let outcome = dedupe_send(
                     &mut receipts,
                     key,
@@ -947,6 +952,7 @@ impl FactoryDaemon {
                             in_reply_to,
                             &attribution,
                         )?;
+                        live_view = Some(self.live_operator_message(outcome.id()));
                         Ok(SendReceipt {
                             notification_id: outcome.id(),
                             stamped: operator_stamp(&attribution).verified,
@@ -954,7 +960,21 @@ impl FactoryDaemon {
                     },
                 );
                 self.send_receipts = receipts;
-                let outcome = outcome?;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        // cas-2109: the sender gets an error frame ("Not
+                        // sent"); leave the reason in the daemon log too.
+                        tracing::warn!(
+                            target: "cas::commander",
+                            client_ref = client_ref.as_deref().unwrap_or_default(),
+                            recipient = %target,
+                            error = %format!("{error:#}"),
+                            "Commander send refused"
+                        );
+                        return Err(error);
+                    }
+                };
                 if let SendOutcome::Duplicate(receipt) = outcome {
                     tracing::info!(
                         target: "cas::commander",
@@ -964,8 +984,8 @@ impl FactoryDaemon {
                     );
                 }
                 let receipt = outcome.receipt();
-                if matches!(outcome, SendOutcome::Enqueued(_)) {
-                    match self.live_operator_message(receipt.notification_id) {
+                if let Some(live_view) = live_view {
+                    match live_view {
                         Ok(Some(message)) => self.broadcast_daemon_message(
                             &crate::ui::factory::DaemonMessage::OperatorMessage(message),
                         ),
@@ -2072,6 +2092,56 @@ mod tests {
             super::super::ws_client::commander_control_from_ws_message(&forged, true).unwrap();
         let row = stored(relayed);
         assert_eq!(row.operator.as_ref().map(|stamp| stamp.verified), Some(true));
+    }
+
+    /// cas-2109: a refused Commander send used to leave no daemon log line,
+    /// only the phone's "Not sent". It now warns with client_ref, target and
+    /// the error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_commander_send_is_logged_with_client_ref_target_and_error_cas_2109() {
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || Capture(sink.clone()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let reply = daemon
+            .dispatch_commander_control(CommanderControl::SendMessage {
+                target: "supervisor".to_string(),
+                text: "answering an ask that does not exist".to_string(),
+                summary: None,
+                urgent: false,
+                client_ref: Some("phone-2109".to_string()),
+                in_reply_to: Some(999_999),
+                attribution: commander_attribution(),
+            })
+            .await;
+
+        let error = reply.expect_err("the send is refused");
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let line = log
+            .lines()
+            .find(|line| line.contains("WARN") && line.contains("phone-2109"))
+            .unwrap_or_else(|| panic!("no WARN naming the client_ref in:\n{log}"));
+        assert!(line.contains("supervisor"), "names the target: {line}");
+        assert!(line.contains("999999"), "names the error ({error:#}): {line}");
     }
 
     #[test]

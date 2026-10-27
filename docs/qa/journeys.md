@@ -83,7 +83,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - The invitation is recognised at once, with no extra click to start.
-- Scopes the link did not grant are visibly unavailable, with the command to get them.
+- Scopes the link did not grant are visibly unavailable, with whom to ask for a link that grants them; the command that mints one is in Technical details, for the machine's owner (cas-b7c0).
+- A browser paired read-only shows a read-only composer that says, before anything is typed, whom to ask for a link that can send (cas-b7c0).
 - The hub address field says what to type (the placeholder shows a real example).
 
 #### Edge paths
@@ -170,7 +171,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the conversation — the composer names the supervisor
 2. Write and send — the message appears at once as "Sending…" and the composer clears
-3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
+3. See it delivered — durable acceptance turns "Sending…" into "Queued for supervisor", without a delivery check. Only a real supervisor transport receipt earns "Delivered" and its check. Queue acceptance and delivery remain visible after a reload and on another paired device; older history/receipts never reverse delivery or a reply. A connected machine whose supervisor has not taken a pending message says "Waiting for supervisor" in its row and header. Queue and transport receipts alone never claim the supervisor is working.
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
    - A refused Take control keeps focus on the message — when another device holds the session the take is refused; the message names the device in control, once, in plain words, and the composer only points at it; its Take control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back on its own; keyboard focus stays on it, never the page body
@@ -186,7 +187,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Enter sends and Shift+Enter adds a new line.
 - A pairing with message:send can send without pane:input or terminal control; another device holding the pane never blocks a supervisor message.
-- The user can tell sent from delivered without reading attributes.
+- The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
@@ -231,9 +232,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
-- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`
-- **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
-- **Gaps:** none
+- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`, `hub-web/e2e/journeys/real-hub-server.mjs`
+- **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`, `hub-web/e2e/journeys/real-hub.journey.ts` (HUB-J7 real-hub part)
+- **Gaps:** the catalog suite uses a protocol double. The real-hub part proves CLI ask choices through the real daemon, live reply, history reload and the linked phone answer. Its supervisor provider is inert, so actual model action remains unproven.
 
 #### Steps
 

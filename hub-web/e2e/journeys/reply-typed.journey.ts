@@ -91,8 +91,13 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   let queued = 0;
   await journey.stage("See it delivered", async () => {
-    queued = hub.deliverLatest(PELICAN);
-    const delivered = page.locator('.conversation-turn[data-state="acknowledged"]');
+    queued = hub.queueLatest(PELICAN);
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').getByRole("status")).toHaveText("Queued for supervisor");
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').getByRole("status")).toHaveText("Queued for supervisor");
+    hub.deliverQueued(PELICAN, queued);
+    const delivered = page.locator('.conversation-turn[data-state="delivered"]');
     await expect(delivered.getByRole("status")).toHaveText("Delivered");
     await expect(page.getByText(/Sending to /)).toHaveCount(0);
     // cas-387e: a Delivered message never sits above "will go out by itself".
@@ -304,7 +309,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   await journey.stage("A late receipt after the supervisor talks on never offers Retry", async () => {
     hub.deliverLatest(PELICAN);
-    await expect(page.locator('.conversation-turn[data-state="acknowledged"]')).toHaveCount(1);
+    await expect(page.locator('.conversation-turn[data-state="delivered"]')).toHaveCount(1);
     // Watch every frame: a "Not confirmed" that flashes before a late receipt
     // is a Retry that sends the message twice (cas-1185).
     await page.evaluate(() => {
@@ -331,7 +336,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await page.clock.runFor(3_400);
     await hub.received(hub.deliverLatest(PELICAN));
     await page.clock.resume();
-    const crossed = page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Run the gate once more." });
+    const crossed = page.locator('.conversation-turn[data-state="delivered"]').filter({ hasText: "Run the gate once more." });
     await expect(crossed).toHaveCount(1);
     const flashed = await page.evaluate(() => {
       const w = window as unknown as { __unconfirmedFrames: number; __watchUnconfirmed: boolean };
@@ -345,7 +350,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // unrelated "Gate run 2 of 3" turn did not take the tick off the earlier
     // "Ship it after the gate passes." either.
     await expect(crossed.locator(".conversation-delivered")).toHaveText("Delivered");
-    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Ship it after the gate passes." }).locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="delivered"]').filter({ hasText: "Ship it after the gate passes." }).locator(".conversation-delivered")).toHaveText("Delivered");
   });
 
   await journey.stage("A message Cassy can't confirm offers Retry", async () => {

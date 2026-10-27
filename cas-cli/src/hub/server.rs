@@ -2612,9 +2612,10 @@ async fn proxy_socket(
                     if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
-                    if !correlated_daemon_frame_allowed(
+                    if !admit_correlated_daemon_frame(
                         &mut pending_message_refs,
                         &session,
+                        &auth,
                         &frame.bytes,
                     ) {
                         continue;
@@ -3322,7 +3323,8 @@ fn operator_message_allowed(auth: &Option<(AuthStore, AuthContext)>, bytes: &[u8
         return true;
     };
     auth.as_ref().is_some_and(|(_, context)| {
-        context.has(Scope::PaneRead) && context.device_id != message.device_id
+        context.has(Scope::PaneRead)
+            && (context.device_id != message.device_id || message.state == "delivered")
     })
 }
 
@@ -3438,6 +3440,28 @@ fn multiplex_forbidden_error(session: &str, client_ref: Option<&str>) -> serde_j
     error
 }
 
+/// Admit one daemon frame to an authenticated socket (cas-2109): the
+/// correlation filter in [`correlated_daemon_frame_allowed`], plus one
+/// `commander_send` audit row per answered send. The `allowed` row is written
+/// when the hub forwards a send, before the daemon answers; this row records
+/// the answer (queued id or refusal), keyed by client_ref, so a "Not sent" can
+/// be traced after the fact.
+pub(crate) fn admit_correlated_daemon_frame(
+    pending: &mut HashSet<(String, String)>,
+    session: &str,
+    auth: &Option<(AuthStore, AuthContext)>,
+    bytes: &[u8],
+) -> bool {
+    match correlate_daemon_frame(pending, session, bytes) {
+        Correlation::Refused => false,
+        Correlation::Uncorrelated | Correlation::Consumed(None) => true,
+        Correlation::Consumed(Some(answer)) => {
+            record_send_answer(auth, session, &answer);
+            true
+        }
+    }
+}
+
 /// MessageQueued and correlated Error frames share one daemon upstream, so
 /// the hub filters them by the authenticated socket that submitted the ref.
 pub(crate) fn correlated_daemon_frame_allowed(
@@ -3445,25 +3469,92 @@ pub(crate) fn correlated_daemon_frame_allowed(
     session: &str,
     bytes: &[u8],
 ) -> bool {
-    if let Ok(DaemonMessage::MessageQueued { client_ref, .. }) =
-        serde_json::from_slice::<DaemonMessage>(bytes)
-    {
-        return client_ref
-            .is_some_and(|client_ref| pending.remove(&(session.to_owned(), client_ref)));
+    !matches!(
+        correlate_daemon_frame(pending, session, bytes),
+        Correlation::Refused
+    )
+}
+
+/// The daemon's answer to one Commander send.
+struct SendAnswer {
+    client_ref: String,
+    /// The queued notification id, or the daemon's refusal.
+    result: Result<i64, String>,
+}
+
+enum Correlation {
+    /// Not a correlated frame: relay it.
+    Uncorrelated,
+    /// This socket's pending ref, now consumed; a send carries its answer.
+    Consumed(Option<SendAnswer>),
+    /// Another socket's (or an already consumed) ref: do not relay it.
+    Refused,
+}
+
+fn correlate_daemon_frame(
+    pending: &mut HashSet<(String, String)>,
+    session: &str,
+    bytes: &[u8],
+) -> Correlation {
+    let mut consume = |client_ref: String, answer: Option<Result<i64, String>>| {
+        if pending.remove(&(session.to_owned(), client_ref.clone())) {
+            Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
+        } else {
+            Correlation::Refused
+        }
+    };
+    match serde_json::from_slice::<DaemonMessage>(bytes) {
+        Ok(DaemonMessage::MessageQueued {
+            client_ref,
+            notification_id,
+            ..
+        }) => match client_ref {
+            Some(client_ref) => consume(client_ref, Some(Ok(notification_id))),
+            None => Correlation::Refused,
+        },
+        Ok(DaemonMessage::Error {
+            client_ref: Some(client_ref),
+            message,
+        }) => consume(client_ref, Some(Err(message))),
+        Ok(DaemonMessage::ConversationHistory { request_id, .. }) => consume(request_id, None),
+        _ => Correlation::Uncorrelated,
     }
-    if let Ok(DaemonMessage::Error {
-        client_ref: Some(client_ref),
-        ..
-    }) = serde_json::from_slice::<DaemonMessage>(bytes)
-    {
-        return pending.remove(&(session.to_owned(), client_ref));
+}
+
+/// Most characters of a daemon refusal kept in the audit row.
+const SEND_ERROR_AUDIT_CHARS: usize = 500;
+
+fn record_send_answer(
+    auth: &Option<(AuthStore, AuthContext)>,
+    session: &str,
+    answer: &SendAnswer,
+) {
+    let client_ref = answer.client_ref.as_str();
+    let (outcome, detail) = match &answer.result {
+        Ok(notification_id) => {
+            tracing::info!(session, client_ref, notification_id, "Commander send queued by the daemon");
+            ("queued", format!("client_ref={client_ref} notification_id={notification_id}"))
+        }
+        Err(error) => {
+            tracing::warn!(session, client_ref, %error, "Commander send refused by the daemon");
+            let error: String = error.chars().take(SEND_ERROR_AUDIT_CHARS).collect();
+            ("failed", format!("client_ref={client_ref} error={error}"))
+        }
+    };
+    let Some((store, context)) = auth else {
+        return;
+    };
+    if let Err(error) = store.audit_operation(
+        context,
+        outcome,
+        "commander_send",
+        Scope::MessageSend,
+        session,
+        Some(detail),
+        chrono::Utc::now(),
+    ) {
+        tracing::warn!(session, client_ref, %error, "cas-2109: Commander send outcome audit not written");
     }
-    if let Ok(DaemonMessage::ConversationHistory { request_id, .. }) =
-        serde_json::from_slice::<DaemonMessage>(bytes)
-    {
-        return pending.remove(&(session.to_owned(), request_id));
-    }
-    true
 }
 
 /// Emit only bounded metadata for the private history response. The request
@@ -3608,9 +3699,10 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
-                    if !correlated_daemon_frame_allowed(
+                    if !admit_correlated_daemon_frame(
                         &mut pending_message_refs,
                         &session,
+                        &auth,
                         &frame.bytes,
                     ) {
                         continue;
@@ -4380,8 +4472,15 @@ mod machine_protocol_tests {
             },
         )).unwrap();
         assert!(!operator_message_allowed(&None, &frame));
-        assert!(!operator_message_allowed(&Some((store.clone(), sender)), &frame));
-        assert!(operator_message_allowed(&Some((store, viewer)), &frame));
+        assert!(!operator_message_allowed(&Some((store.clone(), sender.clone())), &frame));
+        assert!(operator_message_allowed(&Some((store.clone(), viewer)), &frame));
+        let mut delivered: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        delivered["OperatorMessage"]["state"] = serde_json::json!("delivered");
+        let delivered = serde_json::to_vec(&delivered).unwrap();
+        assert!(operator_message_allowed(&Some((store.clone(), sender)), &delivered));
+        let no_read = AuthContext::test_fixture("phone", "https://controller.example", Default::default());
+        assert!(!operator_message_allowed(&Some((store, no_read)), &delivered));
+
     }
 }
 

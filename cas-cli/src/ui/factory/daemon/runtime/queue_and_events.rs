@@ -3677,6 +3677,7 @@ pub(super) fn record_undelivered_relay_alerts(
             device_id: "*".to_string(),
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
         }) {
@@ -7419,7 +7420,7 @@ impl FactoryDaemon {
                 self.open_operator_notices.insert(*id, subject);
             }
         }
-        let (messages, replies) = commander_history_turns(rows, &self.session_name, &notices);
+        let (messages, replies) = commander_history_turns(queue.as_ref(), rows, &self.session_name, &notices);
         // cas-55a4: other sessions' Commander turns travel beside the page,
         // never in it, so Commander can show them only as a labelled, collapsed
         // earlier-session section. They come once, with the newest page.
@@ -7435,7 +7436,7 @@ impl FactoryDaemon {
             // Another session's plumbing notices are its own business: they
             // are never part of this session's history, earlier or not.
             earlier.retain(|row| !is_operator_notice(row));
-            commander_history_turns(earlier, "", &std::collections::HashMap::new())
+            commander_history_turns(queue.as_ref(), earlier, "", &std::collections::HashMap::new())
         } else {
             (Vec::new(), Vec::new())
         };
@@ -7460,15 +7461,8 @@ impl FactoryDaemon {
         notification_id: i64,
     ) -> anyhow::Result<Option<crate::ui::factory::ConversationHistoryMessage>> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        Ok(queue
-            .queued_prompt(notification_id)?
-            .and_then(|row| commander_history_send(row, &self.session_name))
-            .map(|mut message| {
-                // The durable enqueue has completed, so other viewers need
-                // no private receipt to show this send as acknowledged.
-                message.state = "acknowledged".to_string();
-                message
-            }))
+        Ok(queue.queued_prompt(notification_id)?
+            .and_then(|row| commander_history_send(queue.as_ref(), row, &self.session_name)))
     }
 
     /// The selecting job's operator-reply step and its forwarding, in one
@@ -7544,6 +7538,7 @@ impl FactoryDaemon {
                 device_id: device_id.clone(),
                 operator_label: payload.operator_label,
                 kind: payload.kind,
+                options: payload.options,
                 attachments: payload.attachments,
                 notice,
                 reply_to_session: payload.reply_to_session,
@@ -8457,6 +8452,12 @@ impl FactoryDaemon {
         }
     }
 
+    fn forward_operator_message_updates(&mut self) {
+        for message in self.queue_jobs.take_operator_messages() {
+            self.ws_broadcast(&crate::ui::factory::DaemonMessage::OperatorMessage(message));
+        }
+    }
+
     /// Process prompt queue
     pub(super) async fn process_prompt_queue(&mut self) -> anyhow::Result<()> {
         // cas-786a6: urgent injects whose pane has settled type their payload
@@ -8473,6 +8474,7 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
+        self.forward_operator_message_updates();
         result
     }
 
@@ -8483,6 +8485,7 @@ impl FactoryDaemon {
         let cas_dir = self.app.cas_dir().to_path_buf();
         self.queue_jobs.settle_injects(&cas_dir);
         self.queue_jobs.apply_completions();
+        self.forward_operator_message_updates();
         // A live mux command still owns its physical receipt. Only orphaned
         // commands use the existing missing-outcome timeout/retry path.
         self.queue_jobs.retain_owned_injects(Instant::now(), |row| self.urgent_injects.holds_row(row));
@@ -12079,6 +12082,7 @@ fn operator_notices(
 /// Project oldest-first Commander-lane rows onto the history wire shapes.
 /// `fallback_session` names a row that carries no session of its own.
 fn commander_history_turns(
+    queue: &dyn cas_store::PromptQueueStore,
     rows: Vec<cas_store::QueuedPrompt>,
     fallback_session: &str,
     notices: &std::collections::HashMap<i64, crate::ui::factory::OperatorNotice>,
@@ -12111,6 +12115,7 @@ fn commander_history_turns(
                 operator_label: payload.operator_label,
                 kind: payload.kind,
                 attachments: payload.attachments,
+                options: payload.options,
                 session: row
                     .factory_session
                     .clone()
@@ -12121,14 +12126,15 @@ fn commander_history_turns(
             });
             continue;
         }
-        if let Some(message) = commander_history_send(row, fallback_session) {
+        if let Some(message) = commander_history_send(queue, row, fallback_session) {
             messages.push(message);
         }
     }
     (messages, replies)
 }
 
-fn commander_history_send(
+pub(super) fn commander_history_send(
+    queue: &dyn cas_store::PromptQueueStore,
     row: cas_store::QueuedPrompt,
     fallback_session: &str,
 ) -> Option<crate::ui::factory::ConversationHistoryMessage> {
@@ -12142,10 +12148,13 @@ fn commander_history_send(
         notification_id: row.id,
         target: row.target,
         text,
-        state: if terminal || row.processed_at.is_some() {
-            "acknowledged".to_string()
+        // A durable row proves queue acceptance. Cleanup's processed_at is
+        // not transport proof, and a gated row has never reached the supervisor.
+        state: if terminal || queue.message_delivery_report(row.id).ok().flatten()
+            .is_some_and(|report| report.delivered_at.is_some()) {
+            "delivered".to_string()
         } else {
-            "sending".to_string()
+            "acknowledged".to_string()
         },
         stamped: !terminal,
         reply_to,
@@ -12846,6 +12855,90 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("phone".into()),
+            credential_id: Some("phone-credential".into()),
+            device_label: Some("Ben's phone".into()),
+            operator_label: Some("Ben".into()),
+            controller_origin: None,
+            request_id: None,
+            scopes: vec!["message:send".into()],
+            operator_verified: true,
+        };
+        let id = super::super::delivery::enqueue_commander_message(
+            &root,
+            &daemon.session_name,
+            "supervisor",
+            "Yes please, reconcile it.",
+            None,
+            false,
+            None,
+            &attribution,
+        )
+        .unwrap()
+        .id();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none()
+        );
+        let live = daemon.live_operator_message(id).unwrap().unwrap();
+        assert_eq!(live.state, "acknowledged");
+        // The inert supervisor has not consumed the row. A reload and another
+        // pairing still see the same durable acceptance, not Sending again.
+        for device in ["phone", "desktop"] {
+            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                .conversation_history_page(format!("history-{device}"), device, None, 20)
+                .unwrap()
+            else {
+                panic!("expected conversation history");
+            };
+            assert_eq!(messages.len(), 1, "{device}'s accepted turn");
+            assert_eq!(messages[0].notification_id, live.notification_id);
+            assert_eq!(messages[0].text, live.text);
+            assert_eq!(
+                messages[0].state, live.state,
+                "{device}'s receipt regressed on history"
+            );
+        }
+        assert!(
+            queue
+                .queued_prompt(id)
+                .unwrap()
+                .unwrap()
+                .processed_at
+                .is_none(),
+            "reading a receipt must not claim supervisor consumption"
+        );
+        queue.mark_processed(id).unwrap();
+        assert_eq!(daemon.live_operator_message(id).unwrap().unwrap().state, "acknowledged",
+            "processed metadata alone cannot earn Delivered");
+        daemon.queue_jobs.stamp(&root, id, "supervisor",
+            super::super::prompt_queue_jobs::QueueStamp::TransportDelivered);
+        daemon.queue_jobs.apply_completions();
+        let updates = daemon.queue_jobs.take_operator_messages();
+        assert_eq!(updates.len(), 1, "persisted transport publishes one live update");
+        assert_eq!(updates[0].state, "delivered");
+        assert!(queue.message_delivery_report(id).unwrap().unwrap().delivered_at.is_some());
+        for device in ["phone", "desktop"] {
+            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                .conversation_history_page(format!("delivered-{device}"), device, None, 20).unwrap()
+            else { panic!("expected conversation history"); };
+            assert_eq!(messages[0].state, updates[0].state,
+                "{device}'s history must agree with actual supervisor transport");
+        }
+    }
+
+    #[tokio::test]
     async fn cas_7bcb_operator_reply_backoff_caps_and_resets() {
         use crate::ui::factory::daemon::WsConnection;
         use futures_util::{FutureExt, StreamExt};
@@ -13265,7 +13358,7 @@ mod tests {
         assert!(!notices.contains_key(&reply));
         queue.mark_transport_delivered(relay).unwrap();
         assert!(super::operator_notices(queue, "acct-52", &rows)[&alert].resolved);
-        let (_, replies) = super::commander_history_turns(rows, "acct-52", &notices);
+        let (_, replies) = super::commander_history_turns(queue, rows, "acct-52", &notices);
         assert_eq!(replies.iter().filter(|reply| reply.notice.is_some()).count(), 1);
     }
 
@@ -13303,7 +13396,7 @@ mod tests {
             .unwrap();
         rows.reverse();
         let (messages, replies) =
-            super::commander_history_turns(rows, "", &std::collections::HashMap::new());
+            super::commander_history_turns(queue, rows, "", &std::collections::HashMap::new());
         assert_eq!(
             replies
                 .iter()
@@ -16431,6 +16524,7 @@ mod tests {
             device_id: "device-123".to_string(),
             operator_label: Some("Pippenz".to_string()),
             kind: crate::ui::factory::OperatorTurnKind::Ask,
+            options: vec!["Fix in-train".into(), "Ship with allowlist".into()],
             attachments: Vec::new(),
             reply_to_session: None,
         })
@@ -16449,6 +16543,11 @@ mod tests {
             .unwrap()
             .id();
         queue.stamp_operator_reply(ask_id, "ask", &[]).unwrap();
+        let (_, history) = super::commander_history_turns(
+            queue.as_ref(), vec![queue.queued_prompt(ask_id).unwrap().unwrap()], "factory-1", &Default::default(),
+        );
+        assert_eq!(history[0].options, ["Fix in-train", "Ship with allowlist"]);
+
         let before = queue.message_delivery_report(ask_id).unwrap().unwrap();
         assert_eq!(before.confirmation_source, cas_store::ConfirmationSource::Unconfirmed);
 

@@ -55,6 +55,7 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
     "urgent",
     "in_reply_to",
     "kind",
+    "options",
     "attachment",
     "supersede_key",
     "sticky",
@@ -90,6 +91,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("in_reply_to", "notification_id of direct message answered."),
     ("kind", "answer|status|receipt|ask|blocker; receipts never wake a supervisor."),
     ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
+    ("options", "Operator ask choices; tap returns the label with in_reply_to."),
     ("attachment", "Published artifact id for a Commander turn."),
     // Keep explicit caller contracts within the 3,600 B coordination budget.
     ("supersede_key", "Broadcast: newest per key wins."),
@@ -122,6 +124,7 @@ pub(crate) const FACTORY_HIDDEN_FIELDS: &[&str] = &[
     "urgent",
     "in_reply_to",
     "kind",
+    "options",
     "attachment",
     "supersede_key",
     "sticky",

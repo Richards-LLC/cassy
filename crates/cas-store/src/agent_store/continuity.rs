@@ -334,6 +334,25 @@ impl SqliteAgentStore {
         Ok(result)
     }
 
+    /// Every predecessor handoff this exact successor incarnation claimed,
+    /// published or not. Reading it never changes a claim.
+    pub fn supervisor_handoffs_claimed_by(&self, successor: &Agent) -> Result<Vec<SessionEnd>> {
+        let conn = self.lock_conn()?;
+        if !table_exists(&conn, "agent_session_ends")? {
+            return Ok(Vec::new());
+        }
+        let mut stmt = conn.prepare("SELECT payload,reason FROM agent_session_ends WHERE role='supervisor' AND claimed_by=? AND claimed_epoch=? ORDER BY ended_at")?;
+        let rows = stmt
+            .query_map(
+                params![successor.id, successor.registered_at.to_rfc3339()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(payload, reason)| decode(payload, reason))
+            .collect()
+    }
+
     pub fn mark_supervisor_handoff_queued(&self, id: &str, successor: &Agent) -> Result<()> {
         let conn = self.lock_conn()?;
         conn.execute("UPDATE agent_session_ends SET queued_at=? WHERE id=? AND claimed_by=? AND claimed_epoch=?", params![Utc::now().to_rfc3339(),id,successor.id,successor.registered_at.to_rfc3339()])?;

@@ -26,6 +26,29 @@ WebSocket connection, or a device's first history-page request resets that retry
 schedule. Each scheduled retry logs its next delay; intervening daemon passes
 neither rebroadcast the reply nor stamp it selected again.
 
+## Commander questions with quick replies
+
+A supervisor can send a question with choices using `coordination action=message
+ target=operator kind=ask summary="Choose next step" message="Keep testing?"
+ options=["Keep testing","Stop testing"]`. `options` is an optional array of
+non-empty labels, allowed only with `target=operator kind=ask`. Labels are
+trimmed before storage. The operator's chosen label returns as the message
+text with `in_reply_to` identifying the original question.
+
+The CLI equivalent is:
+
+```sh
+cas factory message --session <session> --target operator --from supervisor \
+  --kind ask --message 'Keep testing?' \
+  --option 'Keep testing' --option 'Stop testing'
+```
+
+The choices are stored with the operator turn and carried by live replies and
+history pages. Empty choices are omitted from the wire; older payloads decode
+as an empty list and older clients ignore the added field. Reloading before
+an answer preserves the choices; after answering it preserves the selected
+label and the durable reply reference.
+
 ## Supervisor succession and committed-work recovery
 
 Supervisor retirement keeps a project/host-scoped handoff before clearing registry

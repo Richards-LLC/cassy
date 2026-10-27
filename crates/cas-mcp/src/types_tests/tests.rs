@@ -530,12 +530,14 @@ fn cas_1e7e2_wake_opt_out_survives_coordination_mapping() {
 #[test]
 fn coordination_reply_reference_survives_agent_mapping() {
     let req: CoordinationRequest = serde_json::from_str(
-        r#"{"action":"message","target":"worker-a","in_reply_to":7602,"summary":"acknowledged","message":"I read your escalation."}"#,
+        r#"{"action":"message","target":"operator","kind":"ask","options":["Approve","Keep testing"],"in_reply_to":7602,"summary":"acknowledged","message":"I read your escalation."}"#,
     )
     .unwrap();
 
     assert_eq!(req.in_reply_to, Some(7602));
     assert_eq!(req.to_agent_request("message").in_reply_to, Some(7602));
+    assert_eq!(req.to_agent_request("message").options,
+        Some(vec!["Approve".to_owned(), "Keep testing".to_owned()]));
 }
 
 #[test]

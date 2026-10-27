@@ -12672,6 +12672,9 @@ mod spawn_lifecycle_tests {
         let core = CasCore::with_daemon(cas_root.clone(), None, None);
         let tasks = core.open_task_store().unwrap();
         tasks.init().unwrap();
+        let mut epic = cas_types::Task::new("cas-cba9-fixture".into(), "Codex account selection".into());
+        epic.task_type = cas_types::TaskType::Epic;
+        tasks.add(&epic).unwrap();
         #[cfg(feature = "mcp-proxy")]
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]

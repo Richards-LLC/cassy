@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.84.0] - 2026-10-27
+
 ### Added — every subscription named, listed and picked for you
 
 - **One account list** — Was: Claude and Codex accounts were separate folder

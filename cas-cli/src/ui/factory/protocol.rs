@@ -1173,6 +1173,22 @@ mod tests {
         let decoded: OperatorReplyPayload =
             serde_json::from_str(&serde_json::to_string(&cross).unwrap()).unwrap();
         assert_eq!(decoded.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
+
+        // cas-7ebc: choices must survive the same payload boundary used by
+        // persisted operator turns, rather than existing only in hub doubles.
+        let ask: OperatorReplyPayload = serde_json::from_value(serde_json::json!({
+            "schema_version": 2,
+            "message": "Keep testing or stop?",
+            "summary": "Choose the next step",
+            "device_id": "*",
+            "kind": "ask",
+            "options": ["Keep testing", "Stop testing"]
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&ask).unwrap()["options"],
+            serde_json::json!(["Keep testing", "Stop testing"])
+        );
     }
 
     #[test]

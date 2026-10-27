@@ -34,7 +34,7 @@ pub use cas_types::violet_compatibility::{
 pub const VIOLET_DEFAULT_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_CASSY_PROXY";
 pub const VIOLET_DEFAULT_BYPASS_ENV: &str = "VIOLET_VERCEL_BYPASS";
 pub const VIOLET_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
-pub const VIOLET_TOOLS: [&str; 2] = ["violet_read", "violet_post"];
+pub const VIOLET_TOOLS: [&str; 3] = ["violet_read", "violet_post", "violet_reconcile_reply"];
 
 /// Resolve the Violet/legacy pair without reading or mutating the environment.
 /// A custom variable retains its original semantics, including empty values.
@@ -734,7 +734,8 @@ impl Config {
             retired,
             VIOLET_SERVER,
             [&contract.retired_tools[0], &contract.retired_tools[1]],
-            VIOLET_TOOLS,
+            // The retired hub only had read/post aliases; reconciliation is new.
+            [VIOLET_TOOLS[0], VIOLET_TOOLS[1]],
         );
         let server = self.servers.remove(retired).expect("checked above");
         self.servers.entry(VIOLET_SERVER.into()).or_insert(server);

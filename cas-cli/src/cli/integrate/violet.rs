@@ -1716,6 +1716,28 @@ pub fn tool_drift(allowlisted: &[String], live: &[String]) -> ToolDrift {
     }
 }
 
+/// Recommend integration only when this build can actually install the live
+/// contract. A newer/custom hub needs an explicit policy edit instead of an
+/// endless retry of the same canonical registration.
+fn tool_drift_remedy(live: &[String], source: &Path) -> String {
+    if tool_drift(&VIOLET_TOOLS.map(str::to_string), live).is_empty() {
+        return "Run `cas integrate violet` to rewrite that file".to_string();
+    }
+    let contract = violet_compatibility();
+    let routes = sorted_unique(live)
+        .into_iter()
+        .filter(|tool| !contract.retired_tools.iter().any(|retired| retired == tool))
+        .map(|tool| format!("\"{VIOLET_SERVER}.{tool}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Review the hub's tools/list. Edit the Violet routes in {} to [{}], \
+         preserving unrelated allowlist entries",
+        source.display(),
+        routes
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The project file that shadows the machine registration
 // ---------------------------------------------------------------------------
@@ -2331,10 +2353,13 @@ fn run_with_credentials(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            None => format!(
-                "{drift}. Re-run `cas integrate violet` to rewrite the allowlist against \
-                 the hub's current contract."
-            ),
+            None => {
+                let live = match &probe_outcome {
+                    ProbeOutcome::Tools { tools, .. } => tools.as_slice(),
+                    _ => unreachable!("only a tools/list result can report drift"),
+                };
+                format!("{drift}. {}", tool_drift_remedy(live, source))
+            }
         });
 
     let override_path = project
@@ -2913,8 +2938,9 @@ pub fn doctor_row(
                         DoctorSeverity::Warning
                     },
                     message: format!(
-                        "{} (hub: {endpoint}). Run `cas integrate violet` to rewrite that file",
+                        "{} (hub: {endpoint}). {}",
                         drift.describe(&tools, &allowlist, Some(source)),
+                        tool_drift_remedy(&tools, source),
                     ),
                 }
             }

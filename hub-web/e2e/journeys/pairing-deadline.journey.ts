@@ -79,3 +79,29 @@ test("HUB-J2 unanswered pairing exchange times out safely and can be retried (ca
     await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible();
   });
 });
+
+test("HUB-J1 one relay request keeps its deadline across polls and a new request gets a fresh one (cas-fa56)", journeyPart, async ({ page, journey }) => {
+  await journey.hub({ machines: [ATLAS], relay: { machine: "atlas", claimAfter: 2, authorizeAfter: 1000 } });
+  const dialog = page.locator("#pair-dialog");
+  const relayDeadline = async (path: string): Promise<string> => {
+    const response = await page.waitForResponse((candidate) => new URL(candidate.url()).pathname.endsWith(path));
+    return String((await response.json()).expires_at);
+  };
+  const createCode = async (): Promise<string> => {
+    const created = relayDeadline("/requests");
+    await dialog.getByRole("button", { name: "Create pairing code" }).click();
+    return created;
+  };
+  await journey.open();
+  await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).click();
+  const first = await createCode();
+  await journey.stage("Polls, pending and claimed, repeat the request's own deadline", async () => {
+    for (let poll = 0; poll < 3; poll += 1) expect(await relayDeadline("/requests/poll")).toBe(first);
+  });
+  await journey.stage("A newly created request gets a later deadline", async () => {
+    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await page.getByRole("button", { name: "Pair a machine" }).filter({ visible: true }).click();
+    expect(Date.parse(await createCode())).toBeGreaterThan(Date.parse(first));
+  });
+});

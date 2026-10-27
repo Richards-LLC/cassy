@@ -186,7 +186,10 @@ test('undecoded images fail strict captures even with a visual allowlist', async
     const allowlistPath = join(artifactDir, 'allowlist.json');
     await writeFile(allowlistPath, JSON.stringify({ entries: [{ type: '*', selector: '*', reason: 'Visual exceptions cannot approve undecoded evidence.' }] }));
     await writeFile(path, html(`<main><h1>Ranking capture</h1><img id="after" alt="After ranking" decoding="async"
-      style="width:320px;height:94px" src="data:image/png;base64,broken"></main>
+      style="width:320px;height:94px" src="data:image/png;base64,broken">
+      <img id="offscreen" alt="Offscreen" src="data:image/png;base64,broken" style="position:absolute;left:-9999px;width:50px;height:50px">
+      <span style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)"><img id="sr-only" alt="Screen reader helper" src="data:image/png;base64,broken" width="50" height="50"></span>
+      <img id="tracking" alt="" src="data:image/png;base64,broken" width="1" height="1"></main>
       ${mode === 'pending' ? '<script>document.querySelector("#after").decode=()=>new Promise(()=>{});</script>' : ''}`));
     const result = await runBuiltinVisualQa({ ...matrix, urls: [path], artifactDir, readyTimeoutMs: 100, allowlistPath,
       journey: { states: [{ name: 'after' }] } });
@@ -198,5 +201,16 @@ test('undecoded images fail strict captures even with a visual allowlist', async
     assert.ok(result.markdown.includes(failures[0].reason), 'the report names the decode failure or timeout');
     assert.ok(failures.every(({ selector, textSample, reason }) => selector === '#after' && textSample === 'After ranking'
       && reason.includes(mode === 'pending' ? '100 ms' : 'failed')), JSON.stringify(failures));
+  }
+});
+
+test('a child frame disappearing or navigating during image decode does not abort capture', async () => {
+  for (const change of ['frameElement.remove()', 'frameElement.srcdoc="<p>Replacement frame</p>"']) {
+    const result = await render(`<main><h1>Stable report</h1><p>The main document remains ready.</p></main>
+      <iframe title="Ephemeral content" srcdoc='<img src="data:image/png;base64,broken" width="50" height="50"><script>
+        document.querySelector("img").decode=()=>{${change};return new Promise(()=>{});};
+      </script>'></iframe>`);
+    assert.equal(result.status, 'PASS', JSON.stringify(result.findings));
+    assert.equal(result.screenshots.length, 1);
   }
 });

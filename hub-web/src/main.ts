@@ -277,6 +277,8 @@ const paneLastActivity = new Map<string, number>();
 const WORKING_WINDOW_MS = 30_000;
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
+const paneLeaseEpochs = new Map<string, number>();
+const paneLeaseChanges = new Map<string, Promise<unknown>>();
 /** How often an open session held by another device is re-checked for release (journey F5). */
 const FOREIGN_LEASE_RECHECK_MS = 5_000;
 let attention: AttentionItem[] = [];
@@ -549,6 +551,9 @@ function selectionStorage(): SelectionStorage | undefined {
 }
 
 function applySelection(next: SessionSelection | undefined): void {
+  if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
+    releasePaneControl(selectedMachineId, selectedSession);
+  }
   selectedMachineId = next?.machineId;
   selectedSession = next?.session;
   syncFleetSelection();
@@ -1931,8 +1936,13 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {
+  const key = sessionKey(machineId, session);
+  const epoch = paneLeaseEpochs.get(key);
+  if (!paneControlIsHere(machineId, session)) return;
   try {
+    await paneLeaseChanges.get(key)?.catch(() => {});
     const state = await connections.get(machineId)?.lease(session);
+    if (paneLeaseEpochs.get(key) !== epoch || !paneControlIsHere(machineId, session)) return;
     // A control on a message that the lease change repaints (the "Waiting for
     // …" pill turning back into Take control) hands focus to its replacement,
     // not to the page body (cas-88d86 QA F01), as a refused take does.
@@ -2150,8 +2160,8 @@ const interruptsInFlight = new Set<string>();
 
 /**
  * Interrupt the open conversation's supervisor (cas-0546, moved from the
- * Terminal header). Interrupting is a leased action, as sending is, so
- * control is taken for it the same way; taking it from another device is
+ * Terminal header). Interrupting needs an input lease; semantic messages
+ * don't. Taking input control from another device is
  * never silent. Every outcome is said in a toast.
  */
 async function interruptSupervisor(): Promise<void> {
@@ -2217,6 +2227,9 @@ function rawOutputDialog(): HTMLDialogElement {
   // Escape and Close both land here: focus goes back to the header's Raw
   // output, the one a shell rebuild may have replaced since it opened.
   opened.addEventListener("close", () => {
+    if (selectedMachineId && selectedSession && rawOutputThread === sessionKey(selectedMachineId, selectedSession)) {
+      releasePaneControl(selectedMachineId, selectedSession);
+    }
     releaseRawOutputView();
     rawOutputThread = undefined;
     const toggle = document.querySelector<HTMLButtonElement>("#conversation-raw-output");
@@ -2318,15 +2331,70 @@ function sendControl(machineId: string, session: string, message: unknown): bool
   return false;
 }
 
+function paneControlIsHere(machineId: string, session: string): boolean {
+  return selectedMachineId === machineId && selectedSession === session && !document.hidden;
+}
+
+/** Order takes, renewals and releases so a late take cannot undo a departure. */
+function changePaneLease<T>(key: string, change: () => Promise<T>): Promise<T> {
+  const next = (paneLeaseChanges.get(key) ?? Promise.resolve()).catch(() => {}).then(change);
+  paneLeaseChanges.set(key, next);
+  void next.finally(() => {
+    if (paneLeaseChanges.get(key) === next) paneLeaseChanges.delete(key);
+  }).catch(() => {});
+  return next;
+}
+
+function requestPaneControl(machineId: string, session: string, force = false): Promise<LeaseState> {
+  const key = sessionKey(machineId, session);
+  const epoch = paneLeaseEpochs.get(key);
+  return changePaneLease(key, async () => {
+    const here = () => paneLeaseEpochs.get(key) === epoch && paneControlIsHere(machineId, session);
+    const connection = connections.get(machineId);
+    if (!here() || !connection) throw new Error("Left the session before taking terminal control");
+    const state = await connection.requestControl(session, force);
+    if (!here()) throw new Error("Left the session while taking terminal control");
+    leases.set(key, state);
+    return state;
+  });
+}
+
+function releasePaneControl(machineId: string, session: string): void {
+  const key = sessionKey(machineId, session);
+  paneLeaseEpochs.set(key, (paneLeaseEpochs.get(key) ?? 0) + 1);
+  window.clearInterval(leaseHeartbeats.get(key));
+  leaseHeartbeats.delete(key);
+  window.clearTimeout(leaseExpiryTimers.get(key));
+  leaseExpiryTimers.delete(key);
+  controlLostToOutage.delete(key);
+  controlTakenAfterRefusal.delete(key);
+  const held = leases.get(key)?.held_by_me;
+  const changing = paneLeaseChanges.has(key);
+  leases.delete(key);
+  const connection = connections.get(machineId);
+  if (connection && (held || changing)) {
+    // An unreachable hub may refuse DELETE; stopping renewal still lets its
+    // existing lease expire, and reconnect must never reclaim a closed view.
+    void changePaneLease(key, () => connection.releaseLease(session)).catch(() => {});
+  }
+}
+
+function releaseVisiblePaneControl(): void {
+  if (selectedMachineId && selectedSession) releasePaneControl(selectedMachineId, selectedSession);
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseVisiblePaneControl(); });
+window.addEventListener("pagehide", releaseVisiblePaneControl);
+
 function startLeaseHeartbeat(machineId: string, session: string): void {
   const key = sessionKey(machineId, session);
-  if (leaseHeartbeats.has(key)) return;
+  if (leaseHeartbeats.has(key) || !paneControlIsHere(machineId, session)) return;
   leaseHeartbeats.set(key, window.setInterval(async () => {
     if (!leases.get(key)?.held_by_me) return;
     try {
-      const state = await connections.get(machineId)?.acquireLease(session);
-      if (state) leases.set(key, state);
+      const state = await requestPaneControl(machineId, session);
+      leases.set(key, state);
     } catch {
+      if (!paneControlIsHere(machineId, session)) return;
       invalidateMachineLeases(machineId);
       render();
     }
@@ -2930,7 +2998,7 @@ function noteControlTaken(machineId: string, session: string): void {
 
 async function restorePaneControl(machine: StoredMachine, session: string, force = false): Promise<boolean> {
   try {
-    await connections.get(machine.id)?.requestControl(session, force);
+    await requestPaneControl(machine.id, session, force);
   } catch {
     return false;
   }
@@ -2948,7 +3016,7 @@ async function restorePaneControl(machine: StoredMachine, session: string, force
 async function takeControlForInterrupt(machine: StoredMachine, session: string, force = false): Promise<{ taken: boolean; holder?: string }> {
   const key = sessionKey(machine.id, session);
   try {
-    await connections.get(machine.id)?.requestControl(session, force);
+    await requestPaneControl(machine.id, session, force);
   } catch (error) {
     if (force || !(error instanceof HubRequestError) || error.status !== 409) return { taken: false };
     await loadLease(machine.id, session);
@@ -2956,7 +3024,7 @@ async function takeControlForInterrupt(machine: StoredMachine, session: string, 
     const holder = lease && !lease.held_by_me ? lease.controller_label ?? undefined : undefined;
     if (!holder || !machine.scopes.includes("hub-admin")) return { taken: false, holder };
     try {
-      await connections.get(machine.id)?.requestControl(session, true);
+      await requestPaneControl(machine.id, session, true);
     } catch {
       return { taken: false, holder };
     }
@@ -2992,7 +3060,7 @@ async function takeControlForRefused(machineId: string, session: string): Promis
     showComposerStatus("Taking control of this session…", "info");
     let requested = true;
     try {
-      await connections.get(machineId)?.requestControl(session, force);
+      await requestPaneControl(machineId, session, force);
     } catch {
       requested = false;
     }
@@ -3433,7 +3501,7 @@ async function restorePaneControlThenFlush(machine: StoredMachine, session: stri
   const key = sessionKey(machine.id, session);
   // While the machine still holds messages (unsteady, or a socket being
   // probed) the take waits: the next live announcement brings it back here.
-  if (controlLostToOutage.has(key) && !connections.get(machine.id)?.holdsMessages()) {
+  if (controlLostToOutage.has(key) && paneControlIsHere(machine.id, session) && !connections.get(machine.id)?.holdsMessages()) {
     controlLostToOutage.delete(key);
     if (leases.get(key)?.held_by_me !== true) {
       await restorePaneControl(machine, session);

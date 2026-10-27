@@ -58,7 +58,10 @@ function setNotice(element: HTMLElement | null, text: string | undefined): void 
 
 export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
   setNotice(root.querySelector<HTMLElement>(".status-stale"), view.staleNotice);
-  setDisabledReason(root.querySelector<HTMLElement>("#message-send"), view.sendReason);
+  const send = root.querySelector<HTMLElement>("#message-send");
+  setDisabledReason(send, view.sendReason);
+  if (view.sendReason !== undefined) send?.setAttribute("aria-describedby", "message-status");
+  else send?.removeAttribute("aria-describedby");
 
   const field = root.querySelector<HTMLTextAreaElement>("#message-text");
   if (field) {
@@ -78,9 +81,10 @@ export function applyLiveRegions(root: ParentNode, view: LiveRegionView): void {
 
   const status = root.querySelector<HTMLElement>("#message-status");
   if (status) {
-    // A send result outranks the standing read-only sentence; that sentence is
-    // a fact about this pairing, so it is never styled as an error.
-    const shown = view.messageStatus ?? (view.readOnlyReason === undefined ? undefined : { text: view.readOnlyReason, error: false });
+    // The current refusal must stay visible and describe Send, even when a
+    // previous send left a status. A pairing fact has no error tone.
+    const reason = view.sendReason ?? view.readOnlyReason;
+    const shown = reason === undefined ? view.messageStatus : { text: reason, error: false };
     status.textContent = shown?.text ?? "";
     status.className = `message-status${shown?.error ? " error" : ""}`;
     status.hidden = shown === undefined;

@@ -196,11 +196,12 @@ describe("atomic Commander journal", () => {
     first.restorePending((await a.read(scope)).sends, 1_000);
     second.restorePending((await b.read(scope)).sends, 1_000);
     await a.dispatch(scope, item.id, fence, () => true);
-    const receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true };
+    const receipt = { client_ref: item.id, notification_id: 99, target: item.target, stamped: true, operator_label: "Ben", device_label: "Phone" };
     expect(await a.acknowledge(scope, receipt, fence)).toBe(true);
     for (const [journal, history] of [[a, first], [b, second]] as const) {
       const snapshot = await journal.read(scope);
       expect(snapshot.sends).toEqual([]);
+      expect(snapshot.receipts[0]).toMatchObject({ operator_label: "Ben", device_label: "Phone" });
       history.synchronizePending(snapshot.sends, 1_000, snapshot.receipts);
       const event = history.events[0];
       expect(event?.kind === "send" && history.showsDeliveryStatus(event.value)).toBe(true);

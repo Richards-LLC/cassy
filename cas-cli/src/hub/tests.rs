@@ -2600,6 +2600,7 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         target: "supervisor".into(),
         stamped: true,
         device_label: Some("Android".into()),
+        operator_label: None,
     })
     .unwrap();
     let refused = serde_json::to_vec(&DaemonMessage::Error {
@@ -2837,6 +2838,12 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
             .as_deref(),
         Some("laptop")
     );
+    // The phone left with a stale held-by-me cache after the laptop took
+    // control. Departure cleanup must not revoke its pairing or the laptop.
+    auth.release_lease(&phone, "factory-a", now).unwrap();
+    assert!(auth.lease_status(&laptop, "factory-a", now).unwrap().held_by_me);
+    auth.release_lease(&laptop, "factory-a", now).unwrap();
+    // Repeated cleanup after the owner already left is equally harmless.
     auth.release_lease(&laptop, "factory-a", now).unwrap();
     assert!(
         auth.lease_status(&phone, "factory-a", now)

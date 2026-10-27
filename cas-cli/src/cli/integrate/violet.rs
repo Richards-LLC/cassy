@@ -4933,6 +4933,7 @@ auth = "env:{token}"
             }
             assert!(crate::accounts::drift(Provider::Codex, &home).unwrap().is_empty(), "{mode}: integration broke linked account config");
             if mode == "explicit" {
+                // pin: explicit CODEX_HOME must leave other account configurations byte-for-byte unchanged.
                 assert_eq!(fs::read_to_string(&base).unwrap(), original, "explicit selection changed other registered homes");
             }
         }

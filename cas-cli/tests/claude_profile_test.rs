@@ -800,6 +800,17 @@ fi
             )
             .unwrap();
         std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        let active = home.path().join(format!(".{provider}-login.tmp.active"));
+        std::fs::create_dir(&active).unwrap();
+        let lease = std::fs::File::open(&active).unwrap();
+        fs2::FileExt::lock_exclusive(&lease).unwrap();
+        lease
+            .set_times(
+                std::fs::FileTimes::new().set_modified(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+                ),
+            )
+            .unwrap();
         cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove("CLAUDE_CONFIG_DIR")
@@ -817,6 +828,9 @@ fi
             linked.is_symlink() && outside.is_dir(),
             "never traverse sweep symlinks"
         );
+        assert!(active.is_dir(), "old active auth folders must be kept");
+        drop(lease);
+        std::fs::remove_dir(&active).unwrap();
         std::fs::remove_dir(&fresh).unwrap();
         std::fs::remove_file(&linked).unwrap();
         assert!(

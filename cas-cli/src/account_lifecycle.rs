@@ -154,12 +154,11 @@ fn in_use(folder: &Path, home: &Path) -> Result<bool> {
     use crate::store::KnownRepoStore;
     let host = home.join(".cas");
     let mut roots = vec![host.clone()];
-    if host.join("cas.db").is_file() {
-        if let Ok(store) = crate::store::SqliteKnownRepoStore::open(&host) {
-            if let Ok(repos) = store.list() {
-                roots.extend(repos.into_iter().map(|r| r.path.join(".cas")));
-            }
-        }
+    let inspection_error = "Cannot inspect known repositories; account kept\nRun: cas doctor";
+    if host.join("cas.db").try_exists().context(inspection_error)? {
+        let store = crate::store::SqliteKnownRepoStore::open(&host).context(inspection_error)?;
+        let repos = store.list().context(inspection_error)?;
+        roots.extend(repos.into_iter().map(|r| r.path.join(".cas")));
     }
     if let Ok(root) = crate::store::find_cas_root() {
         if !roots.contains(&root) {
@@ -232,6 +231,28 @@ pub(crate) fn disabled(home: &Path, folder: &Path) -> bool {
 
 pub(crate) fn set_disabled(home: &Path, folder: &Path, disabled: bool) -> Result<()> {
     let mut policy = read_policy(home)?;
+    let accounts = policy
+        .get("accounts")
+        .map(|value| value.as_table().context("accounts must be a TOML table"))
+        .transpose()?;
+    let list = accounts
+        .and_then(|table| table.get("disabled"))
+        .map(|value| {
+            value
+                .as_array()
+                .context("accounts.disabled must be an array")
+        })
+        .transpose()?;
+    let current = list.is_some_and(|list| {
+        list.iter().any(|value| {
+            value
+                .as_str()
+                .is_some_and(|value| Path::new(value) == folder)
+        })
+    });
+    if current == disabled {
+        return Ok(());
+    }
     let table = policy
         .as_table_mut()
         .context("Config must be a TOML table")?;
@@ -271,9 +292,6 @@ fn remove_with(
 ) -> Result<()> {
     ensure_idle(target, home)?;
     read_policy(home)?;
-    if macos && target.provider == Provider::Claude {
-        keychain_delete(&target.folder, run)?;
-    }
     // remove_dir_all unlinks symlinks within the tree, never traverses them.
     if std::fs::symlink_metadata(&target.folder)?
         .file_type()
@@ -283,7 +301,21 @@ fn remove_with(
     } else {
         std::fs::remove_dir_all(&target.folder)?;
     }
-    set_disabled(home, &target.folder, false)
+    // Once the directory is gone, a failed Keychain deletion must still leave
+    // policy truthful. Report both failures rather than losing the remedy.
+    let credentials = if macos && target.provider == Provider::Claude {
+        keychain_delete(&target.folder, run)
+    } else {
+        Ok(())
+    };
+    let policy = set_disabled(home, &target.folder, false);
+    match (credentials, policy) {
+        (Err(error), Err(policy)) => {
+            Err(error.context(format!("Cannot update account policy: {policy:#}")))
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        _ => Ok(()),
+    }
 }
 
 pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
@@ -352,17 +384,18 @@ fn keychain_delete(
     folder: &Path,
     run: &mut impl FnMut(&[String], Option<&str>) -> Result<Output>,
 ) -> Result<()> {
+    let service = service(folder);
+    let remedy = format!(
+        "Cannot delete account Keychain item\nRun: security delete-generic-password -s '{service}'"
+    );
     let out = run(
-        &[
-            "delete-generic-password".into(),
-            "-s".into(),
-            service(folder),
-        ],
+        &["delete-generic-password".into(), "-s".into(), service],
         None,
-    )?;
+    )
+    .with_context(|| remedy.clone())?;
     anyhow::ensure!(
         out.status.success() || out.status.code() == Some(44),
-        "Cannot delete account Keychain item"
+        "{remedy}"
     );
     Ok(())
 }
@@ -423,12 +456,214 @@ fn keychain_rekey(
     keychain_delete(from, run)
 }
 
+#[cfg(unix)]
+static LOGIN_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+#[cfg(unix)]
+static LOGIN_SIGNAL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(unix)]
+extern "C" fn record_login_signal(signal: libc::c_int) {
+    // Only an atomic store in signal context. Filesystem and child cleanup run
+    // in ordinary control flow, with interception held until the tempdir drops.
+    let _ = LOGIN_SIGNAL.compare_exchange(
+        0,
+        signal,
+        std::sync::atomic::Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+struct LoginSignals {
+    #[cfg(unix)]
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+    #[cfg(unix)]
+    _exclusive: std::sync::MutexGuard<'static, ()>,
+}
+
+impl LoginSignals {
+    fn enter() -> Result<Self> {
+        #[cfg(unix)]
+        {
+            let mut guard = Self {
+                previous: Vec::new(),
+                _exclusive: LOGIN_SIGNAL_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
+            };
+            LOGIN_SIGNAL.store(0, std::sync::atomic::Ordering::Relaxed);
+            for signal in [libc::SIGINT, libc::SIGTERM] {
+                let mut previous: libc::sigaction = unsafe { std::mem::zeroed() };
+                if unsafe { libc::sigaction(signal, std::ptr::null(), &mut previous) } != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                // Preserve a caller's deliberate ignored disposition.
+                if previous.sa_sigaction == libc::SIG_IGN {
+                    continue;
+                }
+                let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+                action.sa_sigaction = record_login_signal as *const () as libc::sighandler_t;
+                unsafe { libc::sigemptyset(&mut action.sa_mask) };
+                if unsafe { libc::sigaction(signal, &action, &mut previous) } != 0 {
+                    return Err(std::io::Error::last_os_error().into());
+                }
+                guard.previous.push((signal, previous));
+            }
+            Ok(guard)
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {})
+        }
+    }
+
+    fn check(&self) -> Result<()> {
+        #[cfg(unix)]
+        anyhow::ensure!(
+            LOGIN_SIGNAL.load(std::sync::atomic::Ordering::Relaxed) == 0,
+            "Login interrupted; account not added"
+        );
+        Ok(())
+    }
+
+    fn answer(&self) -> Result<String> {
+        #[cfg(unix)]
+        {
+            // read_line retries EINTR internally. Poll/read without that retry
+            // so Ctrl-C also cancels the post-auth duplicate-account question.
+            let mut answer = Vec::new();
+            loop {
+                self.check()?;
+                let mut fd = libc::pollfd {
+                    fd: libc::STDIN_FILENO,
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+                if ready == 0 {
+                    continue;
+                }
+                let mut byte = 0u8;
+                match unsafe { libc::read(libc::STDIN_FILENO, (&mut byte as *mut u8).cast(), 1) } {
+                    0 => break,
+                    1 if byte == b'\n' => break,
+                    1 => answer.push(byte),
+                    _ => {
+                        let error = std::io::Error::last_os_error();
+                        if error.kind() != std::io::ErrorKind::Interrupted {
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+            self.check()?;
+            Ok(String::from_utf8(answer)?)
+        }
+        #[cfg(not(unix))]
+        {
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            Ok(answer)
+        }
+    }
+}
+
+impl Drop for LoginSignals {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            for (signal, previous) in self.previous.iter().rev() {
+                unsafe { libc::sigaction(*signal, previous, std::ptr::null_mut()) };
+            }
+            let signal = LOGIN_SIGNAL.load(std::sync::atomic::Ordering::Relaxed);
+            if signal != 0 {
+                // TempDir and its lease have already dropped. Preserve the
+                // process's death-by-signal contract after completing cleanup.
+                unsafe {
+                    libc::raise(signal);
+                    libc::_exit(128 + signal);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_login_dir(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+}
+
+/// Sweep abandoned transactions only. A directory flock keeps a still-running
+/// login safe even when the user leaves its auth prompt open for over an hour.
+pub(crate) fn sweep_stale_logins(home: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(home)? {
+        let entry = entry?;
+        if !Provider::ALL.iter().any(|p| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{}login.tmp.", p.prefix()))
+        }) {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(entry.path()) {
+            Ok(metadata) => metadata,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
+        if !metadata.is_dir()
+            || !metadata
+                .modified()?
+                .elapsed()
+                .is_ok_and(|age| age > std::time::Duration::from_secs(3600))
+        {
+            continue;
+        }
+        #[cfg(unix)]
+        let _lease = {
+            let Ok(file) = open_login_dir(&entry.path()) else {
+                continue;
+            };
+            if fs2::FileExt::try_lock_exclusive(&file).is_err() {
+                continue;
+            }
+            file
+        };
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        }
+        if cfg!(target_os = "macos")
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(Provider::Claude.prefix())
+        {
+            keychain_delete(&entry.path(), &mut security)?;
+        }
+    }
+    Ok(())
+}
+
 /// RAII cleanup for every early return, provider failure and cancelled login.
 /// The sibling's .tmp segment is hidden by NON_ACCOUNT_SUFFIXES.
 pub(crate) struct NewLogin {
     home: PathBuf,
     provider: Provider,
     dir: tempfile::TempDir,
+    #[cfg(unix)]
+    _lease: std::fs::File,
+    // Fields drop in declaration order: restore signals only after dir cleanup.
+    signals: LoginSignals,
 }
 impl NewLogin {
     pub(crate) fn begin(home: &Path, provider: Provider, typed: &str) -> Result<Self> {
@@ -438,19 +673,50 @@ impl NewLogin {
         );
         crate::cli::account_picker::validate_new_profile_name(typed, "main")
             .map_err(anyhow::Error::msg)?;
+        let signals = LoginSignals::enter()?;
         let dir = tempfile::Builder::new()
             .prefix(&format!("{}login.tmp.", provider.prefix()))
             .tempdir_in(home)?;
+        #[cfg(unix)]
+        let lease = {
+            let file = open_login_dir(dir.path())?;
+            fs2::FileExt::lock_exclusive(&file)?;
+            file
+        };
         Ok(Self {
             home: home.into(),
             provider,
             dir,
+            #[cfg(unix)]
+            _lease: lease,
+            signals,
         })
     }
     pub(crate) fn path(&self) -> &Path {
         self.dir.path()
     }
+    pub(crate) fn run(&self, command: &mut Command) -> Result<std::process::ExitStatus> {
+        self.signals.check()?;
+        let mut child = command.spawn()?;
+        let result = (|| {
+            loop {
+                self.signals.check()?;
+                if let Some(status) = child.try_wait()? {
+                    self.signals.check()?;
+                    return Ok(status);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        })();
+        if result.is_err() {
+            // Only our auth child: no host-wide process-name or group kills.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        result
+    }
     pub(crate) fn finish(self, typed: &str) -> Result<String> {
+        self.signals.check()?;
         let email = self.provider.login_email(&self.home, self.path());
         let name = email.as_deref().unwrap_or(typed);
         crate::cli::account_picker::validate_new_profile_name(name, "main")
@@ -488,8 +754,7 @@ impl NewLogin {
             use std::io::Write;
             eprint!("Keep the existing account? [y/N] ");
             std::io::stderr().flush()?;
-            let mut answer = String::new();
-            std::io::stdin().read_line(&mut answer)?;
+            let answer = self.signals.answer()?;
             if answer.trim().eq_ignore_ascii_case("y") || answer.trim().eq_ignore_ascii_case("yes")
             {
                 return Ok(existing.name);
@@ -515,6 +780,7 @@ impl NewLogin {
                 Ok(_) => bail!("Account folder already exists: {}", to.display()),
             }
         }
+        self.signals.check()?;
         std::fs::rename(self.path(), &to)?;
         if cfg!(target_os = "macos") && self.provider == Provider::Claude {
             if let Err(error) = keychain_rekey(self.path(), &to, &mut security) {
@@ -746,6 +1012,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let store = SqliteAgentStore::open(&root).unwrap();
         store.init().unwrap();
+        use crate::store::KnownRepoStore;
+        crate::store::SqliteKnownRepoStore::open(&root)
+            .unwrap()
+            .init()
+            .unwrap();
         let mut agent = cas_types::Agent::new("account-holder".into(), "account-holder".into());
         let folder = env.home().join(".codex-busy");
         std::fs::create_dir(&folder).unwrap();

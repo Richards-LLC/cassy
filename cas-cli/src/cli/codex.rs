@@ -228,7 +228,10 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
 
 /// Usage per logged-in Codex home from its latest rollout, for the picker
 /// (cas-e1f4).
-fn with_usage(home: &Path, profiles: Vec<super::account_picker::Profile>) -> Vec<super::account_picker::Profile> {
+fn with_usage(
+    home: &Path,
+    profiles: Vec<super::account_picker::Profile>,
+) -> Vec<super::account_picker::Profile> {
     super::account_picker::with_usage(crate::accounts::Provider::Codex, home, profiles)
 }
 
@@ -305,6 +308,7 @@ fn new_login(home: &Path, profile: &str) -> Result<String> {
 }
 
 fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String> {
+    crate::account_lifecycle::sweep_stale_logins(home)?;
     let named = resolve_profile_dir(home, profile);
     let created = profile != "main"
         && match std::fs::symlink_metadata(&named) {
@@ -330,9 +334,12 @@ fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String
     let login_args = std::iter::once(OsString::from("login"))
         .chain(args.iter().cloned())
         .collect::<Vec<_>>();
-    let status = build_codex_command(profile, profile_dir, &login_args)
-        .status()
-        .context("could not run `codex login`")?;
+    let mut command = build_codex_command(profile, profile_dir, &login_args);
+    let status = match &pending {
+        Some(login) => login.run(&mut command),
+        None => command.status().map_err(Into::into),
+    }
+    .context("could not run `codex login`")?;
     anyhow::ensure!(
         status.success(),
         "Codex login cancelled or failed; account not added"

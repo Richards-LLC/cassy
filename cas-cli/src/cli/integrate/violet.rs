@@ -2001,7 +2001,7 @@ fn plan_project_proxy(
         ServerAction::Drop | ServerAction::DropSameHub
     );
     if allowlist_is_canonical && !drops_server {
-        let mut note = "already names exactly the hub's current routes".to_string();
+        let mut note = "already names exactly this build's canonical routes".to_string();
         if server_action == ServerAction::Keep {
             note.push_str("; ");
             note.push_str(&kept_override_note());
@@ -5220,9 +5220,13 @@ auth = "env:{token}"
         );
         assert!(row.message.contains("Edit"), "{row:?}");
 
+        let project = write_project_proxy(
+            dir.path(),
+            &format!("allowlist = {:?}\n", canonical_entries()),
+        );
         let report = run(
             &args,
-            None,
+            Some(&project),
             &paths,
             &env,
             &FakeProbe(ProbeOutcome::Tools {
@@ -5231,10 +5235,15 @@ auth = "env:{token}"
             }),
         )
         .unwrap();
+        let entry = report.project_proxy.as_ref().unwrap();
+        assert_eq!(entry.state, WriteState::AlreadyCurrent);
+        assert!(entry.note.contains("this build's canonical"), "{entry:?}");
+        assert!(!entry.note.contains("hub's current"), "{entry:?}");
+        assert!(!report.is_green(), "{report:?}");
         let remedy = report.remedy.as_deref().unwrap();
         assert!(!remedy.contains("cas integrate violet"), "{remedy}");
         assert!(
-            remedy.contains(&paths.user_proxy.display().to_string()),
+            remedy.contains(&project.display().to_string()),
             "{remedy}"
         );
         assert!(remedy.contains("violet.violet_broadcast"), "{remedy}");

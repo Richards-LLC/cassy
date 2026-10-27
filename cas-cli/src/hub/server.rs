@@ -109,6 +109,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
+        .route("/commander/{*asset}", get(commander_chunk).options(preflight::<R>))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -253,6 +254,29 @@ fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response
     response.headers_mut().insert(
         "cache-control",
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+const COMMANDER_CHUNKS: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/commander_chunks.rs"));
+
+async fn commander_chunk(OriginalUri(uri): OriginalUri) -> Response {
+    // Use the original, encoded path: Path<String> would decode forbidden `%`
+    // sequences before validation. Never consult the filesystem at runtime.
+    let Some(name) = uri.path().strip_prefix("/commander/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(mime) = super::chunk_assets::content_type(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((_, bytes)) = COMMANDER_CHUNKS.iter().find(|(asset, _)| *asset == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = commander_asset(bytes, mime);
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
     );
     response
 }

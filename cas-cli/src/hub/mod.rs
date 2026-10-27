@@ -30,6 +30,7 @@ pub mod open_files;
 pub mod operator_inbox;
 pub mod projects;
 mod runtime;
+mod chunk_assets;
 mod server;
 pub(crate) mod state;
 mod tailscale;

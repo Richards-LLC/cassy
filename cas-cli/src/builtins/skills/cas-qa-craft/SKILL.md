@@ -61,9 +61,12 @@ for API-only reasons; otherwise follow
    write the **evidence bundle** to `~/.cas/artifacts/<project-key>/<task-id>/qa/` with
    [references/evidence-bundle.md](references/evidence-bundle.md), including its trace, ARIA and
    polish requirements even when `visual_change: false`. For a visual change, also write its
-   before/after screenshots to `qa/pairs/`
-   ([pairs](references/evidence-bundle.md#beforeafter-pairs)); reports and release notes read them
-   from there. Cite `bundle.json` in a `platform_proof` note and the close reason. API-only changes
+   before/after screenshots with `cas deliverable capture --task <task-id> --target <target> --side both`
+   to `qa/pairs/` ([pairs](references/evidence-bundle.md#beforeafter-pairs)); cite `files.pairs`
+   and `pairs_status`. If capture is unavailable, omit `files.pairs` and record
+   `pairs_status: "unavailable"` with a one-line `pairs_reason` in the bundle.
+   On deploy-only projects, run `cas deliverable capture --task <task-id> --side before`
+   at task start, before deploying the change. Reports and release notes read pairs from there. Cite `bundle.json` in a `platform_proof` note and the close reason. API-only changes
    use the transcript and diff, with credentials redacted; record sandbox reset and the check that
    no smoke rows remain inline.
 6. Grep the touched feature for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`, `THRESHOLD`, `GRACE`,

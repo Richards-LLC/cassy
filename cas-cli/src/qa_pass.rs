@@ -1418,6 +1418,11 @@ pub fn qa_task_description(
         Ok(commands) => commands,
         Err(refusal) => return refusal,
     };
+    let capture_command = format!(
+        "cas deliverable capture --task {} --target {} --side both",
+        shell_words::quote(&delivery.id),
+        shell_words::quote(parent_branch)
+    );
     let demo = if delivery.demo_statement.trim().is_empty() {
         "(none — derive the user goal from the delivery title and diff)".to_string()
     } else {
@@ -1444,7 +1449,10 @@ pub fn qa_task_description(
          walk the adjacent paths (empty, loading, error, long content, phone 390px, dark, \
          keyboard-only, reduced motion); run visual-qa.mjs --strict and score the \
          cas-ui-craft rubric for what the delivery changed, with desktop+phone, light+dark \
-         screenshots. When a check fails, repeat it on the base build \
+         screenshots. For visual changes, run {capture_command} \
+         and cite files.pairs with pairs_status, or record pairs_status \"unavailable\" and a one-line pairs_reason. \
+         For deploy-only projects, capture --side before at task start, before deploying the change. \
+         When a check fails, repeat it on the base build \
          ({baseline}) before you count it: a failure the base shares is \
          pre-existing. For visual QA, run the base build over the same pages into \
          visual-qa-baseline/ and set visual_qa_status \"scoped\" with \
@@ -2001,6 +2009,7 @@ mod tests {
             &["demo_statement".into()], Path::new("/artifacts/qa"), "epic/{a,b}!e");
         // pin: the baseline command must preserve the configured parent ref.
         assert!(special.contains("git merge-base 'epic/{a,b}!e' aaaa1111"), "{special}");
+        assert!(special.contains("--target 'epic/{a,b}!e' --side both"), "{special}");
         let round = pass("aaaa1111", cas_types::QaPassState::Pending);
         let text = qa_task_description(
             &task(),

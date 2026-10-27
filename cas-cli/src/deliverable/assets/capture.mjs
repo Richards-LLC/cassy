@@ -113,7 +113,11 @@ async function capture(plan) {
             if (s.settleMs) await page.waitForTimeout(s.settleMs);
             if (Buffer.byteLength(await page.content()) > plan.config.max_html_mb * 1024 * 1024) throw new Error('capture-size');
             const mask = s.mask.map(sel => page.locator(sel));
-            for (const locator of mask) if (await locator.count() === 0) throw new Error('capture-mask');
+            for (let i = 0; i < mask.length; i++) if (await mask[i].count() === 0) {
+              const error = new Error('capture-mask');
+              error.selector = s.mask[i];
+              throw error;
+            }
             const target = s.locator ? page.locator(s.locator).first() : page;
             const common = { mask, maskColor:'#8F8371', animations:'disabled', ...(s.locator ? {} : { fullPage:Boolean(s.fullPage) }) };
             const stem = `${s.id}.${phase.side}`;
@@ -125,7 +129,17 @@ async function capture(plan) {
               capture:{png,jpg,sha256:sha(join(plan.out,png)),jpg_sha256:sha(join(plan.out,jpg)),ref:phase.ref,source:s.artifact_path?'artifact':phase.source,captured_at:new Date().toISOString()} });
           } catch (error) {
             const known = ['capture-origin','capture-redirect','capture-size','capture-mask'];
-            result.failures.push({id:s.id,side:phase.side,code:known.includes(error.message)?error.message:'capture-shot',message:'Shot failed; verify its route, readiness and selectors'});
+            if (error.message === 'capture-mask') {
+              let finding = result.failures.find(f => f.id === s.id && f.code === 'capture-mask' && f.selector === error.selector);
+              if (!finding) {
+                finding = { id:s.id, code:'capture-mask', selector:error.selector, sides:[] };
+                result.failures.push(finding);
+              }
+              if (!finding.sides.includes(phase.side)) finding.sides.push(phase.side);
+              finding.message = `Requested mask selector ${finding.selector} is missing on ${finding.sides.join(', ')}; check the selector`;
+            } else {
+              result.failures.push({id:s.id,side:phase.side,code:known.includes(error.message)?error.message:'capture-shot',message:'Shot failed; verify its route, readiness and selectors'});
+            }
           }
         }
       } catch {

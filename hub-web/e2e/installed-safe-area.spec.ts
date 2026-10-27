@@ -52,6 +52,27 @@ test("installed iPhone, landscape: the list header clears the notch", async ({ p
   }
 });
 
+test("landscape pairing code keeps its content scrollable and every action reachable", async ({ page }) => {
+  await page.setViewportSize({ width: 844, height: 390 });
+  await page.goto("/?fixture=pairing-code");
+  const dialog = page.getByRole("dialog", { name: "Pair a machine", exact: true });
+  await expect(dialog).toBeInViewport({ ratio: 1 });
+  expect(await dialog.evaluate((node) => {
+    const overflow = getComputedStyle(node).overflowY;
+    return node.scrollHeight <= node.clientHeight + 1 || overflow === "auto" || overflow === "scroll";
+  }), "pairing content must fit the dialog or remain scrollable, never clipped").toBe(true);
+
+  for (const name of ["Copy command", "Send the code", "Cancel"]) {
+    const action = dialog.getByRole("button", { name, exact: true });
+    await action.focus();
+    await expect(action).toBeFocused();
+    await expect(action).toBeInViewport({ ratio: 1 });
+    const [surface, control] = await Promise.all([dialog.boundingBox(), action.boundingBox()]);
+    expect(control!.y, `${name} clears the dialog's top`).toBeGreaterThanOrEqual(surface!.y);
+    expect(control!.y + control!.height, `${name} clears the dialog's bottom`).toBeLessThanOrEqual(surface!.y + surface!.height);
+  }
+});
+
 test("in a browser tab (no inset) the headers keep their geometry", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?fixture=conversation");

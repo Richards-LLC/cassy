@@ -609,7 +609,10 @@ mod tests {
             let old = crate::account_selection::tests::row(provider, "old", 1, 10., 10.);
             let mut alias = crate::account_selection::tests::row(provider, "alias", 2, 10., 10.);
             let mut old = old;
-            old.identity = Some("limited-subscription".into());
+            old.identity = Some(crate::account_registry::AccountIdentity {
+                account_id: Some("limited-subscription".into()),
+                ..Default::default()
+            });
             alias.identity = old.identity.clone();
             let next = crate::account_selection::tests::row(provider, "next", 8, 20., 20.);
             let meta = LimitRecycle {

@@ -3162,17 +3162,25 @@ fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() 
     use std::path::{Path, PathBuf};
     use std::fs;
 
-    let fixture = tempfile::Builder::new().prefix("c4927").tempdir_in("/tmp").unwrap();
-    let root = fixture.path();
-    let project = root.join("project");
+    // The real projects live under the runtime fixture parent, like every
+    // real-project fixture.
+    let fixture = tempfile::tempdir_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    let base = fixture.path();
+    let project = base.join("project");
     fs::create_dir_all(&project).unwrap();
     let own = cas::store::init_cas_dir(&project).unwrap();
-    let foreign = cas::store::init_cas_dir(&root.join("foreign")).unwrap();
+    let foreign = cas::store::init_cas_dir(&base.join("foreign")).unwrap();
     let agents = SqliteAgentStore::open(&foreign).unwrap();
     let before = fs::read(foreign.join("cas.db")).unwrap();
-    let bin = root.join("bin");
+    let bin = base.join("bin");
     fs::create_dir_all(&bin).unwrap();
-    let spawned = root.join("spawned");
+    let spawned = base.join("spawned");
+    // The socket cells need a HOME parent short enough to reach each byte
+    // boundary from any checkout path. It holds no project: the refused
+    // launches never create a HOME there, and only the positive control binds
+    // a socket in it.
+    let sockets = tempfile::Builder::new().prefix("c4927").tempdir().unwrap();
+    let root = sockets.path();
     // The old launch reaches this inert supervisor before its bind fails.
     fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();
     fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();

@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.83.0] - 2026-10-27
+
 ### Fixed
 
 - Commander phone messages wake an idle supervisor, including short approvals,

@@ -1347,7 +1347,7 @@ x-vercel-protection-bypass = "env:{bypass}"
         );
         let raw = std::fs::read_to_string(&path).unwrap();
         assert_no_legacy_hub_vocabulary(&raw);
-        let config = Config::load_from(&path).unwrap();
+        let mut config = Config::load_from(&path).unwrap();
         assert_eq!(
             config.servers.get(VIOLET_SERVER),
             Some(&ServerConfig::Http {
@@ -1360,6 +1360,22 @@ x-vercel-protection-bypass = "env:{bypass}"
                 oauth: false,
             })
         );
+        // Passive refresh preserves policy; explicit integration installs the
+        // full contract, including the new reconciliation route.
+        assert_eq!(
+            config.violet_allowlisted_tools(),
+            ["violet_read", "violet_post"]
+        );
+        assert!(config.ensure_violet_registration(
+            violet_hub_url(),
+            VIOLET_DEFAULT_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
+        ));
+        assert!(!config.ensure_violet_registration(
+            violet_hub_url(),
+            VIOLET_DEFAULT_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
+        ));
         assert_eq!(
             config.violet_allowlisted_tools(),
             ["violet_read", "violet_post", "violet_reconcile_reply"]

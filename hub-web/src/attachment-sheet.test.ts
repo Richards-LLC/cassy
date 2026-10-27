@@ -90,6 +90,9 @@ describe("sheets in the thread", () => {
       const ask = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
       expect(ask.querySelector(".sheet")).not.toBeNull();
       expect(ask.nextElementSibling?.classList.contains("sheet")).toBe(false);
+      const sheet = ask.querySelector(".sheet");
+      history.markReplyPersisted(60); view.update();
+      expect(view.element.querySelector('.obj .sheet')).toBe(sheet);
     } finally { unregister(); }
   });
 });

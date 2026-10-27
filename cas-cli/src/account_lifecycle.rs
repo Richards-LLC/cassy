@@ -936,14 +936,42 @@ mod tests {
         );
     }
 
+    // Historical layouts from independent QA's qa_legacy_split.py. These
+    // intentionally predate the modern SqliteAgentStore::init baseline.
+    fn legacy_agent_db(root: &Path, with_pid_starttime: bool) -> rusqlite::Connection {
+        std::fs::create_dir_all(root).unwrap();
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        let mut columns = "id TEXT PRIMARY KEY, name TEXT NOT NULL, agent_type TEXT NOT NULL DEFAULT 'primary', \
+            role TEXT NOT NULL DEFAULT 'standard', status TEXT NOT NULL DEFAULT 'active', pid INTEGER, ppid INTEGER, \
+            cc_session_id TEXT, parent_id TEXT, machine_id TEXT, registered_at TEXT NOT NULL, last_heartbeat TEXT NOT NULL, \
+            active_tasks INTEGER NOT NULL DEFAULT 0, metadata TEXT NOT NULL DEFAULT '{}', startup_confirmed INTEGER NOT NULL DEFAULT 0".to_owned();
+        if with_pid_starttime {
+            columns.push_str(", pid_starttime INTEGER");
+        }
+        conn.execute_batch(&format!("CREATE TABLE agents ({columns})"))
+            .unwrap();
+        conn
+    }
+
     #[test]
     fn remove_refuses_unreadable_known_repos() {
         use crate::store::{AgentStore, SqliteAgentStore};
-        for schema in ["missing", "corrupt", "malformed"] {
+        for schema in [
+            "missing",
+            "pre-m199",
+            "pre-m204",
+            "no-agents",
+            "corrupt",
+            "malformed",
+        ] {
             let env = crate::test_support::TestEnvGuard::temp_home();
             let root = env.home().join(".cas");
             if schema == "corrupt" {
                 std::fs::write(root.join("cas.db"), "not a sqlite database").unwrap();
+            } else if schema.starts_with("pre-") {
+                legacy_agent_db(&root, schema == "pre-m204");
+            } else if schema == "no-agents" {
+                rusqlite::Connection::open(root.join("cas.db")).unwrap();
             } else {
                 SqliteAgentStore::open(&root).unwrap().init().unwrap();
                 if schema == "malformed" {
@@ -960,8 +988,10 @@ mod tests {
             };
             std::fs::create_dir(&target.folder).unwrap();
             let result = remove(&target, env.home());
-            if schema == "missing" {
-                result.expect("a legacy host with no repo table has no registered repositories");
+            if matches!(schema, "missing" | "pre-m199" | "pre-m204" | "no-agents") {
+                result.unwrap_or_else(|e| {
+                    panic!("{schema}: legacy idle removal must succeed: {e:#}")
+                });
                 assert!(!target.folder.exists());
                 continue;
             }
@@ -1088,6 +1118,33 @@ mod tests {
             ),
         ] {
             assert_eq!(ps_uses(text, folder), expected, "{text}");
+        }
+    }
+
+    #[test]
+    fn legacy_registered_account_stays_protected_without_modern_columns() {
+        for with_pid_starttime in [false, true] {
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let conn = legacy_agent_db(&env.home().join(".cas"), with_pid_starttime);
+            let folder = env.home().join(".codex-busy");
+            std::fs::create_dir(&folder).unwrap();
+            conn.execute(
+                "INSERT INTO agents (id,name,registered_at,last_heartbeat,metadata) VALUES ('holder','holder','2026-01-01','2026-01-01',?1)",
+                [r#"{"worker_account_dir":"~/.codex-busy"}"#],
+            ).unwrap();
+            let target = Target {
+                provider: Provider::Codex,
+                name: "busy".into(),
+                folder: folder.clone(),
+                email: None,
+            };
+            let error = ensure_idle(&target, env.home()).unwrap_err().to_string();
+            assert!(error.contains("is in use"), "{error}");
+            assert!(folder.is_dir());
+            conn.execute("UPDATE agents SET status='shutdown'", [])
+                .unwrap();
+            remove(&target, env.home()).unwrap();
+            assert!(!folder.exists());
         }
     }
 

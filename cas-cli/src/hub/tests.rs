@@ -2584,12 +2584,15 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
         request_id: "request-2109".into(),
     };
     let auth = Some((AuthStore::open(&root, "machine-test").unwrap(), phone));
-    let mut pending = std::collections::HashSet::from([
-        ("factory-1".to_string(), "send-ok".to_string()),
-        ("factory-1".to_string(), "send-bad".to_string()),
+    use super::server::PendingRefKind::{History, Send};
+    // cas-3877: client_ref is browser-supplied, so the audit keeps a bounded prefix.
+    let long_ref = format!("send-bad{}", "x".repeat(4000));
+    let mut pending = super::server::PendingRefs::from([
+        (("factory-1".to_string(), "send-ok".to_string()), Send),
+        (("factory-1".to_string(), long_ref.clone()), Send),
         // cas-3877: the daemon answers a failed history page load with an
         // Error carrying the request's id; that is not a send.
-        ("factory-1".to_string(), "history-1".to_string()),
+        (("factory-1".to_string(), "history-1".to_string()), History),
     ]);
     let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
         client_ref: Some("send-ok".into()),
@@ -2601,10 +2604,10 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     .unwrap();
     let refused = serde_json::to_vec(&DaemonMessage::Error {
         message: "semantic message enqueue failed: database is locked".into(),
-        client_ref: Some("send-bad".into()),
+        client_ref: Some(long_ref.clone()),
     })
     .unwrap();
-    let admit = |pending: &mut std::collections::HashSet<(String, String)>, frame: &[u8]| {
+    let admit = |pending: &mut super::server::PendingRefs, frame: &[u8]| {
         super::server::admit_correlated_daemon_frame(pending, "factory-1", &auth, frame)
     };
     let history_failed = serde_json::to_vec(&DaemonMessage::Error {
@@ -2635,11 +2638,15 @@ fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_
     assert_eq!(rows[1]["outcome"], "failed");
     let detail = rows[1]["detail"].as_str().unwrap();
     assert!(detail.contains("client_ref=send-bad") && detail.contains("database is locked"), "{detail}");
+    assert!(!detail.contains(&long_ref) && detail.len() < 1000, "client_ref is capped: {} bytes", detail.len());
 }
 
 #[test]
 fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
-    let mut pending = std::collections::HashSet::from([("factory-1".into(), "history-1".into())]);
+    let mut pending = super::server::PendingRefs::from([(
+        ("factory-1".into(), "history-1".into()),
+        super::server::PendingRefKind::History,
+    )]);
     let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-1".into(),
         messages: Vec::new(),
@@ -2650,18 +2657,20 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
         earlier_replies: Vec::new(),
     })
     .unwrap();
-    assert!(super::server::correlated_daemon_frame_allowed(
+    assert!(super::server::admit_correlated_daemon_frame(
         &mut pending,
         "factory-1",
+        &None,
         &frame
     ));
     assert!(
         pending.is_empty(),
         "the response cannot be replayed to another socket"
     );
-    assert!(!super::server::correlated_daemon_frame_allowed(
+    assert!(!super::server::admit_correlated_daemon_frame(
         &mut pending,
         "factory-1",
+        &None,
         &frame
     ));
 }

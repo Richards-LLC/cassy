@@ -1278,7 +1278,10 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
                 .servers
                 .contains_key(&violet_compatibility().retired_server)
         );
-        assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(
+            config.violet_allowlisted_tools(),
+            ["violet_read", "violet_post", "violet_reconcile_reply"]
+        );
         assert_eq!(
             config.violet_env_names(),
             Some((
@@ -1356,7 +1359,10 @@ x-vercel-protection-bypass = "env:{bypass}"
                 oauth: false,
             })
         );
-        assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(
+            config.violet_allowlisted_tools(),
+            ["violet_read", "violet_post", "violet_reconcile_reply"]
+        );
     }
 
     #[test]
@@ -1571,14 +1577,17 @@ tool = "get_file_download_url"
         user_config.save_to(&user).unwrap();
 
         // No project `.cas/proxy.toml`: the machine registration is the whole
-        // policy, so any project on this machine can dispatch both hub tools.
+        // policy, so any project on this machine can dispatch all hub tools.
         let (merged, sources) = Config::load_merged_with_sources_from(Some(&user), None).unwrap();
         assert!(
             !merged
                 .servers
                 .contains_key(&violet_compatibility().retired_server)
         );
-        assert_eq!(merged.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(
+            merged.violet_allowlisted_tools(),
+            ["violet_read", "violet_post", "violet_reconcile_reply"]
+        );
         assert_eq!(sources.get(VIOLET_SERVER), Some(&user));
     }
 

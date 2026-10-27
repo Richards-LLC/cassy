@@ -3841,7 +3841,11 @@ mod tests {
 
     fn live_tools() -> ProbeOutcome {
         ProbeOutcome::Tools {
-            tools: VIOLET_TOOLS.iter().map(|t| t.to_string()).collect(),
+            // Independent fake tools/list: changing the local allowlist must not
+            // silently change what this hub fixture serves.
+            tools: ["violet_read", "violet_post", "violet_reconcile_reply"]
+                .map(str::to_string)
+                .to_vec(),
             schema_problems: Vec::new(),
         }
     }
@@ -3933,7 +3937,10 @@ mod tests {
             .chain(violet_compatibility().retired_tools.iter().cloned())
             .collect();
         assert!(tool_drift(&allowlisted, &live).is_empty());
-        let missing_read: Vec<_> = std::iter::once("violet_post".to_owned())
+        let missing_read: Vec<_> = VIOLET_TOOLS
+            .iter()
+            .filter(|tool| **tool != "violet_read")
+            .map(|tool| (*tool).to_owned())
             .chain(violet_compatibility().retired_tools.iter().cloned())
             .collect();
         assert_eq!(
@@ -4611,6 +4618,18 @@ auth = "env:{token}"
             (VIOLET_DEFAULT_BYPASS_ENV, FAKE_BYPASS),
         ]);
 
+        let mut old = ProxyConfig::default();
+        old.ensure_violet_registration(&args.url, "VIOLET_SLACK_TOKEN_LAPTOP", &args.bypass_env);
+        old.allowlist
+            .retain(|route| route.tool != "violet_reconcile_reply");
+        old.save_to(&paths.user_proxy).unwrap();
+        let before = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(before.severity, DoctorSeverity::Error, "{before:?}");
+        assert!(
+            before.message.contains("cas integrate violet"),
+            "{before:?}"
+        );
+
         let report = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert!(report.is_green(), "{report:?}");
         assert_eq!(report.registration, WriteState::Written);
@@ -4621,7 +4640,9 @@ auth = "env:{token}"
         assert_eq!(
             report.probe,
             ProbeOutcome::Tools {
-                tools: vec!["violet_read".to_string(), "violet_post".to_string()],
+                tools: ["violet_read", "violet_post", "violet_reconcile_reply"]
+                    .map(str::to_string)
+                    .to_vec(),
                 schema_problems: Vec::new(),
             }
         );
@@ -4656,6 +4677,9 @@ auth = "env:{token}"
         // Idempotent: a second run rewrites nothing.
         let second = run(&args, None, &paths, &env, &FakeProbe(live_tools())).unwrap();
         assert_eq!(second.registration, WriteState::AlreadyCurrent);
+        assert!(second.is_green(), "{second:?}");
+        let after = doctor_row(None, &paths, &env, &FakeProbe(live_tools()));
+        assert_eq!(after.severity, DoctorSeverity::Ok, "{after:?}");
         assert!(
             second
                 .harnesses
@@ -5044,7 +5068,32 @@ auth = "env:{token}"
         );
         assert_eq!(row.severity, DoctorSeverity::Error);
         assert!(row.message.contains("violet_broadcast"), "{row:?}");
-        assert!(row.message.contains("cas integrate violet"), "{row:?}");
+        assert!(!row.message.contains("cas integrate violet"), "{row:?}");
+        assert!(
+            row.message
+                .contains(&paths.user_proxy.display().to_string()),
+            "{row:?}"
+        );
+        assert!(row.message.contains("Edit"), "{row:?}");
+
+        let report = run(
+            &args,
+            None,
+            &paths,
+            &env,
+            &FakeProbe(ProbeOutcome::Tools {
+                tools: vec!["violet_read".to_string(), "violet_broadcast".to_string()],
+                schema_problems: Vec::new(),
+            }),
+        )
+        .unwrap();
+        let remedy = report.remedy.as_deref().unwrap();
+        assert!(!remedy.contains("cas integrate violet"), "{remedy}");
+        assert!(
+            remedy.contains(&paths.user_proxy.display().to_string()),
+            "{remedy}"
+        );
+        assert!(remedy.contains("violet.violet_broadcast"), "{remedy}");
     }
 
     /// The `violet_post` input schema both Claude Code and Codex received from
@@ -5174,7 +5223,7 @@ auth = "env:{token}"
         std::fs::write(
             &project,
             "allowlist = [\"violet.violet_read\", \"violet.violet_post\", \
-             \"violet.slack_upload_file\"]\n",
+             \"violet.violet_reconcile_reply\", \"violet.slack_upload_file\"]\n",
         )
         .unwrap();
 
@@ -5270,7 +5319,11 @@ auth = "env:{token}"
         let project = write_project_proxy(dir.path(), &shadowing_project_proxy());
 
         let before = doctor_row(Some(&project), &paths, &env, &FakeProbe(live_tools()));
-        assert_eq!(before.severity, DoctorSeverity::Warning, "{before:?}");
+        assert_eq!(before.severity, DoctorSeverity::Error, "{before:?}");
+        assert!(
+            before.message.contains("cas integrate violet"),
+            "{before:?}"
+        );
 
         let report = run(
             &args,
@@ -5298,6 +5351,7 @@ auth = "env:{token}"
              \x20 \"neon.run_sql\",\n\
              \x20 \"violet.violet_read\",\n\
              \x20 \"violet.violet_post\",\n\
+             \x20 \"violet.violet_reconcile_reply\",\n\
              ]\n\
              \n\
              [servers.neon]\n\
@@ -5804,7 +5858,7 @@ auth = "env:{token}"
         assert_eq!(claude.state, WriteState::AlreadyCurrent);
         let note = claude.note.clone().unwrap_or_default();
         assert!(
-            note.contains("authenticated tools/list: 2 tool(s)"),
+            note.contains("authenticated tools/list: 3 tool(s)"),
             "{claude:?}"
         );
 

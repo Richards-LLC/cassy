@@ -169,6 +169,14 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+bug_families:
+  recovered_session_attention:
+    title: Live replacement sessions retire their daemon-lost and session-ended attention while retaining history
+    found: '2026-10-27'
+    fixed_by: [b8b8d0d234daa7f6ce565138ff5a61ae45288f95]
+    tasks: [cas-d53c]
+    invariants: [HUB-J11-GOAL]
+    journeys: [HUB-J11]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

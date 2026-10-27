@@ -1789,7 +1789,11 @@ export class HubConnectionSupervisor {
       this.callbacks.onFlowControlReset?.(session);
       return;
     }
-    if (envelope.closed) {
+    // A replacement may not be in the catalog when this session re-subscribes.
+    // These subscribe refusals establish no stream, so release the local claim
+    // just as Closed does; the next attempt must actually write a subscription.
+    if (envelope.closed || envelope.error?.code === "session_not_found" || envelope.error?.code === "daemon_offline") {
+      this.clearAttachTimeouts(session);
       this.machineSubscriptions.delete(session);
       this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed", sessionOnly: true });
       this.callbacks.onSocketError(session, "Session daemon stream closed. Retrying…");

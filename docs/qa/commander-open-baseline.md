@@ -213,6 +213,24 @@ sample as a stable median. No physical network timing is inferred.
 
 ACK totals are cumulative observations at each phase, not unique-id counts or proof that all replies persisted. The null fix increases successful ACKs, but cold phone input is still **47.19 s**, essentially the original exploratory **47.3 s** experience. It does not meet the opening budget. The matched baseline/candidate runs each passed both named profile cases, but host one-minute load was 10.12 versus 20.53 on the same 32-logical-CPU machine, so these single samples do not establish a speedup/regression percentage. In particular, reconnect remains about 19.5 s, while hundreds of duplicate old frames still trigger view work. Remaining durable-write failures and transaction pressure need their own isolation; rendering/windowing remains required.
 
+## Follow-up persistence candidate: unique-ID coverage
+
+The opt-in identity gate also passed against candidate `c296c03ae` with the
+same frozen 327 pending IDs. Both desktop and phone acknowledged all **327
+unique IDs**, with no remaining IDs before reconnect. Phone reconnect and
+reload each replayed **zero** pending live replies. This resolves the
+incomplete-ACK uncertainty observed in the earlier null-label-only candidate;
+it does not yet implement presentation windowing.
+
+| Phone flow | Input acknowledged after flow, ms | Frozen IDs acknowledged | Pending live frames |
+| --- | ---: | ---: | ---: |
+| initial | 17722 | 327/327 | 283 |
+| warm_reopen | 855 | 327/327 | 0 |
+| reconnect | 2978 | 327/327 | 0 |
+| reload_resume | 2302 | 327/327 | 0 |
+
+Proof: `c296-identity.log`, `c296-identity/{desktop-0,phone-0}/receipt.json` and their timestamped ACK timelines and CPU/trace files. This is a separate single-sample run, not a controlled speedup percentage. The ambient-Date CI rejection was corrected by deriving the epoch from `performance.timeOrigin + performance.now()`; `npm run check:journey-clock` passes without a checker exception.
+
 ## Evidence
 
 All paths below are relative to the assigned artifact root:

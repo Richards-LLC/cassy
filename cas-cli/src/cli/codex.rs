@@ -164,7 +164,11 @@ fn classify_login_output(success: bool, stdout: &str, stderr: &str) -> LoginStat
     if combined.contains("logged in") {
         return LoginState::LoggedIn;
     }
-    if success { LoginState::LoggedIn } else { LoginState::Unknown }
+    if success {
+        LoginState::LoggedIn
+    } else {
+        LoginState::Unknown
+    }
 }
 
 /// Ask the codex CLI itself whether this profile's credential is usable.
@@ -276,7 +280,10 @@ fn seed_new_codex_profile(home: &Path, profile_dir: &Path) -> Result<()> {
     use crate::accounts::Provider;
     if Provider::Codex.base_dir(home).is_dir() {
         let linked = crate::accounts::link_new_account(Provider::Codex, home, profile_dir)?;
-        eprintln!("Linked shared config from ~/.cas/codex-base: {}", linked.join(", "));
+        eprintln!(
+            "Linked shared config from ~/.cas/codex-base: {}",
+            linked.join(", ")
+        );
         eprintln!("Credentials and account identity remain private to this profile.");
         return Ok(());
     }
@@ -293,36 +300,40 @@ fn seed_new_codex_profile(home: &Path, profile_dir: &Path) -> Result<()> {
 /// Create, seed and sign in a brand new codex account, then return its profile
 /// name so the caller can launch on it immediately.
 fn new_login(home: &Path, profile: &str) -> Result<String> {
-    let profile_dir = resolve_profile_dir(home, profile);
-    std::fs::create_dir_all(&profile_dir).with_context(|| {
-        format!(
-            "could not create Codex profile directory {}",
-            profile_dir.display()
-        )
-    })?;
+    login_profile(home, profile, &[])
+}
 
-    seed_new_codex_profile(home, &profile_dir)?;
+fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String> {
+    let named = resolve_profile_dir(home, profile);
+    let pending = if profile != "main" && std::fs::symlink_metadata(&named).is_err() {
+        Some(crate::account_lifecycle::NewLogin::begin(
+            home,
+            crate::accounts::Provider::Codex,
+            profile,
+        )?)
+    } else {
+        None
+    };
+    let profile_dir = pending.as_ref().map(|login| login.path()).unwrap_or(&named);
+    std::fs::create_dir_all(profile_dir)?;
+    if profile != "main" {
+        seed_new_codex_profile(home, profile_dir)?;
+    }
     eprintln!("Signing in Codex account home: {}", profile_dir.display());
-
-    // Deliberately `status()` rather than `exec()`: this runs inside the launch
-    // path, so the process must survive the login and go on to start the factory
-    // on the account that was just created.
-    let status = build_codex_command(profile, &profile_dir, &[OsString::from("login")])
+    let login_args = std::iter::once(OsString::from("login"))
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>();
+    let status = build_codex_command(profile, profile_dir, &login_args)
         .status()
-        .context("could not run `codex login`; install the Codex CLI or add it to PATH")?;
-    if !status.success() {
-        anyhow::bail!(
-            "`codex login` did not complete for {}; the account was not added",
-            profile_dir.display()
-        );
+        .context("could not run `codex login`")?;
+    anyhow::ensure!(
+        status.success(),
+        "Codex login cancelled or failed; account not added"
+    );
+    match pending {
+        Some(login) => login.finish(profile),
+        None => Ok(profile.to_owned()),
     }
-    if probe_login_state(profile, &profile_dir) == LoginState::LoggedOut {
-        anyhow::bail!(
-            "{} still reports `Not logged in` after the login flow",
-            profile_dir.display()
-        );
-    }
-    Ok(profile.to_string())
 }
 
 /// Build the command used for a `--bare` profile launch without executing it.
@@ -368,7 +379,11 @@ fn should_offer_login_for_explicit_profile(
         && (!profile_dir.is_dir() || login_state == LoginState::LoggedOut)
 }
 
-fn prompt_for_explicit_profile_login(home: &Path, profile: &str, profile_dir: &Path) -> Result<()> {
+fn prompt_for_explicit_profile_login(
+    home: &Path,
+    profile: &str,
+    profile_dir: &Path,
+) -> Result<String> {
     let state = if profile_dir.is_dir() {
         "is not logged in"
     } else {
@@ -381,8 +396,7 @@ fn prompt_for_explicit_profile_login(home: &Path, profile: &str, profile_dir: &P
         ),
         false,
     )? {
-        new_login(home, profile)?;
-        return Ok(());
+        return new_login(home, profile);
     }
 
     anyhow::bail!(
@@ -419,7 +433,7 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
 
     let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
 
-    let profile = match args.profile() {
+    let mut profile = match args.profile() {
         // An explicitly named account is the no-prompt fast path.
         Some(profile) => profile.to_string(),
         None => {
@@ -446,9 +460,12 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
         }
     };
 
-    let profile_dir = resolve_profile_dir(&home, &profile);
+    let mut profile_dir = resolve_profile_dir(&home, &profile);
     let login_state = probe_login_state(&profile, &profile_dir);
-    eprintln!("Using Codex account home: {}", account_line(&home, &profile_dir));
+    eprintln!(
+        "Using Codex account home: {}",
+        account_line(&home, &profile_dir)
+    );
 
     if args.profile().is_some()
         && should_offer_login_for_explicit_profile(
@@ -458,7 +475,8 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
             io::stdout().is_terminal(),
         )
     {
-        prompt_for_explicit_profile_login(&home, &profile, &profile_dir)?;
+        profile = prompt_for_explicit_profile_login(&home, &profile, &profile_dir)?;
+        profile_dir = resolve_profile_dir(&home, &profile);
     } else {
         warn_about_profile_state(&profile, &profile_dir, login_state);
     }
@@ -482,7 +500,8 @@ pub fn execute(args: &CodexArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<(
     }
 
     if args.list_profiles {
-        let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
+        let home =
+            dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
         let active_dir = std::env::var_os("CODEX_HOME").map(PathBuf::from);
         print!("{}", profile_listing(&home, active_dir.as_deref())?);
         return Ok(());
@@ -505,7 +524,7 @@ pub fn execute(args: &CodexArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<(
 }
 
 fn factory_profile<'a>(explicit: Option<&'a str>, picked: Option<&'a str>) -> Option<&'a str> {
-    explicit.or(picked)
+    picked.or(explicit)
 }
 
 /// Build the factory handoff after account selection. Both an explicitly named
@@ -546,15 +565,9 @@ fn parse_factory_args(args: &[OsString]) -> FactoryArgs {
 /// Plain codex launch. On Unix this replaces the Cassy process with codex.
 fn execute_bare(args: &CodexArgs) -> Result<()> {
     let home = dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
-    let profile = match args.profile() {
-        Some(profile) => profile.to_string(),
-        // `apply_profile_env` already ran the picker in the single-threaded
-        // window; reuse its answer instead of asking a second time.
-        None => match SELECTED_PROFILE.get() {
-            Some(selected) => selected.clone(),
-            None => "main".to_string(),
-        },
-    };
+    let profile = factory_profile(args.profile(), SELECTED_PROFILE.get().map(String::as_str))
+        .unwrap_or("main")
+        .to_owned();
     let profile_dir = resolve_profile_dir(&home, &profile);
 
     // `apply_profile_env` announces whatever it selected. Announcing again here
@@ -578,26 +591,8 @@ fn execute_command(command: &CodexCommand) -> Result<()> {
         CodexCommand::Login { profile, args } => {
             let home =
                 dirs::home_dir().context("cannot determine home directory for Codex profiles")?;
-            let profile_dir = resolve_profile_dir(&home, profile);
-            std::fs::create_dir_all(&profile_dir).with_context(|| {
-                format!(
-                    "could not create Codex profile directory {}",
-                    profile_dir.display()
-                )
-            })?;
-            eprintln!("Logging in Codex account home: {}", profile_dir.display());
-
-            if profile != "main" {
-                seed_new_codex_profile(&home, &profile_dir).with_context(|| {
-                    format!("could not seed Codex profile {}", profile_dir.display())
-                })?;
-            }
-
-            let login_args = std::iter::once(OsString::from("login"))
-                .chain(args.iter().cloned())
-                .collect::<Vec<_>>();
-            let mut command = build_codex_command(profile, &profile_dir, &login_args);
-            exec_codex(&mut command)
+            login_profile(&home, profile, args)?;
+            Ok(())
         }
     }
 }
@@ -712,7 +707,10 @@ mod tests {
             args.iter().collect::<Vec<_>>()
         );
         let envs = command.get_envs().collect::<Vec<_>>();
-        assert!(envs.contains(&(OsStr::new("CODEX_HOME"), Some(OsStr::new("/tmp/.codex-alt")))));
+        assert!(envs.contains(&(
+            OsStr::new("CODEX_HOME"),
+            Some(OsStr::new("/tmp/.codex-alt"))
+        )));
         assert!(envs.contains(&(OsStr::new("OPENAI_API_KEY"), None)));
         assert!(envs.contains(&(OsStr::new("CODEX_API_KEY"), None)));
         assert!(envs.contains(&(OsStr::new("CODEX_ACCESS_TOKEN"), None)));
@@ -738,7 +736,13 @@ mod tests {
                 "{entry} appears in both the shared and private codex lists"
             );
         }
-        for forbidden in ["auth.json", "history.jsonl", "sessions", "log", "installation_id"] {
+        for forbidden in [
+            "auth.json",
+            "history.jsonl",
+            "sessions",
+            "log",
+            "installation_id",
+        ] {
             assert!(
                 PRIVATE_PROFILE_ENTRIES.contains(&forbidden),
                 "{forbidden} must be declared private for codex profiles"

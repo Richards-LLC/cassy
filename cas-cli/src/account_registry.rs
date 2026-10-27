@@ -156,6 +156,7 @@ fn account(provider: Provider, home: &Path, folder: PathBuf) -> Account {
     let identity = identity.or_else(|| email.as_ref().map(|email| format!("email:{email}")));
     let never =
         !folder.join(provider.credentials()).exists() && email.is_none() && identity.is_none();
+    let disabled = crate::account_lifecycle::disabled(home, &folder);
     Account {
         provider,
         display_name: email.clone().unwrap_or_else(|| name.clone()),
@@ -172,6 +173,7 @@ fn account(provider: Provider, home: &Path, folder: PathBuf) -> Account {
         },
         flags: AccountFlags {
             never_logged_in: never,
+            disabled,
             ..Default::default()
         },
     }

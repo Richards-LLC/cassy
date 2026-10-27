@@ -303,7 +303,10 @@ fn login_creates_seeds_and_scopes_the_profile() {
     let profile = home.path().join(".codex-work@example.com");
 
     assert!(
-        stdout.contains(&format!("LOGIN_CODEX_HOME={}", profile.display())),
+        stdout.contains(&format!(
+            "LOGIN_CODEX_HOME={}/.codex-login.tmp.",
+            home.path().display()
+        )),
         "codex login was not scoped to the profile home: {stdout}"
     );
     assert!(

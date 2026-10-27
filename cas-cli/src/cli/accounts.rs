@@ -16,6 +16,20 @@ pub struct AccountsArgs {
 pub enum AccountsCommand {
     /// List Claude and Codex subscriptions, usage, resets and login findings
     List,
+    /// Permanently delete a named account (shared base items stay intact)
+    Remove {
+        /// Folder alias or email; use claude:<name> or codex:<name> if ambiguous
+        account: String,
+        /// Skip the default-no confirmation
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Move a named account to a new folder alias
+    Rename { account: String, new_name: String },
+    /// Keep a login but exclude it from automatic account selection
+    Disable { account: String },
+    /// Allow automatic selection of an account again
+    Enable { account: String },
     /// Link every account's shared items (commands, skills, settings, project
     /// memory, ...) to one base folder; logins stay per account. Retires
     /// ~/.claude, ~/.claude-alt and ~/.codex as accounts. Everything replaced
@@ -55,6 +69,44 @@ impl ProviderArg {
 pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
     let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
     match &args.command {
+        AccountsCommand::Remove { account, yes } => {
+            let target = crate::account_lifecycle::resolve(&home, account)?;
+            crate::account_lifecycle::ensure_idle(&target, &home)?;
+            if !yes {
+                // Prompts go to stderr so --json still emits one document.
+                use std::io::Write;
+                eprintln!(
+                    "Delete {} account {}?",
+                    target.provider.name(),
+                    target.email.as_deref().unwrap_or(&target.name)
+                );
+                eprintln!("Folder: {}", target.folder.display());
+                eprint!("Permanently remove this folder? [y/N] ");
+                std::io::stderr().flush()?;
+                let mut answer = String::new();
+                std::io::stdin().read_line(&mut answer)?;
+                if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+                    return mutation_receipt(cli.json, "cancelled", &target);
+                }
+            }
+            crate::account_lifecycle::remove(&target, &home)?;
+            mutation_receipt(cli.json, "removed", &target)
+        }
+        AccountsCommand::Rename { account, new_name } => {
+            let target = crate::account_lifecycle::resolve(&home, account)?;
+            crate::account_lifecycle::rename(&target, &home, new_name)?;
+            mutation_receipt(cli.json, "renamed", &target)
+        }
+        AccountsCommand::Disable { account } | AccountsCommand::Enable { account } => {
+            let target = crate::account_lifecycle::resolve(&home, account)?;
+            let disabled = matches!(args.command, AccountsCommand::Disable { .. });
+            crate::account_lifecycle::set_disabled(&home, &target.folder, disabled)?;
+            mutation_receipt(
+                cli.json,
+                if disabled { "disabled" } else { "enabled" },
+                &target,
+            )
+        }
         AccountsCommand::List => {
             let accounts = crate::account_registry::collect(&home)?;
             print!("{}", render_list(&accounts, cli.json, &home)?);
@@ -166,7 +218,10 @@ fn render_list(
     let flagged = accounts
         .iter()
         .filter(|a| {
-            a.flags.duplicate_of.is_some() || a.flags.never_logged_in || a.flags.stale_login
+            a.flags.duplicate_of.is_some()
+                || a.flags.never_logged_in
+                || a.flags.stale_login
+                || a.flags.disabled
         })
         .count();
     let mut out = format!(
@@ -225,6 +280,9 @@ fn render_list(
                     )
                 ));
             }
+            if a.flags.disabled {
+                out.push_str("    flag: disabled\n");
+            }
             if a.flags.never_logged_in {
                 out.push_str("    flag: never logged in\n");
             }
@@ -258,4 +316,25 @@ fn cell(value: &str, width: usize) -> String {
     } else {
         format!("{}...", &value[..width.saturating_sub(3)])
     }
+}
+
+fn mutation_receipt(
+    json: bool,
+    action: &str,
+    target: &crate::account_lifecycle::Target,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"action": action, "provider": target.provider, "account": target.name, "folder": target.folder})
+        );
+    } else {
+        println!(
+            "[OK] {} {} account {}",
+            action,
+            target.provider.name(),
+            cell(&target.name, 48)
+        );
+    }
+    Ok(())
 }

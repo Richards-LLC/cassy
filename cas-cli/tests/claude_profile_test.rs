@@ -22,6 +22,7 @@ fn cas_cmd(home: &std::path::Path) -> Command {
         .env("XDG_CONFIG_HOME", home.join(".xdg"))
         .env("PATH", path)
         .env_remove("CAS_ROOT")
+        .env_remove("CAS_CLONE_PATH")
         .env_remove("COLUMNS")
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
@@ -489,31 +490,115 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
         std::fs::write(base.join("keep"), "shared").unwrap();
         std::os::unix::fs::symlink(&base, folder.join("shared")).unwrap();
         let key = format!("{provider}:typo@example.com");
-        cas_cmd(home.path()).args(["accounts", "disable", &key]).assert().success();
-        let output = cas_cmd(home.path()).args(["accounts", "list", "--json"]).output().unwrap();
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "disable", &key])
+            .assert()
+            .success();
+        let output = cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["accounts"][0]["flags"]["disabled"], true);
-        cas_cmd(home.path()).args(["accounts", "enable", &key]).assert().success();
-        let output = cas_cmd(home.path()).args(["accounts", "list", "--json"]).output().unwrap();
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "enable", &key])
+            .assert()
+            .success();
+        let output = cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(value["accounts"][0]["flags"]["disabled"], false);
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "disable", &key])
+            .assert()
+            .success();
         let collision = home.path().join(format!(".{provider}-taken"));
         std::fs::create_dir(&collision).unwrap();
-        cas_cmd(home.path()).args(["accounts", "rename", &key, "taken"]).assert().failure();
-        cas_cmd(home.path()).args(["accounts", "rename", &key, "fixed@example.com"]).assert().success();
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "rename", &key, "taken"])
+            .assert()
+            .failure();
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "rename", &key, "fixed@example.com"])
+            .assert()
+            .success();
         assert!(!folder.exists());
+        let output = cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            value["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["name"] == "fixed@example.com" && a["flags"]["disabled"] == true)
+        );
         let key = format!("{provider}:fixed@example.com");
         let moved = home.path().join(format!(".{provider}-fixed@example.com"));
-        let selector = if provider == "claude" { "CLAUDE_CONFIG_DIR" } else { "CODEX_HOME" };
-        cas_cmd(home.path()).env(selector, &moved).args(["accounts", "remove", &key, "--yes"]).assert().failure();
+        let selector = if provider == "claude" {
+            "CLAUDE_CONFIG_DIR"
+        } else {
+            "CODEX_HOME"
+        };
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env(selector, &moved)
+            .args(["accounts", "remove", &key, "--yes"])
+            .assert()
+            .failure();
         assert!(moved.exists());
-        cas_cmd(home.path()).env_remove(selector).args(["accounts", "remove", &key]).write_stdin("n\n").assert().success();
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove(selector)
+            .args(["accounts", "remove", &key])
+            .write_stdin("n\n")
+            .assert()
+            .success();
         assert!(moved.exists());
-        cas_cmd(home.path()).env_remove(selector).args(["accounts", "remove", &key, "--yes"]).assert().success();
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove(selector)
+            .args(["accounts", "remove", &key, "--yes"])
+            .assert()
+            .success();
         assert!(!moved.exists());
-        assert_eq!(std::fs::read_to_string(base.join("keep")).unwrap(), "shared");
+        assert_eq!(
+            std::fs::read_to_string(base.join("keep")).unwrap(),
+            "shared"
+        );
+        std::fs::create_dir(&moved).unwrap();
+        let output = cas_cmd(home.path())
+            .current_dir(home.path())
+            .args(["accounts", "list", "--json"])
+            .output()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(
+            value["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["name"] == "fixed@example.com" && a["flags"]["disabled"] == false)
+        );
+        std::fs::create_dir(home.path().join(format!(".{provider}"))).unwrap();
         for name in ["main", "unknown"] {
-            cas_cmd(home.path()).args(["accounts", "remove", &format!("{provider}:{name}"), "--yes"]).assert().failure();
+            cas_cmd(home.path())
+                .current_dir(home.path())
+                .args(["accounts", "remove", &format!("{provider}:{name}"), "--yes"])
+                .assert()
+                .failure();
         }
     }
 }
@@ -525,8 +610,10 @@ fn new_login_is_atomic_for_both_providers_and_reports_existing_email() {
         let home = TempDir::new().unwrap();
         let bin = home.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(r#"{"email":"real@example.com"}"#);
-        let script = format!(r#"#!/bin/sh
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"email":"real@example.com"}"#);
+        let script = format!(
+            r#"#!/bin/sh
 if [ "$1" = auth ] && [ "$2" = status ]; then echo '{{"loggedIn":true}}'; exit 0; fi
 if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
 [ "$FAIL_LOGIN" = 1 ] && exit 1
@@ -536,20 +623,63 @@ if [ "{provider}" = claude ]; then
 else
   echo '{{"tokens":{{"id_token":"h.{token}.s"}}}}' > "$dir/auth.json"
 fi
-"#);
+"#
+        );
         cas::test_paths::warm_stub(&bin.join(provider), &script);
-        cas_cmd(home.path()).env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME")
-            .env("FAIL_LOGIN", "1").args([provider, "login", "mistyped@example.com"]).assert().failure();
-        assert!(!home.path().join(format!(".{provider}-mistyped@example.com")).exists());
-        cas_cmd(home.path()).env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME")
-            .args([provider, "login", "mistyped@example.com"]).assert().success();
-        assert!(home.path().join(format!(".{provider}-real@example.com")).is_dir());
-        assert!(!home.path().join(format!(".{provider}-mistyped@example.com")).exists());
-        cas_cmd(home.path()).env_remove("CLAUDE_CONFIG_DIR").env_remove("CODEX_HOME")
-            .args([provider, "login", "another-typo"]).write_stdin("y\n").assert().success()
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .env("FAIL_LOGIN", "1")
+            .args([provider, "login", "mistyped@example.com"])
+            .assert()
+            .failure();
+        assert!(
+            !home
+                .path()
+                .join(format!(".{provider}-mistyped@example.com"))
+                .exists()
+        );
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .args([provider, "login", "mistyped@example.com"])
+            .assert()
+            .success();
+        assert!(
+            home.path()
+                .join(format!(".{provider}-real@example.com"))
+                .is_dir()
+        );
+        assert!(
+            !home
+                .path()
+                .join(format!(".{provider}-mistyped@example.com"))
+                .exists()
+        );
+        cas_cmd(home.path())
+            .current_dir(home.path())
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CODEX_HOME")
+            .args([provider, "login", "another-typo"])
+            .write_stdin("y\n")
+            .assert()
+            .success()
             .stderr(predicate::str::contains("already exists"));
-        let names: Vec<_> = std::fs::read_dir(home.path()).unwrap().flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(&format!(".{provider}-"))).collect();
-        assert_eq!(names.len(), 1, "failed/duplicate logins must leave no scratch accounts");
+        let names: Vec<_> = std::fs::read_dir(home.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(&format!(".{provider}-"))
+            })
+            .collect();
+        assert_eq!(
+            names.len(),
+            1,
+            "failed/duplicate logins must leave no scratch accounts"
+        );
     }
 }

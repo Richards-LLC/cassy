@@ -26,9 +26,21 @@ fn discover_follows_directory_symlinks_and_skips_unreadable_entries() {
         let unreadable = home.path().join(format!("{}loop", provider.prefix()));
         std::os::unix::fs::symlink(&unreadable, &unreadable).unwrap();
         write(&home.path().join(format!("{}not-a-directory", provider.prefix())), "file");
+        std::os::unix::fs::symlink(target.path(), home.path().join(format!("{}linked-copy", provider.prefix()))).unwrap();
+        let inside = home.path().join(format!("{}target", provider.name()));
+        std::fs::create_dir_all(&inside).unwrap();
+        for alias in ["inside", "inside-copy"] {
+            std::os::unix::fs::symlink(&inside, home.path().join(format!("{}{alias}", provider.prefix()))).unwrap();
+        }
+        // Write planning must process each physical target just once, including
+        // targets outside HOME; all four aliases remain launchable.
+        assert_eq!(plan(provider, home.path()).unwrap().accounts.len(), 2);
         let rows = discover(provider, home.path()).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].path, linked);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|row| row.path == linked));
+        for alias in ["inside", "inside-copy", "linked", "linked-copy"] {
+            assert!(crate::account_registry::resolve_existing(provider, home.path(), alias).is_ok());
+        }
         assert!(discover(provider, &home.path().join("missing")).unwrap().is_empty());
     }
     let not_directory = home.path().join("file");

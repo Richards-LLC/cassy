@@ -629,6 +629,30 @@ mod tests {
         assert!(valid_profile_name("daniel@petrastella.io"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn missing_implicit_main_is_actionable_but_explicit_names_still_refuse() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home().to_path_buf();
+        let bin = home.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        env.set("PATH", &bin);
+        env.remove("CLAUDE_CONFIG_DIR");
+        env.remove("CODEX_HOME");
+        for (provider, cli) in [("claude", SupervisorCli::Claude), ("codex", SupervisorCli::Codex)] {
+            let executable = bin.join(provider);
+            std::fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(matches!(resolve(cli, None), Err(LaunchError::ProfileMissing { path, .. }) if path == home.join(format!(".{provider}"))));
+            for selector in ["main", "typo"] {
+                assert!(matches!(resolve(cli, Some(selector)), Err(LaunchError::ProbeFailed { detail, .. }) if detail.contains("unknown") && detail.contains(&format!("cas {provider} login {selector}"))));
+            }
+            assert!(!home.join(format!(".{provider}")).exists());
+            assert!(!home.join(format!(".{provider}-typo")).exists());
+        }
+    }
+
     #[test]
     fn configured_profile_beats_ambient_and_main() {
         assert_eq!(

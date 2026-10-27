@@ -79,6 +79,11 @@ invariants:
     statement: I answer with one tap and the supervisor acts on it
     check: 'Walk HUB-J7 in hub-web/e2e/journeys/answer-ask.journey.ts; verify the expected experience and edge paths
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
+  HUB-J7-REAL-ASK-OPTIONS:
+    statement: A real operator ask carries its options through queue, live frames and history to the phone; one tap returns exactly one verified answer linked to that ask.
+    check: Run HUB-J7 in hub-web/e2e/journeys/real-hub.journey.ts against the candidate binary; verify both choices live and after reload, then read the real queue for exactly one answer with the ask's in_reply_to reference and reload the chosen answer.
+    bug:
+      task: cas-7ebc
   HUB-J8-GOAL:
     statement: I work on the other machine, and my draft on the first is still there when I return
     check: 'Walk HUB-J8 in hub-web/e2e/journeys/switch-machines.journey.ts; verify the expected experience and edge
@@ -683,6 +688,8 @@ journeys:
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-list.ts
   - hub-web/e2e/journeys/answer-ask.journey.ts
+  - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-server.mjs
   - hub-web/e2e/journeys/conversation-polish.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
   - hub-web/src/abort-signals.ts
@@ -715,11 +722,12 @@ journeys:
   - hub-web/src/viewport.ts
   invariants:
   - HUB-J7-GOAL
+  - HUB-J7-REAL-ASK-OPTIONS
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/answer-ask.journey.ts
-  catalog_gaps: none
+  catalog_gaps: The catalog suite uses a protocol double. The real-hub HUB-J7 part in real-hub.journey.ts proves CLI ask options through the real daemon, live reply, history reload and the linked phone answer; the supervisor provider is inert, so actual model action remains unproven.
 - id: HUB-J8
   name: Switch between machines without losing my place
   status: live

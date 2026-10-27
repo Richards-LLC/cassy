@@ -323,25 +323,40 @@ for (const width of [1280, 390]) {
           await row.scrollIntoViewIfNeeded();
           const box = (await row.boundingBox())!;
           const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
-          await row.evaluate((node) => { (node as HTMLElement & { pressed?: boolean }).pressed = true; });
+          const pressed = (await row.elementHandle())!;
           await press(point.x, point.y);
-          // While the finger is down, both kinds of live update land: the
-          // prowl pair trades places (the other one just did something), and
-          // a session starts or ends on soundwave, which rebuilds the list.
-          const [, other] = [...prowl.sessions].sort((a, b) => Date.parse(b.last_activity_at!) - Date.parse(a.last_activity_at!));
-          stamp += 61_000;
-          other!.last_activity_at = journeyStamp(stamp);
-          await hub.announceCatalog(prowl.id);
-          if (soundwave.sessions.some((session) => session.name === PASSING.name)) {
-            soundwave.sessions = soundwave.sessions.filter((session) => session.name !== PASSING.name);
-            await hub.announceCatalog(soundwave.id, { removed: [PASSING.name] });
-          } else {
-            soundwave.sessions = [...soundwave.sessions, PASSING];
-            await hub.announceCatalog(soundwave.id, { added: [PASSING.name] });
+          try {
+            // While the finger is down, both kinds of live update land: the
+            // prowl pair trades places (the other one just did something), and
+            // a session starts or ends on soundwave, which rebuilds the list.
+            const [, other] = [...prowl.sessions].sort((a, b) => Date.parse(b.last_activity_at!) - Date.parse(a.last_activity_at!));
+            stamp += 61_000;
+            other!.last_activity_at = journeyStamp(stamp);
+            await hub.announceCatalog(prowl.id);
+            await expect(list.locator('.conversation-row[data-machine-id="prowl"]').first(),
+              `tap ${tap}: the catalog re-sorted the prowl group`).toHaveAttribute("data-thread-key", `${prowl.id}:${other!.name}`);
+            if (soundwave.sessions.some((session) => session.name === PASSING.name)) {
+              soundwave.sessions = soundwave.sessions.filter((session) => session.name !== PASSING.name);
+              await hub.announceCatalog(soundwave.id, { removed: [PASSING.name] });
+            } else {
+              // Insert before both targets: even a render that keeps its keyed
+              // nodes must move the soundwave row out from under this press.
+              soundwave.sessions = [PASSING, ...soundwave.sessions];
+              await hub.announceCatalog(soundwave.id, { added: [PASSING.name] });
+            }
+            // A fulfilled catalog request is not a rendered catalog. Observe
+            // each toggle before the next tap can toggle it back, otherwise
+            // coalesced reads can skip the intervening start/end altogether.
+            await expect(list.locator(`.conversation-row[data-thread-key="${soundwave.id}:${PASSING.name}"]`),
+              `tap ${tap}: the catalog rendered the session start/end`).toHaveCount(soundwave.sessions.includes(PASSING) ? 1 : 0);
+            // Compare this press's node, not a sticky flag on reused rows that
+            // may have been pressed in an earlier iteration.
+            await expect.poll(() => pressed.evaluate((node, { x, y }) => node.ownerDocument.elementFromPoint(x, y)?.closest(".conversation-row") !== node, point),
+              { message: `tap ${tap}: the row under the finger was replaced or moved` }).toBe(true);
+          } finally {
+            await release();
+            await pressed.dispose();
           }
-          await expect.poll(() => page.evaluate(({ x, y }) => (document.elementFromPoint(x, y)?.closest(".conversation-row") as HTMLElement & { pressed?: boolean } | null)?.pressed !== true, point),
-            { message: `tap ${tap}: the row under the finger was replaced or moved` }).toBe(true);
-          await release();
           await opens(key, target.supervisor, `tap ${tap}`);
         }
       });

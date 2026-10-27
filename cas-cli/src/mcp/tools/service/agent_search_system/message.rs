@@ -964,6 +964,22 @@ impl CasService {
                 "target required (agent name, 'supervisor', or 'all_workers')",
             )
         })?;
+        let options: Vec<String> = req.options.take().unwrap_or_default()
+            .into_iter()
+            .map(|option| option.trim().to_owned())
+            .collect();
+        if !options.is_empty() && (target != "operator" || req.kind.as_deref() != Some("ask")) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "options require target='operator' kind=ask",
+            ));
+        }
+        if options.iter().any(String::is_empty) {
+            return Err(Self::error(
+                ErrorCode::INVALID_PARAMS,
+                "ask options must be non-empty labels",
+            ));
+        }
         let mut message = req.message.ok_or_else(|| {
             Self::error(
                 ErrorCode::INVALID_PARAMS,
@@ -1755,6 +1771,7 @@ impl CasService {
                 operator_label,
                 kind,
                 attachments: attachments.clone(),
+                options,
                 reply_to_session,
             })
             .map_err(|error| {
@@ -7761,6 +7778,7 @@ mod cas_89e1_post_merge_message_type_tests {
             "action": "message",
             "target": "operator",
             "kind": "ask",
+            "options": ["Approve", "Keep testing"],
             "summary": "need approval",
             "message": "Can you approve this release?",
         }))
@@ -7783,6 +7801,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(payload.reply_to, None);
         assert_eq!(payload.device_id, "phone-9");
         assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Ask);
+        assert_eq!(payload.options, ["Approve", "Keep testing"]);
     }
 
     /// cas-207e: an ask with a deadline and a default schedules the

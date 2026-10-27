@@ -710,3 +710,59 @@ fn flv2_no_blocking_call_on_lanes() {
         status.lane_violation_sites
     );
 }
+
+/// cas-cd73: an operator's Commander send arrives on the loop thread, often
+/// after earlier work in the pass has spent [`super::store_worker::PASS_STORE_WAIT_BUDGET`].
+/// Under brief write contention it must still enqueue and answer
+/// `MessageQueued`, not "semantic message enqueue failed" ("Not sent").
+#[tokio::test(flavor = "current_thread")]
+async fn commander_send_queues_under_a_spent_pass_budget_and_brief_write_contention_cas_cd73() {
+    let dir = tempfile::tempdir().unwrap();
+    let cas_dir = crate::store::init_cas_dir(dir.path()).unwrap();
+    let mut daemon = super::provisioning_tests::daemon(&cas_dir);
+    let write_lock = hold_sqlite_write_lock(&cas_dir);
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        write_lock.release();
+    });
+
+    let reply = {
+        let _spent = wait_budget::bound_waits_until(Instant::now());
+        daemon
+            .dispatch_commander_control(super::delivery::CommanderControl::SendMessage {
+                target: "supervisor".to_string(),
+                text: "sent from the phone while the factory is busy".to_string(),
+                summary: None,
+                urgent: false,
+                client_ref: Some("phone-1".to_string()),
+                in_reply_to: None,
+                attribution: crate::ui::factory::protocol::MessageAttribution {
+                    device_id: Some("device-phone".to_string()),
+                    credential_id: Some("credential-phone".to_string()),
+                    device_label: Some("Phone".to_string()),
+                    operator_label: Some("Operator".to_string()),
+                    controller_origin: None,
+                    request_id: None,
+                    scopes: vec!["message:send".to_string()],
+                    operator_verified: true,
+                },
+            })
+            .await
+    };
+    release.join().unwrap();
+
+    let Ok(Some(crate::ui::factory::DaemonMessage::MessageQueued {
+        notification_id,
+        client_ref,
+        ..
+    })) = reply
+    else {
+        panic!("expected MessageQueued, got {reply:?}");
+    };
+    assert_eq!(client_ref.as_deref(), Some("phone-1"));
+    let row = open_prompt_queue_store(&cas_dir)
+        .unwrap()
+        .queued_prompt(notification_id)
+        .unwrap();
+    assert!(row.is_some(), "the send wrote its prompt_queue row");
+}

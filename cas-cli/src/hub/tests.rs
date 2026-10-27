@@ -196,6 +196,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         device_id: "phone".into(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Answer,
+        options: Vec::new(),
         attachments: Vec::new(),
         notice: None,
         reply_to_session: None,

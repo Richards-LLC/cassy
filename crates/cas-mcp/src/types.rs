@@ -1064,6 +1064,11 @@ pub struct AgentRequest {
     #[serde(default)]
     pub kind: Option<String>,
 
+    /// Quick-reply choices for a Commander ask.
+    #[schemars(description = "message target=operator kind=ask: non-empty quick-reply labels; the selected label returns with in_reply_to")]
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
+
     /// Published artifact id to attach to a Commander turn.
     #[schemars(description = "Published artifact id to attach to a Commander turn")]
     #[serde(default)]

@@ -12833,6 +12833,43 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[tokio::test]
+    async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let attribution = crate::ui::factory::protocol::MessageAttribution {
+            device_id: Some("phone".into()),
+            device_label: Some("Ben's phone".into()),
+            operator_label: Some("Ben".into()),
+            scopes: vec!["message:send".into()],
+            operator_verified: true,
+            ..Default::default()
+        };
+        let id = super::super::delivery::enqueue_commander_message(
+            &root, &daemon.session_name, "supervisor", "Yes please, reconcile it.",
+            None, false, None, &attribution,
+        ).unwrap().id();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+        let live = daemon.live_operator_message(id).unwrap().unwrap();
+        assert_eq!(live.state, "acknowledged");
+        // The inert supervisor has not consumed the row. A reload and another
+        // pairing still see the same durable acceptance, not Sending again.
+        for device in ["phone", "desktop"] {
+            let crate::ui::factory::DaemonMessage::ConversationHistory { messages, .. } = daemon
+                .conversation_history_page(format!("history-{device}"), device, None, 20).unwrap()
+            else { panic!("expected conversation history"); };
+            assert_eq!(messages.len(), 1, "{device}'s accepted turn");
+            assert_eq!(messages[0].notification_id, live.notification_id);
+            assert_eq!(messages[0].text, live.text);
+            assert_eq!(messages[0].state, live.state, "{device}'s receipt regressed on history");
+        }
+        assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none(),
+            "reading a receipt must not claim supervisor consumption");
+    }
+
+    #[tokio::test]
     async fn cas_7bcb_operator_reply_backoff_caps_and_resets() {
         use crate::ui::factory::daemon::WsConnection;
         use futures_util::{FutureExt, StreamExt};

@@ -305,11 +305,11 @@ fn summarize(limit: &AccountLimit) -> Option<String> {
             None => format!("{} limit hit", full.name),
         });
     }
-    let mut parts: Vec<String> = windows
-        .iter()
-        .map(|window| format!("{} {:.0}%", window.name, window.used_percent.unwrap_or(0.0)))
-        .collect();
-    parts.extend(expired_windows);
+    // Unknown capacity is the first thing a picker must keep visible when
+    // a long account name leaves room for only part of the usage summary.
+    let mut parts = expired_windows;
+    parts.extend(windows.iter()
+        .map(|window| format!("{} {:.0}%", window.name, window.used_percent.unwrap_or(0.0))));
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -2575,7 +2575,7 @@ async fn proxy_socket(
     // MessageQueued and ConversationHistory have no socket field: retain the
     // authenticated submitter's correlation id so only that socket receives
     // its private response.
-    let mut pending_message_refs = HashSet::<(String, String)>::new();
+    let mut pending_message_refs = PendingRefs::new();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -2622,14 +2622,14 @@ async fn proxy_socket(
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(Message::Text(text))) => {
                     let client_ref = client_correlation_ref(text.as_bytes());
-                    if let Some(client_ref) = client_ref.as_deref() {
-                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    if let Some((client_ref, kind)) = &client_ref {
+                        pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
                     if let Err(failure) = handle_client_message(&connector, &session, &auth, text.as_bytes()).await {
-                        if let Some(client_ref) = client_ref.as_deref() {
+                        if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = legacy_send_error(&failure, client_ref.as_deref());
+                        let error = legacy_send_error(&failure, client_ref.as_ref().map(|(r, _)| r.as_str()));
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
                         // cas-0653: this socket's daemon upstream is gone.
                         // Closing it (not with 1000) makes the browser attach
@@ -2643,14 +2643,14 @@ async fn proxy_socket(
                 }
                 Some(Ok(Message::Binary(bytes))) => {
                     let client_ref = client_correlation_ref(&bytes);
-                    if let Some(client_ref) = client_ref.as_deref() {
-                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    if let Some((client_ref, kind)) = &client_ref {
+                        pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
                     if let Err(failure) = handle_client_message(&connector, &session, &auth, &bytes).await {
-                        if let Some(client_ref) = client_ref.as_deref() {
+                        if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = legacy_send_error(&failure, client_ref.as_deref());
+                        let error = legacy_send_error(&failure, client_ref.as_ref().map(|(r, _)| r.as_str()));
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
                         // cas-0653: this socket's daemon upstream is gone.
                         // Closing it (not with 1000) makes the browser attach
@@ -3330,8 +3330,23 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
     (!request_id.is_empty()).then_some(request_id)
 }
 
-fn client_correlation_ref(bytes: &[u8]) -> Option<String> {
-    client_message_ref(bytes).or_else(|| client_history_request_ref(bytes))
+/// What a pending client reference asked the daemon for (cas-3877). The
+/// daemon answers both with a correlated Error, but only a send's answer is a
+/// `commander_send` outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingRefKind {
+    Send,
+    History,
+}
+
+/// One authenticated socket's outstanding references, keyed by session and
+/// client reference.
+pub(crate) type PendingRefs = HashMap<(String, String), PendingRefKind>;
+
+fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
+    client_message_ref(bytes)
+        .map(|client_ref| (client_ref, PendingRefKind::Send))
+        .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
 }
 
 /// What the browser is told when the session's daemon upstream could not take
@@ -3424,14 +3439,15 @@ fn multiplex_forbidden_error(session: &str, client_ref: Option<&str>) -> serde_j
     error
 }
 
-/// Admit one daemon frame to an authenticated socket (cas-2109): the
-/// correlation filter in [`correlated_daemon_frame_allowed`], plus one
-/// `commander_send` audit row per answered send. The `allowed` row is written
+/// Admit one daemon frame to an authenticated socket (cas-2109). MessageQueued,
+/// correlated Error and history frames share one daemon upstream, so they reach
+/// only the socket that submitted their ref; each answered send also writes one
+/// `commander_send` audit row. The `allowed` row is written
 /// when the hub forwards a send, before the daemon answers; this row records
 /// the answer (queued id or refusal), keyed by client_ref, so a "Not sent" can
 /// be traced after the fact.
 pub(crate) fn admit_correlated_daemon_frame(
-    pending: &mut HashSet<(String, String)>,
+    pending: &mut PendingRefs,
     session: &str,
     auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
@@ -3444,19 +3460,6 @@ pub(crate) fn admit_correlated_daemon_frame(
             true
         }
     }
-}
-
-/// MessageQueued and correlated Error frames share one daemon upstream, so
-/// the hub filters them by the authenticated socket that submitted the ref.
-pub(crate) fn correlated_daemon_frame_allowed(
-    pending: &mut HashSet<(String, String)>,
-    session: &str,
-    bytes: &[u8],
-) -> bool {
-    !matches!(
-        correlate_daemon_frame(pending, session, bytes),
-        Correlation::Refused
-    )
 }
 
 /// The daemon's answer to one Commander send.
@@ -3475,16 +3478,15 @@ enum Correlation {
     Refused,
 }
 
-fn correlate_daemon_frame(
-    pending: &mut HashSet<(String, String)>,
-    session: &str,
-    bytes: &[u8],
-) -> Correlation {
+fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]) -> Correlation {
     let mut consume = |client_ref: String, answer: Option<Result<i64, String>>| {
-        if pending.remove(&(session.to_owned(), client_ref.clone())) {
-            Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
-        } else {
-            Correlation::Refused
+        match pending.remove(&(session.to_owned(), client_ref.clone())) {
+            // A history request's Error is not a send outcome (cas-3877).
+            Some(PendingRefKind::Send) => {
+                Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
+            }
+            Some(PendingRefKind::History) => Correlation::Consumed(None),
+            None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
@@ -3507,13 +3509,17 @@ fn correlate_daemon_frame(
 
 /// Most characters of a daemon refusal kept in the audit row.
 const SEND_ERROR_AUDIT_CHARS: usize = 500;
+/// Most characters of the browser-supplied client_ref kept in the audit row
+/// and its log line (cas-3877); Commander's own refs are far shorter.
+const SEND_CLIENT_REF_AUDIT_CHARS: usize = 128;
 
 fn record_send_answer(
     auth: &Option<(AuthStore, AuthContext)>,
     session: &str,
     answer: &SendAnswer,
 ) {
-    let client_ref = answer.client_ref.as_str();
+    let client_ref: String = answer.client_ref.chars().take(SEND_CLIENT_REF_AUDIT_CHARS).collect();
+    let client_ref = client_ref.as_str();
     let (outcome, detail) = match &answer.result {
         Ok(notification_id) => {
             tracing::info!(session, client_ref, notification_id, "Commander send queued by the daemon");
@@ -3662,7 +3668,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     let mut events_subscribed = false;
     // Scoped to this authenticated machine socket; paired devices cannot see
     // one another's MessageQueued acknowledgments.
-    let mut pending_message_refs = HashSet::<(String, String)>::new();
+    let mut pending_message_refs = PendingRefs::new();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -3804,14 +3810,14 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => continue,
                     };
                     let client_ref = client_correlation_ref(&bytes);
-                    if let Some(client_ref) = client_ref.as_deref() {
-                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    if let Some((client_ref, kind)) = &client_ref {
+                        pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
                     if let Err(failure) = handle_client_message(&state.connector, &session, &auth, &bytes).await {
-                        if let Some(client_ref) = client_ref.as_deref() {
+                        if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = multiplex_send_error(&failure, &session, client_ref.as_deref());
+                        let error = multiplex_send_error(&failure, &session, client_ref.as_ref().map(|(r, _)| r.as_str()));
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                         // cas-0653: a re-subscribe is ignored while this
                         // session's subscription exists, so drop it and say
@@ -4397,7 +4403,7 @@ mod machine_protocol_tests {
 
     #[test]
     fn message_queued_reaches_only_the_socket_that_submitted_its_ref() {
-        let mut pending = HashSet::from([("factory-a".to_owned(), "send-42".to_owned())]);
+        let mut pending = PendingRefs::from([(("factory-a".to_owned(), "send-42".to_owned()), PendingRefKind::Send)]);
         let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
             client_ref: Some("send-42".to_owned()),
             notification_id: 812,
@@ -4406,18 +4412,20 @@ mod machine_protocol_tests {
             device_label: None,
         })
         .unwrap();
-        assert!(correlated_daemon_frame_allowed(
+        assert!(admit_correlated_daemon_frame(
             &mut pending,
             "factory-a",
+            &None,
             &queued
         ));
         assert!(
             pending.is_empty(),
             "receipt is single-delivery to its submitter"
         );
-        assert!(!correlated_daemon_frame_allowed(
+        assert!(!admit_correlated_daemon_frame(
             &mut pending,
             "factory-a",
+            &None,
             &queued
         ));
 
@@ -4426,10 +4434,11 @@ mod machine_protocol_tests {
             client_ref: Some("send-99".to_owned()),
         })
         .unwrap();
-        pending.insert(("factory-a".to_owned(), "send-99".to_owned()));
-        assert!(correlated_daemon_frame_allowed(
+        pending.insert(("factory-a".to_owned(), "send-99".to_owned()), PendingRefKind::Send);
+        assert!(admit_correlated_daemon_frame(
             &mut pending,
             "factory-a",
+            &None,
             &error
         ));
     }

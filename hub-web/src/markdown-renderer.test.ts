@@ -2,6 +2,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 
+vi.mock("pele/lazy", async (original) => ({ ...await original<typeof import("pele/lazy")>() }));
+
 describe("supervisor markdown subset", () => {
   it("renders reply structure without leaking markdown markers", () => {
     const root = document.createElement("div");

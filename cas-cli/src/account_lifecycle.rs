@@ -596,24 +596,32 @@ mod tests {
 
     #[test]
     fn remove_refuses_unreadable_known_repos() {
-        let env = crate::test_support::TestEnvGuard::temp_home();
-        let root = env.home().join(".cas");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("cas.db"), "not a sqlite database").unwrap();
-        let target = Target {
-            provider: Provider::Codex,
-            name: "idle".into(),
-            folder: env.home().join(".codex-idle"),
-            email: None,
-        };
-        std::fs::create_dir(&target.folder).unwrap();
-        let result = remove(&target, env.home());
-        assert!(
-            result.is_err(),
-            "an unreadable repo list must refuse removal"
-        );
-        assert!(format!("{:#}", result.unwrap_err()).contains("known repositories"));
-        assert!(target.folder.is_dir());
+        use crate::store::{AgentStore, SqliteAgentStore};
+        for corrupt in [false, true] {
+            let env = crate::test_support::TestEnvGuard::temp_home();
+            let root = env.home().join(".cas");
+            if corrupt {
+                std::fs::write(root.join("cas.db"), "not a sqlite database").unwrap();
+            } else {
+                // A healthy agent DB with an unreadable/missing repo table must
+                // not silently turn into an empty list of registered repositories.
+                SqliteAgentStore::open(&root).unwrap().init().unwrap();
+            }
+            let target = Target {
+                provider: Provider::Codex,
+                name: "idle".into(),
+                folder: env.home().join(".codex-idle"),
+                email: None,
+            };
+            std::fs::create_dir(&target.folder).unwrap();
+            let result = remove(&target, env.home());
+            assert!(
+                result.is_err(),
+                "an unreadable repo list must refuse removal"
+            );
+            assert!(format!("{:#}", result.unwrap_err()).contains("known repositories"));
+            assert!(target.folder.is_dir());
+        }
     }
 
     #[test]

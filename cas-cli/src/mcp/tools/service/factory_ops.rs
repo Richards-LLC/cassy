@@ -14219,6 +14219,53 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn detailed_worker_status_lists_every_held_relay_with_age_and_next_action() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "draft-session");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "draft-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("draft-session".into());
+        supervisor.pid = Some(std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let next = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for index in 0..12 {
+            let label = format!("held-relay-{index:02}");
+            let id = match queue.enqueue_idempotent(
+                &format!("lifecycle-wake:{index}"), "supervisor", &label,
+                Some("draft-session"), Some(&label), None, &label,
+                Some(&cas_store::QueueOrigin::Daemon),
+            ).unwrap() {
+                cas_store::EnqueueIdempotentResult::Created(id) => id,
+                _ => panic!("fresh relay"),
+            };
+            queue.park_for_busy_recipient(id, Some("operator composer is dirty"), next).unwrap();
+            // Both a fresh protected draft and one older than the ordinary
+            // display window must remain inspectable in detail mode.
+            let age = if index == 0 { 0 } else { 2 * 24 * 60 * 60 };
+            conn.execute("UPDATE prompt_queue SET created_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(age)).to_rfc3339(), id]).unwrap();
+        }
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "detail":true})).unwrap();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        for index in 0..12 {
+            assert!(output.contains(&format!("held-relay-{index:02}")), "detail hides a deferred relay: {output}");
+        }
+        assert_eq!(output.matches("age ").count(), 12, "each deferred relay needs its age: {output}");
+        assert_eq!(output.matches("next: recheck ").count(), 12, "each deferred relay needs its next action: {output}");
+        assert!(output.contains(&next.to_rfc3339()), "next action uses the durable recheck time: {output}");
+    }
+
     fn response_text(response: CallToolResult) -> String {
         response
             .content

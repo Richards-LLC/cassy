@@ -25,6 +25,9 @@ use super::{
 };
 use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid_session_name};
 
+#[path = "composer_upload.rs"]
+mod composer_upload;
+
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
 
@@ -196,6 +199,10 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
                 .post(acquire_lease::<R>)
                 .delete(release_lease::<R>)
                 .options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/uploads/{upload_id}",
+            post(composer_upload::upload::<R>).options(preflight::<R>),
         )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route(

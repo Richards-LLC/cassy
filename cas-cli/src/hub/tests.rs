@@ -5248,7 +5248,7 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
         assert!(!artifacts.exists(), "refused requests must not write bytes");
     }
     let mut first = None;
-    for name in ["../../outside.txt", "../../outside.txt"] {
+    for name in ["../../outside.txt", "../renamed.txt"] {
         let response = app.clone().oneshot(send("factory-a", name, b"hello", true)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();

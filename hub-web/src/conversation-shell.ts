@@ -243,6 +243,8 @@ export function fittingPlaceholder(candidates: readonly string[], available: num
  * holds the placeholder, the fitted wording becomes the one it restores.
  */
 export function fitComposerPlaceholder(field: HTMLTextAreaElement): void {
+  // A read-only field keeps its read-only wording (cas-a56c); live regions own it.
+  if (field.readOnly) return;
   let candidates: string[];
   try { candidates = JSON.parse(field.dataset.placeholders ?? "[]") as string[]; } catch { return; }
   if (!candidates.length) return;
@@ -279,9 +281,12 @@ function watchComposerPlaceholder(field: HTMLTextAreaElement): void {
   void field.ownerDocument.fonts?.ready.then(() => fitComposerPlaceholder(field));
 }
 
+/** The unpaired list's lead; a second person is told where a link they were sent goes (cas-a56c). */
+const UNPAIRED_LEAD = "Pair a machine to start your first conversation.";
+
 /** The list's empty line: loading, unpaired, or paired with nothing live. */
 export function conversationEmptyText(catalogLoaded: boolean, machineCount: number): string {
-  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? "Pair a machine to start your first conversation." : "No live supervisors listed. Use Appearance & commands to show dormant sessions for recovery.";
+  return !catalogLoaded ? "Loading paired machines…" : machineCount === 0 ? `${UNPAIRED_LEAD} Got a pairing link from whoever runs it? Open it on this device.` : "No live supervisors listed. Start one with New session, or show sessions that stopped from Appearance & commands.";
 }
 
 /** What the list knows about one paired machine's session catalog. */

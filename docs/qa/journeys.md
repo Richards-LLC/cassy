@@ -51,6 +51,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - One obvious "Pair a machine" action on the empty screen, at every width.
 - The code and the exact command to run are shown together; copying the command works.
+- Someone who does not run the machine is told to send the code to whoever does (it works for 10 minutes), with one Send the code action: the phone's share sheet, or the clipboard where there is none (cas-a56c).
 - While waiting, the status says what the machine is doing, with a visible countdown.
 - The confirm step names the machine and the scopes in plain words before anything is stored.
 - After pairing, the user lands on a list with the supervisor in it. No reload and no second step.

@@ -70,6 +70,15 @@ export interface SupervisorSendContext {
 }
 
 /**
+ * The tone a blocked send's reason is shown in. A pairing that can only read
+ * is a standing fact, said the same way before and after a tap on Send
+ * (cas-a56c, QA F02); every other block is a refusal of this attempt.
+ */
+export function sendBlockTone(block: SupervisorSendBlock): "info" | "error" {
+  return block === "missing-scope" ? "info" : "error";
+}
+
+/**
  * Every refusal the hub can hand back for a supervisor message, decided before
  * the send so the composer can print the actual reason. A disabled button that
  * explains nothing is why an operator concludes the feature is broken: the hub

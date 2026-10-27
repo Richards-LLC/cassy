@@ -145,6 +145,10 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub''s project catalog,
       folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab
       closing is proven at epic assembly on a real machine'
+  HUB-J13-LAUNCH-STORE:
+    statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
+    check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store and the real-hub HUB-J13 part; verify the chosen project boots, emits its first provider reply and answers one Commander message.
+    bug: {task: cas-dd2e}
   HUB-J14-GOAL:
     statement: each session opens onto its own conversation, or an honest empty state with its live activity, never
       another session's old thread; I can retire a stale one
@@ -226,6 +230,11 @@ invariants:
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
 bug_families:
+  cross-project-session-launch:
+    title: A machine hub's originating store must not override the project selected for New session
+    tasks: [cas-dd2e]
+    invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
+    journeys: [HUB-J13]
   clean-home-launch-remedies:
     title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
     tasks: [cas-a1bc]
@@ -1252,6 +1261,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-LAUNCH-STORE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

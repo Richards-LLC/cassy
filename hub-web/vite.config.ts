@@ -30,12 +30,12 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: "app.js",
-        // The hub serves only app.js for script (server.rs include_bytes):
-        // any dynamic import must stay inside it, never become a chunk.
-        inlineDynamicImports: true,
-        chunkFileNames: "chunk-[name].js",
+        // cas-397a embeds these lazy assets in the production hub too.
+        chunkFileNames: "chunk-[name]-[hash].js",
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";
+          if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash].js";
+          if (name === "rich-content.css") return "chunk-rich-content-[hash].css";
           if (name.endsWith(".css")) return "app.css";
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).
           if (name.endsWith("Inter-latin-wght.woff2")) return "inter.woff2";

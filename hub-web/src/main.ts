@@ -27,6 +27,7 @@ import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotic
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
+import { inlineAttachment } from "./rich-attachment";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
@@ -167,7 +168,13 @@ const mountedThreads = new Set<string>();
 installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
 // Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
-installAttachmentSheet();
+installAttachmentSheet((sheet, file, context) => {
+  const entry = [...conversationHistories].find(([, history]) => history === context.history);
+  if (!entry) return sheet;
+  const separator = entry[0].indexOf(":");
+  const machineId = entry[0].slice(0, separator), session = entry[0].slice(separator + 1);
+  return inlineAttachment(sheet, file, async () => connections.get(machineId)?.artifactView(session, file.artifact_id));
+});
 const conversationHistories = new Map<string, ConversationHistory>();
 /** Supervisor turns per thread the operator had on screen the last time that thread was open. */
 const readReplies = new Map<string, number>();

@@ -111,16 +111,18 @@ describe("supervisor markdown subset", () => {
 // The real Markdown entry point must keep readable source until the lazy renderer succeeds.
 it("renders Mermaid through sanitized SVG and keeps invalid diagrams as source", async () => {
   const root = document.createElement("div"); document.body.append(root);
+  // jsdom has no canvas font metrics; the browser journey proves real layout.
+  const canvas = vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
   root.append(...renderMarkdown(document, "```mermaid\nflowchart LR\nA[Ready] --> B[Ship]\n```\n\n```mermaid\nthis is invalid\n```"));
   await vi.waitFor(() => expect(root.querySelector("svg" )).not.toBeNull());
   expect(root.querySelector("svg")?.textContent).toContain("Ready");
   await vi.waitFor(() => expect(root.querySelector('[data-rich-state="fallback"]')?.textContent).toContain("this is invalid"));
-  root.remove();
+  canvas.mockRestore(); root.remove();
 });
 
 it("never inserts a renderer's scripts, event handlers or foreignObject", async () => {
   const pele = await import("pele/lazy");
-  const render = vi.spyOn(pele, "renderAsync").mockResolvedValue({ svg: '<svg xmlns="http://www.w3.org/2000/svg" onload="window.compromised=1"><script>window.compromised=1</script><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><img src="x" onerror="window.compromised=1" /></div></foreignObject><text onclick="window.compromised=1">Safe label</text></svg>', width: 200, height: 100, links: [], type: "flowchart", mermaidType: "flowchart" });
+  const render = vi.spyOn(pele, "renderAsync").mockResolvedValue({ svg: '<svg xmlns="http://www.w3.org/2000/svg" onload="window.compromised=1"><script>window.compromised=1</script><foreignObject><div xmlns="http://www.w3.org/1999/xhtml"><img src="x" onerror="window.compromised=1" /></div></foreignObject><text onclick="window.compromised=1">Safe label</text></svg>', width: 200, height: 100, links: [], type: "flowchart", mermaidType: "flowchart-v2" });
   const root = document.createElement("div"); document.body.append(root);
   try {
     root.append(...renderMarkdown(document, "```mermaid\nflowchart LR\nA --> B\n```"));
@@ -141,7 +143,7 @@ it("renders unified diff lines literally and collapses long changes", async () =
   expect(root.querySelector("summary")?.textContent).toContain("lines");
   root.querySelector("summary")!.click();
   expect(root.querySelector("details")?.open).toBe(true);
-  expect(root.querySelector('[data-change="remove"]')?.textContent).toContain("<script>bad()</script>");
+  await vi.waitFor(() => expect(root.querySelector('[data-change="remove"]')?.textContent).toContain("<script>bad()</script>"));
   expect(root.querySelector('[data-change="add"]')?.textContent).toContain("safe()");
   expect(root.querySelector("script")).toBeNull(); root.remove();
 });

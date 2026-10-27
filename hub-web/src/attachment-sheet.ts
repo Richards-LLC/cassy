@@ -194,6 +194,6 @@ export const attachmentSheetRenderer = (_reply: OperatorReply, context: TurnRend
 };
 
 /** Register the sheet with the thread; returns the unregister function. */
-export function installAttachmentSheet(): () => void {
-  return registerTurnRenderer("attachment", attachmentSheetRenderer);
+export function installAttachmentSheet(preview?: (sheet: HTMLElement, file: ArtifactRef, context: TurnRenderContext) => HTMLElement): () => void {
+  return registerTurnRenderer("attachment", preview ? (reply, context) => preview(attachmentSheetRenderer(reply, context), context.attachment!, context) : attachmentSheetRenderer);
 }

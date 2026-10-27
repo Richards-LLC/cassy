@@ -183,7 +183,7 @@ describe("a note about the connection follows it (journey F28)", () => {
 });
 
 it("loads supported inline media into reserved space and keeps the original Open link", async () => {
-  for (const [mime, tag] of [["image/png", "img"], ["video/mp4", "video"], ["audio/mpeg", "audio"], ["application/pdf", "iframe"]]) {
+  for (const [mime, tag] of [["image/png", "img"], ["video/mp4", "video"], ["audio/mpeg", "audio"]]) {
     const file = { ...brief, mime: mime!, name: "Evidence", artifact_id: `art-${tag}` };
     const sheet = renderAttachmentSheet(document, file, "supervisor");
     const resolve = vi.fn(async () => ({ ok: true as const, view: { artifact_id: file.artifact_id, url: "https://files.example/evidence" } }));
@@ -194,13 +194,14 @@ it("loads supported inline media into reserved space and keeps the original Open
     await vi.waitFor(() => expect(root.querySelector(tag!)).not.toBeNull());
     expect(root.querySelector(tag!)?.getAttribute("src")).toBe("https://files.example/evidence");
     expect(root.querySelector("a.sheet")).toBe(sheet);
+    root.remove(); document.body.append(root);
+    await Promise.resolve();
     expect(resolve).toHaveBeenCalledTimes(1);
     if (tag === "video" || tag === "audio") { expect(root.querySelector(tag)?.hasAttribute("controls")).toBe(true); expect(root.querySelector(tag)?.hasAttribute("autoplay")).toBe(false); }
-    if (tag === "iframe") expect(root.querySelector("iframe")?.getAttribute("sandbox")).toBe("");
     root.remove();
   }
   const root = inlineAttachment(renderAttachmentSheet(document, brief), brief, async () => ({ ok: true, view: { artifact_id: brief.artifact_id, url: "javascript:alert(1)" } }));
   document.body.append(root);
   await vi.waitFor(() => expect(root.textContent).toContain("Preview unavailable"));
-  expect(root.querySelector("iframe")).toBeNull(); root.remove();
+  expect(root.querySelector("canvas")).toBeNull(); root.remove();
 });

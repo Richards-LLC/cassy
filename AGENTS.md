@@ -11,6 +11,7 @@ Cassy's MCP tools are `task`, `memory` and `search`, named with your harness's p
 Slack transport: use the `violet` skill and the Violet proxy for every Slack read (`violet.violet_read`) and post (`violet.violet_post`). Never use the Claude Slack connector or Codex Slack app. Pre-tool hooks deny non-Violet Slack writes by default; only an explicit operator setting `slack.transport=any` disables that guard.
 
 Bug routing: `cas config get issues.repo` names this project's tracker, and `issues.components.{cassy,violet,cloud}` name the Cassy, Violet and Cloud trackers. File an operational bug in the matching tracker before moving on; in the Cassy source repo itself, a Cassy bug becomes a task there. If `issues.repo` is unset, record the bug as a task note.
+Deliverables: use `cas-sow-delivery-report` for SOW deliveries, `cas-feature-report` for feature reports, `cas-release-notes` + `cas-release-report` for internal releases, and `cas-customer-release-notes` for client updates; follow DESIGN.md and use real before/after pairs.
 Release notes: when a merge reaches `staging` or `main` and docs/release-notes/RUBRIC.md exists, use the `cas-release-notes` skill and follow docs/release-notes/RUBRIC.md.
 <!-- CAS:END -->
 

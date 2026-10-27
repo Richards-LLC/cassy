@@ -683,6 +683,8 @@ journeys:
   - hub-web/src/thread-model.ts
   - hub-web/src/conversation-list.ts
   - hub-web/e2e/journeys/answer-ask.journey.ts
+  - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-server.mjs
   - hub-web/e2e/journeys/conversation-polish.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
   - hub-web/src/abort-signals.ts
@@ -719,7 +721,7 @@ journeys:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/answer-ask.journey.ts
-  catalog_gaps: none
+  catalog_gaps: The catalog suite uses a protocol double. The real-hub HUB-J7 part in real-hub.journey.ts proves CLI ask options through the real daemon, live reply, history reload and the linked phone answer; the supervisor provider is inert, so actual model action remains unproven.
 - id: HUB-J8
   name: Switch between machines without losing my place
   status: live

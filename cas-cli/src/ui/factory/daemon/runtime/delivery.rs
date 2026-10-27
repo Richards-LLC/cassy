@@ -161,6 +161,7 @@ fn queue_team_tree_incident(
         device_id: "*".to_string(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
     })?;

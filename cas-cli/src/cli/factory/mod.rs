@@ -1007,6 +1007,14 @@ pub enum FactoryCommands {
         #[arg(long)]
         message: String,
 
+        /// Commander operator turn kind (requires --target operator)
+        #[arg(long, value_parser = ["answer", "status", "receipt", "ask", "blocker"])]
+        kind: Option<String>,
+
+        /// Quick-reply label for --kind ask (repeat for each choice)
+        #[arg(long = "option", requires = "kind")]
+        options: Vec<String>,
+
         /// Source label for attribution in wrapped message (default: openclaw)
         #[arg(long, default_value = "openclaw")]
         from: String,
@@ -1394,6 +1402,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 project_dir,
                 target,
                 message,
+                kind,
+                options,
                 from,
                 no_wrap,
                 wait_ack,
@@ -1405,6 +1415,8 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
                 project_dir.as_deref(),
                 target,
                 message,
+                kind.as_deref(),
+                options,
                 from,
                 *no_wrap,
                 *wait_ack,

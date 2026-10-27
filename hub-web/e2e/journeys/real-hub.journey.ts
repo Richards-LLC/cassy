@@ -488,3 +488,77 @@ test(
     }
   },
 );
+
+
+// cas-7ebc: the catalog's double supplied options the real payload discarded.
+// Keep this check on the actual CLI, daemon queue, hub and production browser.
+test("HUB-J7 real ask choices survive reload and the phone answer names its question", {
+  annotation: { type: "journey-part", description: "real hub, CLI ask, durable linked answer" },
+}, async ({ page, context }, info) => {
+  const directory = resolve(process.env.JOURNEY_RECEIPTS ??
+    join(process.env.JOURNEY_OUTPUT ?? "e2e/.results/real-hub", "journeys"),
+    "HUB-J7", "parts", `real-hub-run-${info.repeatEachIndex}`);
+  claimReceiptDirectory(directory, info.title);
+  const secrets: string[] = [];
+  let fixture: { pairUrl: string; version: string } | undefined;
+  let tracing = false;
+  let passed = false;
+  let readback: unknown;
+  try {
+    fixture = await command("reset", { messageControl: true });
+    const pairing = new URL(fixture!.pairUrl);
+    secrets.push(fixture!.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? "");
+    pairing.pathname = "/commander/";
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    // Pair outside the trace so invitation and installation keys are not captured.
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable choices QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    await page.getByRole("navigation", { name: "Choose a supervisor" })
+      .getByRole("button", { name: /project on/ }).click();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    await context.tracing.start({ screenshots: false,
+      snapshots: { dom: true, aria: true, screen: true }, sources: true });
+    tracing = true;
+    const ask = await command("ask");
+    const question = page.getByRole("group", { name: "Question from journey-supervisor", exact: true });
+    await expect(question.getByRole("button", { name: "Keep testing", exact: true })).toBeVisible();
+    await expect(question.getByRole("button")).toHaveCount(2);
+    await page.screenshot({ path: join(directory, "J01-live-choices.png") });
+    await page.reload();
+    await expect(question.getByRole("button", { name: "Keep testing", exact: true })).toBeVisible();
+    await page.screenshot({ path: join(directory, "J02-history-choices.png") });
+    await question.getByRole("button", { name: "Keep testing", exact: true }).click();
+    await expect.poll(async () => (await command("answers", { notificationId: ask.message_id })).length).toBe(1);
+    readback = await command("answers", { notificationId: ask.message_id });
+    expect(readback).toEqual([expect.objectContaining({
+      target: "journey-supervisor", operator_verified: 1,
+      prompt: `[CAS reply: explicitly acknowledges notification_id=${ask.message_id}]\nKeep testing`,
+    })]);
+    await expect(question.getByLabel("You replied: Keep testing")).toBeVisible();
+    await expect(question.getByRole("button")).toHaveCount(0);
+    await page.reload();
+    await expect(question.getByLabel("You replied: Keep testing")).toBeVisible();
+    await expect(question.getByRole("button")).toHaveCount(0);
+    expect((await command("answers", { notificationId: ask.message_id })).length).toBe(1);
+    await page.screenshot({ path: join(directory, "J03-linked-answer.png") });
+    passed = true;
+  } finally {
+    try {
+      await page.screenshot({ path: join(directory, "final.png") }).catch(() => undefined);
+      await writeFile(join(directory, "final.aria.yml"), await page.locator("body").ariaSnapshot().catch(() => "# unavailable"));
+      await writeFile(join(directory, "final.aria.json"), JSON.stringify(await page.locator("body").ariaSnapshotJSON().catch(() => null), null, 2));
+      await writeFile(join(directory, "result.json"), JSON.stringify({
+        id: "HUB-J7", status: passed ? "PASS" : "FAIL", binary: fixture?.version,
+        label: "real-bundle, real-hub, real-factory-daemon, inert-supervisor-provider",
+        viewport: page.viewportSize(), readback,
+      }, null, 2));
+      if (tracing) await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
+    } finally {
+      await context.close().catch(() => undefined);
+      await command("cleanup");
+    }
+  }
+});

@@ -117,7 +117,7 @@ async function cleanup() {
   if (existsSync(join(root, ".real-hub-fixture")))
     await rm(root, { recursive: true, force: true });
 }
-async function reset() {
+async function reset({ messageControl = false } = {}) {
   await cleanup();
   const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
@@ -132,6 +132,9 @@ async function reset() {
   );
   const env = {
     HOME: home,
+    XDG_CONFIG_HOME: join(home, "config"),
+    CAS_ROOT: join(project, ".cas"),
+    CAS_AGENT_NAME: process.env.CAS_AGENT_NAME ?? "real-hub-qa",
     PATH: `${bin}:/usr/bin:/bin`,
     TERM: "xterm-256color",
     LANG: "C.UTF-8",
@@ -270,6 +273,7 @@ async function reset() {
         "--json",
         "hub",
         "pair",
+        ...(messageControl ? ["--scopes", "machine:read,session:read,pane:read,pane:input,message:send"] : []),
         "--origin",
         origin,
         "--hub-url",
@@ -318,6 +322,29 @@ async function queue(message) {
     { CAS_FACTORY_SESSION: state.session },
   );
   return JSON.parse(out.stdout);
+}
+async function ask() {
+  const out = await cas([
+    "--json", "factory", "message", "--session", state.session,
+    "--project-dir", state.project, "--target", "operator", "--from", "supervisor",
+    "--kind", "ask", "--message", "Keep testing or stop?",
+    "--option", "Keep testing", "--option", "Stop testing",
+  ], { CAS_FACTORY_SESSION: state.session });
+  return JSON.parse(out.stdout);
+}
+async function answers(notificationId) {
+  if (!Number.isSafeInteger(notificationId) || notificationId <= 0)
+    throw Error("a positive ask notification id is required");
+  // Independent read-back from the actual store; no fixture-authored answers.
+  const { stdout } = await run("python3", ["-c", `
+import sqlite3,json,sys
+c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+c.row_factory=sqlite3.Row
+marker='[CAS reply: explicitly acknowledges notification_id='+sys.argv[2]+']\\n'
+rows=c.execute("select id,target,prompt,operator_verified from prompt_queue where source like 'commander:%' and prompt like ?",(marker+'%',))
+print(json.dumps([dict(row) for row in rows]))
+`, join(state.project, ".cas", "cas.db"), String(notificationId)], { timeout: 5000 });
+  return JSON.parse(stdout);
 }
 async function readLogs(directory) {
   if (!existsSync(directory)) return "";
@@ -405,7 +432,7 @@ const server = createServer(async (req, res) => {
     const job = chain.then(async () => {
       switch (path) {
         case "/reset":
-          return reset();
+          return reset(data);
         case "/stop":
           if (state.paused) {
             state.hub.kill("SIGCONT");
@@ -426,6 +453,10 @@ const server = createServer(async (req, res) => {
         case "/start":
           await startHub();
           return { started: true };
+        case "/ask":
+          return ask();
+        case "/answers":
+          return answers(data.notificationId);
         case "/queue":
           return queue(data.message);
         case "/evidence":

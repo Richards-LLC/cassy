@@ -787,6 +787,8 @@ pub(super) fn execute_message(
     project_dir: Option<&std::path::Path>,
     target: &str,
     message: &str,
+    kind: Option<&str>,
+    options: &[String],
     from: &str,
     no_wrap: bool,
     wait_ack: bool,
@@ -809,13 +811,58 @@ pub(super) fn execute_message(
         target.to_string()
     };
 
-    let message_id = crate::ui::factory::enqueue_external_message(
-        &cas_root,
-        from,
-        &resolved_target,
-        message,
-        no_wrap,
-    )?;
+    let message_id = if let Some(kind) = kind {
+        anyhow::ensure!(target == "operator", "--kind requires --target operator");
+        let kind = match kind {
+            "answer" => crate::ui::factory::OperatorTurnKind::Answer,
+            "status" => crate::ui::factory::OperatorTurnKind::Status,
+            "receipt" => crate::ui::factory::OperatorTurnKind::Receipt,
+            "ask" => crate::ui::factory::OperatorTurnKind::Ask,
+            "blocker" => crate::ui::factory::OperatorTurnKind::Blocker,
+            _ => anyhow::bail!("unknown Commander turn kind"),
+        };
+        anyhow::ensure!(
+            options.is_empty() || kind == crate::ui::factory::OperatorTurnKind::Ask,
+            "--option requires --kind ask"
+        );
+        let options: Vec<String> = options.iter().map(|option| option.trim().to_owned()).collect();
+        anyhow::ensure!(
+            !options.iter().any(String::is_empty),
+            "ask options must be non-empty labels"
+        );
+        let payload = serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
+            schema_version: 2,
+            reply_to: None,
+            message: message.to_owned(),
+            summary: message.lines().next().unwrap_or_default().to_owned(),
+            device_id: "*".to_owned(),
+            operator_label: None,
+            kind,
+            options,
+            attachments: Vec::new(),
+            reply_to_session: None,
+        })?;
+        let queue = crate::store::open_prompt_queue_store(&cas_root)?;
+        queue.record_operator_turn(&cas_store::OperatorTurn {
+            source: from,
+            target: "operator",
+            prompt: &payload,
+            factory_session: Some(&session.name),
+            metadata: cas_store::OperatorTurnMetadata {
+                kind: Some(kind.as_str()),
+                ..Default::default()
+            },
+        })?.id()
+    } else {
+        anyhow::ensure!(options.is_empty(), "--option requires --kind ask");
+        crate::ui::factory::enqueue_external_message(
+            &cas_root,
+            from,
+            &resolved_target,
+            message,
+            no_wrap,
+        )?
+    };
 
     let mut ack_event_id: Option<i64> = None;
     if wait_ack {

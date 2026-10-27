@@ -167,13 +167,25 @@ async function reset({ messageControl = false, newSession = false } = {}) {
     { mode: 0o700 },
   );
   if (newSession) await writeFile(join(bin, "claude"), `#!/usr/bin/python3
-import sys,os,json,subprocess
+import sys,os,json,subprocess,uuid
+from datetime import datetime,timezone
 if sys.argv[1:3] == ['auth','status']: print('{"loggedIn":true}');sys.exit(0)
 if '--version' in sys.argv: print('2.1.47');sys.exit(0)
 if '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)
+sid=sys.argv[sys.argv.index('--session-id')+1] if '--session-id' in sys.argv else str(uuid.uuid4())
+transcript=os.path.join(os.environ['HOME'],'.claude','projects','disposable',sid+'.jsonl')
+os.makedirs(os.path.dirname(transcript),exist_ok=True)
+open(transcript,'a').close()
+def hook(event):
+ payload=json.dumps(dict(session_id=sid,cwd=os.getcwd(),hook_event_name=event,transcript_path=transcript))
+ subprocess.run([${JSON.stringify(cli)},'hook',event],input=payload,text=True,stdout=subprocess.DEVNULL,check=True)
+hook('SessionStart')
 def reply(message):
+ with open(transcript,'a') as f: f.write(json.dumps(dict(type='system',subtype='turn_duration',sessionId=sid,timestamp=datetime.now(timezone.utc).isoformat()))+'\\n')
  payload=json.dumps(dict(schema_version=2,reply_to=None,message=message,summary=message,device_id='*',kind='status',attachments=[]))
  subprocess.run([${JSON.stringify(cli)},'--json','factory','message','--session',os.environ['CAS_FACTORY_SESSION'],'--project-dir',os.getcwd(),'--target','operator','--from','supervisor','--no-wrap','--message',payload],stdout=subprocess.DEVNULL,check=True)
+ hook('Stop')
+ print('> ',flush=True)
 print('Claude Code disposable test supervisor\\n> ',flush=True)
 started=False
 for line in sys.stdin:

@@ -45,8 +45,12 @@ fn selected(args: &[String]) -> bool {
             continue;
         }
         if !arg.starts_with('-')
-            && (arg.ends_with(".spec.ts") || arg.ends_with(".journey.ts"))
-            && !arg.chars().any(|c| matches!(c, '*' | '$' | '`'))
+            && [".spec.ts", ".spec.mjs", ".spec.js", ".spec.tsx", ".journey.ts"]
+                .iter()
+                .any(|suffix| arg.ends_with(suffix))
+            && !arg
+                .chars()
+                .any(|c| matches!(c, '*' | '?' | '[' | ']' | '$' | '`'))
         {
             return true;
         }

@@ -271,7 +271,7 @@ fn a_worker_timeline_reads_its_own_transcript_and_the_probe_tells_followers_of_c
 
     let timeline = events(&mut index, Some("swift-fox-2"));
     assert_eq!(timeline.len(), 1);
-    assert_eq!((timeline[0].agent.as_deref(), timeline[0].label.as_str()), (Some("swift-fox-2"), "Read limits.rs"));
+    assert_eq!((timeline[0].agent.as_deref(), timeline[0].label.as_str()), (Some("swift-fox-2"), "Read: /repo/src/limits.rs"));
     assert!(events(&mut index, None).iter().all(|event| event.agent.as_deref() == Some("calm-otter-1")));
     let DaemonMessage::WorkEventDetail { detail: Some(text), .. } =
         index.detail(&scope, &stores, &resolve, "detail".into(), timeline[0].id.clone())

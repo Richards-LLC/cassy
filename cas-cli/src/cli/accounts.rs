@@ -364,14 +364,16 @@ mod reset_render_tests {
         for provider in accounts::Provider::ALL {
             let mut row = crate::account_selection::tests::row(provider, "short", 6, 20., 10.);
             for window in &mut row.windows { window.resets_at = Some(reset); }
+            if provider == accounts::Provider::Claude { row.windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
             rows.push(row);
         }
         let text = render_list(&rows, false, std::path::Path::new("/fixture")).unwrap();
         assert_eq!(text.matches("(in ").count(), 4, "{text}");
+        assert!(!text.contains("extra usage"), "{text}");
         assert!(text.lines().all(|line| line.len() <= 80), "{text}");
         let json: serde_json::Value = serde_json::from_str(&render_list(&rows, true, std::path::Path::new("/fixture")).unwrap()).unwrap();
         for row in json["accounts"].as_array().unwrap() {
-            for window in row["windows"].as_array().unwrap() {
+            for window in row["windows"].as_array().unwrap().iter().filter(|w| w["name"] != "extra usage") {
                 let instant=window["resets_at"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap();
                 assert_eq!(instant, reset);
             }

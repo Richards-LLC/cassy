@@ -10990,12 +10990,31 @@ fn worker_usage_reset_lines(agent: &cas_types::Agent, transcript: Option<&std::p
         }
     }
     if windows.is_empty() && provider == crate::accounts::Provider::Codex {
-        if let Some(dir) = dir { windows = crate::cli::limits::account_usage(provider, &dir).windows; }
+        if let Some(dir) = dir { windows = status_codex_windows(&dir); }
     }
     ["5h", "weekly"].into_iter().map(|name| {
         let reset = windows.iter().find(|window| window.name == name).and_then(|window| window.resets_at);
         format!("\n    {name}: {}", crate::cli::limits::format_reset(reset, now))
     }).collect::<String>()
+}
+
+// Keep polling fallback separate from explicit account inventory collection.
+const STATUS_ROLLOUT_ENTRIES: usize = 256;
+const STATUS_ROLLOUT_FILES: usize = 8;
+fn status_codex_rollout_entries(root: &std::path::Path) -> impl Iterator<Item = walkdir::Result<walkdir::DirEntry>> {
+    walkdir::WalkDir::new(root.join("sessions")).into_iter()
+}
+
+fn status_codex_windows(root: &std::path::Path) -> Vec<crate::account_registry::UsageWindow> {
+    let newest = status_codex_rollout_entries(root).filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+        .filter_map(|entry| Some((entry.metadata().ok()?.modified().ok()?, entry.into_path())))
+        .max_by_key(|(modified, _)| *modified);
+    let Some((_, path)) = newest else { return Vec::new() };
+    let Ok(tail) = std::fs::read_to_string(path) else { return Vec::new() };
+    tail.lines().rev().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .map(|value| crate::cli::limits::transcript_windows(&value))
+        .find(|windows| !windows.is_empty()).unwrap_or_default()
 }
 
 /// Whether a resolved Codex rollout records the terminal account-limit failure
@@ -19156,6 +19175,38 @@ effort = "high"
             cas_mux::SupervisorCli::Claude,
             "an unparseable worker_cli value must default to Claude, not panic"
         );
+    }
+
+    #[test]
+    fn worker_status_reset_fallback_bounds_rollout_inventory_and_reads_recent_tails() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let root = env.home().join(".codex");
+        let archive = root.join("sessions/2025/01/01");
+        let recent = root.join("sessions/2026/10/27");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::create_dir_all(&recent).unwrap();
+        for i in 0..300 { std::fs::write(archive.join(format!("rollout-{i:03}.jsonl")), "{}\n").unwrap(); }
+        let now = chrono::Utc::now();
+        for i in 0..=STATUS_ROLLOUT_FILES {
+            let path = recent.join(format!("rollout-{i:02}.jsonl"));
+            let body = if i == 0 { serde_json::json!({"rate_limits": {
+                "primary": {"window_minutes":300,"resets_at":now.timestamp()+3600},
+                "secondary": {"window_minutes":10080,"resets_at":now.timestamp()+86400}
+            }}).to_string() } else { "{}".into() };
+            std::fs::write(&path, body).unwrap();
+            std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now()+std::time::Duration::from_secs(i as u64+10))).unwrap();
+        }
+        let inspected = status_codex_rollout_entries(&root).count();
+        assert!(inspected <= STATUS_ROLLOUT_ENTRIES, "status scanned {inspected} entries");
+        let mut agent = cas_types::Agent::new("bounded-reset".into(), "worker".into());
+        agent.metadata.insert("worker_cli".into(), "codex".into());
+        agent.metadata.insert("worker_account_dir".into(), root.to_string_lossy().into_owned());
+        let unknown = worker_usage_reset_lines(&agent, None, now);
+        assert!(!unknown.contains("resets "), "an older file beyond the read budget must stay unknown: {unknown}");
+        std::fs::remove_file(recent.join(format!("rollout-{:02}.jsonl", STATUS_ROLLOUT_FILES))).unwrap();
+        let known = worker_usage_reset_lines(&agent, None, now);
+        assert!(known.contains("5h: resets ") && known.contains("weekly: resets "), "{known}");
     }
 
     #[test]

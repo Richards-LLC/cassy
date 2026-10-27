@@ -625,8 +625,12 @@ mod tests {
         let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap().with_timezone(&zone);
         for (reset, expected) in [
             (Some("2026-10-27T18:00:00Z"), "resets Tue 14:00 (in 6h)"),
-            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d)"),
-            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d)"),
+            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d 1h)"),
+            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d 1h)"),
+            (Some("2026-10-28T11:59:00Z"), "resets Wed 07:59 (in 24h)"),
+            (Some("2026-10-28T12:00:00Z"), "resets Wed 08:00 (in 1d)"),
+            (Some("2026-10-29T11:56:00Z"), "resets Thu Oct 29 07:56 (in 1d 23h)"),
+            (Some("2026-11-03T11:00:00Z"), "resets Tue Nov 3 07:00 (in 6d 23h)"),
             (Some("2026-10-27T11:00:00Z"), "reset, usage unknown until next session"),
             (None, "reset time unknown"),
         ] {

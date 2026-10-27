@@ -61,6 +61,36 @@ describe("ConversationView (Pebble thread)", () => {
     expect(first.classList.contains("group-first")).toBe(true); expect(first.classList.contains("group-last")).toBe(false);
     expect(view.element.querySelectorAll(".msgs > .turn")).toHaveLength(1);
   });
+  it("keeps a focused link connected when another reply joins its group", () => {
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
+    history.reply(reply(1, "answer", "[Evidence](https://example.org/proof)"), at(9, 44)); view.update();
+    const link = view.element.querySelector<HTMLAnchorElement>(".bub a")!;
+    link.focus();
+    history.reply(reply(2, "answer"), at(9, 45)); view.update();
+    expect(document.activeElement).toBe(link);
+    expect(view.element.querySelector(".bub a")).toBe(link);
+  });
+  it("opens a bounded tail and exposes cached older turns before fetching another page", () => {
+    const history = new ConversationHistory();
+    const fetchEarlier = vi.fn();
+    const view = new ConversationView(document, history, { supervisor: "sup", hasEarlier: () => true, loadEarlier: fetchEarlier });
+    document.body.replaceChildren(view.element);
+    for (let id = 1; id <= 240; id++) history.reply(reply(id, "answer"), at(9, 0) + id * 1000);
+    view.update();
+    expect(view.element.querySelectorAll(".conversation-turn").length).toBeLessThanOrEqual(80);
+    expect(view.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
+    expect(view.element.querySelector('[data-key="reply:1"]')).toBeNull();
+    const first = view.element.querySelector<HTMLElement>(".conversation-turn")!.dataset.key;
+    view.element.querySelector<HTMLButtonElement>(".conversation-load-earlier")!.click();
+    expect(fetchEarlier).not.toHaveBeenCalled();
+    expect(view.element.querySelector('[data-key="reply:1"]')).toBeNull();
+    expect(view.element.querySelector<HTMLElement>(".conversation-turn")!.dataset.key).not.toBe(first);
+    expect(view.element.querySelectorAll(".conversation-turn").length).toBeLessThanOrEqual(80);
+    view.jump.click();
+    expect(view.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
+    view.dispose();
+  });
   it("shows session dividers and the no-earlier-history marker", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, {

@@ -12960,9 +12960,12 @@ mod tests {
         let mut daemon = super::super::provisioning_tests::daemon(&root);
         daemon.enqueue_spawn_requests().unwrap();
         assert!(daemon.pending_spawns.is_empty(), "legacy limit switches must never reach the stop/respawn path");
-        let rows = queue.recent_spawn_lifecycle("provision-test", 10).unwrap();
-        assert!(rows.iter().any(|row| row.id == id && row.state == cas_store::SpawnLifecycleState::Failed));
-
+        assert!(queue.peek(10).unwrap().is_empty(), "legacy row was consumed");
+        // recent_spawn_lifecycle only exposes action=spawn, so read the
+        // persisted recycle outcome directly, as the shutdown tests do.
+        let state: String = rusqlite::Connection::open(root.join("cas.db")).unwrap()
+            .query_row("SELECT spawn_state FROM spawn_queue WHERE id=?", [id], |row| row.get(0)).unwrap();
+        assert_eq!(state, cas_store::SpawnLifecycleState::Failed.as_str());
     }
 
     #[tokio::test]

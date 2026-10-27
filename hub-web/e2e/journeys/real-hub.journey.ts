@@ -353,7 +353,9 @@ test(
             message: "Queued while Local Network Access was denied.",
           });
           await expect(
-            page.getByText(/Allow Local network access for this page/),
+            page
+              .getByRole("status")
+              .filter({ hasText: /allow local network access for this page/i }),
           ).toBeVisible();
           // Browser.grantPermissions does not overwrite a per-origin
           // Browser.setPermission denial. Change those same real permissions.

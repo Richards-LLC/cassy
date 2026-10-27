@@ -108,6 +108,8 @@ invariants:
     check: 'Walk HUB-J10 in hub-web/e2e/journeys/dark-theme.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
   HUB-J11-GOAL:
+    bug:
+      task: cas-c756
     statement: I see what is happening, and it recovers without me doing anything
     check: 'Walk HUB-J11 in hub-web/e2e/journeys/reconnect.journey.ts; verify the expected experience and edge paths
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the regular suite uses a protocol

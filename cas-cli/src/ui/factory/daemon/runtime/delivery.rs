@@ -954,7 +954,21 @@ impl FactoryDaemon {
                     },
                 );
                 self.send_receipts = receipts;
-                let outcome = outcome?;
+                let outcome = match outcome {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        // cas-2109: the sender gets an error frame ("Not
+                        // sent"); leave the reason in the daemon log too.
+                        tracing::warn!(
+                            target: "cas::commander",
+                            client_ref = client_ref.as_deref().unwrap_or_default(),
+                            recipient = %target,
+                            error = %format!("{error:#}"),
+                            "Commander send refused"
+                        );
+                        return Err(error);
+                    }
+                };
                 if let SendOutcome::Duplicate(receipt) = outcome {
                     tracing::info!(
                         target: "cas::commander",

@@ -69,10 +69,7 @@ export interface SupervisorSendContext {
   readonly scopes: readonly Scope[];
   readonly leaseHeldByMe: boolean;
   readonly leaseControllerLabel: string | undefined;
-  readonly commanderOrigin: string;
 }
-
-const CONTROL_PAIRING_SCOPES = "machine:read,session:read,pane:read,pane:input,message:send,pane:interrupt";
 
 /**
  * Every refusal the hub can hand back for a supervisor message, decided before
@@ -103,8 +100,10 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
       kind: "blocked",
       block: "missing-scope",
       // `cas hub pair` defaults to read-only scopes, so a device paired by the
-      // documented recipe is refused by the hub with nothing on screen to say so.
-      reason: `This device was paired without the message:send scope, so the hub refuses its messages. Run cas hub pair --origin ${context.commanderOrigin} --scopes ${CONTROL_PAIRING_SCOPES} on ${context.machineLabel}, then open the new pairing URL here.`,
+      // documented recipe is refused by the hub. The person holding it is often
+      // not the one who runs the machine (cas-b7c0): say what to ask for, in
+      // plain words, never a scope name or a command they cannot run here.
+      reason: `This browser can read this conversation but not send messages. Ask whoever runs ${context.machineLabel} for a link that can send, then open it here.`,
     };
   }
   if (context.text.trim().length === 0) {

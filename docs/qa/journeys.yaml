@@ -174,6 +174,12 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+bug_families:
+  read-only-pairing-dead-end:
+    title: A read-only pairing told the person holding the phone to run a CLI command, and its composer looked writable
+    tasks: [cas-b7c0]
+    invariants: [HUB-J2-GOAL]
+    journeys: [HUB-J2]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

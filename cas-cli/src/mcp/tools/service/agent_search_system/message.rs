@@ -4846,20 +4846,43 @@ mod inbox_poll_identity_tests {
     fn message_status_tells_the_sender_received_or_pending_cas_badb() {
         use cas_store::{PromptQueueStore, SurfacingSource};
         let temp = tempfile::tempdir().unwrap();
+        let agents = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut sender = crate::types::Agent::new("sender".into(), "worker-a".into());
+        sender.factory_session = Some("session".into());
+        agents.register(&sender).unwrap();
         let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let id = queue.enqueue_with_session("worker-a", "zen-hound", "please review", "session").unwrap();
         let verdict = |now| {
             let report = queue.message_delivery_report(id).unwrap().unwrap();
-            super::recipient_verdict(&report, now, 300)
+            super::recipient_verdict(&report, now, 1800)
         };
-        let now = chrono::Utc::now();
+        let now = queue.message_delivery_report(id).unwrap().unwrap().enqueued_at;
         let pending = verdict(now);
         assert!(pending.starts_with("recipient: PENDING for zen-hound"), "{pending}");
-        assert!(pending.contains("told at 300s"), "{pending}");
+        // pin: diagnostic deadlines must use the watchdog's capped policy, never promise unrecorded wakes/alerts.
+        assert!(pending.contains("threshold 720s") && !pending.contains("every 60s"), "{pending}");
+        let before_alert = verdict(now + chrono::Duration::seconds(776));
+        assert!(!before_alert.contains("have been told"), "age is not proof of escalation: {before_alert}");
+
+        let cas_store::PromptRetryDisposition::Scheduled { retry_at, attempts } = queue
+            .record_retry(id, cas_store::PendingReason::AdapterRetryable, Some("transport unavailable"))
+            .unwrap() else { panic!("first failure must retain recovery"); };
+        let retry = verdict(now);
+        // pin: expose the durable attempt count and exact next deadline, not an invented fixed cadence.
+        assert!(retry.contains(&format!("delivery_attempts: {attempts}")) && retry.contains(&retry_at.to_rfc3339()), "{retry}");
+        queue.mark_transport_delivered(id).unwrap();
+        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportClaimed).unwrap();
+        let claimed = verdict(now + chrono::Duration::seconds(776));
+        // pin: a completed PTY handoff has no scheduled transport retry, and missing receipt is not proof of no turn.
+        assert!(claimed.contains("next_attempt_at: none recorded") && !claimed.contains("no turn has started"), "{claimed}");
+        let notice = queue.enqueue_delivery_stalled_bounce(id, "session", "delivery stalled", "delivery stalled")
+            .unwrap().expect("an actionable failure must still alert its sender");
+        let paused = verdict(now + chrono::Duration::seconds(776));
+        // pin: paused escalation must cite the watchdog's persisted notice, not elapsed-time inference.
         assert!(
-            verdict(now + chrono::Duration::seconds(600)).contains("have been told"),
-            "after the escalation threshold the sender knows the alert went out"
+            paused.contains(&format!("notice {notice}")) && paused.contains("further notices paused"),
+            "{paused}"
         );
         queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportDelivered).unwrap();
         assert!(verdict(now).starts_with("recipient: PENDING"), "a pane handoff is not a read");

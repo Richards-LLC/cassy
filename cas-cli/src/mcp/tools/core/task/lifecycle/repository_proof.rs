@@ -930,6 +930,8 @@ mod tests {
         };
         assert!(message.contains("request a fresh verification cycle"), "{message}");
         assert!(message.contains(&proof.head_commit), "{message}");
+        // cas-defb: the head did not move, so the refusal must name what did.
+        assert!(message.contains("uncommitted working-tree content changed"), "{message}");
     }
 
     #[test]

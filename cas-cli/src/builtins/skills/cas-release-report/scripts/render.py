@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
+import time
 from urllib.parse import quote, urlsplit
 
 REFERENCE_DIR = Path(__file__).resolve().parent.parent / 'references'
@@ -154,8 +156,42 @@ class Captures:
     names why. Paths are absolute or relative to the project root.
     """
 
-    def __init__(self, project_root):
+    def __init__(self, project_root, cas_bin='cas'):
         self.root, self.pairs = Path(project_root), 0
+        self.cas_bin, self.receipts = cas_bin, {}
+        self.lookup_deadline = time.monotonic() + 30
+
+    def resolve(self, reference):
+        # Reuse the shared manifest reader's project namespace, legacy fallback,
+        # capture lock and digest validation. Exit 1 can still carry valid pairs
+        # alongside findings for other shots; never promote unpaired[].
+        identity = r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}'
+        if not re.fullmatch(identity + '/' + identity, reference):
+            raise ValueError('Pair: needs <task-id>/<shot-id>')
+        task, shot = reference.split('/')
+        if task not in self.receipts:
+            self.receipts[task] = None
+            try:
+                remaining = self.lookup_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError('pair lookup budget exhausted')
+                result = subprocess.run([str(self.cas_bin), '--json', 'deliverable', 'pairs',
+                                         '--root', str(self.root.resolve()), '--task', task],
+                                        cwd=self.root, capture_output=True, text=True,
+                                        timeout=min(10, remaining))
+                if result.returncode not in (0, 1):
+                    raise ValueError('pair reader failed for ' + task)
+                receipt = json.loads(result.stdout)
+                if receipt.get('schema') != 'cas.deliverable.pairs/1':
+                    raise ValueError('unsupported pair receipt')
+                self.receipts[task] = receipt['pairs']
+            except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as error:
+                raise ValueError('cannot resolve Pair: ' + reference + ': ' + str(error)) from error
+        for pair in self.receipts[task] or []:
+            if pair['task_id'] == task and pair['id'] == shot:
+                directory = Path(pair['directory'])
+                return str(directory / pair['before']['png']), str(directory / pair['after']['png'])
+        raise ValueError('no complete verified Pair: ' + reference)
 
     def image(self, path):
         file = Path(path) if Path(path).is_absolute() else self.root / path
@@ -169,7 +205,17 @@ class Captures:
             raise ValueError('capture is not a PNG, JPEG or WebP image: ' + path)
         return 'data:' + kind + ';base64,' + base64.b64encode(data).decode()
 
-    def pair(self, title, before, after):
+    def pair(self, title, before, after, reference=None):
+        if reference:
+            try:
+                if before or after:
+                    raise ValueError('use Pair: or explicit Before:/After: for a change')
+                if self.pairs >= CAPTURE_PAIRS:
+                    raise ValueError(f'more than {CAPTURE_PAIRS} capture pairs')
+                before, after = self.resolve(reference)
+            except ValueError as error:
+                warn(str(error) + '; showing no captures for "' + title + '"')
+                return ''
         if not before and not after:
             return ''
         if not (before and after):
@@ -199,11 +245,11 @@ def groups(source, captures=None):
         if items[0].strip():
             result.append(simple(items[0]))
         for j in range(1, len(items), 2):
-            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(?:\n\nBefore: (\S+))?(?:\n\nAfter: (\S+))?(\n\nSource:.*)?\s*', items[j + 1], re.S)
+            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(?:\n\nPair: (\S+))?(?:\n\nBefore: (\S+))?(?:\n\nAfter: (\S+))?(\n\nSource:.*)?\s*', items[j + 1], re.S)
             if not match:
                 raise ValueError('change needs Was/Now paragraphs: ' + items[j])
-            was, now, before, after, trailing = match.groups()
-            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div>' + captures.pair(items[j].strip(), before, after) + '</article>')
+            was, now, reference, before, after, trailing = match.groups()
+            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div>' + captures.pair(items[j].strip(), before, after, reference) + '</article>')
             if trailing:
                 result.append(simple(trailing))
         result.append('</div></section>')
@@ -211,7 +257,7 @@ def groups(source, captures=None):
 
 
 def render(source, *, project_root=Path('.'), source_href='source.md',
-           pdf_href='report.pdf', emphasis='', footer='Release report'):
+           pdf_href='report.pdf', emphasis='', footer='Release report', cas_bin='cas'):
     """Return HTML whose brand markers `cas deliverable` fills; this script
     holds no brand code. `cas release report` renders, fills and writes it."""
     # The CLI assembler records machine-readable release metadata in a small
@@ -309,7 +355,7 @@ def render(source, *, project_root=Path('.'), source_href='source.md',
             raise ValueError('glance table needs measure, value and definition')
         label, value, definition = row
         stats.append('<div class="stat"><span class="stat-value">' + inline(value) + '</span><span class="stat-label">' + inline(label) + '</span><p>' + inline(definition) + '</p></div>')
-    captures = Captures(project_root)
+    captures = Captures(project_root, cas_bin)
     rendered_verdict = inline(verdict)
     if emphasis:
         if emphasis not in verdict:
@@ -337,6 +383,7 @@ def main():
     parser.add_argument('source', type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--project-root', default=Path('.'), type=Path)
+    parser.add_argument('--cas-bin', default='cas', help='Cassy executable for verified Pair: lookup')
     parser.add_argument('--pdf-href')
     parser.add_argument('--source-href')
     parser.add_argument('--emphasis', default='')
@@ -346,7 +393,7 @@ def main():
         output = render(args.source.read_text(encoding='utf-8'), project_root=args.project_root,
                         source_href=args.source_href or quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
                         pdf_href=args.pdf_href or quote(args.output.with_suffix('.pdf').name),
-                        emphasis=args.emphasis, footer=args.footer)
+                        emphasis=args.emphasis, footer=args.footer, cas_bin=args.cas_bin)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output, encoding='utf-8')
     except (ValueError, KeyError, OSError, TypeError) as error:

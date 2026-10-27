@@ -419,11 +419,12 @@ impl<'w> Formatter<'w> {
         self.newline()
     }
 
-    /// Print a bulleted list item: `• text`
+    /// Print a bulleted list item with a locale-appropriate marker.
     pub fn bullet(&mut self, text: &str) -> io::Result<()> {
         if self.mode == OutputMode::Styled {
             let color = self.theme.palette.text_muted;
-            self.write_colored(&format!("  {} ", Icons::BULLET), color)?;
+            let marker = if self.glyphs() { Icons::BULLET } else { "-" };
+            self.write_colored(&format!("  {marker} "), color)?;
             self.write_primary(text)?;
         } else {
             write!(self.writer, "  - {text}")?;

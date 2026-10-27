@@ -29,7 +29,5 @@ Scored by ready-raven-67 on 2026-10-26 against candidate4ac73527d. Setup failure
 Missing masks name the selector and affected sides once. Budget timeouts name
 both the configured seconds and elapsed seconds. The standard 80-column fixtures
 fit with their finding prefix and code; full values remain in `--json`.
-The temporary `deliverable-capture.allowlist.json` matches only the single U+2022
-codepoint from the existing styled bullet at
-`cas-cli/src/ui/components/formatter.rs:423-427` (cas-9f8d). Remove it with the
-shared formatter correction before release; it permits no width exceptions.
+Finding bullets use the shared formatter's `-` fallback in C locales; UTF-8
+terminals keep their styled bullet. No Unicode exception is required.

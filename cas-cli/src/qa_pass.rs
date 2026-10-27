@@ -1410,19 +1410,13 @@ pub fn qa_task_description(
             delivery.id, ledger_dir.display(),
         );
     }
-    let [baseline] = match crate::worktree::GitOperations::git_remedies([&[
-        "merge-base",
-        parent_branch,
-        &pass.bound_head,
-    ]]) {
+    let [baseline, capture_command] = match crate::worktree::GitOperations::shell_remedies([
+        ("git", &["merge-base", parent_branch, &pass.bound_head]),
+        ("cas", &["deliverable", "capture", "--task", &delivery.id, "--target", parent_branch, "--side", "both"]),
+    ]) {
         Ok(commands) => commands,
         Err(refusal) => return refusal,
     };
-    let capture_command = format!(
-        "cas deliverable capture --task {} --target {} --side both",
-        shell_words::quote(&delivery.id),
-        shell_words::quote(parent_branch)
-    );
     let demo = if delivery.demo_statement.trim().is_empty() {
         "(none — derive the user goal from the delivery title and diff)".to_string()
     } else {

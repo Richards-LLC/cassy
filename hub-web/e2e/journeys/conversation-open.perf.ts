@@ -253,7 +253,6 @@ for (const profile of [
       if (backlog) await drainPending();
     });
     expect(results.initial.history_requests).toBe(1);
-    if (backlog) expect(results.initial.rendered_turns).toBeGreaterThan(250);
     if (!backlog) await measure("accumulated", async () => {
       for (let index = 1; index < capture.pages.length; index++) {
         const count = hub.historyRequests.length;
@@ -280,9 +279,8 @@ for (const profile of [
         await expect(page.locator(".msgs .conversation-turn").first()).toBeAttached();
         await drainPending();
       });
-      expect(results.warm_reopen.rendered_turns).toBeGreaterThan(250);
-      expect(results.reconnect.rendered_turns).toBeGreaterThan(250);
-      expect(results.reload_resume.rendered_turns).toBeGreaterThan(250);
+      // Record DOM size without requiring the baseline's bad behavior: the
+      // fix must be able to rerun this exact command with a bounded window.
     }
     expect(errors).toEqual([]);
   } finally { await context.close(); }

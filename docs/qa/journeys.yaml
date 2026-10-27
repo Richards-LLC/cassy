@@ -230,6 +230,11 @@ invariants:
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
 bug_families:
+  clean-home-launch-remedies:
+    title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
+    tasks: [cas-a1bc]
+    invariants: [HUB-J13-GOAL]
+    journeys: [HUB-J13]
   recovered_session_attention:
     title: Dead daemon viewers close, catalog-gap retries re-subscribe, and fresh replacement sessions retire outage attention while retaining history
     found: '2026-10-27'

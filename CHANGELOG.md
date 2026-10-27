@@ -7,6 +7,93 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.84.0] - 2026-10-27
+
+### Added — every subscription named, listed and picked for you
+
+- **One account list** — Was: Claude and Codex accounts were separate folder
+  scans named `main`, `alt` or a typo, with no single view of usage. → Now:
+  `cas accounts list` (and `--json`) shows every Claude and Codex subscription by
+  email, with plan, login state, 5h and weekly use, reset times, and flags for
+  duplicates, never-logged-in folders and rejected logins. Usage is fetched
+  within one 4-second deadline; unavailable usage reads "usage unknown".
+- **Pickers name accounts by email** — Was: `cas claude` and `cas codex` listed
+  folder names, so two folders sharing one login looked unrelated. → Now: rows
+  read `email (alias)`, the original account is listed before its duplicates,
+  and `main`, `alt` and email folder names still launch. A displayed email
+  launches its folder; an ambiguous email lists the aliases to choose from; an
+  unknown name is refused, creates no folder, and points to `cas <provider> login`.
+- **A recommended account** — Was: the operator chose an account by memory. →
+  Now: the account that resets soonest with room left is marked "recommended",
+  with its reason, and the picker cursor starts on it. Any account stays
+  selectable and nothing launches before Enter. Idle accounts count as unused;
+  accounts over the threshold (`accounts.threshold`, default 90%), disabled,
+  duplicate, logged-out or with no usage data are not recommended, and each says
+  why. `accounts.selection` chooses `soonest-reset` (default) or `most-headroom`.
+  Commander's New session sheet preselects and marks the same account, and a
+  worker spawned without `config_dir` uses it, naming the account and reason in
+  its receipt.
+- **Remove, rename, disable and enable** — Was: a mistyped or retired account
+  folder could not be removed from Cassy. → Now: `cas accounts remove` (with a
+  default-no confirmation, or `--yes`), `rename`, `disable` and `enable` act on a
+  folder alias or email. `main` and accounts in use by a running session are
+  refused. Shared items linked into the base stay intact. Removing an account
+  also removes its symlink aliases, and disabling either spelling of an aliased
+  account disables both.
+- **A new login leaves nothing behind** — Was: a cancelled or failed
+  `cas claude login <name>` left a seeded folder that looked like an account. →
+  Now: a login is staged and only becomes an account when it succeeds. The same
+  login already present asks before reusing it, and the same email with a
+  different account becomes `email-2`. Stale staging folders are swept on the
+  next login without blocking it.
+- **Absolute reset times everywhere** — Was: usage showed a relative time or only
+  a percentage. → Now: `cas accounts list`, the pickers, `cas limits`, Commander's
+  account sheet, `worker_status` and limit notices read like
+  `resets Tue 14:00 (in 6h)` in local time, with the date when it is not today or
+  tomorrow, and `(in 1d 23h)` for longer waits. An already-reset window reads
+  "reset, usage unknown until next session"; `cas limits --compact` stays one
+  line and ends `+N more` when it overflows.
+- **Shared links repaired** — Was: an account folder recreated after
+  `cas accounts link` silently lost its shared commands, skills and settings. →
+  Now: `cas doctor` reports account link drift in one row, `cas doctor --fix`
+  restores the links with a backup, and every launch checks and restores the
+  chosen account's shared links before starting.
+- **A worker that hits its usage limit restarts on the next account** — Was: a
+  limited worker stopped until someone switched it by hand. → Now: the factory
+  restarts it once per limit episode on the next recommended account, resuming
+  its task in the same worktree and branch, and tells the supervisor which
+  account it moved to. When no account is eligible, the notice says when the
+  first one will be ("no eligible account until …"). A switch error still sends
+  one notice that names the error. The supervisor itself is never switched.
+  `worker_status` labels Claude and Codex limits correctly.
+
+### Changed
+
+- **`cas limits --json` reset times** — Was: `reset_at` was local display text.
+  → Now: it is an RFC3339 UTC instant, like `cas accounts list --json`.
+- **Folders named `old` or `backup`** — Was: `~/.codex-old` or `~/.claude-backup`
+  were hidden as scratch folders. → Now: they are listed as accounts. Name a
+  backup with a dotted suffix, e.g. `~/.claude-x.backup`, to keep it hidden.
+- **Playwright 1.64.1** — Was: Commander's browser tests pinned Playwright 1.63.
+  → Now: they run on 1.64.1.
+
+### Fixed
+
+- **macOS Claude usage** — Was: Claude usage on macOS read only
+  `.credentials.json`, so Keychain-backed logins showed no usage. → Now: usage
+  reads the account's macOS Keychain credential first, without printing it, and
+  falls back to the file.
+- **Remove on older hosts** — Was: `cas accounts remove` failed with a raw SQL
+  error on a host whose Cassy database predates newer agent columns or the known
+  repositories table. → Now: it proceeds on those layouts; a corrupt or unreadable
+  database still refuses with `Run: cas update`.
+
+### Upgrade notes
+
+- After installing, run `cas doctor --fix` to restore shared links on account
+  folders recreated after `cas accounts link`.
+- Removing an account is a hard delete after confirmation; there is no backup copy.
+
 ## [3.83.0] - 2026-10-27
 
 ### Fixed

@@ -1692,11 +1692,17 @@ mod launch_profile_tests {
                 name: "ready".into(),
                 logged_in: true,
                 is_default: false,
+                recommendation: None,
+                usage: None,
+                exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
                 name: "signed-out".into(),
                 logged_in: false,
                 is_default: true,
+                recommendation: None,
+                usage: None,
+                exclusion: None,
             },
         ];
         assert_eq!(selected_profile("ready", &rows), Ok("ready"));
@@ -1728,6 +1734,9 @@ mod launch_profile_tests {
             name: "support@petrastella.io".into(),
             logged_in: true,
             is_default: true,
+            recommendation: None,
+            usage: None,
+            exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});
         assert_eq!(
@@ -1793,8 +1802,19 @@ fn launch_session_blocking(
         );
     }
 
+    let root = match super::projects::resolve_launch_target(&request.target) {
+        Ok(root) => root.path,
+        Err(error) => {
+            return launch_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                &error.to_string(),
+            );
+        }
+    };
+    let project_cas_root = root.join(".cas");
     let chosen_profile = if let Some(profile) = request.profile.as_deref() {
-        let profiles = match super::launch_env::profiles(supervisor_cli) {
+        let profiles = match super::launch_env::profiles_for_project(supervisor_cli, Some(&project_cas_root)) {
             Ok(profiles) => profiles,
             Err(error) => {
                 return launch_error(
@@ -1811,7 +1831,7 @@ fn launch_session_blocking(
             }
         }
     } else {
-        match super::launch_env::default_profile_name(supervisor_cli) {
+        match super::launch_env::default_profile_name_for_project(supervisor_cli, Some(&project_cas_root)) {
             Ok(profile) => profile,
             Err(error) => {
                 return launch_error(
@@ -1823,16 +1843,6 @@ fn launch_session_blocking(
         }
     };
 
-    let root = match super::projects::resolve_launch_target(&request.target) {
-        Ok(root) => root.path,
-        Err(error) => {
-            return launch_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_target",
-                &error.to_string(),
-            );
-        }
-    };
     let mut pending = match launches.lock() {
         Ok(lock) => lock,
         Err(_) => {
@@ -1883,7 +1893,7 @@ fn launch_session_blocking(
     }
     pending.remove(&root);
 
-    let environment = match super::launch_env::resolve(supervisor_cli, request.profile.as_deref()) {
+    let environment = match super::launch_env::resolve_for_project(supervisor_cli, Some(&chosen_profile), Some(&project_cas_root)) {
         Ok(environment) => environment,
         Err(error) => {
             let code = match error {
@@ -1952,6 +1962,11 @@ fn launch_session_blocking(
             );
         }
     }
+    // cas-05cee: the supervisor starts with its account's shared links.
+    let account_links = super::launch_env::ensure_account_links(supervisor_cli, &environment);
+    for notice in &account_links {
+        tracing::info!(session = %name, %notice, "account links before launch");
+    }
     let placement = match spawn_factory_daemon(
         &executable,
         &root,
@@ -1985,7 +2000,7 @@ fn launch_session_blocking(
     pending.insert(root, (name.clone(), Instant::now(), chosen_profile.clone()));
     (
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({"session":name, "attached":false, "placement":placement, "profile":chosen_profile})),
+        Json(serde_json::json!({"session":name, "attached":false, "placement":placement, "profile":chosen_profile, "account_links":account_links})),
     )
         .into_response()
 }

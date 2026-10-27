@@ -152,24 +152,14 @@ fn logged_out_profile_is_announced_before_launch() {
         .stderr(predicate::str::contains("cas codex login work"));
 }
 
-/// An explicitly named missing account preserves the non-TTY contract: it is
-/// called out, but it never asks a script to answer the interactive login
-/// prompt. The factory error proves launch preparation proceeded normally.
+/// A typo is refused before a provider can create an empty account folder.
 #[test]
-fn non_tty_missing_named_profile_warns_then_reaches_factory() {
+fn non_tty_missing_named_profile_is_refused_without_creating_it() {
     let home = home_with_profiles();
-
-    cas_cmd(home.path())
-        .args(["codex", "support"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains(
-            ".codex-support does not exist yet",
-        ))
-        .stderr(predicate::str::contains("Using Codex account home:"))
-        .stderr(predicate::str::contains(
-            "Factory mode requires an interactive terminal",
-        ));
+    cas_cmd(home.path()).args(["codex", "support"]).assert().failure()
+        .stderr(predicate::str::contains("unknown codex account"))
+        .stderr(predicate::str::contains("cas codex login support"));
+    assert!(!home.path().join(".codex-support").exists());
 }
 
 /// Factory flags pass through both with and without a profile — `cas codex
@@ -303,7 +293,10 @@ fn login_creates_seeds_and_scopes_the_profile() {
     let profile = home.path().join(".codex-work@example.com");
 
     assert!(
-        stdout.contains(&format!("LOGIN_CODEX_HOME={}", profile.display())),
+        stdout.contains(&format!(
+            "LOGIN_CODEX_HOME={}/.codex-login.tmp.",
+            home.path().display()
+        )),
         "codex login was not scoped to the profile home: {stdout}"
     );
     assert!(

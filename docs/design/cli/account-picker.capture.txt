@@ -1,0 +1,42 @@
+Claude
+Usage: cas claude <profile> [factory-args...]
+
+Detected Claude profiles:
+  main@example.com (main) (logged in) (active)
+    ~/.claude
+  dup@example.com (alt) (logged in)
+    ~/.claude-alt
+  dup@example.com (logged in)
+    ~/.claude-dup@example.com
+  dup@example.com (linked) (logged in)
+    ~/.claude-linked
+  never (not logged in)
+    ~/.claude-never
+  stale@example.com (stale) (not logged in)
+    ~/.claude-stale
+  dup@example.com (work) (logged in)
+    ~/.claude-work
+
+Hit a usage limit? Switch in one step: cas claude <profile>. Resume the
+  last session here: cas claude --bare <profile> --continue.
+
+Codex
+Usage: cas codex <profile> [factory-args...]
+
+Detected Codex profiles:
+  team@example.com (main) (logged in) (active)
+    ~/.codex
+    5h 77%, weekly 77%
+  team@example.com (alt) (logged in)
+    ~/.codex-alt
+    5h 77%, weekly 77%
+  never (not logged in)
+    ~/.codex-never
+  past@example.com (past) (logged in)
+    ~/.codex-past
+    5h reset, usage unknown until next session, weekly 99%
+  team@example.com (logged in)
+    ~/.codex-team@example.com
+    5h 77%, weekly 77%
+
+Hit a usage limit? Switch in one step: cas codex <profile>.

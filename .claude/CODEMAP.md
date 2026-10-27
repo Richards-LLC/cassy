@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map of the assembled 3.83 release source at `48262f3b4`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map of the assembled 3.84 release source (accounts epic + burn-down v66) at `88922c00a`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -45,12 +45,20 @@
 
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable entry, module composition, command definitions and dispatch.
 - `cas-cli/src/cli/init.rs` - initialization, recovery advice and MCP provisioning.
-- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/account_picker.rs` - account selection, profile setup and login commands.
+- `cas-cli/src/account_selection.rs`, `cas-cli/src/config/accounts.rs` - pure account recommendation policy, capacity exclusions and typed selection/threshold/disabled configuration.
+- `cas-cli/src/account_registry/resolve.rs` - read-only alias/email resolution shared by CLI launch, Commander and worker config_dir validation.
+- `cas-cli/src/account_registry.rs` - shared Claude/Codex identity, login evidence, duplicate flags and structured usage snapshots with a four-second deadline.
+- `cas-cli/src/account_lifecycle.rs` - account remove, rename, disable/enable and staged new-login transactions, with in-use checks and symlink-alias handling.
+- `cas-cli/src/account_links.rs` - shared-link drift detection and repair behind `cas doctor --fix` and launch-time link restoration.
+- `cas-cli/src/cli/accounts.rs`, `cas-cli/src/accounts.rs` - subscription list/JSON, shared account configuration and link/drift operations.
+- `cas-cli/src/cli/limits.rs`, `cas-cli/src/cli/accounts.rs` - shared local reset-date/day-hour formatting, reset-only summaries, provider capacity snapshots, bounded human reports and unchanged RFC3339 JSON instants.
+- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs` - registry-backed account names, legacy profile aliases, profile setup and login commands.
 - `cas-cli/src/cli/doctor.rs`, `cas-cli/src/cli/doctor/` - health producers, grouped rendering and communication checks.
 - `cas-cli/src/cli/update.rs`, `cas-cli/src/cli/update/` - update phases, binding checks, discovery and receipts.
 - `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - managed files, Git reconciliation and locking.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - configuration commands, key registry and operator policy; `cas-cli/src/config/qa_capture.rs` owns project capture intent and credential-file pointers.
 - `cas-cli/src/capability.rs`, `cas-cli/src/cli/hub_service.rs` - account probes, bounded auth cache and readiness.
+- `cas-cli/src/claude_credentials.rs` - shared Claude Keychain service identity for capability and usage probes and account lifecycle (remove, rename and new-login Keychain items).
 - `cas-cli/src/cli/codemap_cmd.rs`, `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs` - map commands, immutable documentation measurements and calling-checkout document reads.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations, cache GC and integration commands.
 - `cas-cli/src/cli/factory/lifecycle.rs`, `cas-cli/src/cli/factory/daemon.rs` - `cas kill` start-time-pinned escalation, `--force-stale`, fingerprint-checked worker-group reaping and bounded daemon runtime exit.
@@ -83,6 +91,7 @@
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry/` - dispatch, reminders, stalls and owned servers.
 - `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_branch_recovery.rs` - durable succession and authenticated worker-branch recovery.
 - `cas-cli/src/factory_session_scope.rs`, `cas-cli/src/mcp/tools/service/factory_ops.rs` - session ownership, adopted-orphan worker routing, reset and fingerprinted shutdown.
+- `cas-cli/src/mcp/tools/service/factory_ops/limit_switch.rs` - durable account-limit recycle decisions, pre-stop validation and transcript continuation.
 - `cas-cli/src/ui/factory/app/merge_alert.rs`, `cas-cli/src/ui/factory/app/director_refresh.rs` - pushed-green signals, shared external probes, readiness cache and durable per-tip admission.
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_review_scratch.rs` - build-pressure admission, review checkouts, inherited flags, target reuse and freeable-inode accounting.

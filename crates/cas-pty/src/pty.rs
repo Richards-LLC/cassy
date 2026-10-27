@@ -139,6 +139,15 @@ pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
         markers: &["at a glance", "never trims evidence"],
         all: true,
     },
+    // cas-b748: Codex ranks this developer contract above the user-role
+    // AGENTS.md, so the contract itself must hand voice and style to the
+    // operator's user-level instructions, or "facts, not narration" overrides
+    // them and reads as "flat".
+    ContractElement {
+        id: "user-instructions-voice",
+        markers: &["user-level instructions", "govern voice and style"],
+        all: true,
+    },
 ];
 
 /// The canonical worker contract: one-task ownership, async availability, full

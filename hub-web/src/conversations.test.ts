@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { applyHistoryCursor, ConversationHistory, RECEIPT_REPLY_GRACE_MS, RECEIPT_TIMEOUT_MS, supervisorWorking, type HistoryCursor } from "./conversation-history";
 import { ConversationList, ROW_TAP_CLICK_WAIT_MS, conversationRowMarkup, filterConversationRows, truncateConversationPreview, type ConversationRow, conversationRowSpokenName } from "./conversation-list";
 import { ConversationView } from "./conversation-view";
-import { applePlatform, appearanceButtonMarkup, ATTACH_DISABLED_REASON, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
+import { applePlatform, appearanceButtonMarkup, ATTACH_SUPPORTED, arrangeConversationShell, conversationNoMatchText, conversationSearchPlaceholder, conversationShellMarkup, dressComposer, fitMachineLine, hostMarkup, KEYBOARD_HINT_MEDIA_QUERY, paletteShortcutLabel } from "./conversation-shell";
 import { renderConversationFixture } from "../fixtures/conversations";
 import { projectName, projectBadge } from "./cloud-brand";
 
@@ -652,10 +652,10 @@ describe('conversation evidence', () => {
     expect(app.querySelector<HTMLElement>('#conversation-attention-slot > #attention-panel')?.hidden).toBe(false);
     const composer = app.querySelector<HTMLElement>('#conversation-composer-slot > .message.conversation-composer')!;
     expect(composer).not.toBeNull();
-    // cas-17e3: attaching has no transport yet, so the clip is not offered at all.
-    expect(ATTACH_SUPPORTED).toBe(false);
-    expect(composer.querySelector('.composer-clip')).toBeNull();
-    expect(ATTACH_DISABLED_REASON).toContain('not supported yet');
+    // The existing clip becomes a working keyboard-reachable file picker.
+    expect(ATTACH_SUPPORTED).toBe(true);
+    expect(composer.querySelector<HTMLButtonElement>('.composer-clip')?.disabled).toBe(false);
+    expect(composer.querySelector('.composer-clip')?.getAttribute('aria-label')).toBe('Attach files');
     const mic = composer.querySelector<HTMLButtonElement>('#message-mic')!;
     expect(mic.getAttribute('aria-label')).toBe('Start listening');
     expect(mic.querySelector('.mic-glyph')).not.toBeNull();
@@ -669,7 +669,7 @@ describe('conversation evidence', () => {
     expect(app.querySelector('.conversation-shell')?.classList.contains('machine-accent-0')).toBe(true);
     // Dressing twice (every re-render) never stacks a second clip or label.
     dressComposer(composer, 'patient-pelican-9');
-    expect(composer.querySelectorAll('.composer-clip')).toHaveLength(0); expect(send.querySelectorAll('.send-label')).toHaveLength(1);
+    expect(composer.querySelectorAll('.composer-clip')).toHaveLength(1); expect(send.querySelectorAll('.send-label')).toHaveLength(1);
   });
   it('shows only turns — never pane text — escapes replies, and never presents the operator as the supervisor', () => {
     const history = new ConversationHistory();

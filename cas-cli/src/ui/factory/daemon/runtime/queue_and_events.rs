@@ -12840,7 +12840,7 @@ mod tests {
         let mut daemon = super::super::provisioning_tests::daemon(&root);
         let attribution = crate::ui::factory::protocol::MessageAttribution {
             device_id: Some("phone".into()),
-            credential_id: None,
+            credential_id: Some("phone-credential".into()),
             device_label: Some("Ben's phone".into()),
             operator_label: Some("Ben".into()),
             controller_origin: None,

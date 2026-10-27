@@ -717,7 +717,10 @@ mod tests {
             unknown.windows.clear();
             for (five, weekly, hours, threshold) in [(20., 85., 8, 80), (95., 20., 3, 90), (95., 95., 8, 90)] {
                 let blocked = crate::account_selection::tests::row(provider, "blocked", 8, weekly, five);
-                let rows = [blocked, disabled.clone(), logged_out.clone(), stale.clone(), duplicate.clone(), unknown.clone()];
+                // The transcript can be newer than the limited account's
+                // under-threshold quota snapshot. It is excluded for switching,
+                // and another account's early reset must not make it "recover".
+                let rows = [blocked, disabled.clone(), logged_out.clone(), stale.clone(), duplicate.clone(), unknown.clone(), accounts[0].clone()];
                 let policy = crate::config::AccountsConfig { threshold, ..Default::default() };
                 let (_, detail) = plan_switch(&agent, &meta, &rows, now, &policy, |_| panic!("none eligible"));
                 let reset = (now + chrono::Duration::hours(hours)).to_rfc3339();

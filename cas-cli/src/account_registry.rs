@@ -142,7 +142,7 @@ fn metadata(provider: Provider, home: &Path, folder: &Path) -> (Option<String>, 
     }
 }
 
-fn account(provider: Provider, home: &Path, folder: PathBuf) -> Account {
+pub(crate) fn account(provider: Provider, home: &Path, folder: PathBuf) -> Account {
     let label = folder
         .file_name()
         .and_then(|name| name.to_str())

@@ -305,7 +305,13 @@ fn new_login(home: &Path, profile: &str) -> Result<String> {
 
 fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String> {
     let named = resolve_profile_dir(home, profile);
-    let pending = if profile != "main" && std::fs::symlink_metadata(&named).is_err() {
+    let created = profile != "main"
+        && match std::fs::symlink_metadata(&named) {
+            Ok(_) => false,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) => return Err(e.into()),
+        };
+    let pending = if created {
         Some(crate::account_lifecycle::NewLogin::begin(
             home,
             crate::accounts::Provider::Codex,

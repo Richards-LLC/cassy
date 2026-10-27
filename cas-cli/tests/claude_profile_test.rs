@@ -559,6 +559,36 @@ fn accounts_lifecycle_preserves_shared_targets_and_guards_mutations() {
             .assert()
             .failure();
         assert!(moved.exists());
+        {
+            use std::io::{BufRead, Write};
+            use std::process::Stdio;
+            let mut holder = std::process::Command::new("/bin/sh")
+                .args(["-c", "printf 'ready\\n'; read answer"])
+                .env(selector, &moved)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            std::io::BufReader::new(holder.stdout.take().unwrap())
+                .read_line(&mut ready)
+                .unwrap();
+            assert_eq!(ready.trim(), "ready");
+            cas_cmd(home.path())
+                .current_dir(home.path())
+                .env_remove(selector)
+                .args(["accounts", "rename", &key, "busy-rename"])
+                .assert()
+                .failure();
+            cas_cmd(home.path())
+                .current_dir(home.path())
+                .env_remove(selector)
+                .args(["accounts", "remove", &key, "--yes"])
+                .assert()
+                .failure();
+            holder.stdin.take().unwrap().write_all(b"\n").unwrap();
+            assert!(holder.wait().unwrap().success());
+        }
         cas_cmd(home.path())
             .current_dir(home.path())
             .env_remove(selector)

@@ -293,7 +293,12 @@ fn prepare_login_profile(
     profile: &str,
 ) -> Result<(PathBuf, Option<crate::account_lifecycle::NewLogin>)> {
     let named = resolve_profile_dir(home, profile);
-    let created = profile != "main" && std::fs::symlink_metadata(&named).is_err();
+    let created = profile != "main"
+        && match std::fs::symlink_metadata(&named) {
+            Ok(_) => false,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) => return Err(e.into()),
+        };
     let pending = if created {
         Some(crate::account_lifecycle::NewLogin::begin(
             home,

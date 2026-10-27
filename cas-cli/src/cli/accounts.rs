@@ -93,8 +93,10 @@ pub fn execute(args: &AccountsArgs, cli: &Cli) -> Result<()> {
             mutation_receipt(cli.json, "removed", &target)
         }
         AccountsCommand::Rename { account, new_name } => {
-            let target = crate::account_lifecycle::resolve(&home, account)?;
+            let mut target = crate::account_lifecycle::resolve(&home, account)?;
             crate::account_lifecycle::rename(&target, &home, new_name)?;
+            target.name = new_name.clone();
+            target.folder = home.join(format!("{}{new_name}", target.provider.prefix()));
             mutation_receipt(cli.json, "renamed", &target)
         }
         AccountsCommand::Disable { account } | AccountsCommand::Enable { account } => {
@@ -335,6 +337,9 @@ fn mutation_receipt(
             target.provider.name(),
             cell(&target.name, 48)
         );
+        if target.name.len() > 48 {
+            println!("Full values: cas accounts list --json");
+        }
     }
     Ok(())
 }

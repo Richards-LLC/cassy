@@ -761,6 +761,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
+        // cas-d53c: a replacement daemon can reuse this session name. Its
+        // actual Live attach also settles the machine-event outage cards;
+        // hub connectivity alone cannot prove a session recovered. Keep the
+        // acknowledged rows as history, including later enrichment revisions.
+        const recovered = attention.filter((item) => !item.acknowledgedAt
+          && item.machineId === machine.id && item.session === session
+          && (item.kind === "daemon_disconnected" || item.kind === "session_removed"));
+        if (recovered.length) void acknowledgeAttentionGroup(recovered);
       }
       else restateAttachmentNotes(document, machine.id);
       if (selectedMachineId === machine.id && selectedSession === session) render();

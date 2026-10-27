@@ -37,6 +37,7 @@ pub mod builtins;
 pub mod cli;
 pub mod cloud;
 pub mod capability;
+mod claude_credentials;
 pub mod config;
 pub mod consolidation;
 pub mod coordination;

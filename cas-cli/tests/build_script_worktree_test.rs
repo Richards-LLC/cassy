@@ -154,6 +154,9 @@ fn create_fixture() -> (TempDir, PathBuf, PathBuf) {
     let dist = repo.path().join("hub-web/dist");
     fs::create_dir_all(&source).expect("fixture source directory");
     fs::create_dir_all(&dist).expect("fixture dist directory");
+    // build.rs embeds docs/design/cli/init-*.capture.txt and requires the directory.
+    fs::create_dir_all(repo.path().join("docs/design/cli"))
+        .expect("fixture design capture directory");
 
     let production_build_script = std::env::current_dir()
         .expect("test current directory")

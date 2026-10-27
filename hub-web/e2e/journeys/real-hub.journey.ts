@@ -646,11 +646,11 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     await page.screenshot({ path: join(directory, "J01-choose-project.png") });
     await sheet.getByRole("button", { name: "Start", exact: true }).click();
     await expect(sheet).toBeHidden({ timeout: 30_000 });
-    await expect(page.getByText("Supervisor ready", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("log").getByText("Supervisor ready", { exact: true })).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: join(directory, "J02-first-message.png") });
     await page.getByRole("textbox", { name: "Your message", exact: true }).fill("ping launch supervisor");
     await page.getByRole("button", { name: "Send to the project supervisor", exact: true }).click();
-    await expect(page.getByText("Launch supervisor answered", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("log").getByText("Launch supervisor answered", { exact: true })).toBeVisible({ timeout: 30_000 });
     await page.screenshot({ path: join(directory, "J03-answer.png") });
     passed = true;
   } finally {

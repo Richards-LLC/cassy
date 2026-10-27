@@ -70,6 +70,11 @@ invariants:
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: delivery by a running
       daemon and operator stamping are doubled'
+  HUB-J5-ANSWER-MONOTONIC:
+    statement: Replaying a delivery receipt keeps an answered message answered while reply history rebuilds
+    check: 'Run the receipt regression in hub-web/src/conversations.test.ts: answer a send, remove its reply
+      event, replay the journal receipt through synchronizePending, and assert that the send remains replied.'
+    bug: {task: cas-1b57}
   HUB-J6-GOAL:
     statement: I speak my reply, check it, and send it
     check: 'Walk HUB-J6 in hub-web/e2e/journeys/reply-voice.journey.ts; verify the expected experience and edge
@@ -583,6 +588,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J5-ANSWER-MONOTONIC
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

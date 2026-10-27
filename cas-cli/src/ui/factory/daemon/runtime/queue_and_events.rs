@@ -3860,11 +3860,18 @@ impl FactoryDaemon {
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let key = format!("usage-limit:{agent_id}");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
-                        let persisted = match crate::mcp::tools::service::factory_ops::limit_switch::queue_limit_switch(&cas_dir, &agent_id, &occurrence) {
-                            Ok(detail) => matches!(super::lifecycle::enqueue_usage_limit_switch_relay(&cas_dir, &worker, &occurrence, &detail),
-                                super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }),
-                            Err(error) => { tracing::warn!(%error, worker, "usage-limit decision not persisted; retry next scan"); false }
+                        let (detail, switch_queued) = match crate::mcp::tools::service::factory_ops::limit_switch::queue_limit_switch(&cas_dir, &agent_id, &occurrence) {
+                            Ok(decision) => (decision.detail, decision.switch_queued),
+                            Err(error) => {
+                                tracing::warn!(%error, worker, "usage-limit decision failed; notifying supervisor");
+                                (format!("Worker {worker} hit its usage limit; blocked switch: {error:#}. Existing pane kept."), false)
+                            }
                         };
+                        // The same durable occurrence key dedupes failures too,
+                        // including a daemon restart after the fallback notice.
+                        let persisted = matches!(super::lifecycle::enqueue_usage_limit_switch_relay(
+                            &cas_dir, &worker, &occurrence, &detail, switch_queued),
+                            super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. });
                         super::relay_jobs::RelayOutput::UsageLimitWritten {
                             agent_id,
                             worker,

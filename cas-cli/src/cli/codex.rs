@@ -479,6 +479,12 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
                 // which account that is (cas-e1f4).
                 let ambient = active_dir.clone().unwrap_or_else(|| home.join(".codex"));
                 eprintln!("Codex account (ambient): {}", account_line(&home, &ambient));
+                crate::account_links::prelaunch(
+                    crate::accounts::Provider::Codex,
+                    &home,
+                    &ambient,
+                    io::stdin().is_terminal() && io::stderr().is_terminal(),
+                );
                 return Ok(());
             }
         }
@@ -505,6 +511,14 @@ pub fn apply_profile_env(args: &CodexArgs) -> Result<()> {
         warn_about_profile_state(&profile, &profile_dir, login_state);
     }
 
+    // cas-05cee: a session on a folder without its shared links has no
+    // skills, agents, hooks or settings. Link empty slots before launch.
+    crate::account_links::prelaunch(
+        crate::accounts::Provider::Codex,
+        &home,
+        &profile_dir,
+        io::stdin().is_terminal() && io::stderr().is_terminal(),
+    );
     set_profile_env(&profile, &profile_dir);
     // `execute`/`execute_bare` run later in the same process; record the choice
     // so the operator is asked once, not once per launch path.

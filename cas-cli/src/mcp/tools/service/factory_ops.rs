@@ -1505,6 +1505,38 @@ fn recommend_spawn_accounts(
     notices.into_iter().map(|notice| format!("\nAccount selection: {notice}")).collect()
 }
 
+/// cas-05cee: link each worker account's empty shared slots before its
+/// worker starts, and record what was linked or still needs a person in the
+/// spawn receipt. Never refuses the spawn.
+fn spawn_account_links_notice(specs: &[cas_mux::WorkerSpec], home: &std::path::Path) -> String {
+    use std::path::PathBuf;
+    let mut seen: Vec<(crate::accounts::Provider, PathBuf)> = Vec::new();
+    let mut lines = Vec::new();
+    for spec in specs {
+        let provider = match spec.cli {
+            cas_mux::SupervisorCli::Claude => crate::accounts::Provider::Claude,
+            cas_mux::SupervisorCli::Codex => crate::accounts::Provider::Codex,
+            _ => continue,
+        };
+        let Some(dir) = spec.config_dir.as_deref().or(spec.requester_config_dir.as_deref()) else {
+            continue;
+        };
+        let dir = dir.strip_prefix("~/").map_or_else(|| PathBuf::from(dir), |rest| home.join(rest));
+        if seen.contains(&(provider, dir.clone())) {
+            continue;
+        }
+        seen.push((provider, dir.clone()));
+        match crate::account_links::ensure(provider, home, &dir) {
+            Ok(ensured) => lines.extend(crate::account_links::notices(provider, home, &dir, &ensured)),
+            Err(error) => lines.push(format!(
+                "Warning: could not link shared items in {}: {error:#}",
+                crate::account_links::short(home, &dir)
+            )),
+        }
+    }
+    lines.into_iter().map(|line| format!("\nAccount links: {line}")).collect()
+}
+
 fn spawn_specs_summary(specs: &[cas_mux::WorkerSpec], worker_names: &[String]) -> String {
     specs
         .iter()
@@ -2878,6 +2910,9 @@ impl CasService {
         let codex_fallback_notice = (!notices.is_empty())
             .then(|| format!("\nWarning: {}", notices.join("\nWarning: ")))
             .unwrap_or_default();
+        let account_links_notice = dirs::home_dir()
+            .map(|home| spawn_account_links_notice(&specs, &home))
+            .unwrap_or_default();
         let config_dir_notice = (!config_dir_warnings.is_empty())
             .then(|| format!("\nWarning: {}", config_dir_warnings.join("\nWarning: ")))
             .unwrap_or_default();
@@ -3140,11 +3175,11 @@ impl CasService {
 
         let msg = if worker_names.is_empty() {
             format!(
-                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
+                "Queued spawn request for {count} worker(s) (request ID: {request_id})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}"
             )
         } else {
             format!(
-                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
+                "Queued spawn request for worker(s): {} (request ID: {})\nWorker spec: {spec_summary}{account_selection_notice}{account_links_notice}{lane_notice}{default_sources_notice}{spec_warning}{codex_fallback_notice}{config_dir_notice}{isolation_warning}{shared_clone_notice}{delivery_mode_notice}{task_id_note}{brief_delivery_note}{build_check_notice}{build_guard_notice}{throttle_notice}{liveness_note}{related_context}",
                 worker_names.join(", "),
                 request_id
             )
@@ -15280,6 +15315,52 @@ mod tests {
         assert_eq!(specs[0].model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(specs[0].effort, Some(cas_mux::Effort::High));
         assert!(spawn_specs_summary(&specs, &[]).contains(": claude model=claude-opus-5-5"));
+    }
+
+    #[test]
+    fn spawn_receipt_links_worker_accounts_and_records_real_items() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        let mut specs = Vec::new();
+        let mut expected = String::new();
+        for (provider, cli) in [
+            (crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
+            (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex),
+        ] {
+            for item in ["agents", "skills"] {
+                std::fs::create_dir_all(provider.base_dir(h).join(item)).unwrap();
+            }
+            let label = format!("{}w@x.com", provider.prefix());
+            std::fs::create_dir_all(h.join(&label).join("agents")).unwrap();
+            std::fs::write(h.join(&label).join(provider.credentials()), "{}").unwrap();
+            // An explicit account and the same account inherited (as ~/...).
+            let spec = cas_mux::WorkerSpec {
+                name: None,
+                cli,
+                model: None,
+                effort: None,
+                config_dir: Some(h.join(&label).to_string_lossy().into_owned()),
+                requester_config_dir: None,
+                requester_secure_storage_dir: None,
+            };
+            specs.push(spec.clone());
+            let inherited = cas_mux::WorkerSpec {
+                config_dir: None,
+                requester_config_dir: Some(format!("~/{label}")),
+                ..spec
+            };
+            specs.push(inherited);
+            let base = format!("~/.cas/{}-base", provider.name());
+            expected.push_str(&format!(
+                "\nAccount links: Linked 1 shared item in ~/{label} from {base}\nAccount links: Warning: 1 shared item in ~/{label} not linked to {base}: agents. Fix: cas doctor --fix --yes"
+            ));
+        }
+        assert_eq!(spawn_account_links_notice(&specs, h), expected);
+        for provider in crate::accounts::Provider::ALL {
+            let account = h.join(format!("{}w@x.com", provider.prefix()));
+            assert_eq!(std::fs::read_link(account.join("skills")).unwrap(), provider.base_dir(h).join("skills"));
+            assert!(!account.join("agents").is_symlink(), "real items are never replaced at spawn");
+        }
     }
 
     #[test]

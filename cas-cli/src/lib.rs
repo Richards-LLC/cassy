@@ -22,6 +22,7 @@ compile_error!(
 
 // Core modules
 pub(crate) mod account_lifecycle;
+pub(crate) mod account_links;
 pub mod account_registry;
 pub mod account_selection;
 pub mod accounts;

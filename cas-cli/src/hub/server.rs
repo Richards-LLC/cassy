@@ -1962,6 +1962,11 @@ fn launch_session_blocking(
             );
         }
     }
+    // cas-05cee: the supervisor starts with its account's shared links.
+    let account_links = super::launch_env::ensure_account_links(supervisor_cli, &environment);
+    for notice in &account_links {
+        tracing::info!(session = %name, %notice, "account links before launch");
+    }
     let placement = match spawn_factory_daemon(
         &executable,
         &root,
@@ -1995,7 +2000,7 @@ fn launch_session_blocking(
     pending.insert(root, (name.clone(), Instant::now(), chosen_profile.clone()));
     (
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({"session":name, "attached":false, "placement":placement, "profile":chosen_profile})),
+        Json(serde_json::json!({"session":name, "attached":false, "placement":placement, "profile":chosen_profile, "account_links":account_links})),
     )
         .into_response()
 }

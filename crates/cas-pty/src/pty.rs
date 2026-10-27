@@ -4627,6 +4627,67 @@ echo SMOKE_DONE
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn codex_supervisor_spawn_forwards_effective_account_home_to_cas() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let args_file = temp.path().join("args");
+        let codex = temp.path().join("codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" > {}\n",
+                shell_quote(&args_file.to_string_lossy())
+            ),
+        ).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(temp.path().join("cas"), "fixture preflight only").unwrap();
+        env.set("PATH", temp.path());
+        let inherited = temp.path().join("inherited Codex/\"account\"/λ");
+        let explicit = temp.path().join("explicit Codex/\"account\"/λ");
+        for home in [&inherited, &explicit] {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::write(home.join("auth.json"), "fixture-auth-never-log").unwrap();
+        }
+        assert!(!dirs::home_dir().unwrap().join(".codex/auth.json").exists());
+        env.set("CODEX_HOME", &inherited);
+
+        for selected in [None, Some(&explicit)] {
+            let mut config = PtyConfig::codex(
+                "account-probe", "supervisor", temp.path().to_path_buf(),
+                None, None, None, None, None, None,
+            );
+            if let Some(home) = selected {
+                config.env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+            }
+            let mut pty = Pty::spawn("account-probe", config).unwrap();
+            let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(code)) => {
+                        assert_eq!(code, Some(0));
+                        break;
+                    }
+                    Some(PtyEvent::Output(_)) => {}
+                    event => panic!("account launch did not complete: {event:?}"),
+                }
+            }
+            let bytes = std::fs::read(&args_file).unwrap();
+            let args = std::str::from_utf8(&bytes).unwrap();
+            let forwarded = args.split('\0')
+                .find(|arg| arg.starts_with("mcp_servers.cs.env.CODEX_HOME="))
+                .expect("the supervisor's CAS MCP child must inherit its effective CODEX_HOME");
+            let parsed: toml::Value = toml::from_str(forwarded).unwrap();
+            let actual = parsed["mcp_servers"]["cs"]["env"]["CODEX_HOME"].as_str().unwrap();
+            assert_eq!(PathBuf::from(actual), *selected.unwrap_or(&inherited));
+            assert!(PathBuf::from(actual).join("auth.json").is_file());
+            assert!(!args.contains("fixture-auth-never-log"));
+        }
+    }
+
+    #[tokio::test]
     async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {
         let _env = TestEnvGuard::new();
         let root = PathBuf::from("/tmp/cas root with spaces");

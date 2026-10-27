@@ -730,7 +730,12 @@ mod tests {
         assert!(called);
         assert_eq!(limit.state, "active");
         assert_eq!(limit.plan.as_deref(), Some("max"));
-        assert_eq!(summarize(&limit).as_deref(), Some("5h 12%, weekly 34%"));
+        // The accounts reset contract (cas-0dda) names a window whose reset the
+        // usage API omits.
+        assert_eq!(
+            summarize(&limit).as_deref(),
+            Some("5h 12%, reset time unknown; weekly 34%, reset time unknown")
+        );
         assert!(
             !serde_json::to_string(&limit)
                 .unwrap()

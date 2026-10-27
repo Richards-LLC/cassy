@@ -731,6 +731,15 @@ mod tests {
             assert_eq!(rows[1].exclusion.as_deref(), Some("resets later than chosen"));
             assert_eq!(rows[2].exclusion.as_deref(), Some("duplicate of chosen"));
             assert!(rows[1].logged_in && rows[2].logged_in, "exclusions stay manually selectable");
+            let mut unknown_reset_accounts = accounts.clone();
+            unknown_reset_accounts[0].windows[1].resets_at = None;
+            unknown_reset_accounts.push(crate::account_selection::tests::row(provider, "later", 60, 70.0, 20.0));
+            mark_recommendation(&mut rows, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert_eq!(rows[0].exclusion.as_deref(), Some("weekly reset unknown; known resets first"));
+            unknown_reset_accounts[1].flags.disabled = true;
+            mark_recommendation(&mut rows, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert_eq!(rows[0].recommendation.as_deref(), Some("weekly reset unknown, 41% left"));
+
             assert_eq!(choose_profile_name(Some("other"), None, Some("chosen")), "other");
             // Commander uses the selected project's threshold, not only the global one.
             let project = tempfile::tempdir().unwrap();

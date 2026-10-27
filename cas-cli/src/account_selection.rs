@@ -93,6 +93,15 @@ pub fn recommend<'a>(
             .excluded
             .push((skipped, format!("resets later than {}", account.name)));
     }
+    if reset.is_some() {
+        for &(skipped, candidate_reset, _, _) in candidates.iter().skip(1) {
+            if candidate_reset.is_none() {
+                result
+                    .excluded
+                    .push((skipped, "weekly reset unknown; known resets first".into()));
+            }
+        }
+    }
     let reset_reason = match reset {
         Some(reset) => {
             let minutes = (reset - now).num_minutes().max(1);
@@ -138,22 +147,20 @@ fn capacity(
         let Some(w) = account.windows.iter().find(|w| w.name == name) else {
             return Ok((None, 0.0));
         };
-        // Past timestamps remain evidence of rollover even when the registry
-        // clears the stale percentage. Null reset + known usage is unopened.
-        if w.resets_at.is_none_or(|reset| reset <= now) {
+        // A past timestamp proves rollover even if the registry cleared its
+        // old percentage. Missing reset metadata alone does not prove rollover.
+        if w.resets_at.is_some_and(|reset| reset <= now) {
             return Ok((None, 0.0));
         }
-        let used = w
-            .used_percent
-            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
-            .ok_or_else(|| format!("{name} usage unknown"))?;
-        let Some(reset) = w.resets_at else {
-            return Ok((None, 0.0));
+        let used = match (w.used_percent, w.resets_at) {
+            (None, None) => 0.0, // Unopened window in an otherwise known account.
+            (Some(used), _) if used.is_finite() && (0.0..=100.0).contains(&used) => used,
+            _ => return Err(format!("{name} usage unknown")),
         };
         if used >= f64::from(threshold) {
             return Err(format!("{name} at {used:.0}% (threshold {threshold}%)"));
         }
-        Ok((Some(reset), used))
+        Ok((w.resets_at, used))
     };
     let (_, five) = window("5h")?;
     let (reset, weekly) = window("weekly")?;
@@ -301,6 +308,15 @@ pub(crate) mod tests {
             cleared_expired.windows[0].used_percent = None;
             let mut unknown_weekly_reset = a.clone();
             unknown_weekly_reset.windows[1].resets_at = None;
+            let mut unknown_weekly_full = unknown_weekly_reset.clone();
+            unknown_weekly_full.windows[1].used_percent = Some(95.0);
+            let mut unknown_five_full = a.clone();
+            unknown_five_full.windows[0].resets_at = None;
+            unknown_five_full.windows[0].used_percent = Some(95.0);
+            let mut unopened_weekly = unknown_weekly_reset.clone();
+            unopened_weekly.windows[1].used_percent = None;
+            let mut zero_weekly = unknown_weekly_reset.clone();
+            zero_weekly.windows[1].used_percent = Some(0.0);
             let mut expired_weekly = a.clone();
             expired_weekly.windows[1].resets_at = Some(now);
             expired_weekly.windows[1].used_percent = None;
@@ -420,6 +436,34 @@ pub(crate) mod tests {
                     Some("a"),
                 ),
                 (
+                    "unknown reset weekly threshold",
+                    vec![unknown_weekly_full, b.clone()],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("b"),
+                ),
+                (
+                    "unknown reset five-hour threshold",
+                    vec![unknown_five_full, b.clone()],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("b"),
+                ),
+                (
+                    "unopened weekly missing percentage",
+                    vec![unopened_weekly],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("a"),
+                ),
+                (
+                    "unopened weekly zero percentage",
+                    vec![zero_weekly],
+                    AccountSelection::SoonestReset,
+                    90,
+                    Some("a"),
+                ),
+                (
                     "known weekly reset before unknown",
                     vec![unknown_weekly_reset, b.clone()],
                     AccountSelection::SoonestReset,
@@ -471,6 +515,7 @@ pub(crate) mod tests {
                 if let Some(r) = result.recommended {
                     if case == "unknown weekly reset eligible"
                         || case == "expired weekly window eligible"
+                        || case.starts_with("unopened weekly")
                     {
                         assert!(
                             r.reason.contains("weekly reset unknown"),
@@ -479,6 +524,32 @@ pub(crate) mod tests {
                         );
                     } else {
                         assert!(r.reason.contains("resets in"), "{case}: {}", r.reason);
+                    }
+                    if case == "unknown weekly reset eligible" {
+                        assert_eq!(r.reason, "weekly reset unknown, 41% left");
+                    }
+                    if case.starts_with("unopened weekly") {
+                        assert_eq!(r.reason, "weekly reset unknown, 100% left");
+                    }
+                    if case == "known weekly reset before unknown" {
+                        assert_eq!(
+                            result
+                                .excluded
+                                .iter()
+                                .find(|(a, _)| a.name == "a")
+                                .map(|(_, reason)| reason.as_str()),
+                            Some("weekly reset unknown; known resets first")
+                        );
+                    }
+                    if case == "unknown reset weekly threshold"
+                        || case == "unknown reset five-hour threshold"
+                    {
+                        assert!(
+                            result
+                                .excluded
+                                .iter()
+                                .any(|(_, why)| why.contains("95% (threshold 90%)"))
+                        );
                     }
                     if case == "soonest reset" {
                         assert_eq!(

@@ -4882,7 +4882,7 @@ auth = "env:{token}"
         use crate::accounts::Provider;
         use std::os::unix::fs::symlink;
         let original = "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-mcp\"\n";
-        for mode in ["registered", "explicit", "none"] {
+        for mode in ["foreign", "registered", "explicit", "none"] {
             let mut env = crate::test_support::TestEnvGuard::temp_home();
             let home = env.home().to_path_buf();
             env.set("XDG_CONFIG_HOME", home.join(".config"));
@@ -4904,10 +4904,16 @@ auth = "env:{token}"
                     expected.push(account.join("config.toml"));
                 }
             }
-            if mode == "explicit" {
+            if matches!(mode, "explicit" | "foreign") {
                 let selected = home.join("selected-codex");
                 fs::create_dir_all(&selected).unwrap();
-                fs::write(selected.join("config.toml"), original).unwrap();
+                if mode == "foreign" {
+                    let foreign = home.join("foreign.toml");
+                    fs::write(&foreign, original).unwrap();
+                    symlink(&foreign, selected.join("config.toml")).unwrap();
+                } else {
+                    fs::write(selected.join("config.toml"), original).unwrap();
+                }
                 env.set("CODEX_HOME", &selected);
                 expected = vec![selected.join("config.toml")];
             }
@@ -4918,6 +4924,13 @@ auth = "env:{token}"
             };
             let outcome = execute(&args, false, true).unwrap();
             assert!(!home.join(".codex").exists(), "{mode}: recreated retired default home");
+            if mode == "foreign" {
+                let foreign_after = fs::read_to_string(home.join("foreign.toml")).unwrap();
+                assert_eq!(foreign_after, original, "arbitrary config symlink target was changed");
+                assert!(outcome.summary.iter().any(|line| line.starts_with("codex: skipped") && line.contains("not a regular file")), "{:?}", outcome.summary);
+                assert!(fs::symlink_metadata(home.join("selected-codex/config.toml")).unwrap().file_type().is_symlink());
+                continue;
+            }
             if mode == "none" {
                 assert!(outcome.summary.iter().any(|line| line == "codex: no account"), "{:?}", outcome.summary);
                 continue;

@@ -1035,6 +1035,42 @@ describe("Commander live connection lifecycle", () => {
     }, { timeout: 250, interval: 10 });
   });
 
+  it("reattaches after a replacement is absent between Closed and session_added (cas-d53c)", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("replacement-gap"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const welcome = { channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } };
+    socket.receive(welcome);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame))
+      .filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+
+    socket.receive({ channel: "pty:session-a", closed: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(subscriptions()).toHaveLength(2);
+    // The real catalog has removed the old daemon but not yet found its replacement.
+    socket.receive({ channel: "pty:session-a", error: { code: "session_not_found" } });
+    socket.receive({ channel: "events", event: { kind: "session_added", session: "session-a", sequence: 1 } });
+    expect(connection.hasLiveAttach("session-a")).toBe(false);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "Wait for the replacement" } })).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(subscriptions()).toHaveLength(3);
+    socket.receive(welcome);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
+  });
+
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
     const hub = transport(true);
     TransportSocket.instances = [];

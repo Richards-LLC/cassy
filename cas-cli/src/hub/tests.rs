@@ -196,6 +196,7 @@ fn operator_reply_relay_reaches_another_authenticated_device() {
         device_id: "phone".into(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Answer,
+        options: Vec::new(),
         attachments: Vec::new(),
         notice: None,
         reply_to_session: None,
@@ -2495,7 +2496,7 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     );
     assert!(
         !super::server::is_pane_read_message(&semantic),
-        "SendMessage remains a leased mutation"
+        "SendMessage is a semantic mutation, not a pane read"
     );
     assert_eq!(required_scope(&targeted), Some(Scope::PaneInterrupt));
     assert_eq!(required_scope(&semantic), Some(Scope::MessageSend));
@@ -2566,9 +2567,113 @@ fn hub_forwards_the_operator_in_reply_to_reference_unchanged() {
     assert!(serde_json::to_value(&legacy).unwrap()["SendMessage"].get("in_reply_to").is_none());
 }
 
+/// cas-2109: the hub's `allowed` row is written when it forwards a send,
+/// before the daemon answers. The daemon's answer (queued id or refusal) is
+/// recorded too, keyed by client_ref, so a "Not sent" can be traced.
+#[test]
+fn hub_audits_each_commander_send_outcome_by_client_ref_when_the_daemon_answers_cas_2109() {
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let phone = AuthContext {
+        device_id: "phone".into(),
+        credential_id: "phone-credential".into(),
+        device_label: "Android".into(),
+        operator_label: "Daniel".into(),
+        controller_origin: "https://controller.example".into(),
+        scopes: [Scope::MessageSend].into_iter().collect(),
+        request_id: "request-2109".into(),
+    };
+    let auth = Some((AuthStore::open(&root, "machine-test").unwrap(), phone));
+    use super::server::PendingRefKind::{History, Send};
+    // cas-3877: client_ref is browser-supplied, so the audit keeps a bounded prefix.
+    let long_ref = format!("send-bad{}", "x".repeat(4000));
+    let mut pending = super::server::PendingRefs::from([
+        (("factory-1".to_string(), "send-ok".to_string()), Send),
+        (("factory-1".to_string(), long_ref.clone()), Send),
+        // cas-3877: the daemon answers a failed history page load with an
+        // Error carrying the request's id; that is not a send.
+        (("factory-1".to_string(), "history-1".to_string()), History),
+    ]);
+    let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
+        client_ref: Some("send-ok".into()),
+        notification_id: 77,
+        target: "supervisor".into(),
+        stamped: true,
+        device_label: Some("Android".into()),
+        operator_label: None,
+    })
+    .unwrap();
+    let refused = serde_json::to_vec(&DaemonMessage::Error {
+        message: "semantic message enqueue failed: database is locked".into(),
+        client_ref: Some(long_ref.clone()),
+    })
+    .unwrap();
+    let admit = |pending: &mut super::server::PendingRefs, frame: &[u8]| {
+        super::server::admit_correlated_daemon_frame(pending, "factory-1", &auth, frame)
+    };
+    let history_failed = serde_json::to_vec(&DaemonMessage::Error {
+        message: "conversation history unavailable".into(),
+        client_ref: Some("history-1".into()),
+    })
+    .unwrap();
+    assert!(admit(&mut pending, &queued));
+    assert!(admit(&mut pending, &refused));
+    assert!(admit(&mut pending, &history_failed), "the requester still sees its history error");
+    assert!(!admit(&mut pending, &queued), "a consumed answer is neither relayed nor audited again");
+
+    let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap_or_default();
+    let rows: Vec<serde_json::Value> = audit
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["action"] == "commander_send")
+        .collect();
+    assert_eq!(rows.len(), 2, "one outcome row per answered send, none for a history load:\n{audit}");
+    for row in &rows {
+        assert_eq!(row["target_session"], "factory-1");
+        assert_eq!(row["request_id"], "request-2109");
+        assert_eq!(row["device_id"], "phone");
+    }
+    assert_eq!(rows[0]["outcome"], "queued");
+    let detail = rows[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("client_ref=send-ok") && detail.contains("notification_id=77"), "{detail}");
+    assert_eq!(rows[1]["outcome"], "failed");
+    let detail = rows[1]["detail"].as_str().unwrap();
+    assert!(detail.contains("client_ref=send-bad") && detail.contains("database is locked"), "{detail}");
+    assert!(!detail.contains(&long_ref) && detail.len() < 1000, "client_ref is capped: {} bytes", detail.len());
+}
+
+/// cas-db44: a connection recovery row names the hub like every other audit
+/// row, so an operator (and real HUB-J11) reads every reconnect under the one
+/// paired machine identity.
+#[test]
+fn connection_recovery_audit_rows_name_the_hub_cas_db44() {
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let store = AuthStore::open(&root, "machine-test").unwrap();
+    store.audit_connection("events", false, 200, "request-db44", Some("viewer_lagged"), 3).unwrap();
+    store.audit(None, "allowed", "pairing_exchange", None, None, chrono::Utc::now()).unwrap();
+    let audit = std::fs::read_to_string(root.join("audit.jsonl")).unwrap();
+    let identities: Vec<(String, serde_json::Value)> = audit
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .map(|row| (row["action"].as_str().unwrap().to_owned(), row["machine_id"].clone()))
+        .collect();
+    assert_eq!(
+        identities,
+        vec![
+            ("connection_recovery".to_owned(), serde_json::json!("machine-test")),
+            ("pairing_exchange".to_owned(), serde_json::json!("machine-test")),
+        ],
+        "{audit}"
+    );
+}
+
 #[test]
 fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
-    let mut pending = std::collections::HashSet::from([("factory-1".into(), "history-1".into())]);
+    let mut pending = super::server::PendingRefs::from([(
+        ("factory-1".into(), "history-1".into()),
+        super::server::PendingRefKind::History,
+    )]);
     let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-1".into(),
         messages: Vec::new(),
@@ -2579,18 +2684,20 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
         earlier_replies: Vec::new(),
     })
     .unwrap();
-    assert!(super::server::correlated_daemon_frame_allowed(
+    assert!(super::server::admit_correlated_daemon_frame(
         &mut pending,
         "factory-1",
+        &None,
         &frame
     ));
     assert!(
         pending.is_empty(),
         "the response cannot be replayed to another socket"
     );
-    assert!(!super::server::correlated_daemon_frame_allowed(
+    assert!(!super::server::admit_correlated_daemon_frame(
         &mut pending,
         "factory-1",
+        &None,
         &frame
     ));
 }
@@ -2757,6 +2864,12 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
             .as_deref(),
         Some("laptop")
     );
+    // The phone left with a stale held-by-me cache after the laptop took
+    // control. Departure cleanup must not revoke its pairing or the laptop.
+    auth.release_lease(&phone, "factory-a", now).unwrap();
+    assert!(auth.lease_status(&laptop, "factory-a", now).unwrap().held_by_me);
+    auth.release_lease(&laptop, "factory-a", now).unwrap();
+    // Repeated cleanup after the owner already left is equally harmless.
     auth.release_lease(&laptop, "factory-a", now).unwrap();
     assert!(
         auth.lease_status(&phone, "factory-a", now)
@@ -4633,6 +4746,7 @@ async fn end_session_writes_audit_row() {
     let _home = crate::test_env_guard::TestEnvGuard::temp_home();
     let mut scopes = control_scopes();
     scopes.insert(Scope::FactoryManage);
+    scopes.insert(Scope::SessionLaunch);
     let fixture = ops_fixture(scopes);
 
     let (status, _) = fixture
@@ -4647,6 +4761,56 @@ async fn end_session_writes_audit_row() {
         assert_eq!(row["target_session"], "factory-gone-566b");
         assert_eq!(row["required_scope"], "factory:manage");
         assert_eq!(row["device_id"], fixture.device_id.as_str());
+    }
+
+    // cas-1ce3: names accepted by the CLI's real session registry must also
+    // pass the hub's launch/attach validation and reach End session cleanup.
+    let manager = crate::ui::factory::SessionManager::new();
+    for name in ["q", "q2", "build_dev.v1"] {
+        let metadata = crate::ui::factory::create_metadata(
+            name,
+            i32::MAX as u32, // A dead PID: cleanup must never signal a real process.
+            "supervisor",
+            &[],
+            None,
+            fixture.cas_dir.parent().unwrap().to_str(),
+            None,
+        );
+        manager.save_metadata(&metadata).unwrap();
+
+        let (status, body) = fixture
+            .call(
+                "POST",
+                "/v1/sessions",
+                Some(serde_json::json!({
+                    "target": {"kind": "project", "id": "not-a-registered-project"},
+                    "supervisor_cli": "claude",
+                    "name": name,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert_eq!(
+            body["error"], "invalid_target",
+            "CLI name must pass launch validation: {name}: {body}"
+        );
+
+        let (status, body) = fixture
+            .call("DELETE", &format!("/v1/sessions/{name}"), None)
+            .await;
+        assert_eq!(
+            status, StatusCode::OK,
+            "CLI name must be endable: {name}: {body}"
+        );
+        assert_eq!(body["session"], name);
+        assert!(manager.find_session(Some(name)).unwrap().is_none());
+        let outcomes: Vec<_> = fixture
+            .audit("session_end")
+            .into_iter()
+            .filter(|row| row["target_session"] == name)
+            .map(|row| row["outcome"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(outcomes, ["requested", "cleaned_stale"], "{name}");
     }
 }
 
@@ -4934,5 +5098,60 @@ fn eaa3_session_reports_the_projects_cloud_identity_for_explorer() {
     assert_eq!(
         serde_json::to_value(&session).unwrap()["cloud_project_id"],
         "github.com/acme/widget"
+    );
+}
+
+/// cas-2c559: `/v1/projects` needs only machine:read, but a live session's
+/// project (cas-0273) is session data. A pairing that can only see machines
+/// must not learn the folder of a running session in an unregistered project;
+/// one that can read sessions sees it. The folder is not a git checkout, so it
+/// is listed through the non-git fallback (its canonical path).
+#[tokio::test]
+async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_cas_2c559() {
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let temp = private_tempdir();
+    let folder = temp.path().join("plain-folder");
+    std::fs::create_dir(&folder).unwrap();
+    let mut session = fixture_session("factory-a");
+    session.project_dir = Some(folder.join(".").to_string_lossy().into_owned());
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let pair = |scopes: std::collections::BTreeSet<Scope>| {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), Utc::now()).unwrap();
+        let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", scopes);
+        exchange.public_key_jwk = public_jwk(&signing);
+        (signing, auth.exchange_pairing(exchange, Utc::now()).unwrap())
+    };
+    let machine_only = pair([Scope::MachineRead].into_iter().collect());
+    let session_reader = pair([Scope::MachineRead, Scope::SessionRead].into_iter().collect());
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    let listed = |(signing, credential): &(SigningKey, DeviceCredential)| {
+        let request = Request::get("/v1/projects")
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", credential.credential))
+            .header("dpop", sign_dpop(signing, &credential.credential, "GET", "/v1/projects", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .body(Body::empty()).unwrap();
+        let app = app.clone();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+            body["projects"].as_array().unwrap().iter()
+                .map(|p| (p["path"].as_str().unwrap().to_owned(), p["running_session"].as_str().map(str::to_owned)))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(listed(&machine_only).await, Vec::new(), "machine:read alone reveals no running session's folder");
+    assert_eq!(
+        listed(&session_reader).await,
+        vec![(folder.canonicalize().unwrap().to_string_lossy().into_owned(), Some("factory-a".to_owned()))],
     );
 }

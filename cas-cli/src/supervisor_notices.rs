@@ -136,6 +136,7 @@ pub(crate) fn operator_prompt(
             device_id: "*".into(),
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Blocker,
+            options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
         },

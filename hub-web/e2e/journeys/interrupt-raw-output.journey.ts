@@ -148,8 +148,44 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
   });
 
   await journey.stage("Read the raw output from the keyboard", async () => {
+    const released = page.waitForResponse((response) => response.request().method() === "DELETE" && new URL(response.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
     await readRawOutput(page, hub, false);
+    expect((await released).status()).toBe(204);
     await expectOnlyTheThread(page);
+  });
+
+  await journey.stage("Leaving a conversation releases its input control", async () => {
+    await interrupt.click();
+    await hub.waitFor(() => interrupts(hub).length === 3);
+    const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
+    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await released;
+    await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
+  });
+
+  await journey.stage("A take that finishes after leaving cannot keep the old conversation", async () => {
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    let resume!: () => void;
+    let started!: () => void;
+    const waiting = new Promise<void>((resolve) => { started = resolve; });
+    const held = new Promise<void>((resolve) => { resume = resolve; });
+    const path = `**/v1/sessions/${PELICAN}/lease`;
+    await page.route(path, async (route) => {
+      if (route.request().method() === "POST") { started(); await held; }
+      await route.fallback();
+    });
+    try {
+      await interrupt.click();
+      await waiting;
+      const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
+      await list.getByRole("button", { name: /gabber-studio/ }).click();
+      resume();
+      await released;
+      expect(interrupts(hub), "the abandoned take must not interrupt the old supervisor").toHaveLength(3);
+    } finally {
+      resume();
+      await page.unroute(path);
+    }
   });
 });
 
@@ -190,7 +226,7 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
       const phone = width === 390;
       // The light phone pairing may not force a take: it is told who holds control instead.
       const admin = !(phone && colorScheme === "light");
-      const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: admin ? { atlas: [...SCOPES, "hub-admin"] } : undefined });
+      const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: admin ? [...SCOPES, "hub-admin"] : SCOPES.filter((scope) => scope !== "message-send") } });
       const interrupt = page.getByRole("button", { name: "Interrupt the cas-src supervisor", exact: true });
       const raw = page.getByRole("button", { name: "Raw output", exact: true });
       const toast = page.locator("#toast");
@@ -200,6 +236,15 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
         await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
         await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
         await expectOnlyTheThread(page);
+        if (!admin) {
+          const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
+          const reason = page.locator("#message-status");
+          await expect(send).toHaveAttribute("aria-disabled", "true");
+          await expect(send).toHaveAttribute("aria-describedby", "message-status");
+          await expect(reason).toBeVisible();
+          await expect(reason).toContainText("Ask whoever runs Atlas");
+          await expect(send).toHaveAccessibleDescription(await reason.innerText());
+        }
         // Both stay whole in the header at every width: Interrupt keeps its
         // word, Raw output its icon under its full name, each a full target.
         await expect(interrupt.locator(".action-label")).toBeVisible();
@@ -255,6 +300,14 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
       await journey.stage(`Read the raw output at ${width} in ${colorScheme}`, async () => {
         await readRawOutput(page, hub, phone);
         await expectOnlyTheThread(page);
+      });
+      if (phone && admin) await journey.stage("Back to Conversations releases the input lease", async () => {
+        await interrupt.click();
+        await hub.waitFor(() => interrupts(hub).length === 3);
+        const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
+        await page.locator("#conversation-back").click();
+        await released;
+        await expect(page.getByRole("navigation", { name: "Choose a supervisor" })).toBeVisible();
       });
     });
   });

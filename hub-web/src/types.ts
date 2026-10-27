@@ -133,7 +133,8 @@ export interface ConversationHistoryMessage {
   notification_id: number;
   target: string;
   text: string;
-  state: "sending" | "acknowledged";
+  /** acknowledged = durable queue acceptance; delivered = actual supervisor transport proof. */
+  state: "sending" | "acknowledged" | "delivered";
   stamped: boolean;
   reply_to?: number;
   device_id: string;
@@ -166,6 +167,7 @@ export interface MessageQueued {
   target: string;
   stamped: boolean;
   device_label?: string;
+  operator_label?: string;
 }
 
 export type SessionPhase = "planning" | "editing" | "testing" | "building" | "blocked" | "reviewing" | "idle";

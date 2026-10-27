@@ -3152,3 +3152,91 @@ fn issue_repo_cli_reads_show_origin_without_saving_cas_f398() {
         .success()
         .stdout("example/project\n");
 }
+
+/// cas-4927: factory startup must refuse before logs, session files or an
+/// agent registration when the socket cannot fit or CAS_ROOT is foreign.
+#[test]
+fn daemon_start_rejects_long_sockets_and_foreign_store_before_writes_cas_4927() {
+    use cas::store::{AgentStore, SqliteAgentStore};
+    use std::os::unix::{ffi::OsStrExt, fs::PermissionsExt};
+    use std::path::{Path, PathBuf};
+    use std::fs;
+
+    // The real projects live under the runtime fixture parent, like every
+    // real-project fixture.
+    let fixture = tempfile::tempdir_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    let base = fixture.path();
+    let project = base.join("project");
+    fs::create_dir_all(&project).unwrap();
+    let own = cas::store::init_cas_dir(&project).unwrap();
+    let foreign = cas::store::init_cas_dir(&base.join("foreign")).unwrap();
+    let agents = SqliteAgentStore::open(&foreign).unwrap();
+    let before = fs::read(foreign.join("cas.db")).unwrap();
+    let bin = base.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    let spawned = base.join("spawned");
+    // The socket cells need a HOME parent short enough to reach each byte
+    // boundary from any checkout path. It holds no project: the refused
+    // launches never create a HOME there, and only the positive control binds
+    // a socket in it.
+    let sockets = tempfile::Builder::new().prefix("c4927").tempdir().unwrap();
+    let root = sockets.path();
+    // The old launch reaches this inert supervisor before its bind fails.
+    fs::write(bin.join("claude"), "#!/bin/sh\ncase \"$1\" in --version) echo 2.1.47; exit;; --help) echo --mcp-config --strict-mcp-config; exit;; esac\nprintf spawned > \"$CAS_4927_SPAWN_MARKER\"\nexec /bin/cat\n").unwrap();
+    fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = std::env::join_paths(std::iter::once(bin).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+    )).unwrap();
+    let session = "rig-supervisor";
+    let launch = |home: &Path, selected: &Path| {
+        let mut cmd = Command::new(cas::test_paths::cas_binary());
+        cmd.current_dir(&project)
+            .env_clear().env("PATH", &path).env("HOME", home)
+            .env("CAS_ROOT", selected).env("NO_COLOR", "1")
+            .env("CAS_SKIP_FACTORY_TOOLING", "1")
+            .env("CAS_FACTORY_CLAUDE_SUPPORTED_FLAGS", "--mcp-config --strict-mcp-config")
+            .env("CAS_4927_SPAWN_MARKER", &spawned)
+            .args(["factory", "daemon", "--session", session, "--cwd"])
+            .arg(&project)
+            .args(["--workers", "0", "--no-worktrees", "--foreground", "--no-phone-home", "--json"]);
+        cmd.timeout(std::time::Duration::from_secs(10));
+        cmd
+    };
+    let native_capacity = if cfg!(target_os = "macos") { 104 } else { 108 };
+    let suffix = format!("/.cas/factory-{session}.gui.sock");
+    let assert_refusal = |home: &Path, message: &str| {
+        let output = launch(home, &foreign).assert().failure().get_output().clone();
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(message), "{error}");
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["status"], "error");
+        assert!(json["message"].as_str().unwrap().contains(message), "{json}");
+        assert!(agents.list(None).unwrap().is_empty(), "refusal registered into foreign CAS_ROOT");
+        assert_eq!(fs::read(foreign.join("cas.db")).unwrap(), before, "foreign database changed");
+        assert!(!home.exists(), "refusal created home/logs/session/socket state");
+        assert!(!spawned.exists(), "refusal spawned the supervisor");
+    };
+    // Both ABI boundaries are deliberate fixtures. Linux admits GUI lengths
+    // 103, 104 and 107; macOS admits only 103. A fitting socket reaches the
+    // independent foreign-root refusal, proving the byte check admitted it.
+    for (bytes, linux_fits, macos_fits) in [(108, false, false), (107, true, false), (104, true, false), (103, true, true)] {
+        let padding = bytes - root.as_os_str().as_bytes().len() - suffix.len() - 1;
+        let home = root.join("h".repeat(padding));
+        assert_eq!(home.as_os_str().as_bytes().len() + suffix.len(), bytes);
+        let fits = if cfg!(target_os = "macos") { macos_fits } else { linux_fits };
+        assert_eq!(fits, bytes < native_capacity);
+        let message = if fits { "CAS_ROOT" } else { "GUI Unix socket path" };
+        assert_refusal(&home, message);
+    }
+    // A multibyte HOME still counts filesystem bytes, not Unicode scalars.
+    let home = root.join("é".repeat(60));
+    assert_refusal(&home, "GUI Unix socket path");
+    let home = root.join("short-home");
+    assert_refusal(&home, "CAS_ROOT");
+    assert!(SqliteAgentStore::open(&own).unwrap().list(None).unwrap().is_empty());
+    // Positive control at the host's longest native pathname, including NUL.
+    let padding = native_capacity - 1 - root.as_os_str().as_bytes().len() - 1;
+    let socket = PathBuf::from(root).join("s".repeat(padding));
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    fs::remove_file(socket).unwrap();
+}

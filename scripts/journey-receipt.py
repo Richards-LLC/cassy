@@ -30,13 +30,16 @@ def cas_root(repo: Path) -> Path:
     return Path(git(repo, 'rev-parse', '--path-format=absolute', '--git-common-dir')).parent / '.cas'
 
 
+def artifact_task_id(artifacts: Path | None) -> str | None:
+    return next((p.name for p in [artifacts, *artifacts.parents]
+                 if re.fullmatch(r'cas-[A-Za-z0-9-]+', p.name)), None) if artifacts else None
+
+
 def task_context(repo: Path, artifacts: Path | None, task_id: str | None) -> tuple[dict, Path]:
     root = cas_root(repo)
     with sqlite3.connect((root / 'cas.db').as_uri() + '?mode=ro', uri=True) as db:
         db.row_factory = sqlite3.Row
-        if not task_id and artifacts:
-            task_id = next((p.name for p in [artifacts, *artifacts.parents]
-                            if re.fullmatch(r'cas-[A-Za-z0-9-]+', p.name)), None)
+        task_id = task_id or artifact_task_id(artifacts)
         if task_id:
             rows = db.execute('SELECT id,deliverables,notes FROM tasks WHERE id=?', (task_id,)).fetchall()
         else:
@@ -106,28 +109,68 @@ def selection(repo: Path, base: str, head: str, full: bool) -> list[dict]:
     return sorted(rows, key=lambda r: r['id'])
 
 
+# Only the opt-in comparison may overlay these producer-owned helpers from
+# its reviewed head onto the base checkout. Product, bundle and test inputs
+# remain the evaluated revision; record the helper revision explicitly.
+CAPTURE_INSTRUMENTATION = (
+    'scripts/journey-eval.sh', 'scripts/journey-receipt.py',
+    'hub-web/e2e/journeys/journey.ts',
+    'hub-web/e2e/journeys/receipt-directory.mjs',
+    'hub-web/e2e/journeys/receipt-directory.d.mts',
+)
+GUARDED_INPUTS = ('hub-web', 'docs/qa/journeys.md', 'scripts/journey-eval.sh',
+                  'scripts/journey-receipt.py', 'scripts/journey-bundles.py',
+                  'scripts/journeys-for-diff.py')
+
+
+def comparison(repo: Path, refs: list[str], evaluated: str) -> dict:
+    base, head = [git(repo, 'rev-parse', '--verify', f'{ref}^{{commit}}') for ref in refs]
+    if evaluated not in (base, head):
+        raise ValueError('comparison must evaluate exactly its base or head checkout')
+    dirty = set(git(repo, 'diff', '--name-only', 'HEAD', '--', *GUARDED_INPUTS).splitlines())
+    dirty.update(git(repo, 'ls-files', '--others', '--exclude-standard', '--', *GUARDED_INPUTS).splitlines())
+    if dirty - set(CAPTURE_INSTRUMENTATION):
+        raise ValueError('comparison product/catalog/test inputs must be committed')
+    for path in CAPTURE_INSTRUMENTATION:
+        source = subprocess.run(['git', 'show', f'{head}:{path}'], cwd=repo, capture_output=True)
+        if source.returncode == 0:
+            if not (repo / path).is_file() or (repo / path).read_bytes() != source.stdout:
+                raise ValueError(f'comparison instrumentation must match head: {path}')
+        elif path in dirty:
+            raise ValueError(f'comparison instrumentation absent from head: {path}')
+    return {'base_sha': base, 'head_sha': head, 'instrumentation_sha': head}
+
+
 def plan(args: argparse.Namespace) -> int:
     repo = args.repo.resolve()
     head = git(repo, 'rev-parse', 'HEAD^{commit}')
     artifacts = args.artifacts.expanduser().resolve() if args.artifacts else None
     if args.full and os.environ.get('CAS_AGENT_ROLE', '').lower() not in ('', 'supervisor'):
         raise ValueError('full browser suite is supervisor-only; run scripts/journey-eval.sh <artifact-dir> for affected journeys')
+    compared = comparison(repo, args.compare, head) if args.compare else None
     task = root = None
-    if artifacts is None or (not args.full and not args.affected):
+    if artifacts is None or (not args.full and not args.affected and not compared):
         task, root = task_context(repo, artifacts, args.task)
     if artifacts is None:
         artifacts = default_artifacts(root, task['id'])
-    base = git(repo, 'rev-parse', '--verify', f'{args.affected}^{{commit}}') if args.affected else (head if args.full else task_base(repo, head, task))
-    rows = selection(repo, base, head, args.full)
+    base = git(repo, 'rev-parse', '--verify', f'{args.affected}^{{commit}}') if args.affected else (head if args.full or compared else task_base(repo, head, task))
+    if compared:
+        base = compared['base_sha']
+    rows = selection(repo, base, compared['head_sha'] if compared else head, args.full)
     if args.full and not rows:
         raise ValueError('full catalog selection is empty')
     # Only this producer constructs the native filter; matches supplemental
     # specs/parts by actual title ID, not solely the catalog main suite path.
     ids = [r['id'] for r in rows]
     grep = r'\b(?:' + '|'.join(re.escape(i) for i in ids) + r')\b' if ids else None
-    value = {'schema': 1, 'repo': str(repo), 'artifacts': str(artifacts), 'base_sha': base,
+    # Identity belongs to the delivery, not a nested run directory. Explicit
+    # bases bypass the store, but must still preserve --task or the task path.
+    task_id = task['id'] if task else args.task or artifact_task_id(artifacts)
+    value = {'schema': 1, 'repo': str(repo), 'artifacts': str(artifacts), 'task_id': task_id, 'base_sha': base,
              'head_sha': head, 'scope': 'full' if args.full else 'affected',
              'selection_ids': ids, 'journeys': rows, 'workers': args.workers, 'grep': grep}
+    if compared:
+        value['comparison'] = compared
     print(json.dumps(value))
     return 0
 
@@ -175,6 +218,8 @@ def fold(plan: dict, report: dict | None, suite_exit: int, version: str) -> tupl
                'selection_ids': ids, 'results': list(rows.values()), 'tool_version': version,
                'suite_exit': suite_exit, 'created_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                'native_report': 'playwright/report.json' if ids else None, 'errors': errors}
+    if 'comparison' in plan:
+        receipt['comparison'] = plan['comparison']
     if ci:
         receipt['ci_run_url'] = ci_url
     okay = suite_exit == 0 and not errors and all(r['status'] == 'PASS' for r in rows.values())
@@ -186,7 +231,10 @@ def write(args: argparse.Namespace) -> int:
     repo = Path(run['repo'])
     if git(repo, 'rev-parse', 'HEAD^{commit}') != run['head_sha']:
         raise ValueError('checkout advanced during the run; retain execution proof and rebind only unchanged documentation inputs')
-    actual = [r['id'] for r in selection(repo, run['base_sha'], run['head_sha'], run['scope'] == 'full')]
+    compared = run.get('comparison')
+    if compared and comparison(repo, [compared['base_sha'], compared['head_sha']], run['head_sha']) != compared:
+        raise ValueError('comparison instrumentation changed during execution')
+    actual = [r['id'] for r in selection(repo, run['base_sha'], compared['head_sha'] if compared else run['head_sha'], run['scope'] == 'full')]
     if actual != run['selection_ids']:
         raise ValueError('plan selection differs from journeys-for-diff; caller IDs cannot substitute for affected proof')
     report = json.loads(args.report.read_text()) if args.report.is_file() else None
@@ -248,6 +296,7 @@ def main() -> int:
     p.add_argument('--repo', type=Path, default=Path(__file__).resolve().parent.parent)
     p.add_argument('--task')
     mode = p.add_mutually_exclusive_group()
+    mode.add_argument('--compare', nargs=2, metavar=('BASE', 'HEAD'))
     mode.add_argument('--affected')
     mode.add_argument('--full', action='store_true')
     p.add_argument('--workers', type=int, choices=range(1, 5), default=4)

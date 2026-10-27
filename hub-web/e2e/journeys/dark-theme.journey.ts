@@ -1,5 +1,5 @@
 import { phoneLayout, phoneDark } from "./responsive-goals";
-import { test, expect } from "./journey";
+import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 
 test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
@@ -40,6 +40,28 @@ test("HUB-J10 switch to dark and keep reading", async ({ page, journey }) => {
     await expect(page.locator("#command-palette [data-palette-scheme='dark'] small")).toHaveText("Current");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(page.getByRole("log").getByText("Status: the Linux lane is green; the Mac lane is still running.")).toBeVisible();
+  });
+});
+
+// cas-66fb: the forced-colours walk is its own part with its own deadline. On
+// the end of the four stages above, under the four-worker journey load, every
+// action ran several times slower than alone (an Evaluate 0.5-1 s, a Hover
+// 1.9 s), and the whole test used its 60 s before this stage's screenshot.
+// It opens the same conversation, with the same status line and the same
+// stored Dark choice, and checks exactly what it checked as the final stage.
+test("HUB-J10 high contrast keeps the open conversation and Send marked (cas-66fb)", journeyPart, async ({ page, journey }) => {
+  // As in the main test, the phone's appearance walk is phoneDark's.
+  if (await phoneLayout(page)) return;
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await journey.stage("Open the conversation in dark", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    hub.supervisorSays(PELICAN, "Status: the Linux lane is green; the Mac lane is still running.", { kind: "status" });
+    await expect(page.getByRole("log").getByText("Status: the Linux lane is green; the Mac lane is still running.")).toBeVisible();
+    await page.getByRole("button", { name: "Appearance & commands" }).click();
+    await page.getByRole("button", { name: /^Appearance · Dark/ }).click();
+    await expect(page.locator("html")).toHaveAttribute("data-scheme", "dark");
   });
 
   await journey.stage("High contrast keeps the open conversation and Send marked", async () => {

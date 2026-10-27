@@ -49,7 +49,8 @@ function validReceipt(value: unknown): value is JournalReceipt {
   return object(value) && boundedText(value.client_ref, 2_000) && Boolean(value.client_ref)
     && Number.isSafeInteger(value.notification_id) && (value.notification_id as number) > 0
     && boundedText(value.target, 2_000) && Boolean(value.target) && typeof value.stamped === "boolean"
-    && finiteTime(value.sentAt) && (value.device_label === undefined || boundedText(value.device_label, 2_000));
+    && finiteTime(value.sentAt) && (value.device_label === undefined || boundedText(value.device_label, 2_000))
+    && (value.operator_label === undefined || boundedText(value.operator_label, 2_000));
 }
 function normalizedReply(value: unknown): OperatorReply | undefined {
   // Notices have their own durable attention/resolution store. Never ACK or
@@ -299,7 +300,8 @@ export class CommanderJournal {
             if (!row || (!row.send && !row.flight) || (row.send && row.send.target !== receipt.target)) return;
             const saved = { client_ref: receipt.client_ref, notification_id: receipt.notification_id, target: receipt.target,
               stamped: receipt.stamped, sentAt: row.send?.sentAt ?? row.receipt?.sentAt ?? this.now(),
-              ...(receipt.device_label === undefined ? {} : { device_label: receipt.device_label }) };
+              ...(receipt.device_label === undefined ? {} : { device_label: receipt.device_label }),
+              ...(receipt.operator_label === undefined ? {} : { operator_label: receipt.operator_label }) };
             if (!validReceipt(saved)) return;
             // Duplicate receipts cannot replace the first confirmed queue identity.
             if (row.receipt) { committed = row.receipt.notification_id === receipt.notification_id; return; }

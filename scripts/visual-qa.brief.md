@@ -22,6 +22,18 @@ has animated for 500 ms, bounded at 3 s. Content a framework inserts after load
 is therefore measured after its enter transition, not at opacity 0 (GH #1158).
 Text that stays invisible once the page is at rest still fails.
 
+Both resting and journey full-page screenshots wait for every rendered image's
+`decode()` in every frame, after print/screen changes. Lazy images included in
+the full-page capture are loaded eagerly. The existing readiness timeout bounds
+this concurrent decode wait (default5000ms); rejected or timed-out images emit
+`image-not-decoded` with their selector and alt label. Visual allowlists cannot
+suppress capture readiness failures. Two animation frames flush decoded pixels
+before capture; no arbitrary delay or retry is used.
+Only images with more than one CSS pixel in each painted dimension participate:
+document bounds and ancestor clipping exclude off-canvas, sr-only and tracking
+images. A child frame removed or navigated during decoding no longer contributes
+its old document to the capture; other evaluation failures still surface.
+
 ## Critique
 
 terminal-qa: PASS visual-qa-loading · 11 runs · 0 fail · 0 warn · 0 allowed

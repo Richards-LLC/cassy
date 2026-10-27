@@ -318,6 +318,7 @@ pub(crate) fn page_operator_for_stalled_message(
         device_id: "*".to_string(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
     }) {

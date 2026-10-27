@@ -213,6 +213,34 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
         )), "{html}");
     }
 
+    // One source exercises verified Pair: lookup alongside explicit captures.
+    // Put evidence under the configured project namespace, not the checkout.
+    use sha2::{Digest, Sha256};
+    let cas_root = project.path().join(".cas");
+    let mut config = cas::config::Config::load(&cas_root).unwrap();
+    config.set("factory.artifacts_root", project.path().join("artifacts").to_str().unwrap()).unwrap();
+    config.save(&cas_root).unwrap();
+    let pair_dir = cas::deliverable::pairs::task_dir(&config, &cas_root, "cas-report");
+    fs::create_dir_all(&pair_dir).unwrap();
+    let png = include_bytes!("../../hub-web/public/favicon-16.png");
+    let side = |name: &str| {
+        fs::write(pair_dir.join(format!("{name}.png")), png).unwrap();
+        serde_json::json!({"png":format!("{name}.png"),"jpg":format!("{name}.png"),
+            "sha256":format!("{:x}",Sha256::digest(png)),
+            "jpg_sha256":format!("{:x}",Sha256::digest(png)),
+            "ref":"fixture","source":"fixture","captured_at":"2026-10-26T00:00:00Z"})
+    };
+    let before = side("before");
+    let after = side("after");
+    fs::write(pair_dir.join("pairs.json"), serde_json::to_vec(&serde_json::json!({
+        "schema":1,"task_id":"cas-report","base_sha":"base","head_sha":"head","origin":"fixture",
+        "pairs":[{"id":"roster","surface":"drivers","viewport":[1280,800],"scheme":"light","before":before,"after":after}],
+        "unpaired":[{"id":"missing","surface":"drivers","viewport":[1280,800],"scheme":"light","after":after}]
+    })).unwrap()).unwrap();
+    fs::write(project.path().join("before.png"), png).unwrap();
+    fs::write(project.path().join("after.png"), png).unwrap();
+    let source = source.replace("\n## Under the hood", "\n#### Paired change\n\nWas: earlier.\n\nNow: shipped.\n\nPair: cas-report/roster\n\nSource: capture receipt.\n\n#### Explicit change\n\nWas: earlier.\n\nNow: shipped.\n\nBefore: before.png\n\nAfter: after.png\n\n#### Unpaired change\n\nWas: earlier.\n\nNow: shipped.\n\nPair: cas-report/missing\n\n#### Unavailable change\n\nWas: earlier.\n\nNow: shipped.\n\nPair: cas-absent/roster\n\n## Under the hood");
+    fs::write(&source_path, &source).unwrap();
     let second = cas_cmd(&project)
         .env("GH_BIN", &fake_gh)
         .args([
@@ -233,7 +261,17 @@ fn cli_release_report_renders_fixture_html_and_preserves_source() {
     assert_eq!(second["change_count"], 2);
     assert_eq!(second["issue_count"], 2);
     assert_eq!(fs::read_to_string(&source_path).unwrap(), source);
-    assert_eq!(fs::read_to_string(&html_path).unwrap(), html);
+    let html = fs::read_to_string(&html_path).unwrap();
+    assert_eq!(html.matches("class=\"captures\"").count(), 2, "{html}");
+    for title in ["Paired change", "Explicit change"] {
+        assert!(html.contains(&format!("alt=\"Before: {title}\"")), "{html}");
+        assert!(html.contains(&format!("alt=\"After: {title}\"")), "{html}");
+    }
+    for title in ["Unpaired change", "Unavailable change"] {
+        assert!(!html.contains(&format!("alt=\"After: {title}\"")), "{html}");
+    }
+    assert!(!html.contains("Pair: cas-"), "capture metadata leaked into Now text");
+    assert!(html.contains("Source: capture receipt."));
 }
 
 /// A managed renderer installed before link overrides must not reject a new
@@ -342,9 +380,12 @@ esac
         ),
     );
 
-    // cas-1a83: a standalone `release-latency-receipt.sh --run-dir` receipt
-    // lives in a task artifacts directory, not under ~/.cas/artifacts/release.
-    let run_dir = project.path().join("task-artifacts/cas-fixture");
+    // A standalone receipt lives under the artifact root, outside the default
+    // `release/` directory. Its absolute input path must not leak into report
+    // source, where finalize's internal hygiene rejects home paths.
+    let home = TempDir::new_in(std::env::var_os("HOME").map(PathBuf::from).unwrap()).unwrap();
+    let xdg = project.path().join(".test-xdg-config");
+    let run_dir = home.path().join(".cas/artifacts/cas-fixture");
     fs::create_dir_all(&run_dir).unwrap();
     let receipt = run_dir.join("release-latency.receipt");
     fs::write(
@@ -355,7 +396,7 @@ esac
     )
     .unwrap();
 
-    let output = cas_cmd(&project)
+    let output = cas_cmd_at(project.path(), home.path(), &xdg)
         .env("GH_BIN", &fake_gh)
         .env("CAS_RELEASE_REPORT_POLL_SECS", "1")
         .args(["--json", "release", "report", "3.19.0", "--out", "docs/release-reports"])
@@ -378,6 +419,13 @@ esac
     assert_eq!(result["issue_count"], 2, "{result}");
     assert_eq!(result["change_count"], 3);
     let source = fs::read_to_string(project.path().join("docs/release-reports/v3.19.0.md")).unwrap();
+    assert!(
+        source.contains(
+            "Release receipt (relative to `~/.cas/artifacts`): `cas-fixture/release-latency.receipt`."
+        ),
+        "{source}"
+    );
+    assert!(!source.contains(home.path().to_str().unwrap()), "{source}");
     // pin: generated Markdown rows are render.py's input contract (cas-7860)
     assert!(source.contains("| GitHub issues closed | 2 |"), "{source}");
     // pin: generated Markdown rows are render.py's input contract (cas-7860)

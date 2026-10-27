@@ -39,10 +39,10 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     const owner = hub.sends.length ? hub : other;
-    owner.deliverLatest(PELICAN);
+    owner.queueLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(1);
@@ -91,9 +91,9 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
     await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
   });
   await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
-    (hub.sends.length ? hub : other).deliverLatest(PELICAN);
+    (hub.sends.length ? hub : other).queueLatest(PELICAN);
     for (const tab of [page, peer]) {
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(2);
@@ -358,6 +358,9 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
   let id = 0;
   await journey.stage("The reply is stored on this device before its application ACK", async () => {
     await journey.open(); await choose(page);
+    // cas-7ecc: the reply rides the conversation's socket, so it is said only
+    // once that socket is open (as the sibling parts below wait for it).
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __receiptOrder: string[] }).__receiptOrder.length = 0; });
     id = hub.supervisorSays(PELICAN, "A durable reply on this device");
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);

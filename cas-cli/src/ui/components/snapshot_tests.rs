@@ -209,6 +209,11 @@ mod tests {
         let mut tf = TestFormatter::plain(80);
         tf.fmt().bullet("First item").unwrap();
         insta::assert_snapshot!(tf.output());
+
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("LC_ALL", "C")]);
+        let mut styled = TestFormatter::dark();
+        styled.fmt().bullet("First item").unwrap();
+        insta::assert_snapshot!(styled.output_plain(), @"  - First item");
     }
 
     #[test]

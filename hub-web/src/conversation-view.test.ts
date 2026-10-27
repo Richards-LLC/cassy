@@ -425,7 +425,7 @@ describe("ConversationView (Pebble thread)", () => {
     expect(history.acknowledge({ client_ref: "x", notification_id: 60, target: "sup", stamped: true })).toBe(true);
     view.update();
     expect(view.element.querySelector(".conversation-unconfirmed")).toBeNull();
-    expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Delivered");
+    expect(view.element.querySelector(".conversation-delivered")?.textContent).toBe("Queued for supervisor");
   });
   it("settles a Not confirmed send once the supervisor replies after it: no warning, no Retry, a quiet Send again (journey F10, cas-470e)", () => {
     const history = new ConversationHistory();
@@ -473,32 +473,44 @@ describe("ConversationView (Pebble thread)", () => {
     // The visible time is not read twice: the group label carries it.
     for (const time of view.element.querySelectorAll(".msgs time")) expect(time.getAttribute("aria-hidden")).toBe("true");
   });
-  it("says Delivered on each delivered send until a reply linked to it lands (F5, journey F4)", () => {
+  it("distinguishes queued acceptance from transport delivery across replay until the reply lands (F5, journey F4)", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "sup" }); document.body.replaceChildren(view.element);
     history.submit("a", "sup", "First", at(9, 0)); view.update();
     expect(view.element.querySelector(".conversation-delivered")).toBeNull();
     history.acknowledge({ client_ref: "a", notification_id: 10, target: "sup", stamped: true }); view.update();
     const delivered = view.element.querySelector<HTMLElement>('.bub[data-state="acknowledged"] .conversation-delivered')!;
-    expect(delivered.textContent).toBe("Delivered");
+    expect(delivered.textContent).toBe("Queued for supervisor");
     expect(delivered.getAttribute("role")).toBe("status");
-    expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBe("true");
-    // A second send still in flight: the first keeps its tick.
+    expect(delivered.querySelector("svg.tick")?.getAttribute("aria-hidden")).toBeUndefined();
+    // A second send still in flight: the first keeps its queue status.
     history.submit("b", "sup", "Second", at(9, 1)); view.update();
     expect(view.element.querySelectorAll(".conversation-delivered")).toHaveLength(1);
     expect(view.element.querySelector('.bub[data-state="sending"] .conversation-delivery')?.textContent).toBe("Sending…");
-    // An unrelated supervisor turn crosses the second send (journey F4): the first keeps Delivered…
+    // An unrelated supervisor turn crosses the second send: the first keeps its queue status.
     history.reply({ notification_id: 12, reply_to: null, message: "Gate run 2 of 3 is going.", summary: "", device_id: "d" }, at(9, 2)); view.update();
-    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstDelivered"]);
-    // …and the second, acknowledged after that turn, ends Delivered too.
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstQueued for supervisor"]);
+    // The second acceptance is also queued, never inferred transport delivery.
     history.acknowledge({ client_ref: "b", notification_id: 11, target: "sup", stamped: true }); view.update();
-    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstDelivered", "SecondDelivered"]);
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["FirstQueued for supervisor", "SecondQueued for supervisor"]);
+    const confirmed = { notification_id: 10, target: "sup", text: "First", state: "delivered" as const, stamped: true, device_id: "phone", at: new Date(at(9, 0)).toISOString() };
+    history.hydrateSend(confirmed); view.update();
+    expect(view.element.querySelector('.bub[data-state="delivered"] .conversation-delivered')?.textContent).toBe("Delivered");
+    history.acknowledge({ client_ref: "a", notification_id: 10, target: "sup", stamped: true });
+    history.hydrateSend({ ...confirmed, state: "acknowledged" }); view.update();
+    expect(view.element.querySelector('.bub[data-state="delivered"] .conversation-delivered')?.textContent).toBe("Delivered");
+    const other = new ConversationHistory();
+    other.hydrateSend({ ...confirmed, state: "acknowledged" });
+    const otherView = new ConversationView(document, other, { supervisor: "sup" }); otherView.update();
+    expect(otherView.element.querySelector('.conversation-delivered')?.textContent).toBe("Queued for supervisor");
+    other.hydrateSend(confirmed); otherView.update();
+    expect(otherView.element.querySelector('.conversation-delivered')?.textContent).toBe("Delivered");
     // A reply linked to a send is its evidence: that send's tick steps aside.
     history.reply({ notification_id: 13, reply_to: 10, message: "Done.", summary: "", device_id: "d" }, at(9, 3)); view.update();
-    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["SecondDelivered"]);
-    // Hydrated history carries no tick.
+    expect([...view.element.querySelectorAll(".conversation-delivered")].map((node) => node.closest(".bub")?.textContent)).toEqual(["SecondQueued for supervisor"]);
+    // Replayed queue acceptance remains visible on a reloaded/other device.
     const hydrated = history.events.find((event) => event.kind === "send" && event.value.id === "a")!.value as never as { sentAt?: number; state: string };
-    expect(history.showsDelivered({ ...hydrated, sentAt: undefined, state: "acknowledged" } as never)).toBe(false);
+    expect(history.showsDeliveryStatus({ ...hydrated, sentAt: undefined, state: "acknowledged" } as never)).toBe(true);
   });
   it("retires a refused send once its edited version is sent: collapsed, no Retry (F6)", () => {
     const history = new ConversationHistory();

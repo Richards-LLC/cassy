@@ -51,6 +51,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - One obvious "Pair a machine" action on the empty screen, at every width.
 - The code and the exact command to run are shown together; copying the command works.
+- Someone who does not run the machine is told to send the code to whoever does (it works for 10 minutes), with one Send the code action: the phone's share sheet, or the clipboard where there is none (cas-a56c).
+- On a sideways phone, the pairing dialog fits or scrolls inside its viewport; the code, Copy command, Send the code and Cancel remain reachable without clipped content (cas-f300).
 - While waiting, the status says what the machine is doing, with a visible countdown.
 - The confirm step names the machine and the scopes in plain words before anything is stored.
 - After pairing, the user lands on a list with the supervisor in it. No reload and no second step.
@@ -83,7 +85,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - The invitation is recognised at once, with no extra click to start.
-- Scopes the link did not grant are visibly unavailable, with the command to get them.
+- Scopes the link did not grant are visibly unavailable, with whom to ask for a link that grants them; the command that mints one is in Technical details, for the machine's owner (cas-b7c0).
+- A browser paired read-only shows a read-only composer that says, before anything is typed, whom to ask for a link that can send (cas-b7c0).
 - The hub address field says what to type (the placeholder shows a real example).
 
 #### Edge paths
@@ -104,15 +107,16 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. See every machine's supervisors in one list — every row is titled by its project, then its machine, with the supervisor codename beneath
 2. Each row's time is its own session's activity — lighthouse reads "3h" and its row is named with "3 hours ago"; no time is a catalog check, and across a catalog poll none turns "now" or runs backwards
-3. Notice a new reply while away — the row shows an unread count
-4. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active descendant; opening a result clears the search and brings the whole list back; the header names the project once
-5. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
+3. Notice a new reply while away — before opening it, the row shows an unread count and the reply's first line
+4. Open the conversation, then notice its next reply — opening clears the unread count; a later reply while away brings it back
+5. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active descendant; opening a result clears the search and brings the whole list back; the header names the project once
+6. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
    - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
-6. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / Machines / Appearance / Advanced, the same groups with a conversation open, Advanced collapsed and holding only the dormant-session switch; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); a filter that matches nothing says "No commands or conversations match"; the command Enter runs is marked and is the filter's active descendant ("light" marks "Jump to lighthouse")
-7. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
+7. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / Machines / Appearance / Advanced, the same groups with a conversation open, Advanced collapsed and holding only the dormant-session switch; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); a filter that matches nothing says "No commands or conversations match"; the command Enter runs is marked and is the filter's active descendant ("light" marks "Jump to lighthouse")
+8. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
    - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
-8. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details; one loading look from the attach to the first history page, centred in the reading area, still for its first second and then a quiet pulse, with the header and row on Live and the composer's width steady (cas-813a)
+9. Open a conversation over a slow relay: one calm line, and the footer stays Connected — "Opening the conversation…", the attempt and relay stage only behind a closed Details; one loading look from the attach to the first history page, centred in the reading area, still for its first second and then a quiet pulse, with the header and row on Live and the composer's width steady (cas-813a)
    - A first open that misses the 3-second mark retries calmly, and the footer stays Connected — the first retry of a conversation that has never opened still reads "Opening the conversation…" with the retry behind Details; no unavailable notice, no retry timeline, and the footer never drops to "1 connected"; a second failure shows as a real one
 
 #### Expected experience
@@ -170,7 +174,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the conversation — the composer names the supervisor
 2. Write and send — the message appears at once as "Sending…" and the composer clears
-3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
+3. See it delivered — durable acceptance turns "Sending…" into "Queued for supervisor", without a delivery check. Only a real supervisor transport receipt earns "Delivered" and its check. Queue acceptance and delivery remain visible after a reload and on another paired device; older history/receipts never reverse delivery or a reply. A connected machine whose supervisor has not taken a pending message says "Waiting for supervisor" in its row and header. Queue and transport receipts alone never claim the supervisor is working.
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
    - A refused Take control keeps focus on the message — when another device holds the session the take is refused; the message names the device in control, once, in plain words, and the composer only points at it; its Take control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back on its own; keyboard focus stays on it, never the page body
@@ -185,7 +189,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - Enter sends and Shift+Enter adds a new line.
-- The user can tell sent from delivered without reading attributes.
+- A pairing with message:send can send without pane:input or terminal control; another device holding the pane never blocks a supervisor message.
+- The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.
@@ -193,6 +198,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A message never says "Sending…" forever: without a receipt it turns "Not confirmed" and offers Retry, without claiming it was not sent, and it names Cassy, never "the hub".
 - Once the supervisor has replied since, a "Not confirmed" message stops offering Retry; only a quiet "Send again" remains.
 - A receipt that is only a few seconds late never flashes "Not confirmed", so there is no Retry that could send the message twice.
+- Replaying a delivery receipt while reply history rebuilds keeps an answered message answered.
 - A screen reader hears who spoke and when for each message group ("You, 12:45"), the status as "Live", and meets no dead attach control.
 
 #### Edge paths
@@ -230,9 +236,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** an open conversation where the supervisor asks a question with choices
 - **Goal:** I answer with one tap and the supervisor acts on it
-- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`
-- **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`
-- **Gaps:** none
+- **Touches:** `hub-web/src/attention-objects.ts`, `hub-web/src/attention-view.ts`, `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/context-rail.ts`, `hub-web/src/swipe-dismiss.ts`, `hub-web/src/dismissed-asks.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-list.ts`, `hub-web/e2e/journeys/real-hub-server.mjs`
+- **Suite:** `hub-web/e2e/journeys/answer-ask.journey.ts`, `hub-web/e2e/journeys/real-hub.journey.ts` (HUB-J7 real-hub part)
+- **Gaps:** the catalog suite uses a protocol double. The real-hub part proves CLI ask choices through the real daemon, live reply, history reload and the linked phone answer. Its supervisor provider is inert, so actual model action remains unproven.
 
 #### Steps
 
@@ -370,6 +376,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Sending works again — a message goes through and is answered
 5. On a phone, the banner stays readable through an outage — no toast sits on the reconnect banner, in light and dark; after it reconnects, every turn keeps its place (the day line still heads the thread, the session's own thread has no session line, and the held message stays above the ones sent after it)
 6. During an outage, Interrupt and Raw output say why they wait — the Attention rail names the outage instead of "All clear"; the conversation header's Interrupt and Raw output stay on screen at 1280 and 390, marked unavailable and described by "Lost connection to Atlas · Linux. Interrupt and raw output return when it reconnects.", so the banner stays the one outage line announced; pressing either says why in a toast, sends no interrupt and opens no drawer; once the session is back both are available again and the rail says "All clear"
+7. A replacement Live session retires its outage attention and keeps history — daemon-lost and session-ended notices for the recovered session leave the active rail and badge, remain acknowledged in storage through enrichment replay, and leave unrelated diagnostics and other sessions' outages active. On a real hub, retiring the daemon closes every old viewer, discards its cached Welcome, and makes the open phone attach to the replacement before it reads Live again. After both daemon replacement and hub restart, the first published completed-pass snapshot after the fresh Welcome belongs to the current daemon PID and counts at least one Commander client (cas-9e46). If a retry lands before the replacement enters the catalog, session_not_found or daemon_offline releases that attempt so a fresh subscription and Welcome follow session_added (cas-d53c)
 
 #### Expected experience
 
@@ -413,6 +420,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - A network switch never needs a reload, and never leaves the page claiming Live on a dead socket.
+- Working requires recent pane activity, a live authenticated machine and an unanswered message. An idle prompt repaint, Reconnecting or Needs pairing never claims work (cas-a252).
 - A message is never silently lost: it goes out once when it can, or says "Not sent" with Retry.
 - Recovery is bounded: at most 10 s after the network returns, sooner when the browser says it changed.
 
@@ -549,6 +557,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
 - A failed end shows its error under the row and offers End session again.
+- A session named from the CLI can be ended under the same name rule, including `q`, `q2`, and `build_dev.v1`; the hub's launch/attach validation uses that rule too. The real authenticated handler regression `hub::tests::end_session_writes_audit_row` covers this boundary (cas-1ce3).
 
 ### HUB-J17 · Run the fleet from a conversation
 
@@ -575,6 +584,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
 - A refused operation shows the hub's detail on the row.
+- A fleet change that overlaps an older catalog heartbeat still refreshes the roster: a stopped worker disappears without waiting for the next heartbeat (cas-66ea).
+- That refresh still happens when the older heartbeat read it waits for fails or times out (cas-1966).
 - On a phone, a pending operation keeps its notice above the composer through a shell rebuild and Raw output; a completion that lands while Raw output is open keeps its Undo or refusal, reachable by keyboard once the sheet closes (M12).
 
 ### HUB-J18 · Interrupt or read the supervisor from its conversation
@@ -591,6 +602,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in a terminal; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
 3. Take control from another device to interrupt — with Studio iPad in control, Interrupt forces the take and says so: "Took control from Studio iPad. Interrupted the cas-src supervisor."
 4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready.") read from the daemon's rendered rows; it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
+5. Leaving a conversation releases its input control — switching conversations releases this browser's input lease; going back to the phone list does too (cas-5ca4).
+6. A take that finishes after leaving cannot keep the old conversation — the late take is released in order and never interrupts the abandoned supervisor (cas-5ca4).
 
 #### Expected experience
 
@@ -602,6 +615,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - Another device holds control and this pairing cannot force a take: "Studio iPad is in control of this session. Interrupt works once it releases control.", and nothing is interrupted.
 - On a phone Raw output is a bottom sheet across the width; on a desktop a drawer on the right edge.
+- On the read-only phone, Send's plain explanation is visible before typing and is its accessible description through aria-describedby (cas-5ca4).
 - While the conversation is down both say why and wait (HUB-J11, HUB-J12, HUB-J14).
 
 ### HUB-J19 · Read my inbox on a new phone while the machine is off

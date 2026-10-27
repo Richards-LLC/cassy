@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
-import type { Machine } from "./hub-double";
+import type { DoubleOptions, Machine } from "./hub-double";
 
 // A third machine with a 40-character name (cas-1ca1): its row must ellipsise
 // the name and keep the time stamp readable.
@@ -64,7 +64,15 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   // Every wait inside is event-driven (hub double, DOM, page clock), so the
   // whole-test budget is sized from that loaded runtime with headroom.
   test.setTimeout(240_000);
-  const hub = await journey.hub({ machines: [ATLAS, STUDIO, FORGE], paired: ["atlas", "studio", "forge"] });
+  const atlas: Machine = { ...ATLAS, sessions: ATLAS.sessions.map((session) => ({ ...session })) };
+  const atlasSession = atlas.sessions[0]!;
+  const history: NonNullable<DoubleOptions["history"]> = {
+    [PELICAN]: [{
+      messages: [], has_earlier: false,
+      replies: [{ notification_id: 999, reply_to: null, message: "The bank feed for October is ready. Should I reconcile it against the statement now?", summary: "", device_id: "journey-device", kind: "answer", attachments: [], session: PELICAN, at: journeyStamp(-1_000) }],
+    }],
+  };
+  const hub = await journey.hub({ machines: [atlas, STUDIO, FORGE], paired: ["atlas", "studio", "forge"], history });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const search = page.getByRole("searchbox", { name: "Search conversations" });
   /** "Conversations" and its New session control sit on one line (cas-865c). */
@@ -154,8 +162,21 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
   });
 
   await journey.stage("Notice a new reply while away", async () => {
+    // A new device knows only the session catalog. When the supervisor queues
+    // a reply, it must fetch that thread's first history page before the row
+    // can show the unread count and preview.
+    atlasSession.last_activity_at = journeyStamp(-1_000);
+    atlasSession.last_activity = "supervisor → Commander";
+    await hub.announceCatalog("atlas");
+    const unopened = list.getByRole("button", { name: /cas-src/ });
+    await expect(unopened.getByLabel("1 unread")).toBeVisible();
+    await expect(unopened.locator(".conversation-preview")).toContainText("The bank feed for October is ready.");
+  });
+
+  await journey.stage("Open the conversation, then notice its next reply", async () => {
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).getByLabel("1 unread")).toHaveCount(0);
     // The list is on screen beside the thread, so there is no back step (F17):
     // moving to another conversation is one click on its row.
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeHidden();

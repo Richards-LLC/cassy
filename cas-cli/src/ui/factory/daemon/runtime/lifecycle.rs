@@ -91,6 +91,7 @@ fn page_operator_for_idle_supervisor(
         device_id: "*".to_string(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
     }) {
@@ -3054,6 +3055,10 @@ mod worker_attention_tests {
 
 impl FactoryDaemon {
     pub fn new(config: DaemonConfig) -> anyhow::Result<Self> {
+        crate::ui::factory::session::validate_daemon_start(
+            &config.session_name,
+            &config.factory_config.cwd,
+        )?;
         // Get initial terminal size (default for daemon without terminal)
         let (cols, rows) = (120, 40);
 

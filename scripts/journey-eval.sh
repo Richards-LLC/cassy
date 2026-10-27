@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Affected journeys, four workers. No arguments resolve the active task and
 # its artifact directory; an explicit task artifact directory is recommended.
-# Usage: journey-eval.sh [artifact-dir] [--affected <base>|--full] [--workers=1..4] [--task <id>]
+# Usage: journey-eval.sh [artifact-dir] [--affected <base>|--compare <base> <head>|--full] [--workers=1..4] [--task <id>]
 # --full is reserved for the supervisor/CI at epic assembly and merge queue.
 # Caller spec/grep filters are refused: the producer owns the exact selection.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plan="$(python3 "$repo/scripts/journey-receipt.py" plan --repo "$repo" "$@")"
-# A clean evaluated input set is necessary for an exact-tip receipt.
-if [[ -n "$(git -C "$repo" status --porcelain -- hub-web docs/qa/journeys.md scripts/journey-eval.sh scripts/journey-receipt.py scripts/journey-bundles.py scripts/journeys-for-diff.py)" ]]; then
+# Default runs retain their exact-tip guard. Opt-in comparison validates its
+# narrow, head-identical instrumentation overlay in the producer itself.
+mapfile -t fields < <(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["artifacts"]); print(p["head_sha"]); print(p["workers"]); print(p["scope"]); print(p["grep"] or ""); print("compare" if "comparison" in p else "normal")' <<<"$plan")
+if [[ "${fields[5]}" != compare ]] && [[ -n "$(git -C "$repo" status --porcelain -- hub-web docs/qa/journeys.md scripts/journey-eval.sh scripts/journey-receipt.py scripts/journey-bundles.py scripts/journeys-for-diff.py)" ]]; then
     printf 'journey-eval: commit product/catalog/runner inputs before recording an exact-tip receipt\n' >&2
     exit 2
 fi
-mapfile -t fields < <(python3 -c 'import json,sys; p=json.load(sys.stdin); print(p["artifacts"]); print(p["head_sha"]); print(p["workers"]); print(p["scope"]); print(p["grep"] or "")' <<<"$plan")
 artifacts="${fields[0]}"
 commit="${fields[1]}"
 workers="${fields[2]}"

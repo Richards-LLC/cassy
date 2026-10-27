@@ -82,11 +82,13 @@ pub struct ConfigGetArgs {
 #[command(
     after_help = concat!(
         "Project write roots (operator only):\n",
-        "  cas config set factory.write_roots \"~/Downloads,/mnt/models\"\n",
+        "  cas config set factory.write_roots \"/mnt/models,~/.gabber-support\"\n",
         "  cas config set factory.write_roots \"\"    # clear\n",
         "\n",
         "Stored in .cas/config.toml as [factory] write_roots. Each root lets this\n",
         "project's supervisor and workers create, edit and delete files beneath it.\n",
+        "Run from $HOME, it sets ~/.cas/config.toml: those roots apply to every\n",
+        "project. Your Downloads folder is always a root and needs no entry.\n",
         "Paths are canonicalized; /, $HOME and its parents, the project root, and\n",
         "anything containing or inside .cas are refused. Run it in your terminal or\n",
         "as `! cas config set ...` in an agent pane. Agents' own tool calls are\n",

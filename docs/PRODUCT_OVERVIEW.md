@@ -61,6 +61,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 - Commander browser app: `hub-web/`.
 - Release and delivery reports: `cas-cli/src/builtins/skills/cas-release-report/`, `cas-cli/src/builtins/skills/cas-sow-delivery-report/`, `cas-cli/src/builtins/skills/cas-feature-report/`, `cas-cli/src/builtins/skills/cas-customer-release-notes/`; all finish through `cas deliverable finalize` (`cas-cli/src/deliverable/finalize.rs`), the one path for image inlining, audience hygiene, printing and the PDF check (`cas-cli/src/deliverable/assets/`).
 - Branding of human-facing output: `cas-cli/src/builtins/skills/design-spec/references/design-md-first.md`; `cas deliverable brand` (`cas-cli/src/deliverable/`) resolves it, and a customer deliverable with no `DESIGN.md` is refused rather than given the default brand.
+- Before/after evidence: `cas deliverable capture` captures masked merge-base/head shots or passing journey goals in one bounded run; `cas deliverable pairs` selects complete verified pairs by task or commit provenance. Project defaults live under `[qa.capture]`.
 - Session wrap-up: `cas-cli/src/builtins/skills/finish/SKILL.md`.
 - Release history: `CHANGELOG.md`.
 

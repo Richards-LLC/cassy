@@ -7,6 +7,84 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.83.0] - 2026-10-27
+
+### Fixed
+
+- Commander phone messages wake an idle supervisor, including short approvals,
+  instead of waiting for unrelated activity.
+- Commander sends get their own bounded two-second store wait, so brief write
+  contention or an exhausted loop budget does not immediately report “Not sent”.
+- An unread, verified phone message addressed to an ended supervisor moves once
+  to its successor. Messages already seen by the predecessor stay with it.
+- Two people can send through one hub without taking terminal input control.
+  Leaving releases control held by that person; live receipts and history keep
+  each sender's name. Read-only conversations explain whom to ask for Send access.
+- After a supervisor replacement or hub restart, Commander retires the old
+  connection, retries subscriptions refused during the catalog gap, and counts
+  the attached phone again without a page reload.
+- Supervisor answers are saved to the operator thread while Commander is
+  reconnecting. A temporarily empty device count reports held delivery;
+  reattach recovers the same reply instead of losing it before it is queued.
+- Newly paired devices load unread replies and their conversation-list previews
+  before the conversation is opened.
+- Delivery receipts distinguish a durable queue entry from delivery to the
+  supervisor. Replayed receipts and history do not move delivered or replied
+  messages backwards.
+- The working indicator requires current unanswered activity. An idle supervisor
+  no longer appears to be working just because it remains connected.
+- Ask choices survive live replies and conversation history, so the phone keeps
+  the offered one-tap answers.
+- Recovered connections clear their outage attention item. A fleet change still
+  refreshes the catalog when it overlaps a heartbeat whose read fails.
+- New session includes projects with a live session even if they are not in the
+  project registry. Folder paths are shown only with session-read permission,
+  and session names use the same validation as the CLI.
+- Committed installation pairings write their pairing audit row. Reconnection
+  audit rows include the hub's machine identity, so their origin is attributable.
+- Refused Commander sends leave a daemon log and a correlated hub outcome.
+  History reads do not create send audit rows, and audited client references
+  are bounded.
+- No-code completion stays tied to its reviewed revision when the checkout is
+  reused for another change. Branch recovery writes through the supported
+  guarded store update.
+- Release reports use and name the configured artifacts root instead of assuming
+  the default location; embedded receipt references remain portable.
+- Visual QA waits for visible images to decode before resting and journey
+  screenshots. Broken or timed-out images produce a finding instead of a blank
+  capture marked PASS, including when visual exceptions are configured.
+- Journey evidence bundles keep the originating task identity in nested output,
+  preserve a moved trace on a documentation-only rebundle, and name the revision
+  that actually ran.
+- Styled terminal bullets fall back to ASCII in C locales, keeping diagnostics
+  readable without a visual exception.
+- Invalid daemon socket paths or store ownership are refused before startup
+  registers a session, preventing a partial start.
+- Review-wait alerts recognize the full recorded hold, unchanged not-ready
+  deliveries wait for the settled retry, and delivery anchors remain on origin.
+
+### Changed
+
+- Downloads is writable by default (the configured Linux downloads folder, or
+  `~/Downloads`), and user-level `factory.write_roots` joins each project's
+  allowed folders through the existing safety checks.
+- Configured visual capture requires declared, complete before/after pairs.
+  Capture diagnostics explain selector, mask and budget problems within an
+  80-column terminal, and reused dependencies stay clean in private captures.
+
+### Added
+
+- Pairing codes can be sent through the phone's share sheet, with a clipboard
+  fallback and the approval command and expiry included.
+- Branded deliverables can capture immutable revisions through the journey or
+  catalog path, including opt-in masks and goal receipts. Verified pairs check
+  image integrity and framing before use; managed project guidance advertises
+  the available report and customer-note commands.
+- Release notes select verified before/after JPGs from the released commit range
+  and attach them to the reply describing the change. Release reports accept
+  `Pair: <task-id>/<shot-id>` alongside explicit `Before:`/`After:` captures;
+  missing or incomplete evidence shows no image.
+
 ## [3.82.0] - 2026-10-26
 
 ### Added — every report, page and note wears the target project's DESIGN.md

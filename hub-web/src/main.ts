@@ -9,7 +9,7 @@ import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
-import { retainPendingSessions, visibleCatalog } from "./worker-visibility";
+import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
@@ -50,6 +50,7 @@ import { launchDropped, launchDroppedNotice, preselectedScopes, repairCommand, r
 import { loadLaunchDropped, saveLaunchDropped } from "./launch-dropped";
 import { LaunchSheet, canLaunch } from "./launch-session";
 import { pendingPairingStoreFor, type PendingPairing, type PendingRelayRequest } from "./pending-pairing";
+import { sendPairingCode } from "./pair-share";
 import { DEFAULT_PAIRING_SCOPES, PairingRelayError, acknowledgePairing, createPairingRequest, pairingRelayOrigin, pollPairingRequest } from "./pairing-relay";
 import { browserSupport, unsupportedBrowserNotice } from "./browser-support";
 import { attentionStore, catalog } from "./storage";
@@ -65,7 +66,7 @@ import { announceTo, type AnnounceOptions } from "./live-region";
 import { runFleetOperation } from "./fleet-ops-request";
 import { detectSpeechInput, focusAfterDictation, SpeechDictationController, type SpeechInputCapability, type SpeechInputState } from "./speech-input";
 import { clearStoredSelection, forgetMachine, loadStoredSelection, pairedSessionToOpen, restorableSession, saveStoredSelection, selectionAfterPairing, selectSelection, type SelectionState, type SelectionStorage, type SessionSelection } from "./session-selection";
-import { planSupervisorSend, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
+import { planSupervisorSend, sendBlockTone, sendsOnEnter, supervisorMessage, supervisorTarget } from "./supervisor-message";
 import { readablePanes } from "./worker-visibility";
 import { dormantCommandLabel, dormantRevealed, dormantRoute, saveDormantRevealed } from "./dormant-visibility";
 import { setMachineAccentFleet, storageAccentStore } from "./machine-accent";
@@ -276,6 +277,8 @@ const paneLastActivity = new Map<string, number>();
 const WORKING_WINDOW_MS = 30_000;
 const leaseHeartbeats = new Map<string, number>();
 const leaseExpiryTimers = new Map<string, number>();
+const paneLeaseEpochs = new Map<string, number>();
+const paneLeaseChanges = new Map<string, Promise<unknown>>();
 /** How often an open session held by another device is re-checked for release (journey F5). */
 const FOREIGN_LEASE_RECHECK_MS = 5_000;
 let attention: AttentionItem[] = [];
@@ -388,9 +391,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
-      // The supervisor is executing while a send it received awaits its
-      // reply on a reachable machine, or the pane produced output in the last
-      // half minute (cas-5a8f: never on a held send or an unreachable machine).
+      // Only recent pane activity drives the working line. A queued or
+      // transported message alone never proves the supervisor took a turn.
       working: () => supervisorWorking(
         history,
         connectionStates.get(threadMachineId),
@@ -549,6 +551,9 @@ function selectionStorage(): SelectionStorage | undefined {
 }
 
 function applySelection(next: SessionSelection | undefined): void {
+  if (selectedMachineId && selectedSession && (next?.machineId !== selectedMachineId || next.session !== selectedSession)) {
+    releasePaneControl(selectedMachineId, selectedSession);
+  }
   selectedMachineId = next?.machineId;
   selectedSession = next?.session;
   syncFleetSelection();
@@ -757,10 +762,18 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
-        void reclaimControlThenFlush(machine, session);
+        void restorePaneControlThenFlush(machine, session);
         if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
+        // cas-d53c: a replacement daemon can reuse this session name. Its
+        // actual Live attach also settles the machine-event outage cards;
+        // hub connectivity alone cannot prove a session recovered. Keep the
+        // acknowledged rows as history, including later enrichment revisions.
+        const recovered = attention.filter((item) => !item.acknowledgedAt
+          && item.machineId === machine.id && item.session === session
+          && (item.kind === "daemon_disconnected" || item.kind === "session_removed"));
+        if (recovered.length) void acknowledgeAttentionGroup(recovered);
       }
       else restateAttachmentNotes(document, machine.id);
       if (selectedMachineId === machine.id && selectedSession === session) render();
@@ -804,6 +817,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
       attachPreviewedSession(machine.id);
+      attachIncomingConversationPreviews(machine.id, items);
       render();
     },
     onMachineEvent: (event) => {
@@ -1923,8 +1937,13 @@ async function loadStatus(machineId: string, session: string): Promise<void> {
 }
 
 async function loadLease(machineId: string, session: string): Promise<void> {
+  const key = sessionKey(machineId, session);
+  const epoch = paneLeaseEpochs.get(key);
+  if (!paneControlIsHere(machineId, session)) return;
   try {
+    await paneLeaseChanges.get(key)?.catch(() => {});
     const state = await connections.get(machineId)?.lease(session);
+    if (paneLeaseEpochs.get(key) !== epoch || !paneControlIsHere(machineId, session)) return;
     // A control on a message that the lease change repaints (the "Waiting for
     // …" pill turning back into Take control) hands focus to its replacement,
     // not to the page body (cas-88d86 QA F01), as a refused take does.
@@ -2142,8 +2161,8 @@ const interruptsInFlight = new Set<string>();
 
 /**
  * Interrupt the open conversation's supervisor (cas-0546, moved from the
- * Terminal header). Interrupting is a leased action, as sending is, so
- * control is taken for it the same way; taking it from another device is
+ * Terminal header). Interrupting needs an input lease; semantic messages
+ * don't. Taking input control from another device is
  * never silent. Every outcome is said in a toast.
  */
 async function interruptSupervisor(): Promise<void> {
@@ -2209,6 +2228,9 @@ function rawOutputDialog(): HTMLDialogElement {
   // Escape and Close both land here: focus goes back to the header's Raw
   // output, the one a shell rebuild may have replaced since it opened.
   opened.addEventListener("close", () => {
+    if (selectedMachineId && selectedSession && rawOutputThread === sessionKey(selectedMachineId, selectedSession)) {
+      releasePaneControl(selectedMachineId, selectedSession);
+    }
     releaseRawOutputView();
     rawOutputThread = undefined;
     const toggle = document.querySelector<HTMLButtonElement>("#conversation-raw-output");
@@ -2310,15 +2332,70 @@ function sendControl(machineId: string, session: string, message: unknown): bool
   return false;
 }
 
+function paneControlIsHere(machineId: string, session: string): boolean {
+  return selectedMachineId === machineId && selectedSession === session && !document.hidden;
+}
+
+/** Order takes, renewals and releases so a late take cannot undo a departure. */
+function changePaneLease<T>(key: string, change: () => Promise<T>): Promise<T> {
+  const next = (paneLeaseChanges.get(key) ?? Promise.resolve()).catch(() => {}).then(change);
+  paneLeaseChanges.set(key, next);
+  void next.finally(() => {
+    if (paneLeaseChanges.get(key) === next) paneLeaseChanges.delete(key);
+  }).catch(() => {});
+  return next;
+}
+
+function requestPaneControl(machineId: string, session: string, force = false): Promise<LeaseState> {
+  const key = sessionKey(machineId, session);
+  const epoch = paneLeaseEpochs.get(key);
+  return changePaneLease(key, async () => {
+    const here = () => paneLeaseEpochs.get(key) === epoch && paneControlIsHere(machineId, session);
+    const connection = connections.get(machineId);
+    if (!here() || !connection) throw new Error("Left the session before taking terminal control");
+    const state = await connection.requestControl(session, force);
+    if (!here()) throw new Error("Left the session while taking terminal control");
+    leases.set(key, state);
+    return state;
+  });
+}
+
+function releasePaneControl(machineId: string, session: string): void {
+  const key = sessionKey(machineId, session);
+  paneLeaseEpochs.set(key, (paneLeaseEpochs.get(key) ?? 0) + 1);
+  window.clearInterval(leaseHeartbeats.get(key));
+  leaseHeartbeats.delete(key);
+  window.clearTimeout(leaseExpiryTimers.get(key));
+  leaseExpiryTimers.delete(key);
+  controlLostToOutage.delete(key);
+  controlTakenAfterRefusal.delete(key);
+  const held = leases.get(key)?.held_by_me;
+  const changing = paneLeaseChanges.has(key);
+  leases.delete(key);
+  const connection = connections.get(machineId);
+  if (connection && (held || changing)) {
+    // An unreachable hub may refuse DELETE; stopping renewal still lets its
+    // existing lease expire, and reconnect must never reclaim a closed view.
+    void changePaneLease(key, () => connection.releaseLease(session)).catch(() => {});
+  }
+}
+
+function releaseVisiblePaneControl(): void {
+  if (selectedMachineId && selectedSession) releasePaneControl(selectedMachineId, selectedSession);
+}
+document.addEventListener("visibilitychange", () => { if (document.hidden) releaseVisiblePaneControl(); });
+window.addEventListener("pagehide", releaseVisiblePaneControl);
+
 function startLeaseHeartbeat(machineId: string, session: string): void {
   const key = sessionKey(machineId, session);
-  if (leaseHeartbeats.has(key)) return;
+  if (leaseHeartbeats.has(key) || !paneControlIsHere(machineId, session)) return;
   leaseHeartbeats.set(key, window.setInterval(async () => {
     if (!leases.get(key)?.held_by_me) return;
     try {
-      const state = await connections.get(machineId)?.acquireLease(session);
-      if (state) leases.set(key, state);
+      const state = await requestPaneControl(machineId, session);
+      leases.set(key, state);
     } catch {
+      if (!paneControlIsHere(machineId, session)) return;
       invalidateMachineLeases(machineId);
       render();
     }
@@ -2345,9 +2422,6 @@ function invalidateMachineLeases(machineId: string): void {
     // browser — was holding the session against them.
     leases.set(key, { ...lease, held_by_me: false, controller_label: undefined, controller_device_id: undefined });
   }
-  // cas-7b31 (journey F2): nothing is said here. The header, the banner and
-  // the conversation's controls already say the session is down, and control
-  // comes back by itself.
 }
 
 let toastTimer: number | undefined;
@@ -2510,6 +2584,23 @@ function attachPreviewedSession(machineId: string): void {
   previewedSession = undefined;
   if (selectedMachineId !== target.machineId || selectedSession !== target.session || !target.session) return;
   if (visibleSessions(machineId).some((session) => session.name === target.session)) void attachSelectedSession(machineId, target.session);
+}
+
+/** Load the first page for unopened rows after the supervisor writes to Commander. */
+function attachIncomingConversationPreviews(machineId: string, listed: readonly HubSession[]): void {
+  const connection = connections.get(machineId);
+  if (!connection) return;
+  for (const session of listed) {
+    if (session.last_activity !== "supervisor → Commander") continue;
+    if (selectedMachineId === machineId && selectedSession === session.name) continue;
+    const key = sessionKey(machineId, session.name);
+    const page = conversationHistoryPages.get(key);
+    const attachment = connection.attachSnapshot(session.name);
+    if (page?.loaded || page?.requested || page?.unavailable || (attachment && attachment.phase !== "idle")) continue;
+    // History arrives in Welcome on the normal device-scoped session stream;
+    // the row then derives its unread count and preview from that page.
+    void connection.attach(session.name);
+  }
 }
 
 /**
@@ -2908,16 +2999,9 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
     scopes: machine?.scopes ?? [],
     leaseHeldByMe: lease?.held_by_me === true,
     leaseControllerLabel: lease?.held_by_me ? undefined : lease?.controller_label,
-    commanderOrigin: location.origin,
   };
 }
 
-/**
- * The hub only accepts a supervisor message from the device holding the session
- * lease (hub/server.rs handle_client_message). Observing operators were left
- * with a dead button; taking the lease is the step they would otherwise perform
- * by hand, and it succeeds only when no one else controls the session.
- */
 /**
  * Threads where this device took control after the hub last refused one of
  * its messages (cas-8e0a). The cached lease can say held while the hub
@@ -2930,9 +3014,9 @@ function noteControlTaken(machineId: string, session: string): void {
   if (leases.get(key)?.held_by_me) controlTakenAfterRefusal.add(key); else controlTakenAfterRefusal.delete(key);
 }
 
-async function takeControlForMessage(machine: StoredMachine, session: string, force = false): Promise<boolean> {
+async function restorePaneControl(machine: StoredMachine, session: string, force = false): Promise<boolean> {
   try {
-    await connections.get(machine.id)?.requestControl(session, force);
+    await requestPaneControl(machine.id, session, force);
   } catch {
     return false;
   }
@@ -2950,7 +3034,7 @@ async function takeControlForMessage(machine: StoredMachine, session: string, fo
 async function takeControlForInterrupt(machine: StoredMachine, session: string, force = false): Promise<{ taken: boolean; holder?: string }> {
   const key = sessionKey(machine.id, session);
   try {
-    await connections.get(machine.id)?.requestControl(session, force);
+    await requestPaneControl(machine.id, session, force);
   } catch (error) {
     if (force || !(error instanceof HubRequestError) || error.status !== 409) return { taken: false };
     await loadLease(machine.id, session);
@@ -2958,7 +3042,7 @@ async function takeControlForInterrupt(machine: StoredMachine, session: string, 
     const holder = lease && !lease.held_by_me ? lease.controller_label ?? undefined : undefined;
     if (!holder || !machine.scopes.includes("hub-admin")) return { taken: false, holder };
     try {
-      await connections.get(machine.id)?.requestControl(session, true);
+      await requestPaneControl(machine.id, session, true);
     } catch {
       return { taken: false, holder };
     }
@@ -2994,7 +3078,7 @@ async function takeControlForRefused(machineId: string, session: string): Promis
     showComposerStatus("Taking control of this session…", "info");
     let requested = true;
     try {
-      await connections.get(machineId)?.requestControl(session, force);
+      await requestPaneControl(machineId, session, force);
     } catch {
       requested = false;
     }
@@ -3431,14 +3515,14 @@ function settleSendsForPairingLoss(machine: StoredMachine): void {
  * refuses (another device took control meanwhile) leaves this browser an
  * observer, as before.
  */
-async function reclaimControlThenFlush(machine: StoredMachine, session: string): Promise<void> {
+async function restorePaneControlThenFlush(machine: StoredMachine, session: string): Promise<void> {
   const key = sessionKey(machine.id, session);
   // While the machine still holds messages (unsteady, or a socket being
   // probed) the take waits: the next live announcement brings it back here.
-  if (controlLostToOutage.has(key) && !connections.get(machine.id)?.holdsMessages()) {
+  if (controlLostToOutage.has(key) && paneControlIsHere(machine.id, session) && !connections.get(machine.id)?.holdsMessages()) {
     controlLostToOutage.delete(key);
     if (leases.get(key)?.held_by_me !== true) {
-      await takeControlForMessage(machine, session);
+      await restorePaneControl(machine, session);
       if (selectedMachineId === machine.id && selectedSession === session) render();
     }
   }
@@ -3455,16 +3539,6 @@ async function flushHeldSends(machine: StoredMachine, session: string): Promise<
     let waiting = false;
     try {
       const history = conversationHistory(key);
-      // The lease lapsed while the machine was away; the hub refuses a message
-      // from an observer, so control is taken back first, as a send does.
-      if (leases.get(key)?.held_by_me !== true && !await takeControlForMessage(machine, session)) {
-        for (const held of heldSends.get(key) ?? []) {
-          clearTimeout(held.expiry);
-          history.reject(held.clientRef, `Could not take control of ${session} after reconnecting. Retry to send it.`);
-        }
-        heldSends.delete(key);
-        return;
-      }
       const queue = heldSends.get(key) ?? [];
       while (queue.length) {
         const held = queue[0]!;
@@ -3604,7 +3678,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   const editOf = !quick && editingRefused?.threadKey === selectedThread ? editingRefused?.id : undefined;
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
-    showComposerStatus(plan.reason, "error");
+    showComposerStatus(plan.reason, sendBlockTone(plan.block));
     composer.focus();
     return;
   }
@@ -3616,21 +3690,6 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   if (pendingSubmissions.has(submissionKey)) return;
   pendingSubmissions.add(submissionKey);
   try {
-    // While the session is down, taking control cannot succeed and its
-    // refusal would blame the lease; the message is held instead and control
-    // is taken when the session is back (cas-0978).
-    if (plan.kind === "take-control-then-send" && (sessionIsUp(machine.id, session) || !machineWillReconnect(machine.id))) {
-    showComposerStatus(plan.notice, "info");
-    if (!await takeControlForMessage(machine, session)) {
-      showComposerStatus(`Could not take control of ${session}, and the hub refuses a message from a device that is only observing. Send again to retry; if another device controls the session, wait for it to release control.`, "error");
-      return;
-    }
-    // cas-cff2: control is held now, so "Taking control…" is done. The send
-    // itself speaks next: the bubble's Sending… and Delivered, or the
-    // waiting line if the connection holds it. Left up, it outlived the
-    // reply beside a Delivered message.
-    if (messageStatus?.text === plan.notice) clearComposerStatus();
-  }
   // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
@@ -3769,6 +3828,7 @@ function render(captureDraft = true): void {
   const liveRegions: LiveRegionView = {
     ...(staleStatusText ? { staleNotice: staleStatusText } : {}),
     ...(sendReason ? { sendReason } : {}),
+    ...(sendPlan.kind === "blocked" && sendPlan.block === "missing-scope" ? { readOnlyReason: sendPlan.reason } : {}),
     ...(composerStatus ? { messageStatus: { text: composerStatus.text, error: composerStatus.tone === "error" } } : {}),
     // cas-71f4: no composer "Sending to <codename>…" line; the bubble says it.
     pairing: {
@@ -4164,7 +4224,7 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: session.unreachable ? "Unreachable · message pending" : session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable", interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4230,7 +4290,7 @@ function keptMessagesLine(): string {
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
 function conversationHeaderLabel(machineId: string, session: string | undefined): string {
-  return visibleSessions(machineId).find((item) => item.name === session)?.unreachable ? "Unreachable · message pending" : conversationStatusLabel(machineId, session);
+  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live") ?? conversationStatusLabel(machineId, session);
 }
 
 /**
@@ -5189,6 +5249,18 @@ function bindEvents(): void {
     void navigator.clipboard.writeText(pairCopy.dataset.pairCommand ?? "")
       .then(() => toast("Command copied"))
       .catch(() => toast("Copy failed — type the command shown above"));
+  };
+  // cas-a56c: the code goes to whoever runs the machine, through the phone's
+  // share sheet or, failing that, the clipboard; the result is said in the dialog.
+  const pairShare = document.querySelector<HTMLButtonElement>("#pair-share");
+  if (pairShare) pairShare.onclick = () => {
+    const status = pairShare.parentElement?.querySelector<HTMLElement>(".pair-share-status");
+    const say = (text: string) => { if (!status) return; status.textContent = ""; window.setTimeout(() => { status.textContent = text; }, 50); };
+    void sendPairingCode(navigator, pairShare.dataset.shareText ?? "").then((outcome) => {
+      if (outcome === "copied") { pairShare.textContent = "Copied — paste it to them"; say("Code copied. Paste it to whoever runs the machine."); }
+      else if (outcome === "failed") { pairShare.textContent = "Copy failed"; say("Copy failed — read them the code shown above"); }
+      if (outcome === "copied" || outcome === "failed") window.setTimeout(() => { pairShare.textContent = "Send the code"; }, 2500);
+    });
   };
   if (pairDialogAutoOpen) {
     pairDialogAutoOpen = false;

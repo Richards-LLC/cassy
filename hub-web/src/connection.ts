@@ -225,7 +225,21 @@ export class HubConnectionSupervisor {
     if (!this.desired || this.lifecycle.phase !== "live") return;
     const stream = this.eventAbort;
     try {
-      await this.refreshSessions(anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]));
+      const signal = anySignal([stream?.signal ?? new AbortController().signal, AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)]);
+      // A heartbeat/manual read may predate this event. Joining that flight
+      // alone swallows the invalidation (a stopped worker stays in the roster).
+      // Drain it first, then read the changed catalog within the same deadline.
+      // A drained read that fails or times out is the older read's loss, not
+      // this event's (cas-1966): only a refused pairing skips the fresh read.
+      if (this.catalogRequest) {
+        try {
+          await this.refreshSessions(signal);
+        } catch (error) {
+          if (error instanceof AuthenticationError) throw error;
+        }
+      }
+      if (!this.desired || this.lifecycle.phase !== "live" || stream !== this.eventAbort) return;
+      await this.refreshSessions(signal);
     } catch (error) {
       // cas-eefe: event delivery never waits on this read, and every
       // heartbeat reads the catalog too, so a failed or timed-out read is the
@@ -1789,7 +1803,11 @@ export class HubConnectionSupervisor {
       this.callbacks.onFlowControlReset?.(session);
       return;
     }
-    if (envelope.closed) {
+    // A replacement may not be in the catalog when this session re-subscribes.
+    // These subscribe refusals establish no stream, so release the local claim
+    // just as Closed does; the next attempt must actually write a subscription.
+    if (envelope.closed || envelope.error?.code === "session_not_found" || envelope.error?.code === "daemon_offline") {
+      this.clearAttachTimeouts(session);
       this.machineSubscriptions.delete(session);
       this.transitionAttach(session, "failed", "attaching", { reason: "Session daemon stream closed", sessionOnly: true });
       this.callbacks.onSocketError(session, "Session daemon stream closed. Retrying…");
@@ -1969,6 +1987,7 @@ export function messageQueuedFromDaemon(message: Record<string, any>): MessageQu
     target: value.target,
     stamped: value.stamped === true,
     ...(typeof value.device_label === "string" ? { device_label: value.device_label } : {}),
+    ...(typeof value.operator_label === "string" ? { operator_label: value.operator_label } : {}),
   };
 }
 

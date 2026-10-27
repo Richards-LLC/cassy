@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,7 +23,7 @@ use super::{
     PairingExchangeError, ProxyFrame, ProxyFrameKind, Scope, SessionCatalog, SessionReadModel,
     TransportSecurity, ViewerRecvError, required_scope,
 };
-use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution};
+use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid_session_name};
 
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
@@ -770,7 +770,7 @@ async fn projects<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = authorize(
+    let context = match authorize(
         &state,
         HubAction::MachineRead,
         Scope::MachineRead,
@@ -778,11 +778,18 @@ async fn projects<R: SessionReadModel>(
         "GET",
         "/v1/projects",
     ) {
-        return with_cors(unauthorized_for(&error), &headers);
-    }
-    let sessions = match state.catalog.list().await {
-        Ok(sessions) => sessions,
-        Err(error) => return internal_error(error),
+        Ok(context) => context,
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    // cas-2c559: a live session's project (cas-0273) is session data, so a
+    // pairing that cannot read sessions sees only the registry's projects.
+    let sessions = if context.as_ref().is_none_or(|context| context.has(Scope::SessionRead)) {
+        match state.catalog.list().await {
+            Ok(sessions) => sessions,
+            Err(error) => return internal_error(error),
+        }
+    } else {
+        Vec::new()
     };
     match tokio::task::spawn_blocking(move || {
         Ok::<_, anyhow::Error>(ProjectsResponse {
@@ -932,7 +939,7 @@ async fn end_session<R: SessionReadModel>(
         }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
-    if !valid_launch_name(&session) {
+    if !valid_session_name(&session) {
         return with_cors(generic_not_found(), &headers);
     }
     let device = context
@@ -1663,22 +1670,6 @@ fn launch_error(status: StatusCode, code: &str, detail: &str) -> Response {
         .into_response()
 }
 
-fn valid_launch_name(name: &str) -> bool {
-    name.len() <= 80
-        && name.len() >= 3
-        && name
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && name
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-}
-
 fn selected_profile<'a>(
     name: &str,
     profiles: &'a [super::launch_env::LaunchProfile],
@@ -1793,12 +1784,12 @@ fn launch_session_blocking(
     if request
         .name
         .as_deref()
-        .is_some_and(|name| !valid_launch_name(name))
+        .is_some_and(|name| !valid_session_name(name))
     {
         return launch_error(
             StatusCode::BAD_REQUEST,
             "invalid_name",
-            "name must be 3-80 ASCII letters, digits, or hyphens and start and end with a letter or digit",
+            "name must be non-empty, not . or .., and contain no path separators",
         );
     }
 
@@ -2591,7 +2582,7 @@ async fn proxy_socket(
     // MessageQueued and ConversationHistory have no socket field: retain the
     // authenticated submitter's correlation id so only that socket receives
     // its private response.
-    let mut pending_message_refs = HashSet::<(String, String)>::new();
+    let mut pending_message_refs = PendingRefs::new();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -2612,9 +2603,10 @@ async fn proxy_socket(
                     if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
-                    if !correlated_daemon_frame_allowed(
+                    if !admit_correlated_daemon_frame(
                         &mut pending_message_refs,
                         &session,
+                        &auth,
                         &frame.bytes,
                     ) {
                         continue;
@@ -2637,14 +2629,14 @@ async fn proxy_socket(
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 Some(Ok(Message::Text(text))) => {
                     let client_ref = client_correlation_ref(text.as_bytes());
-                    if let Some(client_ref) = client_ref.as_deref() {
-                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    if let Some((client_ref, kind)) = &client_ref {
+                        pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
                     if let Err(failure) = handle_client_message(&connector, &session, &auth, text.as_bytes()).await {
-                        if let Some(client_ref) = client_ref.as_deref() {
+                        if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = legacy_send_error(&failure, client_ref.as_deref());
+                        let error = legacy_send_error(&failure, client_ref.as_ref().map(|(r, _)| r.as_str()));
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
                         // cas-0653: this socket's daemon upstream is gone.
                         // Closing it (not with 1000) makes the browser attach
@@ -2658,14 +2650,14 @@ async fn proxy_socket(
                 }
                 Some(Ok(Message::Binary(bytes))) => {
                     let client_ref = client_correlation_ref(&bytes);
-                    if let Some(client_ref) = client_ref.as_deref() {
-                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    if let Some((client_ref, kind)) = &client_ref {
+                        pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
                     if let Err(failure) = handle_client_message(&connector, &session, &auth, &bytes).await {
-                        if let Some(client_ref) = client_ref.as_deref() {
+                        if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = legacy_send_error(&failure, client_ref.as_deref());
+                        let error = legacy_send_error(&failure, client_ref.as_ref().map(|(r, _)| r.as_str()));
                         let _ = sink.send(Message::Text(error.to_string().into())).await;
                         // cas-0653: this socket's daemon upstream is gone.
                         // Closing it (not with 1000) makes the browser attach
@@ -2713,6 +2705,10 @@ async fn proxy_socket(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("This device was paired without terminal typing. Pair this device again with pane:input to type in the terminal.")]
+struct PaneInputPermissionRequired;
+
 async fn handle_client_message(
     connector: &DaemonConnector,
     session: &str,
@@ -2727,6 +2723,9 @@ async fn handle_client_message(
     store.ensure_active_context(context, now)?;
     let allowed = if read_message {
         context.has(Scope::PaneRead)
+    } else if matches!(&message, ClientMessage::SendMessage { .. }) {
+        // A queued supervisor message does not write to the shared terminal.
+        context.has(Scope::MessageSend)
     } else {
         context.has(scope) && store.has_active_lease(context, session, now)?
     };
@@ -2743,6 +2742,9 @@ async fn handle_client_message(
             Some(session),
             now,
         )?;
+        if scope == Scope::PaneInput && !context.has(scope) {
+            return Err(PaneInputPermissionRequired.into());
+        }
         anyhow::bail!("authorization refused")
     }
     if let ClientMessage::SendMessage { attribution, .. } = &mut message {
@@ -3312,7 +3314,8 @@ fn operator_message_allowed(auth: &Option<(AuthStore, AuthContext)>, bytes: &[u8
         return true;
     };
     auth.as_ref().is_some_and(|(_, context)| {
-        context.has(Scope::PaneRead) && context.device_id != message.device_id
+        context.has(Scope::PaneRead)
+            && (context.device_id != message.device_id || message.state == "delivered")
     })
 }
 
@@ -3334,8 +3337,23 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
     (!request_id.is_empty()).then_some(request_id)
 }
 
-fn client_correlation_ref(bytes: &[u8]) -> Option<String> {
-    client_message_ref(bytes).or_else(|| client_history_request_ref(bytes))
+/// What a pending client reference asked the daemon for (cas-3877). The
+/// daemon answers both with a correlated Error, but only a send's answer is a
+/// `commander_send` outcome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingRefKind {
+    Send,
+    History,
+}
+
+/// One authenticated socket's outstanding references, keyed by session and
+/// client reference.
+pub(crate) type PendingRefs = HashMap<(String, String), PendingRefKind>;
+
+fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
+    client_message_ref(bytes)
+        .map(|client_ref| (client_ref, PendingRefKind::Send))
+        .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
 }
 
 /// What the browser is told when the session's daemon upstream could not take
@@ -3356,7 +3374,9 @@ fn is_upstream_unavailable(failure: &anyhow::Error) -> bool {
 /// missing, otherwise the unchanged `forbidden` refusal.
 fn legacy_send_error(failure: &anyhow::Error, client_ref: Option<&str>) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
-        return legacy_forbidden_error(client_ref);
+        let mut error = legacy_forbidden_error(client_ref);
+        describe_pane_input_permission(failure, &mut error);
+        return error;
     }
     let mut error = serde_json::json!({
         "error": crate::hub::connector::UPSTREAM_UNAVAILABLE,
@@ -3377,7 +3397,9 @@ fn multiplex_send_error(
     client_ref: Option<&str>,
 ) -> serde_json::Value {
     if !is_upstream_unavailable(failure) {
-        return multiplex_forbidden_error(session, client_ref);
+        let mut error = multiplex_forbidden_error(session, client_ref);
+        describe_pane_input_permission(failure, &mut error["error"]);
+        return error;
     }
     let mut error = serde_json::json!({
         "channel": format!("pty:{session}"),
@@ -3391,6 +3413,14 @@ fn multiplex_send_error(
         error["error"]["client_ref"] = serde_json::Value::String(client_ref.to_owned());
     }
     error
+}
+
+/// Explain a missing terminal grant without changing the refusal code.
+fn describe_pane_input_permission(failure: &anyhow::Error, error: &mut serde_json::Value) {
+    if failure.is::<PaneInputPermissionRequired>() {
+        error["required_scope"] = serde_json::json!(Scope::PaneInput.as_str());
+        error["message"] = serde_json::json!(PaneInputPermissionRequired.to_string());
+    }
 }
 
 /// Preserve the submitted reference on a legacy attach refusal without
@@ -3416,32 +3446,112 @@ fn multiplex_forbidden_error(session: &str, client_ref: Option<&str>) -> serde_j
     error
 }
 
-/// MessageQueued and correlated Error frames share one daemon upstream, so
-/// the hub filters them by the authenticated socket that submitted the ref.
-pub(crate) fn correlated_daemon_frame_allowed(
-    pending: &mut HashSet<(String, String)>,
+/// Admit one daemon frame to an authenticated socket (cas-2109). MessageQueued,
+/// correlated Error and history frames share one daemon upstream, so they reach
+/// only the socket that submitted their ref; each answered send also writes one
+/// `commander_send` audit row. The `allowed` row is written
+/// when the hub forwards a send, before the daemon answers; this row records
+/// the answer (queued id or refusal), keyed by client_ref, so a "Not sent" can
+/// be traced after the fact.
+pub(crate) fn admit_correlated_daemon_frame(
+    pending: &mut PendingRefs,
     session: &str,
+    auth: &Option<(AuthStore, AuthContext)>,
     bytes: &[u8],
 ) -> bool {
-    if let Ok(DaemonMessage::MessageQueued { client_ref, .. }) =
-        serde_json::from_slice::<DaemonMessage>(bytes)
-    {
-        return client_ref
-            .is_some_and(|client_ref| pending.remove(&(session.to_owned(), client_ref)));
+    match correlate_daemon_frame(pending, session, bytes) {
+        Correlation::Refused => false,
+        Correlation::Uncorrelated | Correlation::Consumed(None) => true,
+        Correlation::Consumed(Some(answer)) => {
+            record_send_answer(auth, session, &answer);
+            true
+        }
     }
-    if let Ok(DaemonMessage::Error {
-        client_ref: Some(client_ref),
-        ..
-    }) = serde_json::from_slice::<DaemonMessage>(bytes)
-    {
-        return pending.remove(&(session.to_owned(), client_ref));
+}
+
+/// The daemon's answer to one Commander send.
+struct SendAnswer {
+    client_ref: String,
+    /// The queued notification id, or the daemon's refusal.
+    result: Result<i64, String>,
+}
+
+enum Correlation {
+    /// Not a correlated frame: relay it.
+    Uncorrelated,
+    /// This socket's pending ref, now consumed; a send carries its answer.
+    Consumed(Option<SendAnswer>),
+    /// Another socket's (or an already consumed) ref: do not relay it.
+    Refused,
+}
+
+fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]) -> Correlation {
+    let mut consume = |client_ref: String, answer: Option<Result<i64, String>>| {
+        match pending.remove(&(session.to_owned(), client_ref.clone())) {
+            // A history request's Error is not a send outcome (cas-3877).
+            Some(PendingRefKind::Send) => {
+                Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
+            }
+            Some(PendingRefKind::History) => Correlation::Consumed(None),
+            None => Correlation::Refused,
+        }
+    };
+    match serde_json::from_slice::<DaemonMessage>(bytes) {
+        Ok(DaemonMessage::MessageQueued {
+            client_ref,
+            notification_id,
+            ..
+        }) => match client_ref {
+            Some(client_ref) => consume(client_ref, Some(Ok(notification_id))),
+            None => Correlation::Refused,
+        },
+        Ok(DaemonMessage::Error {
+            client_ref: Some(client_ref),
+            message,
+        }) => consume(client_ref, Some(Err(message))),
+        Ok(DaemonMessage::ConversationHistory { request_id, .. }) => consume(request_id, None),
+        _ => Correlation::Uncorrelated,
     }
-    if let Ok(DaemonMessage::ConversationHistory { request_id, .. }) =
-        serde_json::from_slice::<DaemonMessage>(bytes)
-    {
-        return pending.remove(&(session.to_owned(), request_id));
+}
+
+/// Most characters of a daemon refusal kept in the audit row.
+const SEND_ERROR_AUDIT_CHARS: usize = 500;
+/// Most characters of the browser-supplied client_ref kept in the audit row
+/// and its log line (cas-3877); Commander's own refs are far shorter.
+const SEND_CLIENT_REF_AUDIT_CHARS: usize = 128;
+
+fn record_send_answer(
+    auth: &Option<(AuthStore, AuthContext)>,
+    session: &str,
+    answer: &SendAnswer,
+) {
+    let client_ref: String = answer.client_ref.chars().take(SEND_CLIENT_REF_AUDIT_CHARS).collect();
+    let client_ref = client_ref.as_str();
+    let (outcome, detail) = match &answer.result {
+        Ok(notification_id) => {
+            tracing::info!(session, client_ref, notification_id, "Commander send queued by the daemon");
+            ("queued", format!("client_ref={client_ref} notification_id={notification_id}"))
+        }
+        Err(error) => {
+            tracing::warn!(session, client_ref, %error, "Commander send refused by the daemon");
+            let error: String = error.chars().take(SEND_ERROR_AUDIT_CHARS).collect();
+            ("failed", format!("client_ref={client_ref} error={error}"))
+        }
+    };
+    let Some((store, context)) = auth else {
+        return;
+    };
+    if let Err(error) = store.audit_operation(
+        context,
+        outcome,
+        "commander_send",
+        Scope::MessageSend,
+        session,
+        Some(detail),
+        chrono::Utc::now(),
+    ) {
+        tracing::warn!(session, client_ref, %error, "cas-2109: Commander send outcome audit not written");
     }
-    true
 }
 
 /// Emit only bounded metadata for the private history response. The request
@@ -3565,7 +3675,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     let mut events_subscribed = false;
     // Scoped to this authenticated machine socket; paired devices cannot see
     // one another's MessageQueued acknowledgments.
-    let mut pending_message_refs = HashSet::<(String, String)>::new();
+    let mut pending_message_refs = PendingRefs::new();
     let mut revocations = auth
         .as_ref()
         .map(|(store, _)| store.subscribe_revocations());
@@ -3586,9 +3696,10 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
-                    if !correlated_daemon_frame_allowed(
+                    if !admit_correlated_daemon_frame(
                         &mut pending_message_refs,
                         &session,
+                        &auth,
                         &frame.bytes,
                     ) {
                         continue;
@@ -3706,14 +3817,14 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         Err(_) => continue,
                     };
                     let client_ref = client_correlation_ref(&bytes);
-                    if let Some(client_ref) = client_ref.as_deref() {
-                        pending_message_refs.insert((session.clone(), client_ref.to_owned()));
+                    if let Some((client_ref, kind)) = &client_ref {
+                        pending_message_refs.insert((session.clone(), client_ref.clone()), *kind);
                     }
                     if let Err(failure) = handle_client_message(&state.connector, &session, &auth, &bytes).await {
-                        if let Some(client_ref) = client_ref.as_deref() {
+                        if let Some((client_ref, _)) = &client_ref {
                             pending_message_refs.remove(&(session.clone(), client_ref.to_owned()));
                         }
-                        let error = multiplex_send_error(&failure, &session, client_ref.as_deref());
+                        let error = multiplex_send_error(&failure, &session, client_ref.as_ref().map(|(r, _)| r.as_str()));
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                         // cas-0653: a re-subscribe is ignored while this
                         // session's subscription exists, so drop it and say
@@ -3812,6 +3923,13 @@ async fn acquire_lease<R: SessionReadModel>(
     ) {
         Ok(Some(context)) => context,
         Ok(None) => return unauthorized(),
+        Err(error) if error.to_string() == "scope denied" && required_scope == Scope::PaneInput => {
+            return with_cors((StatusCode::FORBIDDEN, Json(serde_json::json!({
+                "error": "scope_denied",
+                "required_scope": Scope::PaneInput.as_str(),
+                "message": PaneInputPermissionRequired.to_string(),
+            }))).into_response(), &headers);
+        }
         Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
     match state.auth.as_ref().unwrap().acquire_or_force_lease(
@@ -4292,27 +4410,30 @@ mod machine_protocol_tests {
 
     #[test]
     fn message_queued_reaches_only_the_socket_that_submitted_its_ref() {
-        let mut pending = HashSet::from([("factory-a".to_owned(), "send-42".to_owned())]);
+        let mut pending = PendingRefs::from([(("factory-a".to_owned(), "send-42".to_owned()), PendingRefKind::Send)]);
         let queued = serde_json::to_vec(&DaemonMessage::MessageQueued {
             client_ref: Some("send-42".to_owned()),
             notification_id: 812,
             target: "patient-pelican-9".to_owned(),
             stamped: true,
             device_label: None,
+            operator_label: None,
         })
         .unwrap();
-        assert!(correlated_daemon_frame_allowed(
+        assert!(admit_correlated_daemon_frame(
             &mut pending,
             "factory-a",
+            &None,
             &queued
         ));
         assert!(
             pending.is_empty(),
             "receipt is single-delivery to its submitter"
         );
-        assert!(!correlated_daemon_frame_allowed(
+        assert!(!admit_correlated_daemon_frame(
             &mut pending,
             "factory-a",
+            &None,
             &queued
         ));
 
@@ -4321,10 +4442,11 @@ mod machine_protocol_tests {
             client_ref: Some("send-99".to_owned()),
         })
         .unwrap();
-        pending.insert(("factory-a".to_owned(), "send-99".to_owned()));
-        assert!(correlated_daemon_frame_allowed(
+        pending.insert(("factory-a".to_owned(), "send-99".to_owned()), PendingRefKind::Send);
+        assert!(admit_correlated_daemon_frame(
             &mut pending,
             "factory-a",
+            &None,
             &error
         ));
     }
@@ -4351,8 +4473,15 @@ mod machine_protocol_tests {
             },
         )).unwrap();
         assert!(!operator_message_allowed(&None, &frame));
-        assert!(!operator_message_allowed(&Some((store.clone(), sender)), &frame));
-        assert!(operator_message_allowed(&Some((store, viewer)), &frame));
+        assert!(!operator_message_allowed(&Some((store.clone(), sender.clone())), &frame));
+        assert!(operator_message_allowed(&Some((store.clone(), viewer)), &frame));
+        let mut delivered: serde_json::Value = serde_json::from_slice(&frame).unwrap();
+        delivered["OperatorMessage"]["state"] = serde_json::json!("delivered");
+        let delivered = serde_json::to_vec(&delivered).unwrap();
+        assert!(operator_message_allowed(&Some((store.clone(), sender)), &delivered));
+        let no_read = AuthContext::test_fixture("phone", "https://controller.example", Default::default());
+        assert!(!operator_message_allowed(&Some((store, no_read)), &delivered));
+
     }
 }
 
@@ -4388,10 +4517,8 @@ mod upstream_unavailable_tests {
     use super::*;
     use crate::hub::SessionMultiplexer;
 
-    /// The 2026-09-26 22:52Z field shape: a controlling device's send
-    /// reached the hub while no daemon upstream could take it. It came back
-    /// `forbidden` with no audit row. It now fails with the retryable
-    /// upstream error and leaves an `unavailable` audit row.
+    /// Semantic sends need message:send alone, even without a pane lease.
+    /// They reach the upstream boundary; raw terminal input remains refused.
     #[tokio::test]
     async fn a_send_with_no_daemon_upstream_is_audited_and_retryable_cas_a0e2() {
         let temp = crate::test_support::private_hub_tempdir();
@@ -4419,7 +4546,6 @@ mod upstream_unavailable_tests {
             scopes,
             request_id: "request-a0e2".into(),
         };
-        auth.acquire_lease(&phone, "factory-a", now).unwrap();
         let connector = DaemonConnector::new(SessionMultiplexer::new(8), MachineEventBus::new(8));
         let frame = serde_json::json!({
             "SendMessage": {
@@ -4460,21 +4586,26 @@ mod upstream_unavailable_tests {
         assert_eq!(row["target_session"], "factory-a");
         assert_eq!(row["request_id"], "request-a0e2");
 
-        // A device without the lease is still refused as before, and that
-        // refusal stays `forbidden`.
-        auth.release_lease(&phone, "factory-a", now).unwrap();
+        // Giving this send-only device a lease must not grant raw pane input.
+        auth.acquire_lease(&phone, "factory-a", now).unwrap();
+        let input = serde_json::to_vec(&ClientMessage::Input {
+            pane_id: "supervisor".into(),
+            data: b"whoami\n".to_vec(),
+        }).unwrap();
         let refused = handle_client_message(
             &connector,
             "factory-a",
             &Some((auth.clone(), phone)),
-            &bytes,
+            &input,
         )
         .await
-        .expect_err("no lease");
+        .expect_err("message:send and a lease do not grant pane:input");
         assert!(!is_upstream_unavailable(&refused));
-        assert_eq!(
-            legacy_send_error(&refused, Some("send-a0e2"))["error"],
-            "forbidden"
-        );
+        let legacy = legacy_send_error(&refused, Some("send-a0e2"));
+        assert_eq!(legacy["error"], "forbidden");
+        assert_eq!(legacy["required_scope"], "pane:input");
+        assert!(legacy["message"].as_str().unwrap().contains("Pair this device again"));
+        let multiplex = multiplex_send_error(&refused, "factory-a", Some("send-a0e2"));
+        assert_eq!(multiplex["error"]["message"], legacy["message"]);
     }
 }

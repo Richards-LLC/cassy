@@ -1054,4 +1054,57 @@ mod supervisor_handoff_tests {
 
 
     }
+
+    /// cas-d85c3: a phone message still pending when its supervisor ends moves,
+    /// once, to the supervisor that claims the handoff in a new factory session.
+    #[test]
+    fn operator_message_pending_at_supervisor_end_moves_to_successor_once() {
+        let mut env = crate::test_support::TestEnvGuard::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        let mut ending = Agent::new("ending-id".into(), "ending".into());
+        ending.role = AgentRole::Supervisor;
+        ending.machine_id = Some(Agent::get_or_generate_machine_id());
+        ending.factory_session = Some("old-session".into());
+        agents.register(&ending).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let stamp = cas_store::OperatorStamp {
+            operator: "Daniel".into(),
+            device_id: "phone-1".into(),
+            device_label: "Phone".into(),
+            scopes: vec!["message:send".into()],
+            verified: true,
+        };
+        let go = queue
+            .enqueue_operator_message("commander:Daniel@Phone", "ending", "Go", Some("old-session"), None, None, false, None, &stamp)
+            .unwrap()
+            .id();
+        // The predecessor already had this one in its turn; moving it would deliver it twice.
+        let seen = queue
+            .enqueue_operator_message("commander:Daniel@Phone", "ending", "Seen", Some("old-session"), None, None, false, None, &stamp)
+            .unwrap()
+            .id();
+        queue.record_recipient_surfaced(seen, "ending", cas_store::SurfacingSource::HookSurfaced).unwrap();
+        handle_session_end(
+            &HookInput { session_id: ending.id.clone(), reason: Some("prompt_input_exit".into()), ..Default::default() },
+            Some(&root),
+        )
+        .unwrap();
+
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_AGENT_NAME", "successor");
+        env.set("CAS_FACTORY_SESSION", "new-session");
+        let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
+        handle_session_start(&start, Some(&root)).unwrap();
+        handle_session_start(&start, Some(&root)).unwrap();
+
+        let row = queue.queued_prompt(go).unwrap().unwrap();
+        assert_eq!((row.target.as_str(), row.factory_session.as_deref()), ("successor", Some("new-session")));
+        assert!(row.processed_at.is_none(), "the successor still has to read it");
+        let copies = queue.peek_all(100).unwrap().into_iter().filter(|r| r.prompt == "Go").count();
+        assert_eq!(copies, 1, "re-routing moves the one row; it never copies it");
+        let seen = queue.queued_prompt(seen).unwrap().unwrap();
+        assert_eq!(seen.target, "ending", "a row the predecessor already saw stays with it");
+    }
 }

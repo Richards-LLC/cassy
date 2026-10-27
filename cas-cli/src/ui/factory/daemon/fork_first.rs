@@ -51,6 +51,7 @@ pub fn init_phase_without_fork(
     worker_names: Vec<String>,
     phone_home: bool,
 ) -> anyhow::Result<(DaemonInitPhase, PathBuf)> {
+    crate::ui::factory::session::validate_daemon_start(&session_name, &factory_config.cwd)?;
     let sock_path = socket_path(&session_name);
 
     if let Some(parent) = sock_path.parent() {
@@ -91,6 +92,7 @@ pub fn fork_first_daemon(
     worker_names: Vec<String>,
     phone_home: bool,
 ) -> anyhow::Result<ForkFirstResult> {
+    crate::ui::factory::session::validate_daemon_start(&session_name, &factory_config.cwd)?;
     use nix::unistd::{ForkResult as NixForkResult, fork};
     use std::os::unix::io::AsRawFd;
 

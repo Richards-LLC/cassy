@@ -45,11 +45,11 @@ function atlasLaunch(): LaunchWorld {
 
 test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-test("HUB-J13 start a new session from Commander", async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], launch: { atlas: atlasLaunch() } });
+// Independent goals have their own budget; each still enters through Commander.
+test("HUB-J13 grant launch and keep the permission across a reload", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], launch: { atlas: atlasLaunch() } });
   const sheet = page.getByRole("dialog", { name: "New session" });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
 
   await journey.stage("A paired controller enables launch from Commander", async () => {
     await journey.open();
@@ -80,6 +80,14 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: "New session", exact: true })).toBeVisible();
     await expect(page.locator("#new-session-toggle")).not.toHaveAttribute("data-launch-grant", "true");
   });
+});
+
+test("HUB-J13 start a new session from Commander and return to it", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+  await journey.open();
 
   await journey.stage("Open New session and find the project", async () => {
     await page.getByRole("button", { name: "New session", exact: true }).tap();
@@ -139,6 +147,13 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await back.tap();
     await expect(list.getByRole("button", { name: /ledger-api/ })).toBeVisible();
   });
+});
+
+test("HUB-J13 attach to an already running project", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
+  const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
+  await journey.open();
 
   await journey.stage("A running project attaches instead of starting again", async () => {
     await page.getByRole("button", { name: "New session", exact: true }).tap();
@@ -147,6 +162,12 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await back.tap();
   });
+});
+
+test("HUB-J13 recover from a refused launch by browsing a folder", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "session-launch"] }, launch: { atlas: atlasLaunch() } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
+  await journey.open();
 
   await journey.stage("A launch refused by the machine says why", async () => {
     await page.getByRole("button", { name: "New session", exact: true }).tap();
@@ -176,14 +197,17 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(page.getByRole("button", { name: "Send to the acme-portal supervisor", exact: true })).toBeVisible();
     expect(hub.launches.at(-1)?.body).toEqual({ target: { kind: "browse", root_id: "root-code", path: "clients/acme-portal" }, supervisor_cli: "claude", profile: "main" });
   });
+});
+
+test("HUB-J13 read the grant command and supervisor and worker hints on a phone", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [structuredClone(ATLAS)], paired: ["atlas"], scopes: { atlas: ["machine-read", "session-read"] }, launch: { atlas: atlasLaunch() } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
 
   await journey.stage("The grant command reads as whole tokens on a phone, with Supervisor and Workers explained", async () => {
     // cas-cee5 (journey F31): a read-only pairing cannot allow launch from
     // here, so the sheet shows the command to run on the machine. It wraps
     // only between whole tokens at 390px ("pane:i / nput" was the defect).
-    hub.setScopes("atlas", ["machine-read", "session-read"]);
-    await hub.seedPaired();
-    await page.reload();
+    await journey.open();
     await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
     const code = sheet.locator(".launch-grant-command code");
     await expect(code).toContainText("session:launch");
@@ -216,15 +240,19 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
     await expect(sheet.locator("#launch-workers-hint")).toHaveText("Up to 16. None starts the supervisor alone.");
     await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
   });
+});
+
+test("HUB-J13 allow launch with a long machine name on a phone", journeyPart, async ({ page, journey }) => {
+  const machine: Machine = { ...structuredClone(ATLAS), label: "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap", sessions: [...ATLAS.sessions, { name: "bright-heron-21", supervisor: "bright-heron-21", project_dir: "/home/dev/ledger-api", workers: [], liveness: "live" }] };
+  const launch = atlasLaunch();
+  launch.projects.find((project) => project.id === "p-ledger")!.running_session = "bright-heron-21";
+  const hub = await journey.hub({ machines: [machine], paired: ["atlas"], launch: { atlas: launch } });
+  const sheet = page.getByRole("dialog", { name: "New session" });
 
   await journey.stage("A long machine name fits the phone consent", async () => {
-    const originalLabel = ATLAS.label;
-    ATLAS.label = "soundwave — a very long personal workstation name with several extra words and anunbrokentailthatneedstowrap";
-    hub.setScopes("atlas", [...SCOPES]);
-    await hub.seedPaired();
-    await page.reload();
+    await journey.open();
     await page.locator('#new-session-toggle[data-launch-grant="true"]').tap();
-    const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${ATLAS.label}` });
+    const allow = sheet.getByRole("button", { name: `Allow starting sessions on ${machine.label}` });
     await expect(allow).toBeVisible();
     await expect(sheet.getByRole("button", { name: "Close", exact: true })).toBeVisible();
     expect(await allow.evaluate((button) => button.getBoundingClientRect().right <= innerWidth), "the long button fits the viewport").toBe(true);
@@ -238,13 +266,12 @@ test("HUB-J13 start a new session from Commander", async ({ page, journey }) => 
       .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
       .map((animation) => animation.finished.catch(() => undefined))));
     await allow.tap({ timeout: 15_000 });
-    // Earlier in this journey ledger-api was launched: the project picker
-    // now offers its live supervisor, rather than an idle-project radio.
+    // The machine already runs ledger-api: consent must reveal its live
+    // supervisor, rather than an idle-project radio.
     await expect(sheet.getByRole("button", { name: "Attach to ledger-api (bright-heron-21)", exact: true })).toBeVisible();
     await expect(sheet.getByRole("searchbox", { name: "Filter projects" })).toBeFocused();
     await expect(sheet.getByRole("button", { name: /^Allow starting sessions/ })).toHaveCount(0);
     await sheet.getByRole("button", { name: "Cancel", exact: true }).tap();
-    ATLAS.label = originalLabel;
   });
 });
 

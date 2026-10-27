@@ -352,6 +352,12 @@ impl SessionMultiplexer {
         self.publish(session, frame).await
     }
 
+    /// End the dead upstream's viewers and discard its cached Welcome. A
+    /// replacement must establish its own stream and authoritative snapshot.
+    async fn retire_session(&self, session: &str) {
+        self.state.lock().await.sessions.remove(session);
+    }
+
     pub async fn upstream_start_count(&self, session: &str) -> usize {
         self.state
             .lock()

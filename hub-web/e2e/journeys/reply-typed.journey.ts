@@ -91,8 +91,13 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   let queued = 0;
   await journey.stage("See it delivered", async () => {
-    queued = hub.deliverLatest(PELICAN);
-    const delivered = page.locator('.conversation-turn[data-state="acknowledged"]');
+    queued = hub.queueLatest(PELICAN);
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').getByRole("status")).toHaveText("Queued for supervisor");
+    await page.reload();
+    await list.getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').getByRole("status")).toHaveText("Queued for supervisor");
+    hub.deliverQueued(PELICAN, queued);
+    const delivered = page.locator('.conversation-turn[data-state="delivered"]');
     await expect(delivered.getByRole("status")).toHaveText("Delivered");
     await expect(page.getByText(/Sending to /)).toHaveCount(0);
     // cas-387e: a Delivered message never sits above "will go out by itself".
@@ -304,7 +309,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
 
   await journey.stage("A late receipt after the supervisor talks on never offers Retry", async () => {
     hub.deliverLatest(PELICAN);
-    await expect(page.locator('.conversation-turn[data-state="acknowledged"]')).toHaveCount(1);
+    await expect(page.locator('.conversation-turn[data-state="delivered"]')).toHaveCount(1);
     // Watch every frame: a "Not confirmed" that flashes before a late receipt
     // is a Retry that sends the message twice (cas-1185).
     await page.evaluate(() => {
@@ -331,7 +336,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     await page.clock.runFor(3_400);
     await hub.received(hub.deliverLatest(PELICAN));
     await page.clock.resume();
-    const crossed = page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Run the gate once more." });
+    const crossed = page.locator('.conversation-turn[data-state="delivered"]').filter({ hasText: "Run the gate once more." });
     await expect(crossed).toHaveCount(1);
     const flashed = await page.evaluate(() => {
       const w = window as unknown as { __unconfirmedFrames: number; __watchUnconfirmed: boolean };
@@ -345,7 +350,7 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
     // unrelated "Gate run 2 of 3" turn did not take the tick off the earlier
     // "Ship it after the gate passes." either.
     await expect(crossed.locator(".conversation-delivered")).toHaveText("Delivered");
-    await expect(page.locator('.conversation-turn[data-state="acknowledged"]').filter({ hasText: "Ship it after the gate passes." }).locator(".conversation-delivered")).toHaveText("Delivered");
+    await expect(page.locator('.conversation-turn[data-state="delivered"]').filter({ hasText: "Ship it after the gate passes." }).locator(".conversation-delivered")).toHaveText("Delivered");
   });
 
   await journey.stage("A message Cassy can't confirm offers Retry", async () => {
@@ -582,14 +587,13 @@ test("HUB-J5 reply by typing", async ({ page, journey }, testInfo) => {
   });
 });
 
-test("HUB-J5 sending without control takes it, and the take notice clears once the message goes (cas-cff2)", journeyPart, async ({ page, journey }) => {
-  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+test("HUB-J5 message-only pairing sends without taking pane control (cas-d402)", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], scopes: { atlas: ["machine-read", "session-read", "pane-read", "message-send"] } });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
   const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
   const status = page.locator("#message-status");
-  // The lease lapsed while the operator was away: this device reads as not
-  // in control, and nobody else holds it, until the page takes it itself.
+  // A message-only pairing can send without acquiring a terminal input lease.
   let taken = false;
   await page.route(/\/v1\/sessions\/[^/]+\/lease$/, (route) => {
     if (route.request().method() === "POST") { taken = true; return route.fallback(); }
@@ -600,13 +604,13 @@ test("HUB-J5 sending without control takes it, and the take notice clears once t
     await journey.open();
     await list.getByRole("button", { name: /cas-src/ }).click();
     await expect(send).toBeVisible();
-    await composer.fill("Take it and send this.");
+    await composer.fill("Send this without terminal access.");
     const sent = hub.nextSend();
     await send.click();
-    expect((await sent).text).toBe("Take it and send this.");
-    expect(taken).toBe(true);
+    expect((await sent).text).toBe("Send this without terminal access.");
+    expect(taken, "semantic send does not acquire pane control").toBe(false);
   });
-  await journey.stage("Delivered: the take notice is gone", async () => {
+  await journey.stage("Delivered without taking pane control", async () => {
     hub.deliverLatest(PELICAN);
     await expect(page.getByRole("log").getByText("Delivered")).toBeVisible();
     await expect(status).toBeHidden();
@@ -614,7 +618,7 @@ test("HUB-J5 sending without control takes it, and the take notice clears once t
   });
 });
 
-test("HUB-J5 Send again without control takes it, replaces the settled message and settles Delivered (cas-cff2)", journeyPart, async ({ page, journey }) => {
+test("HUB-J5 Send again delivers without taking pane control (cas-d402)", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
   const composer = page.getByRole("textbox", { name: "Your message" });
@@ -624,8 +628,7 @@ test("HUB-J5 Send again without control takes it, replaces the settled message a
   let taken = false;
   await page.route(/\/v1\/sessions\/[^/]+\/lease$/, (route) => {
     if (route.request().method() === "POST") { if (lapsed) taken = true; return route.fallback(); }
-    if (lapsed && !taken) return route.fulfill({ json: { held_by_me: false, controller_label: null } });
-    return route.fallback();
+    return route.fulfill({ json: { held_by_me: false, controller_label: lapsed ? "Studio Mac" : null } });
   });
   await journey.stage("A message whose receipt never came settles as Not confirmed", async () => {
     await journey.open();
@@ -642,7 +645,7 @@ test("HUB-J5 Send again without control takes it, replaces the settled message a
     const bubble = page.locator('.conversation-turn[data-state="unconfirmed"]').filter({ hasText: "Did the Mac tests start?" });
     await expect(bubble).toHaveAttribute("data-settled", "true");
   });
-  await journey.stage("The lease lapses; Send again takes control and the message goes once", async () => {
+  await journey.stage("The lease lapses; Send again delivers without taking control", async () => {
     lapsed = true;
     // The next lease read finds this device no longer in control.
     await page.clock.fastForward(30_000);
@@ -650,7 +653,7 @@ test("HUB-J5 Send again without control takes it, replaces the settled message a
     const resent = hub.nextSend();
     await page.getByRole("button", { name: "Send this message again" }).click();
     expect((await resent).text).toBe("Did the Mac tests start?");
-    expect(taken, "the send took control first").toBe(true);
+    expect(taken, "Send again does not acquire pane control").toBe(false);
     hub.deliverLatest(PELICAN);
     await expect(page.locator(".conversation-turn").filter({ hasText: "Did the Mac tests start?" }).locator(".conversation-delivered")).toHaveText("Delivered");
     await expect(page.getByRole("log").getByText("Did the Mac tests start?")).toHaveCount(1);

@@ -644,6 +644,7 @@ export class ConversationHistory {
     if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
     // A late receipt proves queue acceptance: restore the dismissed send without claiming transport delivery.
     delete send.value.dismissed;
+    // Replayed receipts cannot undo a known answer while reply history is rebuilding.
     if (send.value.state === "replied" || this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id)) send.value.state = "replied";
     else if (send.value.state !== "delivered") send.value.state = "acknowledged";
     if (send.value.held) send.value.sentAt ??= Date.now();

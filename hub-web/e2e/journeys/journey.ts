@@ -13,7 +13,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HubDouble, type DoubleOptions } from "./hub-double";
 import { JOURNEY_NOW, JOURNEY_TIMEZONE, startJourneyClock, stopJourneyClock } from "./clock";
-import { claimReceiptDirectory, receiptPartName } from "./receipt-directory.mjs";
+import { captureMask, captureStageScreenshot, claimReceiptDirectory, receiptPartName } from "./receipt-directory.mjs";
 
 export { expect };
 
@@ -36,6 +36,13 @@ export const RECEIPTS = resolve(process.env.JOURNEY_RECEIPTS ?? join(process.env
 export const RECORD = process.env.JOURNEY_RECORD !== undefined
   ? process.env.JOURNEY_RECORD === "1"
   : process.env.JOURNEY_RECEIPTS !== undefined || !process.env.CI;
+
+const CAPTURE_MASK = captureMask(process.env.JOURNEY_CAPTURE_MASK);
+const CAPTURE_HTML_BYTES = process.env.JOURNEY_CAPTURE_MAX_HTML_BYTES === undefined
+  ? undefined : Number(process.env.JOURNEY_CAPTURE_MAX_HTML_BYTES);
+if (CAPTURE_HTML_BYTES !== undefined && (!Number.isSafeInteger(CAPTURE_HTML_BYTES) || CAPTURE_HTML_BYTES <= 0)) {
+  throw new Error("JOURNEY_CAPTURE_MAX_HTML_BYTES must be a positive integer");
+}
 
 type Stage = { title: string; slug: string; ms: number; screenshot?: string };
 
@@ -144,7 +151,11 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
           }
           const screenshot = `J${String(stages.length + 1).padStart(2, "0")}.png`;
           await settle(page);
-          await page.screenshot({ path: join(dir, screenshot) });
+          if (CAPTURE_MASK === undefined && CAPTURE_HTML_BYTES === undefined) {
+            await page.screenshot({ path: join(dir, screenshot) });
+          } else {
+            await captureStageScreenshot(page, join(dir, screenshot), CAPTURE_MASK, CAPTURE_HTML_BYTES);
+          }
           stages.push({ title, slug: slug(title), ms, screenshot });
         }, { subtitle: id });
       },
@@ -180,6 +191,10 @@ export const test = base.extend<{ journey: Journey; journeyPlatform: JourneyPlat
       project: testInfo.project.name,
       title_path: testInfo.titlePath,
       viewport,
+      ...(CAPTURE_MASK === undefined ? {} : {
+        masked: CAPTURE_MASK,
+        color_scheme: await page.evaluate(() => matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"),
+      }),
       clock: { now: new Date(JOURNEY_NOW).toISOString(), timezone: JOURNEY_TIMEZONE },
       stages,
       page_errors: errors,

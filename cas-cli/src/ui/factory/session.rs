@@ -104,6 +104,52 @@ pub fn panic_log_path(session_name: &str) -> PathBuf {
     session_log_dir(session_name).join("panic.log")
 }
 
+/// Native pathname address capacity, including the terminating NUL.
+/// Linux supplies 108 bytes and macOS 104; derive it from the target ABI.
+fn unix_socket_capacity() -> usize {
+    std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path)
+}
+
+fn validate_socket_path(path: &Path, capacity: usize, label: &str) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= capacity || bytes.contains(&0) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!(
+            "Factory startup refused: {label} Unix socket path is invalid.\nUse a shorter HOME or session name, then retry.\nPath: {} bytes; maximum: {} bytes (address capacity {capacity}).",
+            bytes.len(), capacity.saturating_sub(1),
+        )));
+    }
+    Ok(())
+}
+
+/// An inherited override must belong to the declared launch project. Git and
+/// Cassy worktree aliases still resolve to their shared main-project store.
+pub(crate) fn validate_factory_project(cwd: &Path) -> anyhow::Result<()> {
+    let Some(selected) = cas_core::env_overlay::var("CAS_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+    else {
+        return Ok(());
+    };
+    let own = crate::store::find_cas_root_ignoring_env(cwd)
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+    if !selected.canonicalize().ok().is_some_and(|root| Some(root) == own) {
+        anyhow::bail!("Factory startup refused: CAS_ROOT selects another project.\nRetry after running: unset CAS_ROOT\nThe --cwd project must own its store before agents can start.");
+    }
+    Ok(())
+}
+
+/// Read-only admission shared by CLI, fork-first and legacy startup paths.
+/// Run before logging, directory creation, process spawn or registration.
+pub(crate) fn validate_daemon_start(session: &str, cwd: &Path) -> anyhow::Result<()> {
+    let capacity = unix_socket_capacity();
+    validate_socket_path(&gui_socket_path(session), capacity, "GUI")?;
+    validate_socket_path(&socket_path(session), capacity, "TUI")?;
+    validate_factory_project(cwd)
+}
+
 /// Get the socket path for a session
 pub fn socket_path(session_name: &str) -> PathBuf {
     dirs::home_dir()
@@ -124,6 +170,7 @@ pub fn gui_socket_path(session_name: &str) -> PathBuf {
 pub(super) fn bind_factory_socket(
     path: &Path,
 ) -> std::io::Result<std::os::unix::net::UnixListener> {
+    validate_socket_path(path, unix_socket_capacity(), "Factory")?;
     let base = sessions_dir();
     if path.parent() != base.parent()
         || !path

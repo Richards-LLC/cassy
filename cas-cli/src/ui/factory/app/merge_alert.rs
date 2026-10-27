@@ -134,7 +134,7 @@ pub(super) fn read_delivery(
         && previous.fingerprint == refs
         && !matches!(previous.ci, "pending" | "unknown")
         && (previous.ready.as_ref().is_some_and(|ready| ready.ci == "success")
-            || matches!(previous.ci, "merged" | "unpushed" | "declined" | "not-ready")
+            || matches!(previous.ci, "merged" | "unpushed" | "declined")
             || now.signed_duration_since(previous.checked_at) < SETTLED_RETRY)
     {
         let mut wait = previous.wait.clone();
@@ -530,8 +530,9 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
         *observed_ci = "unpushed";
         return None;
     }
-    // Every refusal here is a function of the fingerprinted refs, so it is
-    // not transient: settle until they change.
+    // cas-16e1: a refusal can also rest on state the fingerprint does not
+    // watch (assignee, task type), so "not-ready" settles only for the
+    // ordinary slow-retry interval, like a failed CI read.
     if crate::mcp::tools::core::task::lifecycle::merge_close::pushed_delivery_tip(
         repo, &task, &branch, &tip,
     ).is_err() {

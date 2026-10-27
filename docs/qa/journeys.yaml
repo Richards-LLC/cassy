@@ -82,6 +82,11 @@ invariants:
     check: Send through a real candidate hub and compare live, reloaded and peer-device status with the queue's transport_delivered_at; retain queue-only and actual-delivery evidence separately. Run the correlated history/receipt model and real enqueue-to-history regressions, and HUB-J5/HUB-J12 without inferring supervisor execution from a receipt.
     bug:
       task: cas-3f40
+  HUB-J5-ANSWER-MONOTONIC:
+    statement: Replaying a delivery receipt keeps an answered message answered while reply history rebuilds
+    check: 'Run the receipt regression in hub-web/src/conversations.test.ts: answer a send, remove its reply
+      event, replay the journal receipt through synchronizePending, and assert that the send remains replied.'
+    bug: {task: cas-1b57}
   HUB-J6-GOAL:
     statement: I speak my reply, check it, and send it
     check: 'Walk HUB-J6 in hub-web/e2e/journeys/reply-voice.journey.ts; verify the expected experience and edge
@@ -173,6 +178,18 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J17-FLEET-INVALIDATION:
+    statement: A fleet change overlapping an older heartbeat obtains a fresh catalog, so a stopped worker disappears
+      without waiting for the next heartbeat.
+    check: 'Run hub-web/src/connection-lifecycle.test.ts case "refreshes a fleet change after an overlapping heartbeat"
+      and HUB-J17; verify Stop removes the row and returns its task to Open.'
+    bug: {task: cas-66ea}
+  HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN:
+    statement: A fleet change still obtains a fresh catalog when the older heartbeat read it drains fails or times
+      out; only a refused pairing skips it.
+    check: 'Run hub-web/src/connection-lifecycle.test.ts case "refreshes a fleet change even when the overlapping
+      heartbeat''s read fails" and HUB-J17; verify Stop on a flaky connection removes the row at once.'
+    bug: {task: cas-1966}
   HUB-J18-GOAL:
     statement: I stop what the supervisor is doing, or read what its terminal shows, without leaving the conversation,
       from the keyboard alone
@@ -644,6 +661,7 @@ journeys:
   - HUB-J5-GOAL
   - HUB-J5-SEND-WITHOUT-PANE-LEASE
   - HUB-J5-RECEIPT-STAGES
+  - HUB-J5-ANSWER-MONOTONIC
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -1532,6 +1550,8 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-FLEET-INVALIDATION
+  - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

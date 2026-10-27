@@ -79,8 +79,9 @@ explicit go. Client messages carry commitments the operator owns.
    threshold, small-SOW and PM-ping rules. Done when every item has an
    estimate, a scope call and an approval state, and every PM message those
    rules require is drafted.
-5. **Write the shot list** `shots.json`, using the format in
-   [scripts/capture.mjs](scripts/capture.mjs)'s header:
+5. **Write and commit the shot list** `docs/qa/shots.json`, an array of
+   `{ "id": "R1", "path": "/admin/dashboard/", "viewport": [1280, 800],
+   "ready": "main", "locator": "main", "mask": [".email"] }` objects:
    - one shot per Met or Partial requirement whose evidence is visual;
    - one *after* shot per round item.
 
@@ -99,25 +100,33 @@ explicit go. Client messages carry commitments the operator owns.
    reconstructed *before* misstates history. Done when every visual
    requirement and every round item has a shot id, and every round item has a
    *before* source or that label.
-6. **Capture headless with the project's QA login.** Run
-   `npm exec --yes --package=playwright -- node <skills-dir>/cas-sow-delivery-report/scripts/capture.mjs --shots shots.json --base <env-url> --out <shots-dir> [--login ...]`.
-   - `--login` reads the QA test account from the credentials file that
-     `DELIVERY.md` names and keeps the session in memory only. `--success-url`
-     is required with `--login`. Anchor it to the signed-in path, as in `^https://[^/]+/admin/`,
-     because an unanchored pattern also matches a sign-in URL that carries a
-     `returnUrl`.
-   - Never start interactive or third-party auth flows, such as OAuth consent,
-     `vercel login` or `gh auth`, and never create accounts. They act as the
-     operator. If the QA login fails, stop and report the failing step; the
-     script saves `login-failure.png`.
-   - Mask the client's personal data with each shot's `mask` selectors.
+6. **Capture through the deliverables core.** Configure `[qa.capture]` in
+   `.cas/config.toml`: `serve` with a `{port}` placeholder for local revisions,
+   or `base_url` for a deployed environment; `shots` names the committed list.
+   Set `credentials_env` to an environment-variable name whose value is the
+   readable QA credential-file path (`email:` and `password:` lines). Set
+   `login_path` and an anchored `success_url`, for example
+   `^https://[^/]+/admin/`, plus the project's form selectors. Never put the
+   account secret in config or a report. Keep the session in memory.
+   - Run `cas deliverable capture --task <task> --target <branch>` for a
+     merge-base/head pair from immutable checkouts in one bounded QA run.
+   - For production/staging, configure the environment and run
+     `cas deliverable capture --task <task> --side before`, then configure the
+     delivered environment and run the same command with `--side after`.
+     Both runs use the same shot IDs, framing and masks. Preserve the receipt
+     source; never label a deployed screenshot as a Git build.
+   - Without a catalog, the core runs affected journeys at both revisions and
+     pairs their final-stage screenshots only when both runs pass.
+   - Mask personal data with `qa.capture.mask` or each shot's `mask`. A missing
+     requested mask fails capture. Auth failures produce a finding without an
+     unmasked failure screenshot. Follow the normal PM handoff for unavailable
+     evidence; never create an account or start third-party consent.
 
-   A shot that lands on a different path than it requested fails as
-   `redirected to …`, which is how a lost session shows. View every image.
-   Re-shoot any image that shows a loading state, an error toast, a dev
-   overlay, a logged-out page or empty data the requirement claims is
-   populated. Done when the script exits 0, `manifest.json` lists every shot
-   id and every image has been viewed.
+   Run `cas deliverable pairs --task <task>` to select verified complete pairs
+   from `<task-artifacts>/qa/pairs/pairs.json`. An unpaired capture is excluded.
+   View every image and re-shoot loading states, errors, logged-out screens or
+   empty data. Done when capture exits 0, every required shot has both sides
+   with matching framing/masks, and every image has been viewed.
 7. **Write the markdown**
    `docs/sow/<sow-slug>/reports/<date>-<sow-slug>-round-<n>.md` to
    [references/report-contract.md](references/report-contract.md). Done when

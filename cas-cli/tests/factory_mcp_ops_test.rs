@@ -10740,6 +10740,9 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
     ] {
         let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
         let env = FactoryTestEnv::with_server_supervisor();
+        // cas-b403: a logged-in project, so the rebind writes through the
+        // production SyncingTaskStore rather than the bare SQLite store.
+        std::fs::write(env.cas_root.join("cloud.json"), r#"{"token":"test-token"}"#).unwrap();
         let worker = "rebind-worker";
         let path = init_pushed_worker_repo(&env, worker);
         let project = env.cas_root.parent().unwrap();

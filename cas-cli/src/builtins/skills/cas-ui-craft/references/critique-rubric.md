@@ -27,6 +27,12 @@ npm exec --yes --package=playwright -- node <skills-dir>/cas-ui-craft/scripts/vi
   --strict --artifact-dir <artifacts_root>/<project-key>/<task-id>/visual-qa <artifact-or-url>
 ```
 
+Both resting and journey captures wait for rendered images to decode after
+print/screen changes. `--ready-timeout-ms` also bounds that image wait (default
+5000ms). An image that rejects decoding or exceeds the bound is an
+`image-not-decoded` finding with its selector and alt label; visual allowlists
+cannot suppress it, so a blank capture never receives PASS.
+
 It renders the page headless at 1280×800 and 390×800 in light and dark (add
 `--viewport 390x844` for the phone fold), checks every text node's contrast and every box for
 clipping, overlap, and phone-width overflow, and prints PASS or the failing nodes. Paste the PASS

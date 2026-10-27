@@ -1080,6 +1080,12 @@ mod supervisor_handoff_tests {
             .enqueue_operator_message("commander:Daniel@Phone", "ending", "Go", Some("old-session"), None, None, false, None, &stamp)
             .unwrap()
             .id();
+        // The predecessor already had this one in its turn; moving it would deliver it twice.
+        let seen = queue
+            .enqueue_operator_message("commander:Daniel@Phone", "ending", "Seen", Some("old-session"), None, None, false, None, &stamp)
+            .unwrap()
+            .id();
+        queue.record_recipient_surfaced(seen, "ending", cas_store::SurfacingSource::HookSurfaced).unwrap();
         handle_session_end(
             &HookInput { session_id: ending.id.clone(), reason: Some("prompt_input_exit".into()), ..Default::default() },
             Some(&root),
@@ -1098,5 +1104,7 @@ mod supervisor_handoff_tests {
         assert!(row.processed_at.is_none(), "the successor still has to read it");
         let copies = queue.peek_all(100).unwrap().into_iter().filter(|r| r.prompt == "Go").count();
         assert_eq!(copies, 1, "re-routing moves the one row; it never copies it");
+        let seen = queue.queued_prompt(seen).unwrap().unwrap();
+        assert_eq!(seen.target, "ending", "a row the predecessor already saw stays with it");
     }
 }

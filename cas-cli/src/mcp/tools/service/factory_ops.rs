@@ -12624,11 +12624,11 @@ mod spawn_lifecycle_tests {
     #[test]
     fn codex_spawn_requires_selected_account_cas_cba9() {
         use std::os::unix::fs::PermissionsExt;
-        let env = crate::test_support::TestEnvGuard::temp_home();
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
         let bin = env.home().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let codex = bin.join("codex");
-        std::fs::write(&codex, "#!/bin/sh\nif [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in'; else echo 'Not logged in'; exit 1; fi\n").unwrap();
+        std::fs::write(&codex, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.163.0'; exit 0; fi\nif [ -f \"$CODEX_HOME/auth.json\" ]; then echo 'Logged in'; else echo 'Not logged in'; exit 1; fi\n").unwrap();
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
         if std::env::var_os("CODEX_SPAWN_FIXTURE_CHILD").is_none() {
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -12663,6 +12663,31 @@ mod spawn_lifecycle_tests {
             !error.contains(logged_out.to_str().unwrap()),
             "logged-out home must not be offered: {error}"
         );
+        // The real direct-spawn entry must reach this refusal before the
+        // legacy strict fallback can replace it with a default-home error.
+        env.set("CAS_FACTORY_BUILD_GUARD", "off");
+        let project = env.home().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let cas_root = crate::store::init_cas_dir(&project).unwrap();
+        let core = CasCore::with_daemon(cas_root.clone(), None, None);
+        let tasks = core.open_task_store().unwrap();
+        tasks.init().unwrap();
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request: FactoryRequest = serde_json::from_value(serde_json::json!({
+            "action": "spawn_workers", "count": 1, "cli": "codex"
+        })).unwrap();
+        let direct_error = tokio::runtime::Builder::new_current_thread()
+            .enable_all().build().unwrap().block_on(service.factory_spawn_workers_in(
+                &crate::ops::fleet::FleetContext::operator("codex-account-fixture"), request,
+            )).expect_err("direct spawn must refuse the unselected account");
+        for detail in ["config_dir", logged_in.to_str().unwrap()] {
+            assert!(direct_error.message.contains(detail), "missing {detail:?}: {direct_error}");
+        }
+        use cas_store::SpawnQueueStore;
+        assert!(crate::store::open_spawn_queue_store(&cas_root).unwrap().peek(10).unwrap().is_empty());
         spec.config_dir = Some(logged_in.to_str().unwrap().to_string());
         preflight_account_auth(&[spec.clone()]).expect("explicit account passes auth preflight");
         spec.requester_config_dir = spec.config_dir.take();

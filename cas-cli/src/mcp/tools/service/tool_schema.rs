@@ -82,9 +82,10 @@ pub(crate) const COORDINATION_FIELDS: &[&str] = &[
 /// tools. Each names only what the parameter does for coordination's own
 /// actions.
 pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
-    ("id", "Agent id (default caller); message_status: peer message id."),
-    ("target", "Recipient: agent, supervisor, all_workers, operator or commander:<label>; remind default self."),
-    ("message", "Body chars (configurable defaults): 1200; blocker/merge 2500; task notes 1500. Over-cap operator/Commander refused; supervisor to agent spills to artifact."),
+    ("action", "Operation. inbox=inbox_poll; interrupt=message urgent=true."),
+    ("id", "Agent id (default self); message_status: message id."),
+    ("target", "Recipient: agent, supervisor, all_workers, operator, commander:<label>; remind: self."),
+    ("message", "Body chars (configurable): 1200; blocker/merge 2500; notes 1500. Over-cap operator/Commander refused; supervisor-to-agent spills to artifact."),
     ("urgent", "Interrupt recipient and inject next; discards in-flight work."),
     ("blocker", "Blocker escalation; wakes idle supervisor."),
     ("merge_request", "Parked task_id merge request."),
@@ -92,24 +93,24 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("kind", "answer|status|receipt|ask|blocker; receipts never wake a supervisor."),
     ("wake", "message: false keeps a directed message inbox-only; broadcasts never wake"),
     ("options", "Operator ask choices; tap returns the label with in_reply_to."),
-    ("attachment", "Published artifact id for a Commander turn."),
+    ("attachment", "Published artifact id for Commander."),
     // Keep explicit caller contracts within the 3,600 B coordination budget.
     ("supersede_key", "Broadcast: newest per key wins."),
     ("sticky", "Broadcast: late joiners get it."),
     ("task_id", "Parked task for merge_request; remind: bind to task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
-    ("notification_id", "message_ack/message_status: its id. inbox_poll: read it even if transport holds it; polled rows not acked reappear once."),
+    ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked polled rows reappear once."),
     ("limit", "inbox_poll: max rows."),
     ("name", "register/session_start: agent name."),
-    ("agent_type", "register/session_start: primary, sub_agent, worker or ci."),
-    ("parent_id", "register/session_start: parent agent id."),
+    ("agent_type", "register/session_start: primary|sub_agent|worker|ci."),
+    ("parent_id", "register/session_start: parent id."),
     ("session_id", "register/session_start/session_end: harness id."),
-    ("remind_message", "Required reminder text; message kind=ask: default taken at deadline."),
+    ("remind_message", "Required reminder text; message kind=ask: default at deadline."),
     ("remind_delay_secs", "Delay seconds; message kind=ask: deadline."),
-    ("remind_event", "task_completed, task_blocked, worker_idle, epic_completed, epic_split_decided. External events: cross_session=true."),
+    ("remind_event", "task_completed|task_blocked|worker_idle|epic_completed|epic_split_decided; external: cross_session=true."),
     ("remind_filter", "split {\"split_id\":\"<id>\"}; branch_contained_in {\"commit\":\"<ref>\",\"target_branch\":\"main\"}; tag_exists {\"tag\":\"v1.0.0\"}; ci_completed {\"sha\":\"<40-hex>\",\"workflow\":\"CI\"} (workflow optional); task {\"task_id\":\"cas-1234\"}."),
     ("remind_id", "remind_cancel: reminder id."),
-    ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800 (7 days); 0=never."),
+    ("remind_ttl_secs", "TTL seconds: default 3600; external default 604800; 0=never."),
     ("cross_session", "remind: survive session end and task close."),
     ("scope", "peers: all=account-wide."),
 ];
@@ -426,6 +427,12 @@ mod tests {
             );
         }
         let bytes = |schema: &JsonObject| serde_json::to_string(schema).unwrap().len();
+        eprintln!(
+            "MCP serialized bytes: tools/list={}, coordination={}, factory={}",
+            serde_json::to_vec(&tools).unwrap().len(),
+            bytes(&coordination),
+            bytes(&factory),
+        );
         assert!(
             bytes(&coordination) <= 3_600,
             "the worker tool must stay small: coordination {} B (factory {} B)",

@@ -18,6 +18,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 
 ## Core Concepts
 
+- **Provider account** - a Claude or Codex subscription identified by provider account and organization/workspace IDs, displayed by login email; `cas accounts list` shows usage, absolute resets and duplicate or login findings while legacy folder names remain launch aliases.
 - **Factory session** - a live supervisor and its worker fleet, coordinated through the terminal UI.
 - **Epic / Task** - an epic is a larger outcome built from tasks; a task is a prioritized work item with a lease, notes, an owner and close requirements.
 - **Epic split** - two supervisors divide one epic's tasks; each side's claim is refused to the other until the split is accepted, cancelled or expires.
@@ -47,7 +48,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 6. An operator prepares a client-branded SOW delivery report with before/after evidence for each requested change; `cas deliverable finalize --audience customer` brands it, embeds its screenshots, refuses internal vocabulary and prints and checks the A4 and Letter PDFs.
    For a client product, `cas-customer-release-notes` writes the period's customer release notes from its `docs/deliverables/PROFILE.md`; the client's `DESIGN.md` shapes the layout, and the same `finalize --audience customer` call produces the HTML and PDFs.
 7. An agent calls `cas serve` tools to find tasks, memories, rules, skills and knowledge while it works.
-8. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
+8. The operator runs `cas accounts list` (or `--json`) to compare Claude and Codex subscriptions by email, usage and reset time, and identify duplicate or dead folders before choosing a session account.
+9. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 
 ## Authoritative Sources
 

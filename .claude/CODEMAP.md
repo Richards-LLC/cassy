@@ -45,7 +45,9 @@
 
 - `cas-cli/src/main.rs`, `cas-cli/src/lib.rs`, `cas-cli/src/cli/mod.rs` - executable entry, module composition, command definitions and dispatch.
 - `cas-cli/src/cli/init.rs` - initialization, recovery advice and MCP provisioning.
-- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/account_picker.rs` - account selection, profile setup and login commands.
+- `cas-cli/src/account_registry.rs` - shared Claude/Codex identity, login evidence, duplicate flags and structured usage snapshots with a four-second deadline.
+- `cas-cli/src/cli/accounts.rs`, `cas-cli/src/accounts.rs` - subscription list/JSON, shared account configuration and link/drift operations.
+- `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs` - registry-backed account names, legacy profile aliases, profile setup and login commands.
 - `cas-cli/src/cli/doctor.rs`, `cas-cli/src/cli/doctor/` - health producers, grouped rendering and communication checks.
 - `cas-cli/src/cli/update.rs`, `cas-cli/src/cli/update/` - update phases, binding checks, discovery and receipts.
 - `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - managed files, Git reconciliation and locking.

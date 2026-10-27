@@ -20,6 +20,31 @@ use anyhow::{Context, Result};
 
 pub(crate) use crate::account_registry::LoginState;
 
+/// Bound provider status subprocesses and reap a wedged child. Probes capture
+/// both streams so provider diagnostics cannot pollute `accounts list --json`.
+pub(crate) fn probe_output(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+    child.wait_with_output().ok()
+}
+
 /// One detected account profile.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct Profile {
@@ -173,7 +198,7 @@ pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
             name: profile.name.clone(),
             label: format!(
                 "{} — {}{}{}",
-                profile.name,
+                profile.display_name,
                 login_state_label(profile.login_state),
                 if profile.active { ", active" } else { "" },
                 profile

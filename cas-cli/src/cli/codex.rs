@@ -176,7 +176,9 @@ pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(["login", "status"]);
 
-    let Ok(output) = command.output() else {
+    let Some(output) =
+        super::account_picker::probe_output(command, std::time::Duration::from_secs(2))
+    else {
         return LoginState::Unknown;
     };
     classify_login_output(
@@ -230,7 +232,7 @@ fn with_usage(mut profiles: Vec<super::account_picker::Profile>) -> Vec<super::a
     let usage = super::limits::usage_summaries(
         crate::accounts::Provider::Codex,
         accounts,
-        std::time::Duration::from_secs(4),
+        crate::account_registry::USAGE_DEADLINE,
     );
     for profile in &mut profiles {
         profile.usage = usage.get(&profile.name).cloned();

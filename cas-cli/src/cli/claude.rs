@@ -24,8 +24,8 @@
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, FromArgMatches, Subcommand};
@@ -140,30 +140,8 @@ pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState
 
 /// Run an auth probe with a hard upper bound, killing and reaping a wedged
 /// provider process before returning `Unknown`.
-fn probe_login_state_command(mut command: Command, timeout: Duration) -> LoginState {
-    let Ok(mut child) = command.spawn() else {
-        return LoginState::Unknown;
-    };
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return LoginState::Unknown;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return LoginState::Unknown;
-            }
-        }
-    }
-
-    let Ok(output): Result<Output, _> = child.wait_with_output() else {
+fn probe_login_state_command(command: Command, timeout: Duration) -> LoginState {
+    let Some(output) = super::account_picker::probe_output(command, timeout) else {
         return LoginState::Unknown;
     };
     let Ok(status) = serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout) else {
@@ -222,7 +200,7 @@ fn with_usage(mut profiles: Vec<Profile>) -> Vec<Profile> {
     let usage = super::limits::usage_summaries(
         crate::accounts::Provider::Claude,
         accounts,
-        Duration::from_secs(4),
+        crate::account_registry::USAGE_DEADLINE,
     );
     for profile in &mut profiles {
         profile.usage = usage.get(&profile.name).cloned();
@@ -677,6 +655,7 @@ fn exec_claude(_command: &mut Command) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
     use super::*;
     use std::ffi::OsStr;
 

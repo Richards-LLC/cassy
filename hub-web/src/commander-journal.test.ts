@@ -507,7 +507,10 @@ describe("journal privacy and immutable replay", () => {
   });
   it("live/history defaults dedupe but changed attachments cannot authorize an ACK", async () => {
     const { a } = journals(); expect(await a.persistReply(scope, reply, fence)).toBe(true);
-    expect(await a.persistReply(scope, { ...reply, kind: "answer", attachments: [] }, fence)).toBe(true);
+    // Live absent Option<String> is null; history omits it.
+    const live = JSON.parse(JSON.stringify({ ...reply, kind: "answer", attachments: [], operator_label: null }));
+    expect(await a.persistReply(scope, live, fence)).toBe(true);
+    expect(await a.persistReply(scope, { ...reply, operator_label: 17 } as unknown as typeof reply, fence)).toBe(false);
     expect(await a.persistReply(scope, { ...reply, attachments: [{ artifact_id: "art-other", name: "changed", mime: "text/plain", size_bytes: 1, sha256: "a".repeat(64) }] }, fence)).toBe(false);
     expect((await a.read(scope)).replies).toHaveLength(1);
   });

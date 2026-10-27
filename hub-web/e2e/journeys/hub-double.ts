@@ -53,6 +53,8 @@ export type ProtocolTime = {
 };
 
 export type DoubleOptions = {
+  /** Unreceipted daemon replies, independent of the bounded history page. */
+  pendingReplies?: Record<string, Array<Record<string, unknown>>>;
   /** Controlled journeys own the browser and protocol reply clock together. */
   time?: ProtocolTime;
   machines: Machine[];
@@ -167,6 +169,9 @@ export class HubDouble {
   readonly historyRequests: Array<Record<string, unknown>> = [];
   /** Browser application ACKs, separate from socket forwarding. */
   readonly persistedReplies: Array<{ session: string; notification_id: number }> = [];
+  readonly pendingReplies = new Map<string, Array<Record<string, unknown>>>();
+  readonly pendingReplyForwards: number[] = [];
+  private readonly pendingReplyFlights = new Map<string, Set<number>>();
   /** Artifact ids Commander asked a signed view URL for (cassy#910). */
   readonly artifactRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
@@ -242,7 +247,22 @@ export class HubDouble {
   /** Turns pushed live, replayed in history like a real hub after a reload. */
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
-  constructor(private readonly page: Page, private readonly options: DoubleOptions) {}
+  constructor(private readonly page: Page, private readonly options: DoubleOptions) {
+    for (const [session, rows] of Object.entries(options.pendingReplies ?? {})) this.pendingReplies.set(session, [...rows]);
+  }
+
+  private forwardPendingReplies(session: string, ws: WebSocketRoute): void {
+    const flights = this.pendingReplyFlights.get(session) ?? new Set<number>();
+    this.pendingReplyFlights.set(session, flights);
+    for (const reply of this.pendingReplies.get(session) ?? []) {
+      if (flights.size >= 10) break;
+      const id = Number(reply.notification_id);
+      if (flights.has(id)) continue;
+      flights.add(id);
+      this.pendingReplyForwards.push(id);
+      ws.send(JSON.stringify({ OperatorReply: reply }));
+    }
+  }
 
   private now(): number { return this.options.time?.now() ?? journeyNow(); }
   private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
@@ -1212,7 +1232,15 @@ export class HubDouble {
     const kind = typeof message === "string" ? message : Object.keys(message)[0] ?? "";
     this.frames.push({ machine: machineId, session, kind, body: typeof message === "string" ? message : message[kind] });
     this.observed();
-    if (message.OperatorReplyPersisted) this.persistedReplies.push({ session, notification_id: Number(message.OperatorReplyPersisted.notification_id) });
+    if (message.OperatorReplyPersisted) {
+      const id = Number(message.OperatorReplyPersisted.notification_id);
+      this.persistedReplies.push({ session, notification_id: id });
+      if (this.pendingReplies.has(session)) {
+        this.pendingReplies.set(session, this.pendingReplies.get(session)!.filter(reply => reply.notification_id !== id));
+        this.pendingReplyFlights.get(session)?.delete(id);
+        this.forwardPendingReplies(session, ws);
+      }
+    }
     if (message.SendMessage) {
       const m = message.SendMessage;
       this.sends.push({
@@ -1240,6 +1268,10 @@ export class HubDouble {
         reply = { ...reply, messages: [...reply.messages, ...live.messages], replies: [...reply.replies, ...live.replies] };
       }
       ws.send(JSON.stringify({ ConversationHistory: { request_id: request.request_id, ...reply } }));
+      if (request.before === undefined && this.pendingReplies.has(session)) {
+        this.pendingReplyFlights.delete(session);
+        this.forwardPendingReplies(session, ws);
+      }
     }
   }
 }

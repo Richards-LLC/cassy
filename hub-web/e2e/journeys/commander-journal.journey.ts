@@ -362,8 +362,9 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     // once that socket is open (as the sibling parts below wait for it).
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __receiptOrder: string[] }).__receiptOrder.length = 0; });
-    id = hub.supervisorSays(PELICAN, "A durable reply on this device");
+    id = hub.supervisorSays(PELICAN, "A durable reply on this device", { operator_label: null });
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
+    expect(hub.persistedReplies.filter((row) => row.notification_id === id)).toHaveLength(1);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(1);
     // The reply's own commit comes first and its ACK after it; the forced
     // restore read sits between or after them and is not the reply's commit.
@@ -383,6 +384,32 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
     await expect.poll(() => hub.persistedReplies.length).toBeGreaterThan(before);
     await expect(page.getByRole("log").getByText("A durable reply on this device", { exact: true })).toHaveCount(1);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(1);
+  });
+});
+
+test("HUB-J3 null-label pending backlog drains once and stays drained after attach (cas-c641)", journeyPart, async ({ page, journey }) => {
+  // More than one daemon batch; none is in the bounded history page.
+  const pending = Array.from({ length: 23 }, (_, index) => ({
+    notification_id: 10_000 + index, reply_to: null, message: `Previously stuck reply ${index}`,
+    summary: "", device_id: "journey-device", operator_label: null, kind: "answer", attachments: [],
+  }));
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true, pendingReplies: { [PELICAN]: pending } });
+  await journey.stage("Pending live frames commit and each releases its queue row", async () => {
+    await journey.open(); await choose(page);
+    await expect.poll(() => hub.pendingReplies.get(PELICAN)?.length).toBe(0);
+    expect(hub.persistedReplies.map(row => row.notification_id).sort()).toEqual(pending.map(row => row.notification_id).sort());
+    expect((await journalRows(page, "replies")).map(row => row.reply?.notification_id).sort()).toEqual(pending.map(row => row.notification_id).sort());
+    await expect(page.getByRole("log").getByText("Previously stuck reply 22", { exact: true })).toBeVisible();
+  });
+  await journey.stage("A fresh attach restores the journal without replaying the drained backlog", async () => {
+    const requests = hub.historyRequests.length;
+    await page.reload(); await choose(page);
+    await expect.poll(() => hub.historyRequests.length).toBeGreaterThan(requests);
+    await expect(page.getByRole("log").getByText("Previously stuck reply 22", { exact: true })).toBeVisible();
+    expect(hub.pendingReplies.get(PELICAN)).toEqual([]);
+    expect(hub.pendingReplyForwards).toHaveLength(pending.length);
+    expect(hub.persistedReplies).toHaveLength(pending.length);
+    expect(await journalRows(page, "replies")).toHaveLength(pending.length);
   });
 });
 

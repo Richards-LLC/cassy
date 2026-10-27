@@ -240,7 +240,7 @@ mod internal_llm_tests {
             (crate::internal_llm::INTERNAL_LLM_ENV, None),
         ]);
         // Codex 0.163 sends its thread UUID as the hook session_id.
-        handle_hook(
+        let output = handle_hook(
             "SessionStart",
             HookInput {
                 session_id: "01a14bb6-a0a5-75c1-ac0f-cb08b8ea56a5".into(),
@@ -251,6 +251,14 @@ mod internal_llm_tests {
             },
         )
         .expect("codex session start");
+        let Some(HookSpecificOutput::SessionStart { additional_context, .. }) =
+            output.hook_specific_output
+        else {
+            panic!("Codex startup must return session guidance");
+        };
+        // pin: Codex's explicit skill syntax must be directly usable at startup.
+        assert!(additional_context.contains("`$finish`"), "{additional_context}");
+        assert!(!additional_context.contains("/finish"), "{additional_context}");
         let agents = crate::store::open_agent_store(&cas_root).expect("agent store");
         let ids: Vec<String> = agents
             .list(None)

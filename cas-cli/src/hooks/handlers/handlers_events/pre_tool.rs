@@ -7397,6 +7397,8 @@ mod workspace_contract_tests {
             OperatorWriteGrant, OperatorWriteMode, OperatorWritePolicy, OperatorWriteRoot,
             save_operator_policy,
         };
+        // No host Downloads folder or user-level roots in this count.
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let project = tempfile::tempdir().unwrap();
         let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
         let managed = project.path().canonicalize().unwrap().join("managed");

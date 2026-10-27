@@ -42,7 +42,8 @@ mod worktree;
 // `pub` so integration tests in `cas-cli/tests/` can reach
 // `cli::cloud::execute_team_push` (cas-1f44 T4). Internal; no stable API.
 pub mod cloud;
-mod config;
+// cas-f0ea0: pub(crate) so hook tests drive the operator write-roots path.
+pub(crate) mod config;
 mod config_tui;
 mod coordination;
 mod device;

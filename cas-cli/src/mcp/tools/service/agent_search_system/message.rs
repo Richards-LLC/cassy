@@ -7268,7 +7268,7 @@ mod cas_89e1_post_merge_message_type_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn supervisor_operator_reply_preserves_paired_device_thread_route() {
+    async fn supervisor_operator_reply_is_held_until_reattach_and_keeps_one_thread_row() {
         let _env = TestEnvGuard::with_optional_vars(&[
             ("CAS_AGENT_ROLE", None),
             ("CAS_AGENT_NAME", None),
@@ -7301,6 +7301,21 @@ mod cas_89e1_post_merge_message_type_tests {
             .expect("queue Commander message")
             .id();
 
+        let now = chrono::Utc::now();
+        let mut status: crate::factory_daemon_health::DaemonLoopStatus =
+            serde_json::from_value(serde_json::json!({
+                "pid": 1,
+                "session": "factory-operator",
+                "written_at": now,
+                "last_pass_at": now,
+                "phase": "idle",
+                "passes": 1,
+                "pending_spawns": 0,
+                "commander_clients": 0,
+            }))
+            .expect("detached Commander status");
+        crate::factory_daemon_health::write_status(&cas_root, &status).unwrap();
+
         let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
         core.set_agent_id_for_testing(supervisor.id);
         #[cfg(feature = "mcp-proxy")]
@@ -7322,7 +7337,7 @@ mod cas_89e1_post_merge_message_type_tests {
                 .await
                 .expect("supervisor reply queues successfully"),
         );
-        assert!(response.contains("queued for phone-7"), "{response}");
+        assert!(response.contains("held for delivery to phone-7"), "{response}");
 
         let rows = queue
             .peek_operator_replies("factory-operator", 10)
@@ -7349,6 +7364,20 @@ mod cas_89e1_post_merge_message_type_tests {
         assert_eq!(snapshot["acknowledge_prompt_id"], commander);
         assert_eq!(event.audience_state, "unenrolled");
         assert!(queue.queued_prompt(commander).unwrap().unwrap().acked_at.is_some());
+
+        // A restarted daemon reopens the same durable thread when the phone
+        // attaches. Its application receipt closes the live delivery lane;
+        // later history replays keep the same one notification identity.
+        status.commander_clients = Some(1);
+        crate::factory_daemon_health::write_status(&cas_root, &status).unwrap();
+        let reattached = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+        assert_eq!(reattached.peek_operator_replies("factory-operator", 10).unwrap().len(), 1);
+        for _ in 0..2 {
+            reattached.record_operator_reply_persisted(reply.id, "factory-operator", "phone-7").unwrap();
+            assert!(reattached.peek_operator_replies("factory-operator", 10).unwrap().is_empty());
+            let history = reattached.conversation_history("factory-operator", "phone-7", None, 10).unwrap();
+            assert_eq!(history.iter().filter(|row| row.id == reply.id).count(), 1);
+        }
     }
 
     /// cas-e829: an answer belongs to the session it is sent from. A row from

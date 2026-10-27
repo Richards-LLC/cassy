@@ -157,13 +157,18 @@ function dayKey(at: number): string {
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
+// Date#toLocaleDateString constructs a formatter on every call. History
+// presentation reuses these labels across frames and should reuse its formatters.
+const sameYearDay = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
+const otherYearDay = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
+
 export function dayLabel(at: number, now: number): string {
   const key = dayKey(at);
   if (key === dayKey(now)) return "Today";
   if (key === dayKey(now - 86_400_000)) return "Yesterday";
   const date = new Date(at);
   const sameYear = date.getFullYear() === new Date(now).getFullYear();
-  return date.toLocaleDateString(undefined, sameYear ? { weekday: "short", day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" });
+  return (sameYear ? sameYearDay : otherYearDay).format(date);
 }
 
 function turnOf(event: ConversationEvent): ThreadTurn {

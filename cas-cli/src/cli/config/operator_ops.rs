@@ -261,7 +261,7 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     }
     println!("{}", roots.join(","));
     if !every_project.is_empty() {
-        eprintln!("note: also in effect for every project (~/.cas/config.toml and your Downloads folder):");
+        eprintln!("note: user-level and Downloads roots also apply:");
         for root in &every_project {
             eprintln!("  {root}");
         }

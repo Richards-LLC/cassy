@@ -861,6 +861,66 @@ mod tests {
         assert!(!observed_pin_matches("grok 0.2.118", "0.2.117"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn codex_registered_accounts_enable_standard_lane_cas_cba9() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(&codex, r#"#!/bin/sh
+[ "$1 $2" = 'login status' ] || exit 2
+printf '%s\n' "$CODEX_HOME" >> "$HOME/probes"
+if [ -f "$CODEX_HOME/auth.json" ]; then
+    printf 'Logged in using ChatGPT\n'
+else
+    printf 'Not logged in\n'
+    exit 1
+fi
+"#).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("PATH", &bin);
+        let logged_out = env.home().join(".codex-a@example.com");
+        let logged_in = env.home().join(".codex-b@example.com");
+        for dir in [&logged_out, &logged_in] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(logged_in.join("auth.json"), "{}").unwrap();
+        let registry = cas_factory::embedded_registry().unwrap();
+        for (explicit, authenticated) in [(false, true), (true, false), (false, false)] {
+            if explicit {
+                env.set("CODEX_HOME", &logged_out);
+            } else {
+                env.remove("CODEX_HOME");
+            }
+            let now = CapabilitySnapshot::now_ms();
+            let mut snapshot = CapabilitySnapshot::default();
+            for name in ["codex_sol_6_1", "codex_sol_6"] {
+                let (identity, evidence) = probe_harness(
+                    Harness::CodexCli, &registry.recipes[name].model, None,
+                    &BinaryObservation::Observed("fixture".into()), None, now,
+                    Deadline::after(Duration::from_secs(5)),
+                );
+                assert_eq!(evidence.availability, if authenticated {
+                    CapabilityAvailability::Available
+                } else { CapabilityAvailability::Unavailable });
+                if !authenticated {
+                    assert!(evidence.remediation.as_deref().unwrap().contains("codex login"));
+                }
+                snapshot.record(identity, evidence);
+            }
+            assert_eq!(cas_factory::resolve_lane("standard", &snapshot).is_ok(), authenticated);
+            if explicit {
+                std::fs::remove_file(logged_in.join("auth.json")).unwrap();
+            }
+        }
+        let probes = std::fs::read_to_string(env.home().join("probes")).unwrap();
+        assert!(probes.lines().all(|line| line == logged_out.to_str().unwrap()
+            || line == logged_in.to_str().unwrap()), "unexpected home probed: {probes}");
+        assert!(!env.home().join(".codex").exists());
+    }
+
     #[test]
     fn codex_auth_parser_distinguishes_logged_out_and_unknown() {
         let logged_out = classify_codex_auth(false, "Not logged in", "", 10);

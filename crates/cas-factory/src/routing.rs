@@ -1961,6 +1961,24 @@ candidates = ["primary", "fallback"]
     }
 
     #[test]
+    fn exhausted_lane_names_each_skipped_recipe_cas_cba9() {
+        let mut registry = embedded_registry().unwrap();
+        registry.recipes.get_mut("codex_sol_6").unwrap().status = RecipeStatus::Suspended;
+        registry.recipes.get_mut("codex_sol_6").unwrap().reason = Some("maintenance".into());
+        let mut snapshot = CapabilitySnapshot::default();
+        snapshot.record(
+            recipe_route_identity(&registry.recipes["codex_sol_6_1"], "default"),
+            CapabilityEvidence::new(CapabilityAvailability::Unavailable, CapabilitySnapshot::now_ms())
+                .with_reason("Codex account is logged out"),
+        );
+        let error = resolve_lane_from_registry("standard", &snapshot, &registry).unwrap_err().to_string();
+        assert!(error.contains("no active recipe candidates"), "{error}");
+        for detail in ["codex_sol_6_1", "Codex account is logged out", "codex_sol_6", "maintenance"] {
+            assert!(error.contains(detail), "missing {detail:?}: {error}");
+        }
+    }
+
+    #[test]
     fn resolve_lane_refuses_unknown_fallback_availability() {
         let registry = parse_registry(
             r#"

@@ -84,6 +84,19 @@ function transport(multiplex = false) {
   };
 }
 
+// Keep the real signer, but let event delivery get ahead of its asynchronous
+// completion deterministically instead of relying on a loaded host (cas-33167).
+function pauseSigning(): () => void {
+  const sign = crypto.subtle.sign.bind(crypto.subtle);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(crypto.subtle, "sign").mockImplementation(async (...args) => {
+    await gate;
+    return sign(...args);
+  });
+  return release;
+}
+
 class TransportSocket {
   static readonly OPEN = 1;
   static readonly CONNECTING = 0;
@@ -331,8 +344,10 @@ describe("Commander live connection lifecycle", () => {
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
+    const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
     await vi.waitFor(() => expect(events).toHaveLength(100));
+    releaseSigning();
     const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
     expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
     connection.stop();
@@ -391,8 +406,10 @@ describe("Commander live connection lifecycle", () => {
     connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
+    const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i, revision: 0 });
     await vi.waitFor(() => expect(events).toHaveLength(100));
+    releaseSigning();
     expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
   });
   it("resyncs gaps, accepts replay revisions, and resets on a new epoch (cas-2b3a5)", async () => {

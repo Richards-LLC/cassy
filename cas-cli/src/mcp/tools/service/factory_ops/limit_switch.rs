@@ -577,7 +577,7 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
-            assert!(detail.detail.contains("old -> next"));
+            assert!(detail.detail.split_whitespace().collect::<Vec<_>>().join(" ").contains("old -> next"));
             assert!(detail.switch_queued);
             let queue = crate::store::open_spawn_queue_store(&root).unwrap();
             let rows = queue.peek(10).unwrap();

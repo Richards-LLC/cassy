@@ -474,6 +474,7 @@ fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
         json: None,
         full: None,
+        detail: None,
         action: action.to_string(),
         id: None,
         name: None,

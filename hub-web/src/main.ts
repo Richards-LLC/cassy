@@ -5377,6 +5377,12 @@ app.addEventListener("focusout", () => {
 // cas-2a26: following Explorer from the app switcher closes the menu here.
 app.addEventListener("click", (event) => { if (closeAppSwitcherAfterFollow(event.target)) countUsage("app-switch.explorer"); });
 
+// Count an explicit inspection, rather than every async diagram paint.
+app.addEventListener("toggle", (event) => {
+  const detail = event.target;
+  if (detail instanceof HTMLDetailsElement && detail.open && detail.closest(".rich-diagram, .rich-diff")) countUsage("rich-content.inspect");
+}, true);
+
 // A tap on any artifact (the thread's sheet, the context rail, the operator
 // thread) opens the hosted copy through a signed view URL (cassy issue 910).
 app.addEventListener("click", (event) => {

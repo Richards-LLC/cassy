@@ -122,6 +122,11 @@ invariants:
     check: Run the supervisor working indicator regression in conversations.test.ts and the single revoked machine part of network-switch.journey.ts with a recent Output frame, then verify an answered real Claude supervisor at its idle prompt and during reconnecting.
     bug:
       task: cas-a252
+  HUB-J11-DEVICE-ATTACHMENT:
+    bug:
+      task: cas-9e46
+    statement: An open phone reconnects to the replacement daemon and is counted by its next completed loop pass
+    check: 'Use the real HUB-J11 daemon-replacement and hub-restart stages; require a fresh Welcome and commander_clients >= 1 in the first published post-Welcome completed-pass snapshot for the current daemon PID; retain loop passes and timestamps.'
   HUB-J12-GOAL:
     statement: the conversation reconnects by itself and every message I send is delivered exactly once
     check: 'Walk HUB-J12 in hub-web/e2e/journeys/network-switch.journey.ts; verify the expected experience and edge
@@ -208,8 +213,8 @@ bug_families:
     title: Dead daemon viewers close, catalog-gap retries re-subscribe, and fresh replacement sessions retire outage attention while retaining history
     found: '2026-10-27'
     fixed_by: [b8b8d0d234daa7f6ce565138ff5a61ae45288f95]
-    tasks: [cas-d53c]
-    invariants: [HUB-J11-GOAL]
+    tasks: [cas-d53c, cas-9e46]
+    invariants: [HUB-J11-GOAL, HUB-J11-DEVICE-ATTACHMENT]
     journeys: [HUB-J11]
   read-only-pairing-dead-end:
     title: A read-only pairing told the person holding the phone to run a CLI command, and its composer looked writable
@@ -1007,6 +1012,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J11-GOAL
+  - HUB-J11-DEVICE-ATTACHMENT
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

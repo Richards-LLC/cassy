@@ -4876,41 +4876,66 @@ auth = "env:{token}"
         assert!(!paths.codex_config.unwrap().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_registration_preserves_unrelated_configuration() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = paths_in(dir.path());
-        let codex = paths.codex_config.clone().unwrap();
-        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
-        std::fs::write(
-            &codex,
-            "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n\
-             [mcp_servers.other]\ncommand = \"other-mcp\"\n",
-        )
-        .unwrap();
-
-        let args = VioletArgs {
-            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: violet_hub_url().to_string(),
-            ..test_args()
-        };
-        run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
-
-        let written = std::fs::read_to_string(&codex).unwrap();
-        assert!(
-            written.contains("# operator comment worth keeping"),
-            "{written}"
-        );
-        assert!(written.contains("[mcp_servers.other]"), "{written}");
-        assert!(
-            written.contains(&format!("bearer_token_env_var = \"{}\"", TEST_TOKEN_ENV)),
-            "{written}"
-        );
-        let parsed: toml::Value = toml::from_str(&written).unwrap();
-        assert_eq!(
-            parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER].as_str(),
-            Some(VIOLET_DEFAULT_BYPASS_ENV)
-        );
+        use crate::accounts::Provider;
+        use std::os::unix::fs::symlink;
+        let original = "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-mcp\"\n";
+        for mode in ["registered", "explicit", "none"] {
+            let mut env = crate::test_support::TestEnvGuard::temp_home();
+            let home = env.home().to_path_buf();
+            env.set("XDG_CONFIG_HOME", home.join(".config"));
+            env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+            env.set("SHELL", "/bin/bash");
+            env.set(TEST_TOKEN_ENV, FAKE_TOKEN);
+            env.set(VIOLET_DEFAULT_BYPASS_ENV, FAKE_BYPASS);
+            env.set_current_dir(&home);
+            let base = Provider::Codex.base_dir(&home).join("config.toml");
+            let mut expected = Vec::new();
+            if mode != "none" {
+                fs::create_dir_all(base.parent().unwrap()).unwrap();
+                fs::write(&base, original).unwrap();
+                for name in [".codex-a@example.com", ".codex-b@example.com"] {
+                    let account = home.join(name);
+                    fs::create_dir_all(&account).unwrap();
+                    fs::write(account.join("auth.json"), "{}").unwrap();
+                    symlink(&base, account.join("config.toml")).unwrap();
+                    expected.push(account.join("config.toml"));
+                }
+            }
+            if mode == "explicit" {
+                let selected = home.join("selected-codex");
+                fs::create_dir_all(&selected).unwrap();
+                fs::write(selected.join("config.toml"), original).unwrap();
+                env.set("CODEX_HOME", &selected);
+                expected = vec![selected.join("config.toml")];
+            }
+            let args = VioletArgs {
+                skip_verify: true,
+                token_env: Some(TEST_TOKEN_ENV.into()),
+                ..test_args()
+            };
+            let outcome = execute(&args, false, true).unwrap();
+            assert!(!home.join(".codex").exists(), "{mode}: recreated retired default home");
+            if mode == "none" {
+                assert!(outcome.summary.iter().any(|line| line == "codex: no account"), "{:?}", outcome.summary);
+                continue;
+            }
+            for config in expected {
+                let written = fs::read_to_string(&config).unwrap();
+                assert!(written.contains("# operator comment worth keeping"), "{mode}: {written}");
+                assert!(written.contains("[mcp_servers.other]"), "{mode}: {written}");
+                let parsed: toml::Value = toml::from_str(&written).unwrap();
+                assert_eq!(parsed["mcp_servers"]["violet"]["bearer_token_env_var"].as_str(), Some(TEST_TOKEN_ENV), "{mode}: {written}");
+                assert_eq!(parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER].as_str(), Some(VIOLET_DEFAULT_BYPASS_ENV));
+                assert!(!written.contains(FAKE_TOKEN));
+            }
+            assert!(crate::accounts::drift(Provider::Codex, &home).unwrap().is_empty(), "{mode}: integration broke linked account config");
+            if mode == "explicit" {
+                assert_eq!(fs::read_to_string(&base).unwrap(), original, "explicit selection changed other registered homes");
+            }
+        }
     }
 
     #[test]

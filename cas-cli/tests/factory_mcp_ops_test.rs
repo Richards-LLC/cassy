@@ -3193,6 +3193,39 @@ async fn test_recycle_worker_refuses_dirty_worktree() {
 // =============================================================================
 
 #[tokio::test]
+async fn worker_status_usage_limit_names_each_provider() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let home = std::env::var("HOME").unwrap();
+    let clone = env.cas_root.parent().unwrap().join("project");
+    let slug = clone.to_string_lossy().replace(['/', '.'], "-");
+    for cli in ["claude", "codex"] {
+        let id = env.register_worker_with_metadata(cli, HashMap::from([
+            ("worker_cli".into(), cli.into()),
+            ("clone_path".into(), clone.to_string_lossy().into()),
+        ]));
+        let mut agent = env.agent_store().get(&id).unwrap();
+        agent.cc_session_id = Some(format!("limit-{cli}"));
+        env.agent_store().update(&agent).unwrap();
+        let (path, body) = if cli == "claude" {
+            (PathBuf::from(&home).join(format!(".claude/projects/{slug}/limit-claude.jsonl")),
+             serde_json::json!({"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","timestamp":"2026-10-27T12:00:00Z","message":{"content":[{"type":"text","text":"You've hit your limit"}]}}).to_string())
+        } else {
+            (PathBuf::from(&home).join(".codex/sessions/2026/10/27/rollout-limit-codex.jsonl"),
+             format!("{}\n{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"limit-codex","cwd":clone,"originator":"codex-tui","source":"cli"}}),
+                serde_json::json!({"timestamp":"2026-10-27T12:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","has_credits":false}})))
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let text = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
+    for (cli, label) in [("claude", "Claude"), ("codex", "Codex")] {
+        let block = worker_status_block(&text, cli).expect("limited worker listed");
+        assert!(block.contains(&format!("[UNAVAILABLE: {label} usage limit]")), "{block}");
+    }
+}
+
+#[tokio::test]
 async fn test_worker_status_empty() {
     let env = FactoryTestEnv::new();
 

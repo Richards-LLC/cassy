@@ -665,6 +665,37 @@ mod tests {
                 detail.contains("no eligible account until 2026-10-27T13:00:00+00:00"),
                 "{detail}"
             );
+            // No registered row for the old account: still use its known alias.
+            let mut unregistered = meta.clone();
+            unregistered.old_account = PathBuf::from(format!("/private/account-home/{}legacy@example.invalid", provider.prefix()));
+            let (_, detail) = plan_switch(&agent, &unregistered, std::slice::from_ref(&next), now, &Default::default(), |_| Ok(()));
+            let mut notice_errors = Vec::new();
+            if !detail.contains("legacy@example.invalid -> next") || detail.contains("/private/account-home") {
+                notice_errors.push(detail);
+            }
+
+            // Eligibility needs every blocking window to reset. Ignore accounts
+            // whose login/disabled/duplicate state makes their early reset unusable.
+            let mut disabled = next.clone();
+            disabled.flags.disabled = true;
+            let mut logged_out = next.clone();
+            logged_out.login_state = crate::account_registry::LoginState::LoggedOut;
+            let mut stale = next.clone();
+            stale.flags.stale_login = true;
+            let mut duplicate = next.clone();
+            duplicate.flags.duplicate_of = Some(PathBuf::from("/canonical"));
+            let mut unknown = next.clone();
+            unknown.windows.clear();
+            for (five, weekly, hours) in [(20., 95., 8), (95., 20., 3), (95., 95., 8)] {
+                let blocked = crate::account_selection::tests::row(provider, "blocked", 8, weekly, five);
+                let rows = [blocked, disabled.clone(), logged_out.clone(), stale.clone(), duplicate.clone(), unknown.clone()];
+                let (_, detail) = plan_switch(&agent, &meta, &rows, now, &Default::default(), |_| panic!("none eligible"));
+                let reset = (now + chrono::Duration::hours(hours)).to_rfc3339();
+                if !detail.contains(&format!("no eligible account until {reset}")) {
+                    notice_errors.push(format!("expected {reset}: {detail}"));
+                }
+            }
+            assert!(notice_errors.is_empty(), "{cli}: {notice_errors:#?}");
             // A new registration resuming the same refusal uses the same durable key.
             assert_eq!(episode_key("session", "worker", "first"), meta.episode);
         }

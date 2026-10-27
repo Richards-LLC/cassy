@@ -1937,9 +1937,13 @@ mod worker_attention_tests {
             },
         );
 
+        let _ = enqueue_usage_limit_switch_relay(&cas_dir, "switched", "episode-2",
+            "Worker switched, task cas-held: usage limit; queued account switch old -> next. Worktree, branch and task bindings kept.");
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 4, "a persisted occurrence replays idempotently");
+        assert_eq!(rows.len(), 5, "a persisted occurrence replays idempotently");
+        let switched = rows.iter().find(|row| row.prompt.contains("old -> next")).unwrap();
+        assert!(!switched.prompt.contains("reassign or recover"), "{}", switched.prompt);
         assert!(rows.iter().all(|row| {
             row.target == "supervisor"
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)

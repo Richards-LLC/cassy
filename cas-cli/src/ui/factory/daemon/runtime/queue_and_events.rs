@@ -12888,6 +12888,45 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn limit_switch_error_notifies_once_per_episode_even_after_daemon_restart() {
+        use crate::mcp::tools::service::factory_ops::UsageLimitEvidence;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "provision-test");
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let agents = crate::store::open_agent_store(&root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role("supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor);
+        supervisor.factory_session = Some("provision-test".into());
+        agents.register(&supervisor).unwrap();
+        for cli in ["claude", "codex"] {
+            let mut worker = cas_types::Agent::new_with_role(cli.into(), cli.into(), cas_types::AgentRole::Worker);
+            worker.factory_session = Some("provision-test".into());
+            worker.metadata.insert("worker_cli".into(), cli.into());
+            agents.register(&worker).unwrap();
+            let mut task = cas_types::Task::new(format!("cas-{cli}"), "held task".into());
+            task.assignee = Some(cli.into());
+            crate::store::open_task_store(&root).unwrap().add(&task).unwrap();
+        }
+        for _restart in 0..2 {
+            let mut daemon = super::super::provisioning_tests::daemon(&root);
+            for stamp in ["first", "first", "next"] {
+                daemon.decide_usage_limited_workers(0, ["claude", "codex"].into_iter().map(|cli| (
+                    cli.into(), cli.into(), UsageLimitEvidence::Limited { first_evidence: stamp.into() }
+                )).collect());
+                daemon.drain_relay_jobs();
+            }
+        }
+        let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
+        assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
+        for row in rows {
+            assert_eq!(row.target, "supervisor");
+            assert!(row.prompt.contains("worker worktree missing; nothing stopped"), "{}", row.prompt);
+            assert!(row.prompt.contains("reassign or recover"), "fallback still needs attention: {}", row.prompt);
+        }
+        assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history() {
         let _env = crate::test_support::TestEnvGuard::temp_home();

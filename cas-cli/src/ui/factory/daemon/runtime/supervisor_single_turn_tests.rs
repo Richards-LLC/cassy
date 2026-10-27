@@ -36,6 +36,10 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
 
 /// [`fixture`] with the supervisor launched under `cli`.
 pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempDir, FactoryDaemon) {
+    fixture_with_readiness(cli, true).await
+}
+
+async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (tempfile::TempDir, FactoryDaemon) {
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
@@ -79,7 +83,9 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
         )
         .unwrap();
     // This private shell has no harness startup phase to wait through.
-    pane.backdate_spawn_for_test(Duration::from_secs(6));
+    if ready {
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+    }
     daemon.app.mux.add_pane(pane);
     daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
@@ -95,7 +101,7 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
             }
             if banner.windows(b"ready".len()).any(|bytes| bytes == b"ready")
                 && root.path().join("input").is_file()
-                && daemon.app.mux.pane_ready_for_injection(&name)
+                && (!ready || daemon.app.mux.pane_ready_for_injection(&name))
             {
                 break;
             }
@@ -264,8 +270,6 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
     typed_once(&root, &mut daemon, needle).await;
 }
 
-/// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
-/// physical submit is not evidence that the real Codex harness accepted a turn.
 /// cas-dd2e: sturdy-lion-37 wrote its startup brief while Claude was still
 /// starting. Its transport reservation then hid the pending wake forever.
 /// The private PTY only captures input: it never reads Teams or replies for us.
@@ -274,12 +278,16 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
     if !fixture_child("claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready") {
         return;
     }
-    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
-    let (root, mut daemon) = fixture().await;
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // The operator selected a named Claude profile. That launch includes the
+    // real SessionStart fallback bundle, too large for the inline-body path.
+    let profile = env.home().join("claude-profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &profile);
+    let (root, mut daemon) = fixture_with_readiness(cas_mux::SupervisorCli::Claude, false).await;
     let cas = daemon.app.cas_dir().to_path_buf();
     let name = daemon.app.supervisor_name().to_string();
     // Keep the first pass inside the real harness startup-readiness window.
-    daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::ZERO);
     daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
         cas.clone(), daemon.app.project_scope(),
     );
@@ -317,7 +325,7 @@ async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() 
         queue.message_delivery_report(row.id).unwrap());
     let typed = retried.unwrap();
     assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
-    assert!(typed.contains(&format!("[cas #{} ", row.id)), "wake identifies its startup body: {typed:?}");
+    assert!(typed.contains(&format!("inbox_poll notification_id={}", row.id)), "wake identifies its startup body: {typed:?}");
     assert_eq!(teams_messages(&daemon), held, "retry must not append another Teams body");
 }
 

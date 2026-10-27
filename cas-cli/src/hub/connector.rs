@@ -500,6 +500,126 @@ mod tests {
         );
     }
 
+    /// cas-d53c: a daemon replacement must end the old viewer stream, not
+    /// leave a browser reading Live on a dead upstream and replay its Welcome.
+    #[tokio::test]
+    async fn daemon_replacement_closes_old_viewers_and_replays_only_fresh_welcome_cas_d53c() {
+        use super::super::{MachineEventKind, ViewerRecvError};
+        use tokio::sync::oneshot;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let daemon = tokio::spawn(async move {
+            let mut stop_rx = Some(stop_rx);
+            for title in ["original", "replacement"] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                let welcome = DaemonMessage::Welcome {
+                    session_name: "factory-a".into(),
+                    state: SessionState {
+                        focused_pane: Some(title.into()),
+                        panes: vec![PaneInfo {
+                            id: title.into(),
+                            kind: PaneKind::Supervisor,
+                            focused: true,
+                            title: title.into(),
+                            exited: false,
+                        }],
+                        epic_id: None,
+                        epic_title: None,
+                        cols: 120,
+                        rows: 40,
+                    },
+                    scrollback: None,
+                    protocol_version: crate::ui::factory::PROTOCOL_VERSION,
+                    capabilities: crate::ui::factory::daemon_capabilities(),
+                    pane_bootstrap: vec![],
+                };
+                socket
+                    .send(Message::Binary(serde_json::to_vec(&welcome).unwrap()))
+                    .await
+                    .unwrap();
+                if let Some(stop) = stop_rx.take() {
+                    stop.await.unwrap();
+                    socket.close(None).await.unwrap();
+                } else {
+                    futures_util::future::pending::<()>().await;
+                }
+            }
+        });
+        let events = MachineEventBus::new(16);
+        events.reconcile_sessions(["factory-a"]).await;
+        let mut event_rx = events.subscribe();
+        let mux = SessionMultiplexer::new(8);
+        let mut unrelated = mux
+            .subscribe("other-session", std::iter::empty::<String>())
+            .await;
+        let connector = DaemonConnector::new(mux.clone(), events.clone());
+        let mut first = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        let welcome = first.recv().await.unwrap();
+        let mut second = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        assert_eq!(second.recv().await.unwrap(), welcome);
+
+        // The actual observed lifecycle: Welcome, removed, disconnected,
+        // added. The hub must also end both old viewer streams so browsers
+        // subscribe again and receive the replacement's authoritative state.
+        events.reconcile_sessions(std::iter::empty::<&str>()).await;
+        assert_eq!(
+            event_rx.recv().await.unwrap().kind,
+            MachineEventKind::SessionRemoved
+        );
+        stop_tx.send(()).unwrap();
+        let disconnected = tokio::time::timeout(std::time::Duration::from_secs(5), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(disconnected.kind, MachineEventKind::DaemonDisconnected);
+        events.reconcile_sessions(["factory-a"]).await;
+        assert_eq!(
+            event_rx.recv().await.unwrap().kind,
+            MachineEventKind::SessionAdded
+        );
+        for viewer in [&mut first, &mut second] {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(5), viewer.recv())
+                    .await
+                    .expect("dead upstream must close its viewer stream"),
+                Err(ViewerRecvError::Closed),
+            );
+        }
+        let mut fresh = connector
+            .attach("factory-a", port, std::iter::empty::<String>(), None)
+            .await
+            .unwrap();
+        let fresh = tokio::time::timeout(std::time::Duration::from_secs(5), fresh.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let DaemonMessage::Welcome { state, .. } = serde_json::from_slice(&fresh.bytes).unwrap()
+        else {
+            panic!("replacement must send a fresh Welcome");
+        };
+        assert_eq!(
+            state.focused_pane.as_deref(),
+            Some("replacement"),
+            "never replay a dead daemon's snapshot"
+        );
+        mux.publish("other-session", fresh.clone()).await.unwrap();
+        assert_eq!(
+            unrelated.recv().await.unwrap(),
+            fresh,
+            "retiring one session must preserve others"
+        );
+        daemon.abort();
+    }
+
     #[test]
     fn welcome_replay_drops_departed_panes_and_keeps_a_bounded_active_tail() {
         let mut message = DaemonMessage::Welcome {

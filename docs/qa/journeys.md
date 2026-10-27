@@ -596,7 +596,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Interrupt the supervisor from the keyboard — Tab from the list search reaches Interrupt without stopping in a terminal; Enter sends one InterruptPane for the supervisor pane, the toast says "Interrupted the cas-src supervisor.", and focus stays on Interrupt
 3. Take control from another device to interrupt — with Studio iPad in control, Interrupt forces the take and says so: "Took control from Studio iPad. Interrupted the cas-src supervisor."
 4. Read the raw output from the keyboard — Enter on Raw output opens the "Raw output" drawer, described as read-only, with the supervisor's text ("The supervisor is ready.") read from the daemon's rendered rows; it takes no text and typing in it sends nothing; Escape closes it and returns focus to Raw output
-5. Closing Raw output, switching conversations or going back to the phone list releases this browser's input lease. A take finishing after the move is released in order and never interrupts the abandoned supervisor (cas-5ca4).
+5. Leaving a conversation releases its input control — switching conversations releases this browser's input lease; going back to the phone list does too (cas-5ca4).
+6. A take that finishes after leaving cannot keep the old conversation — the late take is released in order and never interrupts the abandoned supervisor (cas-5ca4).
 
 #### Expected experience
 

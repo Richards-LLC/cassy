@@ -247,6 +247,16 @@ CREATE TABLE IF NOT EXISTS spawn_queue (
 CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(action) WHERE processed_at IS NULL;
 "#;
 
+/// Durable limit decisions outlive spawn queue cleanup. A refusal is a decision too.
+pub const USAGE_LIMIT_EPISODE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS usage_limit_episodes (
+    episode TEXT PRIMARY KEY,
+    detail TEXT NOT NULL,
+    request_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
 /// Trait for spawn queue operations
 pub trait SpawnQueueStore: Send + Sync {
     /// Initialize the store (create tables)
@@ -357,6 +367,15 @@ pub trait SpawnQueueStore: Send + Sync {
         spec_json: Option<&str>,
         factory_session: Option<&str>,
     ) -> Result<i64>;
+
+    /// Atomically remember an episode and optionally enqueue its replacement.
+    /// Replays return the original decision and cannot enqueue a second recycle.
+    fn record_limit_episode(
+        &self, episode: &str, worker: &str, session: &str,
+        spec_json: Option<&str>, detail: &str,
+    ) -> Result<(Option<i64>, String)>;
+
+    fn limit_episode(&self, episode: &str) -> Result<Option<(Option<i64>, String)>>;
 
     /// Poll for pending requests owned by this session, plus legacy unscoped rows.
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>>;
@@ -680,6 +699,17 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
         )
     }
 
+    fn record_limit_episode(
+        &self, _episode: &str, _worker: &str, _session: &str,
+        _spec_json: Option<&str>, detail: &str,
+    ) -> Result<(Option<i64>, String)> {
+        Ok((None, detail.to_owned()))
+    }
+
+    fn limit_episode(&self, _episode: &str) -> Result<Option<(Option<i64>, String)>> {
+        Ok(None)
+    }
+
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let now = Utc::now().to_rfc3339();
@@ -914,6 +944,29 @@ mod tests {
         let store = SqliteSpawnQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn limit_episode_is_atomic_and_survives_reopen_and_queue_cleanup() {
+        let (dir, store) = create_test_store();
+        let first = store.record_limit_episode("agent:timestamp", "worker", "session-a", Some("{}"), "old -> next").unwrap();
+        assert!(first.0.is_some());
+        assert_eq!(store.peek(10).unwrap().len(), 1);
+        drop(store);
+        let store = SqliteSpawnQueueStore::open(dir.path()).unwrap();
+        store.init().unwrap();
+        assert_eq!(store.record_limit_episode("agent:timestamp", "worker", "session-a", Some("{}"), "changed").unwrap(), first);
+        assert_eq!(store.peek(10).unwrap().len(), 1);
+        store.conn.lock().unwrap().execute("DELETE FROM spawn_queue", []).unwrap();
+        assert_eq!(store.limit_episode("agent:timestamp").unwrap(), Some(first));
+        let blocked = store.record_limit_episode("agent:later", "worker", "session-a", None, "no eligible account until tomorrow").unwrap();
+        assert_eq!(blocked.0, None);
+        assert_eq!(store.record_limit_episode("agent:later", "worker", "session-a", Some("{}"), "retry").unwrap(), blocked);
+        assert!(store.peek(10).unwrap().is_empty());
+        // A failed queue insert must also roll back the episode decision.
+        store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_recycle BEFORE INSERT ON spawn_queue BEGIN SELECT RAISE(ABORT, 'fixture'); END").unwrap();
+        assert!(store.record_limit_episode("agent:error", "worker", "session-a", Some("{}"), "switch").is_err());
+        assert!(store.limit_episode("agent:error").unwrap().is_none());
     }
 
     #[test]

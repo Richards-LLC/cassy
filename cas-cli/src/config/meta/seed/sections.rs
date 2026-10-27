@@ -1,6 +1,7 @@
 use crate::config::meta::registry::ConfigRegistry;
 
 pub(super) fn add_section_descriptions(registry: &mut ConfigRegistry) {
+    registry.section_descriptions.insert("accounts", "Claude and Codex account recommendations");
     registry
         .section_descriptions
         .insert("sync", "Rule synchronization to .claude/rules/");

@@ -100,6 +100,26 @@ impl Config {
         };
 
         match key {
+            "accounts.disabled" => {
+                let disabled: Vec<String> = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
+                if disabled.iter().any(|v| !std::path::Path::new(v).is_absolute()) {
+                    return Err(MemError::Parse("accounts.disabled requires absolute account folder paths".into()));
+                }
+                self.accounts.get_or_insert_with(Default::default).disabled = disabled;
+            }
+            "accounts.selection" => {
+                let selection = match value {
+                    "soonest-reset" => AccountSelection::SoonestReset,
+                    "most-headroom" => AccountSelection::MostHeadroom,
+                    _ => return Err(MemError::Parse("accounts.selection must be soonest-reset or most-headroom".into())),
+                };
+                self.accounts.get_or_insert_with(Default::default).selection = selection;
+            }
+            "accounts.threshold" => {
+                let threshold = value.parse::<u8>().ok().filter(|n| (1..=100).contains(n))
+                    .ok_or_else(|| MemError::Parse("accounts.threshold must be between 1 and 100".into()))?;
+                self.accounts.get_or_insert_with(Default::default).threshold = threshold;
+            }
             "slack.channels" => {
                 let mut slack = self.slack.clone().unwrap_or_default();
                 slack.channels = serde_json::from_str(value)

@@ -433,7 +433,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` on a 390 px phone paired with full control access but without `session:launch`
 - **Goal:** I start a supervisor on a project from my phone, without SSH, and land in its conversation
-- **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`
+- **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`, `cas-cli/src/hub/launch_env.rs`, `cas-cli/src/account_selection.rs`
 - **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
 - **Gaps:** the hub's project catalog, folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab closing is proven at epic assembly on a real machine
 
@@ -442,7 +442,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 1. A paired controller enables launch from Commander — "+ New session" (named by its goal before the permission too) opens the sheet's grant view, which names the machine, confirms "Start new sessions", and opens the launch form without a new pairing
 2. The granted scope stays available — after reload "New session" opens the launch form instead of the grant view
 3. Open New session and find the project — the most recently used project leads, a running project offers Attach, Browse is offered because the machine has launch folders, filtering narrows the list, and Claude is marked as the machine's default
-4. Choose the account — every Claude account on the machine is listed with the default preselected; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
+4. Choose the account — every Claude account on the machine is listed with the recommendation preselected and marked with its reset/headroom reason (falling back to the default when no recommendation exists); the operator can select another logged-in account; a logged-out one can't be picked and shows its `cas claude login <name>` command with Copy; a long address wraps; Grok has no account step; the summary names the chosen account
 5. Start it and land on its supervisor — Start shows progress ("Starting <project> with <supervisor> (<account>) on <machine>…"), sends the account, and lands in the new session's conversation once the machine lists it
 6. The session outlives the tab — after a reload the new session is still running and its conversation reopens
 7. A running project attaches instead of starting again — Attach opens the existing session's conversation

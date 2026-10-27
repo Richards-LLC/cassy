@@ -327,7 +327,11 @@ mcp__cas__task action=ready."
 /// launch-time intro prompt CAS queues for the worker (see
 /// `queue_codex_worker_intro_prompt`). Uses Claude's `mcp__cas__` tool prefix.
 pub fn claude_worker_contract(worker_name: &str) -> String {
-    worker_contract("mcp__cas__", Some(worker_name), WorkerContractHarness::Claude)
+    worker_contract(
+        "mcp__cas__",
+        Some(worker_name),
+        WorkerContractHarness::Claude,
+    )
 }
 
 /// The Codex worker contract, delivered as `--config developer_instructions`.
@@ -367,7 +371,9 @@ pub fn worker_contract(
     worker_name: Option<&str>,
     harness: WorkerContractHarness,
 ) -> String {
-    let named = worker_name.map(|name| format!(" ({name})")).unwrap_or_default();
+    let named = worker_name
+        .map(|name| format!(" ({name})"))
+        .unwrap_or_default();
     let identity = match harness {
         WorkerContractHarness::Grok => {
             format!("You are a Cassy Factory Worker{named}, running on Grok Build.")
@@ -1314,6 +1320,47 @@ impl PtyConfig {
     ///   so workers in clones can access the main repo's CAS state.
     /// * `supervisor_name` - For workers, the name of their supervisor (enables `target: supervisor`)
     #[allow(clippy::too_many_arguments)]
+    /// Continue a copied worker transcript while retaining the launch recipe.
+    pub fn resume_worker_session(&mut self, backend: &str, id: &str) -> Result<()> {
+        match backend {
+            "claude" => {
+                let index = self
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--session-id")
+                    .ok_or_else(|| Error::pty("Claude worker launch has no session selector"))?;
+                self.args[index] = "--resume".into();
+                self.args[index + 1] = id.to_owned();
+                for (key, value) in &mut self.env {
+                    if key == "CAS_SESSION_ID" {
+                        *value = id.to_owned();
+                    }
+                }
+            }
+            "codex" => {
+                // The startup prompt stays the final positional argument.
+                let prompt = self
+                    .args
+                    .pop()
+                    .ok_or_else(|| Error::pty("Codex worker prompt missing"))?;
+                let index = if self.command == "codex" {
+                    0
+                } else {
+                    self.args
+                        .iter()
+                        .position(|arg| arg == "codex")
+                        .map(|i| i + 1)
+                        .ok_or_else(|| Error::pty("Codex executable missing"))?
+                };
+                self.args.insert(index, "resume".into());
+                self.args.push(id.to_owned());
+                self.args.push(prompt);
+            }
+            _ => return Err(Error::pty("Harness does not support worker continuation")),
+        }
+        Ok(())
+    }
+
     pub fn claude(
         name: &str,
         role: &str,
@@ -2146,16 +2193,21 @@ pub fn claude_supports_flag(flag: &str) -> bool {
         return claude_help_options(&flags).contains(flag);
     }
     static OPTIONS: OnceLock<BTreeSet<String>> = OnceLock::new();
-    OPTIONS.get_or_init(|| {
-        let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
-            return BTreeSet::new();
-        };
-        if !output.status.success() {
-            return BTreeSet::new();
-        }
-        claude_help_options(&format!("{}\n{}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
-    }).contains(flag)
+    OPTIONS
+        .get_or_init(|| {
+            let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
+                return BTreeSet::new();
+            };
+            if !output.status.success() {
+                return BTreeSet::new();
+            }
+            claude_help_options(&format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        })
+        .contains(flag)
 }
 
 fn claude_help_options(help: &str) -> std::collections::BTreeSet<String> {
@@ -2495,7 +2547,11 @@ fn worker_spawn_audit(
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, mut config: PtyConfig) -> Result<Self> {
-        if let Some((_, reason)) = config.env.iter().find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR") {
+        if let Some((_, reason)) = config
+            .env
+            .iter()
+            .find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR")
+        {
             return Err(Error::pty(reason.clone()));
         }
         config.apply_worker_credential_policy();
@@ -2523,7 +2579,12 @@ impl Pty {
             ));
         }
 
-        if is_codex && config.env.iter().any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker") {
+        if is_codex
+            && config
+                .env
+                .iter()
+                .any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker")
+        {
             crate::codex_hook_warning::warn_at_launch(&config);
         }
 
@@ -2611,8 +2672,12 @@ impl Pty {
 
         if let Some(audit) = worker_spawn_audit(&config, |key| std::env::var(key).ok()) {
             if let Some(warning) = audit.credential_warning {
-                tracing::warn!(worker = audit.worker, cli = audit.cli, credentials = warning,
-                    "factory worker credential warning; review factory.worker_credential_env");
+                tracing::warn!(
+                    worker = audit.worker,
+                    cli = audit.cli,
+                    credentials = warning,
+                    "factory worker credential warning; review factory.worker_credential_env"
+                );
             }
             tracing::info!(
                 worker = audit.worker,
@@ -3376,16 +3441,82 @@ mod tests {
         .expect("the wrapped shell must spawn");
         let is_codex = pty.is_codex;
         pty.child.wait().expect("the probe must exit");
-        assert!(!is_codex, "a model argument must not select Codex prompt timing");
+        assert!(
+            !is_codex,
+            "a model argument must not select Codex prompt timing"
+        );
+    }
+
+    #[test]
+    fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
+        for (command, args) in [
+            ("codex", vec!["--yolo", "-c", "x=y", "startup"]),
+            ("nice", vec!["-n", "10", "codex", "--yolo", "startup"]),
+            (
+                "claude",
+                vec!["--session-id", "new-session", "--model", "opus"],
+            ),
+        ] {
+            let mut config = PtyConfig {
+                command: command.into(),
+                args: args.into_iter().map(str::to_owned).collect(),
+                cwd: None,
+                env: vec![("CAS_SESSION_ID".into(), "new-session".into())],
+                env_remove: vec![],
+                rows: 24,
+                cols: 80,
+            };
+            let backend = if command == "claude" {
+                "claude"
+            } else {
+                "codex"
+            };
+            config
+                .resume_worker_session(backend, "old-session")
+                .unwrap();
+            if backend == "codex" {
+                assert_eq!(config.args.last().map(String::as_str), Some("startup"));
+                assert_eq!(config.args[config.args.len() - 2], "old-session");
+                let index = if command == "nice" { 3 } else { 0 };
+                assert_eq!(config.args[index], "resume");
+            } else {
+                assert!(!config.args.iter().any(|a| a == "--session-id"));
+                assert_eq!(&config.args[..2], &["--resume", "old-session"]);
+                assert_eq!(config.env[0].1, "old-session");
+            }
+        }
     }
 
     #[test]
     fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
         for (args, cli, account_env) in [
-            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
-            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
-            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
-            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
+            (
+                vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"],
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                vec![
+                    "--adjustment=10",
+                    "codex",
+                    "--effort",
+                    "high",
+                    "--model",
+                    "large",
+                ],
+                "codex",
+                "CODEX_HOME",
+            ),
+            (
+                vec!["-n10", "claude", "--effort", "high", "--model", "codex"],
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                vec!["--", "codex", "--model", "large"],
+                "codex",
+                "CODEX_HOME",
+            ),
         ] {
             let config = PtyConfig {
                 command: "nice".into(),
@@ -3393,7 +3524,12 @@ mod tests {
                 env: vec![("CAS_AGENT_ROLE".into(), "worker".into())],
                 ..PtyConfig::default()
             };
-            assert_eq!(config.effective_command() == "codex", cli == "codex", "{:?}", config.args);
+            assert_eq!(
+                config.effective_command() == "codex",
+                cli == "codex",
+                "{:?}",
+                config.args
+            );
             let audit = worker_spawn_audit(&config, |_| Some("/selected-account".into())).unwrap();
             assert_eq!(audit.cli, cli);
             assert_eq!(audit.account_env, account_env);
@@ -3900,10 +4036,21 @@ mod tests {
         let data_home = fixture.path().join("data");
         std::fs::create_dir_all(config_home.join("neonctl")).unwrap();
         std::fs::create_dir_all(data_home.join("com.vercel.cli")).unwrap();
-        std::fs::write(config_home.join("neonctl/credentials.json"), "MOCK_NEON_CANARY").unwrap();
-        std::fs::write(data_home.join("com.vercel.cli/auth.json"), "MOCK_VERCEL_CANARY").unwrap();
+        std::fs::write(
+            config_home.join("neonctl/credentials.json"),
+            "MOCK_NEON_CANARY",
+        )
+        .unwrap();
+        std::fs::write(
+            data_home.join("com.vercel.cli/auth.json"),
+            "MOCK_VERCEL_CANARY",
+        )
+        .unwrap();
         let env = vec![
-            ("XDG_CONFIG_HOME".to_string(), config_home.display().to_string()),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                config_home.display().to_string(),
+            ),
             ("XDG_DATA_HOME".to_string(), data_home.display().to_string()),
         ];
         let script = r#"
@@ -3927,7 +4074,10 @@ echo SMOKE_DONE
             // No namespace here (e.g. already inside a masked worker): the
             // worker must be refused, never started with the store visible.
             let error = probe_output("worker", script, &env).await.unwrap_err();
-            assert!(error.to_string().contains("CAS_WORKER_STORE_ISOLATION"), "{error}");
+            assert!(
+                error.to_string().contains("CAS_WORKER_STORE_ISOLATION"),
+                "{error}"
+            );
             return;
         }
 
@@ -3938,16 +4088,25 @@ echo SMOKE_DONE
                 "supervisor {probe} probe must read the fixture store:\n{supervisor}"
             );
         }
-        assert!(supervisor.contains("vercel=MOCK_VERCEL_CANARY"), "{supervisor}");
+        assert!(
+            supervisor.contains("vercel=MOCK_VERCEL_CANARY"),
+            "{supervisor}"
+        );
         assert!(
             supervisor.contains("SMOKE_DONE") && !supervisor.contains("BROKEN_"),
             "host tooling is broken before masking:\n{supervisor}"
         );
 
         let worker = probe_output("worker", script, &env).await.unwrap();
-        assert!(!worker.contains("MOCK_"), "worker read a masked store:\n{worker}");
+        assert!(
+            !worker.contains("MOCK_"),
+            "worker read a masked store:\n{worker}"
+        );
         for probe in ["python", "perl", "pipe", "indirect", "proc", "vercel"] {
-            assert!(worker.contains(&format!("{probe}=")), "{probe} did not run:\n{worker}");
+            assert!(
+                worker.contains(&format!("{probe}=")),
+                "{probe} did not run:\n{worker}"
+            );
         }
         assert!(
             worker.contains("SMOKE_DONE") && !worker.contains("BROKEN_"),
@@ -3981,15 +4140,19 @@ echo SMOKE_DONE
                 command: cli.into(),
                 env: vec![
                     ("CAS_AGENT_ROLE".into(), "worker".into()),
-                    (WORKER_CREDENTIAL_WARNING_ENV.into(),
-                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into()),
+                    (
+                        WORKER_CREDENTIAL_WARNING_ENV.into(),
+                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into(),
+                    ),
                 ],
                 ..Default::default()
             };
             let audit = worker_spawn_audit(&config, |_| None).unwrap();
             assert_eq!(audit.cli, cli);
-            assert_eq!(audit.credential_warning,
-                Some("missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN"));
+            assert_eq!(
+                audit.credential_warning,
+                Some("missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN")
+            );
         }
     }
 
@@ -6231,7 +6394,8 @@ echo SMOKE_DONE
                     args: vec!["-n".into(), "10".into(), "claude".into()],
                     ..PtyConfig::default()
                 }
-                .effective_command() != "codex",
+                .effective_command()
+                    != "codex",
                 "the wrapper test must not classify every niced harness as Codex"
             );
         }
@@ -6488,7 +6652,10 @@ echo SMOKE_DONE
     fn opencode_hosted_lanes_pin_endpoint_and_key_environment_without_values() {
         let mut env = TestEnvGuard::new();
         let canaries = [
-            ("QWENCLOUD_TOKEN_PLAN_API_KEY", "sk-cas273e-token-plan-canary"),
+            (
+                "QWENCLOUD_TOKEN_PLAN_API_KEY",
+                "sk-cas273e-token-plan-canary",
+            ),
             ("DASHSCOPE_API_KEY", "sk-cas273e-payg-canary"),
         ];
         for (key, value) in canaries {
@@ -6958,7 +7125,12 @@ echo SMOKE_DONE
             None,
             None,
         );
-        assert_eq!(last(&supervisor).as_deref(), Some("codex"), "{:?}", supervisor.env);
+        assert_eq!(
+            last(&supervisor).as_deref(),
+            Some("codex"),
+            "{:?}",
+            supervisor.env
+        );
     }
 
     /// The supervisor path passes `factory_worker_cli = Some(<workers' cli>)`
@@ -7169,7 +7341,10 @@ echo SMOKE_DONE
             let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
             let expected = format!("{tool_prefix}factory action=epic_status id=<epic-id>");
             let bare_call = format!("{tool_prefix}factory action=epic_status`");
-            assert!(surface.contains(&expected), "{harness} is missing {expected}");
+            assert!(
+                surface.contains(&expected),
+                "{harness} is missing {expected}"
+            );
             assert!(
                 !surface.contains(&bare_call),
                 "{harness} still includes an epic_status call without its required id"

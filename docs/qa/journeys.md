@@ -170,8 +170,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 1. Open the conversation — the composer names the supervisor
 2. Write and send — the message appears at once as "Sending…" and the composer clears
-3. See it delivered — the hub's receipt turns "Sending…" into "Delivered" with a check
-   Delivered survives history replay after a reload and on another paired device, even before the supervisor consumes the queue row. A later history page never reverses a receipt or reply. A connected machine whose supervisor has not taken a pending message says "Waiting for supervisor" in its row and header.
+3. See its real progress — durable acceptance turns "Sending…" into "Queued for supervisor", without a delivery check. Only a real supervisor transport receipt earns "Delivered" and its check. Queue acceptance and delivery remain visible after a reload and on another paired device; older history/receipts never reverse delivery or a reply. A connected machine whose supervisor has not taken a pending message says "Waiting for supervisor" in its row and header. Queue and transport receipts alone never claim the supervisor is working.
 4. See it answered — the supervisor's reply arrives under it and "Delivered" steps aside
 5. A refused message says why — "Not sent", a plain reason and the next step on the message, said once (the composer only points at it); the list does not preview it as said
    - A refused Take control keeps focus on the message — when another device holds the session the take is refused; the message names the device in control, once, in plain words, and the composer only points at it; its Take control reads "Waiting for <device>" and is not pressable until that device releases control, then comes back on its own; keyboard focus stays on it, never the page body
@@ -186,7 +185,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Expected experience
 
 - Enter sends and Shift+Enter adds a new line.
-- The user can tell sent from delivered without reading attributes.
+- The user can distinguish sending, queued for the supervisor, delivered to its transport, and replied without reading attributes.
 - The composer status is in plain words, never protocol vocabulary.
 - A refusal says why in plain words, names the next step, and offers Edit and Retry right on the message; a control refusal also offers Take control there, so the step it names is always on screen.
 - Once its edit is sent, a refused message cannot be retried.

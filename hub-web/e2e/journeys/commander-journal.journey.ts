@@ -42,7 +42,7 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
     owner.deliverLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(1);
@@ -93,7 +93,7 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
   await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
     (hub.sends.length ? hub : other).deliverLatest(PELICAN);
     for (const tab of [page, peer]) {
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(2);

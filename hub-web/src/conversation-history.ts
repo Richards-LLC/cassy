@@ -29,7 +29,7 @@ export interface ConversationSend {
   text: string;
   /** `unconfirmed`: sent, but the hub's receipt never came (cas-1622). It may
    * or may not have arrived; the operator can retry it. */
-  state: "sending" | "acknowledged" | "replied" | "error" | "unconfirmed";
+  state: "sending" | "acknowledged" | "delivered" | "replied" | "error" | "unconfirmed";
   /** When this browser put the send on the wire (ms epoch); live sends only. */
   sentAt?: number;
   notificationId?: number;
@@ -254,7 +254,7 @@ export class ConversationHistory {
   }
 
   hasPending(): boolean {
-    return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged"));
+    return this.events.some(event => event.kind === "send" && (event.value.state === "sending" || event.value.state === "acknowledged" || event.value.state === "delivered"));
   }
 
   /**
@@ -264,7 +264,7 @@ export class ConversationHistory {
    * on it.
    */
   awaitingReply(): boolean {
-    return this.events.some(event => event.kind === "send" && !event.value.held && (event.value.state === "sending" || event.value.state === "acknowledged"));
+    return this.events.some(event => event.kind === "send" && !event.value.held && (event.value.state === "sending" || event.value.state === "acknowledged" || event.value.state === "delivered"));
   }
   /**
    * A new send comes after everything already in the thread, whatever the
@@ -458,8 +458,11 @@ export class ConversationHistory {
 
   /** Merge one durable operator message without duplicating a live ack. */
   hydrateSend(message: ConversationHistoryMessage, now: number = Date.now()): void {
+    // Even older daemons' history row is durable queue acceptance, never a wire-in-flight send.
+    const incoming = this.events.some((event) => event.kind === "reply" && event.value.reply_to === message.notification_id)
+      ? "replied" : message.state === "sending" ? "acknowledged" : message.state;
     if (this.foreign(message.session)) {
-      this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: message.state, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
+      this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: incoming, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
       return;
     }
     const existing = this.events.find((event) => event.kind === "send" && event.value.notificationId === message.notification_id);
@@ -468,8 +471,8 @@ export class ConversationHistory {
       existing.value.text = message.text;
       // History may race a live receipt or reply. Keep the furthest evidence
       // already seen instead of replaying an older Sending/Delivered state.
-      if (existing.value.state !== "replied" && !(existing.value.state === "acknowledged" && message.state === "sending")) {
-        existing.value.state = message.state;
+      if (existing.value.state !== "replied" && existing.value.state !== "delivered") {
+        existing.value.state = incoming;
       }
       existing.value.stamped = message.stamped;
       existing.value.deviceLabel = message.operator_label;
@@ -491,7 +494,7 @@ export class ConversationHistory {
     if (restored?.kind === "send") {
       const value = restored.value;
       value.notificationId = message.notification_id;
-      value.state = message.state;
+      value.state = incoming;
       value.stamped = message.stamped;
       value.deviceLabel = message.operator_label;
       value.replyTo = message.reply_to ?? value.replyTo;
@@ -509,7 +512,7 @@ export class ConversationHistory {
         id: `history:${message.notification_id}`,
         target: message.target,
         text: message.text,
-        state: message.state,
+        state: incoming,
         notificationId: message.notification_id,
         stamped: message.stamped,
         deviceLabel: message.operator_label,
@@ -639,7 +642,8 @@ export class ConversationHistory {
     if (shown !== undefined && Number.isFinite(shown) && !this.arrivals.has(`s:${receipt.notification_id}`)) { this.arrivals.set(`s:${receipt.notification_id}`, shown); this.liveArrivals.add(`s:${receipt.notification_id}`); }
     // A late receipt means it did go: a dismissed "failed" send is back in the thread as delivered.
     delete send.value.dismissed;
-    send.value.state = this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id) ? "replied" : "acknowledged";
+    if (send.value.state === "replied" || this.events.some((event) => event.kind === "reply" && event.value.reply_to === receipt.notification_id)) send.value.state = "replied";
+    else if (send.value.state !== "delivered") send.value.state = "acknowledged";
     if (send.value.held) send.value.sentAt ??= Date.now();
     delete send.value.held;
     delete send.value.error;
@@ -770,16 +774,9 @@ export class ConversationHistory {
     const since = send.unconfirmedAt;
     return this.events.slice(index + 1).some((event) => event.kind === "reply" && (since === undefined || (event.arrivedAt ?? event.at ?? 0) > since));
   }
-  /**
-   * Whether `send` says "Delivered" (journey F4): a send this visit put on the
-   * wire whose receipt came, until a reply linked to it (reply_to) makes it
-   * "replied". An unrelated supervisor turn crossing it no longer hides the
-   * tick, and a receipt that lands after such a turn still shows one.
-   * Hydrated history (no sentAt) stays unmarked, so an old thread is not a
-   * column of ticks.
-   */
-  showsDelivered(send: ConversationSend): boolean {
-    return send.state === "acknowledged" && send.sentAt !== undefined;
+  /** Queue acceptance and proven transport delivery remain visible across devices/reloads until a linked reply. */
+  showsDeliveryStatus(send: ConversationSend): boolean {
+    return send.state === "acknowledged" || send.state === "delivered";
   }
   /**
    * The conversation list's one-line preview of the last turn. A refused send
@@ -870,22 +867,13 @@ export class ConversationHistory {
   }
 }
 
-/**
- * Whether the thread may say the supervisor is "working" (cas-5a8f). Real
- * pane output is independent evidence and always counts. A send awaiting its
- * reply counts only while the machine is live and paired: during an outage or
- * a revoked pairing the page cannot know, and a send held in this browser was
- * never seen at all, so "working" beside "Waiting for the connection" or
- * "Needs pairing" contradicted itself.
- */
+/** Recent pane output is activity evidence. Queue or transport receipts never prove execution. */
 export function supervisorWorking(
-  history: Pick<ConversationHistory, "awaitingReply">,
-  machine: { phase: string; authFailure?: unknown } | undefined,
+  _history: Pick<ConversationHistory, "awaitingReply">,
+  _machine: { phase: string; authFailure?: unknown } | undefined,
   recentPaneOutput: boolean,
 ): boolean {
-  if (recentPaneOutput) return true;
-  const reachable = machine?.phase === "live" && !machine.authFailure;
-  return reachable && history.awaitingReply();
+  return recentPaneOutput;
 }
 
 /** The thread's paging state: how far back it has loaded, and whether more is offered. */

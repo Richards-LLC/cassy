@@ -172,7 +172,7 @@ describe("Commander live connection lifecycle", () => {
     await second;
     writer.receive({ MessageQueued: { client_ref: clientRef, notification_id: 99, target: "supervisor", stamped: true } });
     const send = history.events.find(event => event.kind === "send");
-    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(true);
+    expect(send?.kind === "send" && history.showsDeliveryStatus(send.value)).toBe(true);
     expect(TransportSocket.instances).toHaveLength(1);
     expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
     expect(writer.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === clientRef)).toHaveLength(2);
@@ -278,7 +278,7 @@ describe("Commander live connection lifecycle", () => {
     const accepted = change === "same pairing" || change === "stale attach";
     expect(queued).toHaveBeenCalledTimes(accepted ? 1 : 0);
     const send = history.events.find(event => event.kind === "send");
-    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(accepted || change === "already confirmed");
+    expect(send?.kind === "send" && history.showsDeliveryStatus(send.value)).toBe(accepted || change === "already confirmed");
     if (accepted || change === "already confirmed") expect(send?.kind === "send" && send.value.notificationId).toBe(99);
     expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
     expect(connection.attachSnapshot("session-a")?.phase).toBe(phase);

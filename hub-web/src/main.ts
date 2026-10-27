@@ -388,9 +388,8 @@ function mountConversation(key: string, mount: HTMLElement): void {
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
-      // The supervisor is executing while a send it received awaits its
-      // reply on a reachable machine, or the pane produced output in the last
-      // half minute (cas-5a8f: never on a held send or an unreachable machine).
+      // Only recent pane activity drives the working line. A queued or
+      // transported message alone never proves the supervisor took a turn.
       working: () => supervisorWorking(
         history,
         connectionStates.get(threadMachineId),

@@ -189,8 +189,8 @@ const ACCOUNT_PREFLIGHT_BUDGET: std::time::Duration = std::time::Duration::from_
 /// worktrees were cut, four workers registered, and every first turn died in
 /// about a second.
 ///
-/// Codex also requires an explicit or captured account selection. For a
-/// selected account, only affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
+/// Codex uses its default home when no explicit or captured account is set.
+/// Only an absent default or affirmative `Unavailable` refuses. `Unknown` — no CLI on PATH, a
 /// probe that timed out, a harness with no account plumbing — must not block a
 /// spawn: a preflight that fails closed on its own unreliability would ground
 /// the factory over a slow binary.
@@ -198,6 +198,7 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
     // cas-c8de: the account probes and the codex version probe share one
     // budget, so the whole preflight stays within it.
     let deadline = crate::bounded_process::Deadline::after(ACCOUNT_PREFLIGHT_BUDGET);
+    let default_codex_home = dirs::home_dir().map(|home| home.join(".codex"));
     if specs.iter().any(|spec| {
         spec.cli == cas_mux::SupervisorCli::Codex
             && spec
@@ -210,7 +211,21 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
                 .as_deref()
                 .filter(|dir| !dir.trim().is_empty())
                 .is_none()
+    }) && !default_codex_home.as_deref().is_some_and(|home| {
+        home.is_dir()
+            && home.to_str().is_some_and(|home| {
+                crate::capability::probe_account_auth(
+                    cas_mux::SupervisorCli::Codex,
+                    Some(home),
+                    deadline,
+                )
+                .availability
+                    != cas_factory::CapabilityAvailability::Unavailable
+            })
     }) {
+        // The default home is already the implicit worker launch target. A
+        // named account must still be selected by the caller when that default
+        // is absent or logged out; Unknown retains the existing probe policy.
         // Capability can aggregate accounts; a worker must use one account
         // chosen by its caller. Never silently select a different login.
         let homes =
@@ -238,8 +253,9 @@ fn preflight_account_auth(specs: &[cas_mux::WorkerSpec]) -> Result<(), String> {
             None => "account registry unreadable".into(),
         };
         return Err(format!(
-            "spawn refused: no Codex account selected. Pass config_dir with the intended CODEX_HOME \
-             (or launch the supervisor with CODEX_HOME set). Registered logged-in Codex homes: {accounts}. \
+            "spawn refused: the default Codex home is absent or logged out. Pass config_dir with the intended CODEX_HOME, \
+             or set the project worker config_dir in .cas/config.toml ([factory.defaults] or [[factory.workers]]) \
+             for hub/Commander spawns. Registered logged-in Codex homes: {accounts}. \
              No worktree was created and no task was assigned."
         ));
     }
@@ -12838,6 +12854,18 @@ mod spawn_lifecycle_tests {
             !error.contains(logged_out.to_str().unwrap()),
             "logged-out home must not be offered: {error}"
         );
+        // The merged account policy runs before this refusal. These fixture
+        // accounts have no usage evidence, so it must leave the worker
+        // unresolved rather than silently choosing the logged-in home.
+        let mut unresolved = vec![spec.clone()];
+        let selection_notice = recommend_spawn_accounts(
+            &mut unresolved,
+            &Default::default(),
+            chrono::Utc::now(),
+            |provider| crate::account_registry::collect_for(provider, env.home(), false),
+        );
+        assert!(unresolved[0].config_dir.is_none(), "{selection_notice}");
+        assert!(selection_notice.contains("no eligible account"), "{selection_notice}");
         // The real direct-spawn entry must reach this refusal before the
         // legacy strict fallback can replace it with a default-home error.
         env.set("CAS_FACTORY_BUILD_GUARD", "off");
@@ -12887,6 +12915,17 @@ mod spawn_lifecycle_tests {
         spec.requester_config_dir = spec.config_dir.take();
         preflight_account_auth(&[spec]).expect("captured CODEX_HOME passes auth preflight");
         assert!(!env.home().join(".codex").exists());
+        // An implicit default is already the worker's launch target; accepting
+        // its authenticated login never chooses a different registered account.
+        let default = env.home().join(".codex");
+        std::fs::create_dir_all(&default).unwrap();
+        std::fs::write(default.join("auth.json"), "{}").unwrap();
+        preflight_account_auth(&[spec_for(cas_mux::SupervisorCli::Codex, None)])
+            .expect("authenticated default account remains usable without an explicit selector");
+        assert!(
+            error.contains("project"),
+            "refusal omitted the project worker config_dir remedy: {error}"
+        );
     }
 
     #[test]
@@ -13380,8 +13419,7 @@ mod spawn_lifecycle_tests {
     #[tokio::test]
     async fn ct2_p3_spawn_brief_is_stored_on_the_preassigned_task() {
         use cas_types::Task;
-        let _env =
-            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let temp = tempfile::tempdir().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);
         let task_store = core.open_task_store().expect("open task store");
@@ -13442,8 +13480,7 @@ mod spawn_lifecycle_tests {
     #[tokio::test]
     async fn spawn_response_surfaces_related_recall_for_active_epic_cas_0efb() {
         use cas_types::{Entry, Task, TaskType};
-        let _env =
-            crate::test_support::TestEnvGuard::with_vars(&[("CAS_FACTORY_BUILD_GUARD", "off")]);
+        let _env = crate::test_support::TestEnvGuard::temp_home();
 
         let temp = tempfile::tempdir().expect("temp project");
         let core = CasCore::with_daemon(temp.path().to_path_buf(), None, None);

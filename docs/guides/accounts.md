@@ -98,12 +98,15 @@ unset. An authenticated named account keeps Codex lanes available after the
 legacy `~/.codex` is retired. An explicit `CODEX_HOME` limits the check to that
 account.
 
-For a factory worker, pass the intended home as `config_dir`, or start the
-requesting supervisor with `CODEX_HOME` set. When no account is specified,
-the account policy can recommend an eligible registered account. If no account
-is selected and the default Codex home is absent or logged out, spawn refuses
-before creating a worktree or assigning a task. The error lists confirmed
-logged-in registered homes and the `config_dir` remedies.
+Pass the intended worker home as `config_dir`, or set worker `config_dir` in
+the project's `.cas/config.toml` (`[factory.defaults]` or
+`[[factory.workers]]`) for hub and Commander spawns. A requesting supervisor's
+`CODEX_HOME` is inherited when no eligible account recommendation overrides it.
+When no account is selected, the account policy may recommend an eligible
+registered account. Otherwise, an authenticated default `~/.codex` remains
+usable. If that default is absent or logged out, spawn refuses before creating
+a worktree or assigning a task and lists confirmed logged-in registered homes
+with the `config_dir` remedies.
 
 ## List subscriptions
 

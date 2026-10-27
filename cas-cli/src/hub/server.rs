@@ -2612,9 +2612,10 @@ async fn proxy_socket(
                     if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
-                    if !correlated_daemon_frame_allowed(
+                    if !admit_correlated_daemon_frame(
                         &mut pending_message_refs,
                         &session,
+                        &auth,
                         &frame.bytes,
                     ) {
                         continue;
@@ -3416,6 +3417,18 @@ fn multiplex_forbidden_error(session: &str, client_ref: Option<&str>) -> serde_j
     error
 }
 
+/// Admit one daemon frame to an authenticated socket (cas-2109): the
+/// correlation filter in [`correlated_daemon_frame_allowed`], plus the
+/// per-send outcome audit row once the daemon has answered a send.
+pub(crate) fn admit_correlated_daemon_frame(
+    pending: &mut HashSet<(String, String)>,
+    session: &str,
+    _auth: &Option<(AuthStore, AuthContext)>,
+    bytes: &[u8],
+) -> bool {
+    correlated_daemon_frame_allowed(pending, session, bytes)
+}
+
 /// MessageQueued and correlated Error frames share one daemon upstream, so
 /// the hub filters them by the authenticated socket that submitted the ref.
 pub(crate) fn correlated_daemon_frame_allowed(
@@ -3586,9 +3599,10 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                     if !operator_message_allowed(&auth, &frame.bytes) {
                         continue;
                     }
-                    if !correlated_daemon_frame_allowed(
+                    if !admit_correlated_daemon_frame(
                         &mut pending_message_refs,
                         &session,
+                        &auth,
                         &frame.bytes,
                     ) {
                         continue;

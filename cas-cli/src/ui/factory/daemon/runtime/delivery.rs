@@ -2074,6 +2074,56 @@ mod tests {
         assert_eq!(row.operator.as_ref().map(|stamp| stamp.verified), Some(true));
     }
 
+    /// cas-2109: a refused Commander send used to leave no daemon log line,
+    /// only the phone's "Not sent". It now warns with client_ref, target and
+    /// the error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refused_commander_send_is_logged_with_client_ref_target_and_error_cas_2109() {
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&cas_dir);
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(move || Capture(sink.clone()))
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+
+        let reply = daemon
+            .dispatch_commander_control(CommanderControl::SendMessage {
+                target: "supervisor".to_string(),
+                text: "answering an ask that does not exist".to_string(),
+                summary: None,
+                urgent: false,
+                client_ref: Some("phone-2109".to_string()),
+                in_reply_to: Some(999_999),
+                attribution: commander_attribution(),
+            })
+            .await;
+
+        let error = reply.expect_err("the send is refused");
+        let log = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        let line = log
+            .lines()
+            .find(|line| line.contains("WARN") && line.contains("phone-2109"))
+            .unwrap_or_else(|| panic!("no WARN naming the client_ref in:\n{log}"));
+        assert!(line.contains("supervisor"), "names the target: {line}");
+        assert!(line.contains("999999"), "names the error ({error:#}): {line}");
+    }
+
     #[test]
     fn codex_recipient_always_pty_even_under_teams() {
         // AC1: a Codex recipient is PTY-delivered even when the supervisor runs

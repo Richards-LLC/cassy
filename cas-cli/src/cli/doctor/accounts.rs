@@ -90,8 +90,8 @@ pub(super) fn autofix(yes: bool, cli: &Cli) -> Vec<Check> {
 
 fn autofix_in(home: &Path, mut confirm: impl FnMut(&str) -> bool) -> Vec<Check> {
     // The existing safe account repair: abandoned login staging folders.
-    // Best effort; a later login sweeps and reports the same folders.
-    let _ = crate::account_lifecycle::sweep_stale_logins(home);
+    // Best effort: it warns about a folder it cannot remove and carries on.
+    crate::account_lifecycle::sweep_stale_logins(home);
     let survey = match account_links::survey(home) {
         Ok(survey) => survey,
         Err(error) => {

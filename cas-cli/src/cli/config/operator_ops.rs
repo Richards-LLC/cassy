@@ -121,11 +121,18 @@ pub(crate) fn execute_set_write_roots(value: &str, cli: &Cli, cas_root: &Path) -
         );
         return Ok(());
     }
-    if change.stored.is_empty() {
-        println!("Cleared factory.write_roots in .cas/config.toml");
+    // cas-f0ea0: from a directory whose store is ~/.cas (such as $HOME), the
+    // roots are the user-level list every project uses.
+    let (file, scope) = if crate::config::operator_policy::is_user_store(cas_root) {
+        ("~/.cas/config.toml", "Agents in every project")
     } else {
-        println!("Set factory.write_roots in .cas/config.toml.");
-        println!("Agents may create, edit and delete files beneath:");
+        (".cas/config.toml", "This project's agents")
+    };
+    if change.stored.is_empty() {
+        println!("Cleared factory.write_roots in {file}");
+    } else {
+        println!("Set factory.write_roots in {file}.");
+        println!("{scope} may create, edit and delete files beneath:");
         for root in &change.stored {
             println!("  {root}");
         }
@@ -230,14 +237,35 @@ pub(crate) fn execute_get_write_roots(cli: &Cli, cas_root: &Path) -> anyhow::Res
     let legacy: Vec<String> = load_operator_policy(cas_root)
         .map(|policy| policy.roots.iter().map(|root| root.path.display().to_string()).collect())
         .unwrap_or_default();
+    // cas-f0ea0: the user-level roots and the Downloads folder apply too.
+    let every_project: Vec<String> = crate::config::operator_policy::effective_write_roots(
+        &[],
+        &crate::config::operator_policy::user_write_roots(),
+        cas_root,
+    )
+    .into_iter()
+    .map(|root| root.display().to_string())
+    .filter(|root| !roots.contains(root))
+    .collect();
     if cli.json {
         println!(
             "{}",
-            serde_json::json!({"key": "factory.write_roots", "value": roots, "legacy_operator_policy_roots": legacy})
+            serde_json::json!({
+                "key": "factory.write_roots",
+                "value": roots,
+                "legacy_operator_policy_roots": legacy,
+                "every_project_roots": every_project,
+            })
         );
         return Ok(());
     }
     println!("{}", roots.join(","));
+    if !every_project.is_empty() {
+        eprintln!("note: also in effect for every project (~/.cas/config.toml and your Downloads folder):");
+        for root in &every_project {
+            eprintln!("  {root}");
+        }
+    }
     if !legacy.is_empty() {
         eprintln!("note: also honoured from .cas/operator/write-policy.toml:");
         for root in &legacy {

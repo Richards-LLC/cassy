@@ -5966,7 +5966,8 @@ fn apply_patch_write_targets_with_modes(
 /// call, and the task IDs whose grants apply. Project roots come from the
 /// project's `.cas/config.toml` `[factory] write_roots` (this `cas_root` is
 /// the owning project's, also for a worker in an isolated worktree), unioned
-/// with roots still left in the cas-3147 operator policy file. A grant applies
+/// with the user-level `~/.cas/config.toml` roots, the built-in Downloads
+/// folder (cas-f0ea0) and roots still left in the cas-3147 operator policy file. A grant applies
 /// while its task is open: to the worker holding the task's lease, and to the
 /// supervisor. An unreadable policy file fails closed to "no legacy roots or
 /// grants". The project's config files and the policy directory stay
@@ -5990,8 +5991,9 @@ fn operator_write_policy_for(
             .collect()
     };
     let configured_roots = stores.config().factory().write_roots;
+    let user_roots = crate::config::operator_policy::user_write_roots();
     let mut policy = WritePolicy {
-        roots: crate::config::operator_policy::effective_project_write_roots(&configured_roots, cas_root)
+        roots: crate::config::operator_policy::effective_write_roots(&configured_roots, &user_roots, cas_root)
             .into_iter()
             .map(|path| WriteRoot {
                 path,
@@ -6000,7 +6002,9 @@ fn operator_write_policy_for(
             })
             .collect(),
         protected: super::write_roots::protected_policy_paths(cas_root),
+        // The built-in Downloads root alone leaves the default contract as it was.
         configured: !configured_roots.is_empty()
+            || !user_roots.is_empty()
             || crate::config::operator_policy::operator_policy_path(cas_root).exists(),
     };
     let mut task_ids = std::collections::HashSet::new();
@@ -6095,7 +6099,7 @@ fn factory_workspace_contract_denial_with_roots(
         format!(" Operator write roots in effect: {}.", roots.join("; "))
     };
     format!(
-        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml` (`cas config set factory.write_roots`) or add task grants."
+        "{denial}{roots} Only the operator can add directories to `factory.write_roots` in the project's `.cas/config.toml`, or in `~/.cas/config.toml` for every project (`cas config set factory.write_roots`), or add task grants."
     )
 }
 
@@ -6635,8 +6639,6 @@ mod workspace_contract_tests {
         }
         let cas_root = crate::store::init_cas_dir(&worktree).unwrap();
         let roots = "[factory]\nwrite_roots = [\"~/.gabber-support\"]\n";
-        // Host settings do not grant the project's writes.
-        std::fs::write(home.join(".cas/config.toml"), roots).unwrap();
         let completed_at = "2026-10-19T14:00:00Z";
         let state = serde_json::json!({"last_cycle_completed_at": completed_at}).to_string();
         let input = tool_input("Write", serde_json::json!({
@@ -6667,6 +6669,69 @@ mod workspace_contract_tests {
         let denied = run(&outside);
         assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny", "{denied}");
         assert!(!neighbour.join("state.json").exists());
+    }
+
+    /// cas-f0ea0: with no project roots, a worker creates, edits and deletes
+    /// under ~/Downloads, each write audited; a root the operator sets from
+    /// $HOME (the user store, here `~/.cas/qa-rig`) applies to every project;
+    /// the agent still cannot write the user-level config that holds it.
+    #[test]
+    fn cas_f0ea0_downloads_and_user_level_roots_apply_to_every_project() {
+        let fixture = tempfile::tempdir().unwrap();
+        let home = fixture.path().canonicalize().unwrap().join("home");
+        let worktree = fixture.path().canonicalize().unwrap().join("worker");
+        let downloads = home.join("Downloads");
+        let qa_rig = home.join(".cas/qa-rig");
+        for directory in [&worktree, &downloads, &qa_rig] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let mut env = TestEnvGuard::new();
+        env.set("HOME", &home);
+        env.set("XDG_CONFIG_HOME", home.join(".config"));
+        env.set("CAS_CLONE_PATH", &worktree);
+        env.set("CAS_AGENT_ROLE", "worker");
+        env.set("CAS_FACTORY_MODE", "1");
+        env.set("CAS_AGENT_NAME", "downloads-test");
+        env.set("CAS_FACTORY_SESSION", "cas-f0ea0-test");
+        for key in ["CAS_SCRATCHPAD", "CAS_SCRATCHPAD_PATH", "CLAUDE_SCRATCHPAD"] {
+            env.remove(key);
+        }
+        let cas_root = crate::store::init_cas_dir(&worktree).unwrap();
+        let decision = |input: &HookInput| {
+            serde_json::to_value(handle_pre_tool_use(input, Some(&cas_root)).unwrap()).unwrap()
+                ["hookSpecificOutput"]["permissionDecision"]
+                .clone()
+        };
+        let report = downloads.join("report.pdf");
+        let create = tool_input("Write", serde_json::json!({"file_path": report, "content": "x"}), &worktree);
+        let rig_file = qa_rig.join("ledger.md");
+        let rig_write = tool_input("Write", serde_json::json!({"file_path": rig_file, "content": "x"}), &worktree);
+        assert_ne!(decision(&create), "deny");
+        assert_eq!(decision(&rig_write), "deny", "no user-level root yet");
+        std::fs::write(&report, "x").unwrap();
+        let edit = tool_input("Edit", serde_json::json!({
+            "file_path": report, "old_string": "x", "new_string": "y",
+        }), &worktree);
+        assert_ne!(decision(&edit), "deny");
+        assert_ne!(decision(&bash_input(&format!("rm {}", report.display()), &worktree)), "deny");
+        let log = std::fs::read_to_string(cas_root.join("logs").join(format!(
+            "factory-session-{}.log", chrono::Utc::now().format("%Y-%m-%d")
+        ))).unwrap();
+        for mode in ["create", "edit", "delete"] {
+            assert!(log.lines().any(|line| line.contains("workspace_write_root_used")
+                && line.contains(&format!("\"mode\":\"{mode}\""))
+                && line.contains(&format!("\"root\":\"{}\"", downloads.display()))), "{mode}: {log}");
+        }
+
+        // The operator's `cas config set` from $HOME resolves the user store.
+        crate::cli::config::operator_ops::set_project_write_roots(
+            "~/.cas/qa-rig", &home.join(".cas"), "0::/user.slice/tab.scope",
+        ).unwrap();
+        assert_ne!(decision(&rig_write), "deny", "a user-level root applies to this project");
+        let policy_write = tool_input("Write", serde_json::json!({
+            "file_path": home.join(".cas/config.toml"), "content": "[factory]\nwrite_roots = [\"/\"]\n",
+        }), &worktree);
+        assert_eq!(decision(&policy_write), "deny", "agents cannot change the user-level roots");
     }
 
     /// cas-0d4f0: an agent shell cannot set or reset a security-relevant key

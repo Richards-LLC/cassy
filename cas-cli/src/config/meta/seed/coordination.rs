@@ -141,7 +141,7 @@ pub(super) fn register_coordination_lease_telemetry_and_missing(registry: &mut C
         key: "factory.write_roots",
         section: "factory",
         name: "Project Write Roots",
-        description: "Operator-only. Directories outside the worktree where this project's supervisor and workers may create, edit and delete files. Set with `cas config set factory.write_roots \"~/Downloads,/mnt/models\"` (empty clears). Paths are canonicalized at set time; /, $HOME, its ancestors and anything containing or inside this project's .cas are refused. Agents cannot change it.",
+        description: "Operator-only. Directories outside the worktree where this project's supervisor and workers may create, edit and delete files. Set with `cas config set factory.write_roots \"/mnt/models,~/.gabber-support\"` (empty clears). Run from $HOME, it sets ~/.cas/config.toml, whose roots apply to every project alongside each project's own. Your Downloads folder (XDG_DOWNLOAD_DIR on Linux, else ~/Downloads) is always a root and needs no entry. Paths are canonicalized at set time; /, $HOME, its ancestors and anything containing or inside this project's .cas are refused (folders inside ~/.cas are allowed in the user-level list). Agents cannot change it.",
         value_type: ConfigType::StringList,
         default: "",
         constraint: Constraint::None,

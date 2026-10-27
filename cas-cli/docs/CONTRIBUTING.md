@@ -3048,14 +3048,30 @@ worktree, `factory.artifacts_root/<project-key>/<task-id>/`, the configured
 scratch root and the harness scratchpad. An operator can add directories
 outside these:
 
+- **Downloads, built in.** The user's Downloads folder is a root for every
+  project's supervisor and workers with no setup: on Linux the
+  `XDG_DOWNLOAD_DIR` from `$XDG_CONFIG_HOME/user-dirs.dirs` (default
+  `~/.config/user-dirs.dirs`), else `~/Downloads`; on macOS `~/Downloads`. It
+  passes the same safety checks as a configured root, and a missing folder
+  admits nothing. On its own it does not turn on the in-place edit judging
+  described below.
+- **User-level write roots.** Running `cas config set factory.write_roots
+  "<dir>,<dir>"` from `$HOME` writes `[factory] write_roots` to the user-level
+  `~/.cas/config.toml` (that is the store `$HOME` resolves to). These roots
+  apply to every project, merged with each project's own list. Folders
+  inside `~/.cas`, such as `~/.cas/qa-rig`, may be roots here; `~/.cas`
+  itself, its config files and `~/.cas/operator/` may not. Each root is
+  checked against both the user store and the project.
 - **Project write roots.** Run `cas config set factory.write_roots
-  "~/Downloads,/mnt/shockwave/ai/pooled_assets/llm"`. This writes
+  "/mnt/shockwave/ai/pooled_assets/llm"` in the project. This writes
   `[factory] write_roots = [...]` to the project's `.cas/config.toml`, so
   `cas config list` and `cas config get factory.write_roots` show it. Each
   root lets the project's supervisor and workers create, edit, rename and
-  delete files beneath it. An empty value clears it. Roots are per project:
-  a worker reads them from its owning project's `.cas/config.toml`, also in
-  an isolated worktree, and another project's agents never get them.
+  delete files beneath it. An empty value clears it. Project roots are per
+  project: a worker reads them from its owning project's `.cas/config.toml`,
+  also in an isolated worktree, and another project's agents never get them.
+  `cas config get factory.write_roots` prints the project's list and notes
+  the user-level and Downloads roots on stderr.
 - **One-off task grants.** Run `cas config grant-write --task <id> --path <dir>
   --mode create+edit --reason "<why>"`. The grant applies to the worker
   holding the task and to the supervisor until the task closes. It is
@@ -3076,8 +3092,8 @@ them too).
 For a support loop, the operator can include `~/.gabber-support` in the
 owning project's `factory.write_roots`, preserving any existing entries when
 setting the list. This admits `state.json` beneath that directory; a sibling
-such as `~/.gabber-support-other` stays blocked. Setting the key in the user's
-`~/.cas/config.toml` does not grant project writes.
+such as `~/.gabber-support-other` stays blocked. Setting it in the user-level
+`~/.cas/config.toml` instead grants it to every project.
 
 Each grant admits only its modes; a project root admits all three:
 
@@ -3103,8 +3119,9 @@ payloads so each write can be attributed to a root.
 
 **Operator-only, guardrail-grade (not security-grade).** The operator and the
 agents share a Unix user. The PreToolUse hook is the actual gate against
-agents; the CLI checks are defence in depth. With no roots and no policy
-file, the default contract is unchanged. The layers are:
+agents; the CLI checks are defence in depth. With no configured roots and no
+policy file, the default contract is unchanged apart from the Downloads
+root. The layers are:
 
 - `cas config set factory.write_roots` refuses only inside a factory worker or
   server cgroup. The operator usually runs it as `! cas …` inside an agent

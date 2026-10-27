@@ -128,6 +128,7 @@ it("never inserts a renderer's scripts, event handlers or foreignObject", async 
     root.append(...renderMarkdown(document, "```mermaid\nflowchart LR\nA --> B\n```"));
     await vi.waitFor(() => expect(root.querySelector("svg")?.textContent).toBe("Safe label"));
     expect(root.querySelector("script, foreignObject, [onload], [onclick], [onerror], [style]")).toBeNull();
+    expect(root.querySelector("svg")?.getAttribute("font-size")).toBe("12px");
     root.querySelector("svg")!.dispatchEvent(new Event("load"));
     root.querySelector("text")!.dispatchEvent(new MouseEvent("click"));
     expect((window as unknown as { compromised?: number }).compromised).toBeUndefined();

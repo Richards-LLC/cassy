@@ -20,6 +20,7 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
       const loopback = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
       if (url.protocol !== "https:" && !loopback || url.username || url.password) { fallback(); return; }
       let media: HTMLImageElement | HTMLVideoElement | HTMLAudioElement | undefined;
+      let restart: HTMLMediaElement | undefined;
       let wantedPlayback = false;
       const expired = () => Boolean(result.view.expires_at && Date.parse(result.view.expires_at) <= Date.now());
       const failed = async (status?: number): Promise<void> => {
@@ -58,14 +59,17 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
         if (restore) player.addEventListener("loadedmetadata", () => {
           if (!viewport.isConnected || player.parentElement !== viewport) return;
           try { if (Number.isFinite(restore.time) && restore.time > 0) player.currentTime = restore.time; } catch { /* A non-seekable clip can still resume. */ }
-          if (restore.playing) void player.play().catch(() => { /* Native controls remain available. */ });
+          player.preload = "none";
         }, { once: true });
+        if (restore?.playing) restart = player;
+        else if (restore && restore.time > 0) player.preload = "metadata";
         if (player instanceof HTMLVideoElement) { player.width = 640; player.height = 360; player.playsInline = true; }
         media = player;
       }
       media.addEventListener("error", () => { void failed(); }, { once: true });
       media.src = url.href;
       viewport.replaceChildren(media);
+      if (restart) void restart.play().catch(() => { /* Native controls remain available. */ });
     } catch { fallback(); }
   };
   await attempt();

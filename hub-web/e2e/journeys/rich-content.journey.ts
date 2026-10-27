@@ -14,12 +14,12 @@ const variants = [
 for (const [index, variant] of variants.entries()) {
   test.describe(variant.name, () => {
     test.use({ viewport: { width: variant.width, height: variant.height }, colorScheme: variant.scheme });
-    test(`HUB-J22 read diagrams, media and diffs · ${variant.name}`, index === 0 ? {} : journeyPart, async ({ page, journey, baseURL }) => {
+    test(`HUB-J22 read diagrams, media and diffs · ${variant.name}`, index === 0 ? {} : journeyPart, async ({ page, journey, baseURL }, testInfo) => {
       const origin = new URL(baseURL!).origin;
       await page.addInitScript(() => {
-        const violations: string[] = [];
-        (window as unknown as { richCspViolations: string[] }).richCspViolations = violations;
-        addEventListener("securitypolicyviolation", (event) => violations.push(event.effectiveDirective));
+        const violations: Array<{ directive: string; source: string; blocked: string }> = [];
+        (window as unknown as { richCspViolations: typeof violations }).richCspViolations = violations;
+        addEventListener("securitypolicyviolation", (event) => violations.push({ directive: event.effectiveDirective, source: event.sourceFile, blocked: event.blockedURI }));
       });
       if (!process.env.HUB_RICH_HUB_URL) {
         // The static harness gets the same restrictive policy as the candidate.
@@ -141,7 +141,11 @@ for (const [index, variant] of variants.entries()) {
         // Read back the transport: exactly one renewal, for the expired video only.
         for (const id of ["art-inline-image", "art-inline-pdf", "art-inline-video", "art-inline-audio", "art-local-preview"]) expect(hub.previewTicketRequests.filter((value) => value === id)).toHaveLength(id === "art-inline-video" ? 2 : 1);
         expect(hub.artifactRequests).toEqual([]);
-        expect(await page.evaluate(() => (window as unknown as { richCspViolations: string[] }).richCspViolations)).toEqual([]);
+        const csp = await page.evaluate(() => (window as unknown as { richCspViolations: Array<{ directive: string; source: string; blocked: string }> }).richCspViolations);
+        await testInfo.attach("csp-events", { body: JSON.stringify(csp, null, 2), contentType: "application/json" });
+        // Playwright's anonymous screencast overlay injects a blocked <style>.
+        // Keep that automation evidence; no application/attribute violation is exempt.
+        expect(csp.filter((event) => !(event.directive === "style-src-elem" && event.source === ""))).toEqual([]);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       });
     });

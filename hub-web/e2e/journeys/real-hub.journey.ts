@@ -617,6 +617,15 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
   const pairing = new URL(fixture.pairUrl);
   pairing.pathname = "/commander/";
   const secrets = [fixture.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? ""];
+  const redactions: Promise<void>[] = [];
+  page.on("response", (response) => {
+    if (!new URL(response.url()).pathname.startsWith("/v1/auth/")) return;
+    redactions.push(response.json().then((body) => {
+      for (const [key, value] of Object.entries(body)) {
+        if (/credential|ticket|token/i.test(key) && typeof value === "string") secrets.push(value);
+      }
+    }).catch(() => undefined));
+  });
   let passed = false;
   let tracing = false;
   await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
@@ -653,6 +662,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
         label: "real-bundle, real-hub, real-reaper, real-factory-daemon, inert-provider-and-placement",
         viewport: page.viewportSize(),
       }, null, 2));
+      await Promise.all(redactions);
       if (tracing) await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
     } finally {
       await context.close().catch(() => undefined);

@@ -109,9 +109,18 @@ async function cleanup() {
   await stop(state.daemon);
   const ownedLaunch = join(state.home, "launched-pid");
   if (existsSync(ownedLaunch)) {
-    const pid = Number(await readFile(ownedLaunch, "utf8"));
-    if (Number.isSafeInteger(pid) && pid > 1) {
-      try { process.kill(-pid, "SIGTERM"); } catch (e) { if (e.code !== "ESRCH") throw e; }
+    const owned = JSON.parse(await readFile(ownedLaunch, "utf8"));
+    const alive = async () => {
+      try {
+        const fields = (await readFile(`/proc/${owned.pid}/stat`, "utf8")).split(") ")[1].split(/\s+/);
+        return fields[0] !== "Z" && fields[19] === owned.starttime;
+      } catch (e) { if (e.code === "ENOENT") return false; throw e; }
+    };
+    if (Number.isSafeInteger(owned.pid) && owned.pid > 1 && await alive()) {
+      process.kill(-owned.pid, "SIGTERM");
+      const deadline = performance.now() + 3000;
+      while (await alive() && performance.now() < deadline) await delay(50);
+      if (await alive()) process.kill(-owned.pid, "SIGKILL");
     }
   }
   if (state.tls) {
@@ -177,13 +186,14 @@ for line in sys.stdin:
   // HOME and containment instead of asking the real login manager to launch
   // into the operator's HOME. The hub's actual reaper, daemon and PTY execute.
   if (newSession) await writeFile(join(bin, "systemd-run"), `#!/usr/bin/python3
-import sys,os,subprocess
+import sys,os,subprocess,json
 args=sys.argv[1:]
 cwd=next(a.split('=',1)[1] for a in args if a.startswith('--working-directory='))
 log=next(a.split('append:',1)[1] for a in args if a.startswith('--property=StandardError=append:'))
 with open(log,'ab',buffering=0) as out:
  p=subprocess.Popen(args[args.index('--')+1:],cwd=cwd,stdin=subprocess.DEVNULL,stdout=out,stderr=out,start_new_session=True)
-with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: f.write(str(p.pid))
+starttime=open('/proc/'+str(p.pid)+'/stat').read().split(') ',1)[1].split()[19]
+with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(dict(pid=p.pid,starttime=starttime),f)
 `, { mode: 0o700 });
   const env = {
     HOME: home,

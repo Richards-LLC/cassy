@@ -92,3 +92,28 @@ Run the same journey against that control port. Keep the same tip-built hub
 binary to isolate the browser reconnect fix; record both revisions, the failing
 stage, and the visible Needs pairing or failure to recover. Do not weaken the
 assertions to turn an unexpected passing baseline into a failure.
+
+## Real New session launch (HUB-J13)
+
+The same fixture accepts `newSession: true`: it starts only the real hub, then
+Commander browses a disposable repository and calls `POST /v1/sessions`. The
+hub starts its real reaper, factory daemon and supervisor PTY. An inert provider
+answers the actual injected startup prompt through `cas factory message`, then
+answers one Commander instruction through the same durable queue. No reply is
+seeded by the browser or fixture control endpoint.
+
+The hub deliberately inherits another disposable project's `CAS_ROOT`. This
+regresses a machine hub carrying the store from its original launch directory
+into a different project's daemon. Run this part with the registered fixture:
+
+```bash
+npm run journeys:real-hub -- real-hub.journey.ts --grep 'HUB-J13 real hub'
+```
+
+Only OS service placement and the provider executable are test boundaries.
+The fixture's local `systemd-run` adapter executes the real reaper/daemon under
+its private HOME and registered containment, instead of the operator's user
+manager. Its recorded process group and start fingerprint bound cleanup to the
+owned launch. This does not prove host systemd/cgroup placement or model action.
+The installed official provider and login remain a separate bounded live check;
+never use an existing hub or read/copy credentials into this fixture.

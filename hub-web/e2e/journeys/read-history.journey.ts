@@ -47,8 +47,9 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     // the newest turn stays on screen and the reader is not marked as having
     // scrolled away.
     const late = await page.addStyleTag({ content: '.msgs a[data-artifact-id] { min-height: 180px; } .msgs [data-key] { min-height: 140px; }' });
-    await page.evaluate(() => new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok))));
-    expect(await atTail(), "late layout growth keeps the thread at its latest turn").toBe(true);
+    // ResizeObserver and the view's deferred pin settle independently of a
+    // fixed frame count. Wait for the same visible tail outcome as on entry.
+    await expect.poll(atTail, { message: "late layout growth keeps the thread at its latest turn" }).toBe(true);
     await expect(newest).toBeInViewport();
     await expect(jump).toBeHidden();
     // The rest of the journey reads the thread at its normal size.

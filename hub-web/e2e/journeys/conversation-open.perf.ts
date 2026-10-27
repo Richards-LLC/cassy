@@ -219,8 +219,8 @@ for (const profile of [
         style_ms: (metrics.RecalcStyleDuration - before.RecalcStyleDuration) * 1000,
         heap_used_bytes: metrics.JSHeapUsedSize, dom_nodes: metrics.Nodes,
         heap: await cdp.send("Runtime.getHeapUsage"), cpu: costs.sourceSamples,
-        long_task_total_ms: probe.longTasks.reduce((sum: number, entry: any) => sum + entry.ms, 0),
-        long_task_max_ms: Math.max(0, ...probe.longTasks.map((entry: any) => entry.ms)) };
+        long_task_total_ms: probe.long_tasks.reduce((sum: number, entry: any) => sum + entry.ms, 0),
+        long_task_max_ms: Math.max(0, ...probe.long_tasks.map((entry: any) => entry.ms)) };
       await writeFile(join(directory, "receipt.json"), JSON.stringify({ status: "PASS", profile, browser: browser.version(), source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms,
         label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));

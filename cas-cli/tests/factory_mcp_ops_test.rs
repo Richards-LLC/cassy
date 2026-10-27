@@ -3197,6 +3197,8 @@ async fn worker_status_usage_limit_names_each_provider() {
     let _guard = EnvGuard::set(&[]);
     let env = FactoryTestEnv::new();
     let home = std::env::var("HOME").unwrap();
+    let reset_five = chrono::Utc::now() + chrono::Duration::hours(4);
+    let reset_week = chrono::Utc::now() + chrono::Duration::days(4);
     let clone = env.cas_root.parent().unwrap().join("project");
     let slug = clone.to_string_lossy().replace(['/', '.'], "-");
     for cli in ["claude", "codex"] {
@@ -3213,7 +3215,7 @@ async fn worker_status_usage_limit_names_each_provider() {
         } else {
             (PathBuf::from(&home).join(".codex/sessions/2026/10/27/rollout-limit-codex.jsonl"),
              format!("{}\n{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"limit-codex","cwd":clone,"originator":"codex-tui","source":"cli"}}),
-                serde_json::json!({"timestamp":"2026-10-27T12:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","has_credits":false}})))
+                serde_json::json!({"timestamp":"2026-10-27T12:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","has_credits":false,"rate_limits":{"primary":{"used_percent":100,"window_minutes":300,"resets_at":reset_five.timestamp()},"secondary":{"used_percent":100,"window_minutes":10080,"resets_at":reset_week.timestamp()}}}})))
         };
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
@@ -3222,6 +3224,15 @@ async fn worker_status_usage_limit_names_each_provider() {
     for (cli, label) in [("claude", "Claude"), ("codex", "Codex")] {
         let block = worker_status_block(&text, cli).expect("limited worker listed");
         assert!(block.contains(&format!("[UNAVAILABLE: {label} usage limit]")), "{block}");
+        if cli == "claude" {
+            // pin: status must not fetch live usage or guess a reset from prose.
+            assert!(block.contains("5h: reset time unknown") && block.contains("weekly: reset time unknown"), "{block}");
+        } else {
+            for reset in [reset_five, reset_week] {
+                let stamp = reset.with_timezone(&chrono::Local).format("%H:%M").to_string();
+                assert!(block.contains(&stamp) && block.contains("(in "), "{block}");
+            }
+        }
     }
 }
 

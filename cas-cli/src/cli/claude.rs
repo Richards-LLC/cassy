@@ -179,7 +179,7 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             },
         ));
         if let Some(usage) = &profile.usage {
-            for line in crate::cloud::presence::wrap_line(usage).lines() {
+            for line in usage.split("; ") {
                 output.push_str(&format!("    {}\n", line.trim_start()));
             }
         }

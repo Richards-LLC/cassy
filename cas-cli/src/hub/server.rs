@@ -1693,6 +1693,7 @@ mod launch_profile_tests {
                 logged_in: true,
                 is_default: false,
                 recommendation: None,
+                usage: None,
                 exclusion: None,
             },
             super::super::launch_env::LaunchProfile {
@@ -1700,6 +1701,7 @@ mod launch_profile_tests {
                 logged_in: false,
                 is_default: true,
                 recommendation: None,
+                usage: None,
                 exclusion: None,
             },
         ];
@@ -1733,6 +1735,7 @@ mod launch_profile_tests {
             logged_in: true,
             is_default: true,
             recommendation: None,
+            usage: None,
             exclusion: None,
         }])));
         let body = serde_json::json!({"claude": available, "codex": missing});

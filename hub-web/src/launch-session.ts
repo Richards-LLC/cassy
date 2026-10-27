@@ -53,7 +53,7 @@ export interface BrowseListing { root: BrowseRoot; path: string; entries: Browse
 export interface LaunchRequest { target: LaunchTarget; supervisor_cli: SupervisorCli; workers?: number; profile?: string }
 
 /** One account profile a CLI can run as (GET /v1/launch/profiles, cas-7b52). */
-export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string }
+export interface LaunchProfile { name: string; logged_in: boolean; is_default: boolean; recommendation?: string; exclusion?: string; usage?: string }
 
 /** One CLI's accounts. A missing CLI is installed=false with no error; a failed check keeps installed=true and names the error. */
 export interface CliProfiles { installed: boolean; profiles: LaunchProfile[]; error?: string }
@@ -974,7 +974,8 @@ export function commandTokensMarkup(command: string): string {
 function accountRowMarkup(cli: SupervisorCli, profile: LaunchProfile, checked: boolean): string {
   const name = escapeHtml(profile.name);
   const recommendation = profile.recommendation ? `<small class="launch-account-tag">Recommended</small><small class="launch-row-path">${escapeHtml(profile.recommendation)}</small>` : profile.exclusion ? `<small class="launch-row-path">${escapeHtml(profile.exclusion)}</small>` : "";
-  const tag = recommendation + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
+  const usage = profile.usage?.split("; ").map((window) => `<small class="launch-row-path">${escapeHtml(window)}</small>`).join("") ?? "";
+  const tag = recommendation + usage + (profile.is_default ? '<small class="launch-account-tag">Default</small>' : "");
   if (profile.logged_in) {
     return `<label class="launch-row launch-choice launch-account-row"><input type="radio" name="launch-account" value="${name}"${checked ? " checked" : ""}><span class="launch-row-text"><span class="launch-row-name">${name}</span>${tag}</span></label>`;
   }

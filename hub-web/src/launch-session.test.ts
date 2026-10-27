@@ -441,14 +441,16 @@ describe("accounts (cas-9666)", () => {
 
   it("preselects the recommendation with its reason and lets the operator choose another", async () => {
     const profiles = structuredClone(ACCOUNTS);
-    Object.assign(profiles.claude!.profiles[1], { recommendation: "resets in 6h, 41% left" });
+    Object.assign(profiles.claude!.profiles[1], { recommendation: "resets Tue 14:00 (in 6h), 41% left", usage: "5h 20%, resets Tue 14:00 (in 6h); weekly 59%, resets Sat Oct 31 09:00 (in 4d)" });
     const { sheet: s, calls, dialog } = sheet({ machines: [ATLAS], profiles, catalog: { projects: [project("cas-src", "2026-09-27T00:00:00Z")], browse_roots: [] } });
     s.open();
     await flush();
     const recommended = dialog().querySelector<HTMLInputElement>('input[name="launch-account"][value="support@petrastella.io"]')!;
     expect(recommended.checked).toBe(true);
     expect(recommended.closest("label")!.textContent).toContain("Recommended");
-    expect(recommended.closest("label")!.textContent).toContain("resets in 6h, 41% left");
+    expect(recommended.closest("label")!.textContent).toContain("resets Tue 14:00 (in 6h), 41% left");
+    expect(recommended.closest("label")!.textContent).toContain("5h 20%, resets Tue 14:00 (in 6h)");
+    expect(recommended.closest("label")!.textContent).toContain("weekly 59%, resets Sat Oct 31 09:00 (in 4d)");
     expect(calls.launches).toHaveLength(0);
     pick(dialog(), 'input[name="launch-project"]');
     pick(dialog(), 'input[name="launch-account"][value="main"]');

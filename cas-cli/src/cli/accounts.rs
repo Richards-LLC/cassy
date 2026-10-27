@@ -220,6 +220,7 @@ fn render_list(
             serde_json::to_string_pretty(&serde_json::json!({"accounts": accounts}))?
         ));
     }
+    let now = chrono::Utc::now();
     let flagged = accounts
         .iter()
         .filter(|a| {
@@ -265,7 +266,7 @@ fn render_list(
             for name in ["5h", "weekly"] {
                 let w = a.windows.iter().find(|w| w.name == name);
                 if w.and_then(|w| w.resets_at)
-                    .is_some_and(|reset| reset <= chrono::Utc::now())
+                    .is_some_and(|reset| reset <= now)
                 {
                     out.push_str(&format!(
                         "    {name:>6}: reset, usage unknown until next session\n"
@@ -275,13 +276,10 @@ fn render_list(
                 let used = w
                     .and_then(|w| w.used_percent)
                     .map(|used| format!("{used:.0}%"));
-                let reset = w
-                    .and_then(|w| w.resets_at)
-                    .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string());
+                let reset = super::limits::format_reset(w.and_then(|w| w.resets_at), now);
                 out.push_str(&format!(
-                    "    {name:>6}: {:>13}  resets {}\n",
-                    used.as_deref().unwrap_or("usage unknown"),
-                    reset.as_deref().unwrap_or("unknown")
+                    "    {name:>6}: {:>13}  {reset}\n",
+                    used.as_deref().unwrap_or("usage unknown")
                 ));
             }
             if let Some(folder) = &a.flags.duplicate_of {
@@ -353,4 +351,30 @@ fn mutation_receipt(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reset_render_tests {
+    use super::*;
+    #[test]
+    fn account_list_shows_both_resets_and_keeps_json_instants() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let reset: chrono::DateTime<chrono::Utc> = "2099-01-02T14:00:00Z".parse().unwrap();
+        let mut rows = Vec::new();
+        for provider in accounts::Provider::ALL {
+            let mut row = crate::account_selection::tests::row(provider, "short", 6, 20., 10.);
+            for window in &mut row.windows { window.resets_at = Some(reset); }
+            rows.push(row);
+        }
+        let text = render_list(&rows, false, std::path::Path::new("/fixture")).unwrap();
+        assert_eq!(text.matches("(in ").count(), 4, "{text}");
+        assert!(text.lines().all(|line| line.len() <= 80), "{text}");
+        let json: serde_json::Value = serde_json::from_str(&render_list(&rows, true, std::path::Path::new("/fixture")).unwrap()).unwrap();
+        for row in json["accounts"].as_array().unwrap() {
+            for window in row["windows"].as_array().unwrap() {
+                let instant=window["resets_at"].as_str().unwrap().parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+                assert_eq!(instant, reset);
+            }
+        }
+    }
 }

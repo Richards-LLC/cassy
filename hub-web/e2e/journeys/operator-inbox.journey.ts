@@ -589,7 +589,7 @@ test("HUB-J19 Ask to reply upgrades the same browser after its owner approves (c
   } finally { await peer.close(); }
 });
 
-test("HUB-J19 Ask to reply names denial and expiry without granting permission (cas-874b)", journeyPart, async ({ page, journey, browser }) => {
+test("HUB-J19 Ask to reply names denial without granting permission (cas-874b)", journeyPart, async ({ page, journey, browser }) => {
   const cloud = await replyUpgradeCloud();
   await routeOperatorCloud(page.context(), cloud);
   const inbox = page.getByRole("dialog", { name: "Operator inbox" });
@@ -607,20 +607,36 @@ test("HUB-J19 Ask to reply names denial and expiry without granting permission (
       await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
       await captureReply(page, "F01-denied");
     });
-    await journey.stage("An expired request is shown honestly after a reload", async () => {
-      await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
-      await expect(inbox.getByText(/Waiting for the account owner/)).toBeVisible();
-      const pending = [...cloud.replyGrants.requests.values()].find(r => r.status === "pending")!;
-      // Only the server double's deadline changes; no browser sleeps/clock advance.
-      pending.expires_at = new Date(cloud.now() - 1).toISOString();
-      await page.reload(); await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
-      await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
-      await expect(inbox.getByText("This reply request expired. This browser is still read-only.", { exact: true })).toBeVisible();
-      await captureReply(page, "F02-expired");
-      await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toBeVisible();
-      await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
-    });
+    // The denied reader can request again; no expiry setup is needed to
+    // prove that transition (cas-33167). Keep the denied stage capture above.
+    await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
+    await expect(inbox.getByText(/Waiting for the account owner/)).toBeVisible();
   } finally { await peer.close(); }
+});
+
+// Expiry is independent of denial and needs only the requesting browser.
+// It must not spend its test budget enrolling a separate owner (cas-33167).
+test("HUB-J19 Ask to reply names expiry without granting permission (cas-874b)", journeyPart, async ({ page, journey }) => {
+  const cloud = await replyUpgradeCloud();
+  await routeOperatorCloud(page.context(), cloud);
+  const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+  await journey.stage("Reader requests permission", async () => {
+    await journey.open(); await enrollReplyBrowser(page, cloud, "Expiring phone");
+    await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+    await inbox.getByRole("button", { name: "Ask to reply", exact: true }).click();
+    await expect(inbox.getByText(/Waiting for the account owner/)).toBeVisible();
+  });
+  await journey.stage("An expired request is shown honestly after a reload", async () => {
+    const pending = [...cloud.replyGrants.requests.values()].find(r => r.status === "pending")!;
+    // Only the server double's deadline changes; no browser sleeps/clock advance.
+    pending.expires_at = new Date(cloud.now() - 1).toISOString();
+    await page.reload(); await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+    await inbox.getByRole("button", { name: /soundwave · amber-fox-29/ }).click();
+    await expect(inbox.getByText("This reply request expired. This browser is still read-only.", { exact: true })).toBeVisible();
+    await captureReply(page, "F02-expired");
+    await expect(inbox.getByRole("button", { name: "Ask to reply", exact: true })).toBeVisible();
+    await expect(inbox.getByRole("button", { name: "Queue reply", exact: true })).toHaveCount(0);
+  });
 });
 
 test("HUB-J19 unavailable or unshipped reply permissions never block history (cas-6f38)", journeyPart, async ({ page, journey }) => {

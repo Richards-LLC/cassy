@@ -211,23 +211,40 @@ print(json.dumps({'journeys': rows}))
             "code = int(os.environ.get('FIXTURE_NATIVE_EXIT', '0'))\n" +
             "row = {'title':'HUB-J7 main','tests':[{'status':'unexpected' if code else 'expected','expectedStatus':'passed','results':[{'status':'failed' if code else 'passed'}]}]}\n" +
             "Path(os.environ['JOURNEY_OUTPUT'], 'report.json').write_text(json.dumps({'suites':[{'specs':[row]}]}))\n" +
+            "part=Path(os.environ['JOURNEY_RECEIPTS'])/'HUB-J7';part.mkdir(parents=True,exist_ok=True)\n" +
+            "(part/'result.json').write_text(json.dumps({'id':'HUB-J7','title':'main','status':'FAIL' if code else 'PASS','stages':[]}))\n" +
             "sys.exit(code)\n")
         for tool in tools.iterdir():
             tool.chmod(0o755)
         self.env.update(PATH=str(tools) + os.pathsep + self.env['PATH'], FIXTURE_ARGS=str(Path(self.temp.name) / 'args.json'))
-        for code in [7, 0]:
-            self.env['FIXTURE_NATIVE_EXIT'] = str(code)
-            out = subprocess.run(['bash', self.repo / 'scripts/journey-eval.sh', self.artifacts], env=self.env, capture_output=True, text=True)
-            self.assertEqual(out.returncode, code, out.stderr)
-            args = json.loads(Path(self.env['FIXTURE_ARGS']).read_text())
-            self.assertIn('--workers=4', args)
-            self.assertIn('--grep', args)
-            self.assertRegex('HUB-J7 main', args[-1])
-            value = json.loads((self.artifacts / 'journey-receipt.json').read_text())
-            self.assertEqual(value['suite_exit'], code)
-            self.assertEqual(value['results'][0]['failed'], int(code != 0))
-        old = next((self.artifacts / 'journey-runs').glob('*/journey-receipt.json'))
-        self.assertEqual(json.loads(old.read_text())['suite_exit'], 7)
+        # Exercise identity through the real planner -> shell -> bundle path.
+        # --affected skips task-store resolution; --task must still beat a
+        # misleading directory name. The task's original failure stays archived.
+        for leaf, options in [
+            ('corrective', []),
+            ('affected', ['--affected', self.base]),
+            ('cas-other', ['--task', 'cas-fixture']),
+            ('cas-explicit', ['--affected', self.base, '--task', 'cas-fixture']),
+        ]:
+            with self.subTest(leaf=leaf):
+                artifacts = self.artifacts / leaf
+                for code in [7, 0]:
+                    self.env['FIXTURE_NATIVE_EXIT'] = str(code)
+                    out = subprocess.run(['bash', self.repo / 'scripts/journey-eval.sh', artifacts, *options], env=self.env, capture_output=True, text=True)
+                    self.assertEqual(out.returncode, code, out.stderr)
+                    args = json.loads(Path(self.env['FIXTURE_ARGS']).read_text())
+                    self.assertIn('--workers=4', args)
+                    self.assertIn('--grep', args)
+                    self.assertRegex('HUB-J7 main', args[-1])
+                    value = json.loads((artifacts / 'journey-receipt.json').read_text())
+                    self.assertEqual(value['suite_exit'], code)
+                    self.assertEqual(value['results'][0]['failed'], int(code != 0))
+                    bundle = json.loads((artifacts / 'journeys/HUB-J7/bundle.json').read_text())
+                    self.assertEqual(bundle['task_id'], 'cas-fixture')
+                    self.assertEqual(bundle['head_sha'], self.git('rev-parse', 'HEAD'))
+                    self.assertEqual(bundle['verdict'], 'FAIL' if code else 'PASS')
+                old = next((artifacts / 'journey-runs').glob('*/journey-receipt.json'))
+                self.assertEqual(json.loads(old.read_text())['suite_exit'], 7)
 
     def test_writer_recomputes_selection_and_refuses_hand_picked_plan(self):
         (self.repo / 'hub-web/src').mkdir()

@@ -1,5 +1,6 @@
+import type { Page } from "@playwright/test";
 import { createHash } from "node:crypto";
-import { test, expect, journeyPart } from "./journey";
+import { test, expect, journeyPart, type Journey } from "./journey";
 import { journeyDay, journeyNow } from "./clock";
 import { operatorCloudDouble, routeOperatorCloud } from "./operator-cloud-route";
 
@@ -8,7 +9,9 @@ const HUB = "hub-soundwave";
 const PROJECT = "github.com/richards-llc/cassy";
 const sessionId = `s_${createHash("sha256").update(SESSION).digest("base64url")}`;
 
-test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3dd)", journeyPart, async ({ page, journey, browser }) => {
+// Each goal keeps real UI enrollment, PoP, HPKE and IndexedDB. Presence and
+// signed observer events come from a fresh cloud double, never prefilled DOM.
+async function machineAlerts(page: Page) {
   // Real browser enrollment/PoP/HPKE/IndexedDB, protocol-double presence.
   // This cannot establish the deployed watchdog's outage detection bound.
   const cloud = operatorCloudDouble();
@@ -21,22 +24,37 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
   const row = inbox.locator(`[data-machine-presence="${soundwave.id}"]`);
   const notices = inbox.getByRole("list", { name: "Machine alert history" });
   const refresh = async () => inbox.getByRole("button", { name: "Refresh machine status" }).click();
+  const report = () => ({
+    monitoring: "enabled", monitoring_generation: "1", presence: "observed", last_report_at: new Date(journeyNow()).toISOString(),
+    lease_expires_at: new Date(journeyNow() + 180_000).toISOString(), deadline_at: new Date(journeyNow() + 240_000).toISOString(),
+    components: [
+      { component: "hub", state: "up", observed_at: new Date(journeyNow()).toISOString() },
+      { component: "serve", state: "degraded", observed_at: new Date(journeyNow()).toISOString() },
+      { component: "factory", state: "unknown", observed_at: new Date(journeyNow()).toISOString() },
+    ],
+  });
+  return { cloud, soundwave, inbox, row, notices, refresh, report };
+}
+
+async function enrollAlertPhone(page: Page, journey: Journey, cloud: Awaited<ReturnType<typeof machineAlerts>>["cloud"]) {
+  await journey.open();
+  const inbox = page.getByRole("dialog", { name: "Operator inbox" });
+  await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
+  await inbox.getByLabel("Name this browser").fill("Presence phone");
+  await inbox.getByRole("button", { name: "Sign in" }).click();
+  const code = (await inbox.getByLabel("Sign-in code").textContent())!.trim();
+  await cloud.approve(code, { capabilities: ["feed:read", "account:manage"] });
+  await expect(inbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
+}
+
+test("HUB-J19 enable and disable machine alerts without a hub", journeyPart, async ({ page, journey, browser }) => {
+  const { cloud, soundwave, inbox, row, notices, refresh, report } = await machineAlerts(page);
   const peer = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   try {
     const desk = await peer.newPage();
     await desk.clock.install({ time: journeyNow() });
     await routeOperatorCloud(peer, cloud);
     const deskInbox = desk.getByRole("dialog", { name: "Operator inbox" });
-    const report = () => ({
-      monitoring: "enabled", monitoring_generation: "1", presence: "observed", last_report_at: new Date(journeyNow()).toISOString(),
-      lease_expires_at: new Date(journeyNow() + 180_000).toISOString(), deadline_at: new Date(journeyNow() + 240_000).toISOString(),
-      components: [
-        { component: "hub", state: "up", observed_at: new Date(journeyNow()).toISOString() },
-        { component: "serve", state: "degraded", observed_at: new Date(journeyNow()).toISOString() },
-        { component: "factory", state: "unknown", observed_at: new Date(journeyNow()).toISOString() },
-      ],
-    });
-    let outageId = "";
     await journey.stage("Enable alerts and confirm the first machine report", async () => {
       await journey.open();
       await page.getByRole("button", { name: "Operator inbox", exact: true }).click();
@@ -94,6 +112,57 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(row.locator("p time")).toHaveText(/^(?:now|\d+[smhd] ago)$/);
       await expect(inbox.locator(".operator-inbox-bubble")).toHaveCount(0);
     });
+    await journey.stage("Keep a signed recovered notice while changing monitoring", async () => {
+      const outage = await cloud.appendObserverNotice(soundwave, "machine_unobserved");
+      await cloud.appendObserverNotice(soundwave, "machine_recovered", { refEventId: outage.eventId });
+      await refresh();
+      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+      await desk.goto(page.url());
+      await desk.getByRole("button", { name: "Operator inbox", exact: true }).click();
+      await deskInbox.getByLabel("Name this browser").fill("Presence desk");
+      await deskInbox.getByRole("button", { name: "Sign in" }).click();
+      const code = (await deskInbox.getByLabel("Sign-in code").textContent())!.trim();
+      await cloud.approve(code);
+      await expect(deskInbox.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible({ timeout: 15_000 });
+      await expect(deskInbox.getByRole("button", { name: /Enable alerts|Disable alerts/ })).toHaveCount(0);
+    });
+    await journey.stage("The phone disables alerts while the hub is unreachable", async () => {
+      await page.emulateMedia({ forcedColors: null, contrast: null, reducedMotion: null });
+      const settings = row.locator("summary");
+      if (!(await row.locator("details").evaluate((node) => (node as HTMLDetailsElement).open))) {
+        await settings.focus();
+        await settings.press("Enter");
+      }
+      const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
+      await expect(disable).toHaveText("Disable alerts");
+      await disable.focus();
+      await disable.press("Enter");
+      await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible();
+      expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("2");
+      await deskInbox.getByRole("button", { name: "Refresh machine status" }).click();
+      await expect(deskInbox.getByText("Monitoring is off", { exact: true })).toBeVisible();
+      await expect(notices.getByText("soundwave recovered", { exact: true })).toHaveCount(1);
+      await expect(row.getByRole("button", { name: "Enable alerts for soundwave", exact: true })).toMatchAriaSnapshot('- button "Enable alerts for soundwave"');
+      if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/keyboard-disable.png` });
+    });
+  } finally {
+    await peer.close();
+  }
+});
+
+test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3dd)", journeyPart, async ({ page, journey, browser }) => {
+  const { cloud, soundwave, inbox, row, notices, refresh, report } = await machineAlerts(page);
+  cloud.presence.set(soundwave.id, report());
+  const peer = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  try {
+    const desk = await peer.newPage();
+    await desk.clock.install({ time: journeyNow() });
+    await routeOperatorCloud(peer, cloud);
+    const deskInbox = desk.getByRole("dialog", { name: "Operator inbox" });
+    let outageId = "";
+    await journey.stage("Sign in on a phone with machine monitoring already enabled", async () => {
+      await enrollAlertPhone(page, journey, cloud);
+    });
     await journey.stage("A separate profile sees the status and signed outage without pairing", async () => {
       await desk.goto(page.url());
       await desk.getByRole("button", { name: "Operator inbox", exact: true }).click();
@@ -138,66 +207,60 @@ test("HUB-J19 machine alerts reach a separate device with no hub online (cas-e3d
       await expect(inbox.getByText(/Cassy Cloud's alert check is unavailable/)).toBeVisible();
       await expect(row.getByText("Reporting to Cassy Cloud", { exact: true })).toBeVisible();
     });
-    const cells = [
-      { name: "phone-light", width: 390, height: 844, scheme: "light" as const },
-      { name: "phone-dark", width: 390, height: 844, scheme: "dark" as const },
-      { name: "desktop-light", width: 1280, height: 800, scheme: "light" as const },
-      { name: "desktop-dark", width: 1280, height: 800, scheme: "dark" as const },
-      { name: "forced-colors", width: 390, height: 844, scheme: "light" as const, media: { forcedColors: "active" as const }, query: "(forced-colors: active)" },
-      { name: "more-contrast", width: 390, height: 844, scheme: "light" as const, media: { contrast: "more" as const }, query: "(prefers-contrast: more)" },
-      { name: "reduced-motion", width: 390, height: 844, scheme: "light" as const, media: { reducedMotion: "reduce" as const }, query: "(prefers-reduced-motion: reduce)" },
-    ];
-    await journey.stage("Check machine alerts across accessibility modes", async () => {
-      for (const cell of cells) {
-        await page.setViewportSize({ width: cell.width, height: cell.height });
-        await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {}) });
-        await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
-        if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
-        await expect(row.getByText(/Serve: degraded/)).toBeVisible();
-        await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-        if (cell.name === "forced-colors") {
-          await row.locator("summary").click();
-          const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
-          await expect(disable).toBeVisible();
-          expect(await disable.evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
-          if (process.env.QA_ARTIFACTS) {
-            await disable.scrollIntoViewIfNeeded();
-            await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-disable-forced-colors.png` });
-          }
-          await inbox.getByRole("button", { name: "Refresh machine status" }).scrollIntoViewIfNeeded();
-        }
-        if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-${cell.name}.png` });
-      }
-      if (process.env.QA_ARTIFACTS) {
-        const { readFile, writeFile } = await import("node:fs/promises");
-        const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
-        const dialog = await inbox.evaluate((node) => node.outerHTML);
-        await writeFile(`${process.env.QA_ARTIFACTS}/presence.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Machine alerts</title><style>${css}</style></head><body>${dialog}</body></html>`);
-      }
-    });
-    await journey.stage("The phone disables alerts while the hub is unreachable", async () => {
-      await page.emulateMedia({ forcedColors: null, contrast: null, reducedMotion: null });
-      const settings = row.locator("summary");
-      if (!(await row.locator("details").evaluate((node) => (node as HTMLDetailsElement).open))) {
-        await settings.focus();
-        await settings.press("Enter");
-      }
-      const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true });
-      await expect(disable).toHaveText("Disable alerts");
-      await disable.focus();
-      await disable.press("Enter");
-      await expect(row.getByText("Monitoring is off", { exact: true })).toBeVisible();
-      expect(cloud.presence.get(soundwave.id)?.monitoring_generation).toBe("2");
-      await deskInbox.getByRole("button", { name: "Refresh machine status" }).click();
-      await expect(deskInbox.getByText("Monitoring is off", { exact: true })).toBeVisible();
-      await expect(notices.getByText("soundwave recovered", { exact: true })).toHaveCount(1);
-      await expect(row.getByRole("button", { name: "Enable alerts for soundwave", exact: true })).toMatchAriaSnapshot('- button "Enable alerts for soundwave"');
-      if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/keyboard-disable.png` });
-    });
   } finally {
     await peer.close();
   }
+});
+
+test("HUB-J19 machine alerts across accessibility modes", journeyPart, async ({ page, journey }) => {
+  const { cloud, soundwave, inbox, row, notices, report } = await machineAlerts(page);
+  cloud.presence.set(soundwave.id, report());
+  const outage = await cloud.appendObserverNotice(soundwave, "machine_unobserved");
+  await cloud.appendObserverNotice(soundwave, "machine_recovered", { refEventId: outage.eventId });
+  cloud.observerStatus = "unavailable";
+  await journey.stage("Sign in and read a signed recovered alert", async () => {
+    await enrollAlertPhone(page, journey, cloud);
+    await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+    await expect(inbox.getByText(/Cassy Cloud's alert check is unavailable/)).toBeVisible();
+  });
+  const cells = [
+    { name: "phone-light", width: 390, height: 844, scheme: "light" as const },
+    { name: "phone-dark", width: 390, height: 844, scheme: "dark" as const },
+    { name: "desktop-light", width: 1280, height: 800, scheme: "light" as const },
+    { name: "desktop-dark", width: 1280, height: 800, scheme: "dark" as const },
+    { name: "forced-colors", width: 390, height: 844, scheme: "light" as const, media: { forcedColors: "active" as const }, query: "(forced-colors: active)" },
+    { name: "more-contrast", width: 390, height: 844, scheme: "light" as const, media: { contrast: "more" as const }, query: "(prefers-contrast: more)" },
+    { name: "reduced-motion", width: 390, height: 844, scheme: "light" as const, media: { reducedMotion: "reduce" as const }, query: "(prefers-reduced-motion: reduce)" },
+  ];
+  await journey.stage("Check machine alerts across accessibility modes", async () => {
+    for (const cell of cells) {
+      await page.setViewportSize({ width: cell.width, height: cell.height});
+      await page.emulateMedia({ colorScheme: cell.scheme, forcedColors: null, contrast: null, reducedMotion: null, ...("media" in cell ? cell.media : {})});
+      await page.evaluate((scheme) => { document.documentElement.dataset.scheme = scheme; }, cell.scheme);
+      if ("query" in cell) expect(await page.evaluate((query) => matchMedia(query).matches, cell.query!)).toBe(true);
+      await expect(row.getByText(/Serve: degraded/)).toBeVisible();
+      await expect(notices.getByText("soundwave recovered", { exact: true })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (cell.name === "forced-colors") {
+        await row.locator("summary").click();
+        const disable = row.getByRole("button", { name: "Disable alerts for soundwave", exact: true});
+        await expect(disable).toBeVisible();
+        expect(await disable.evaluate((node) => parseFloat(getComputedStyle(node).borderTopWidth))).toBeGreaterThan(0);
+        if (process.env.QA_ARTIFACTS) {
+          await disable.scrollIntoViewIfNeeded();
+          await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-disable-forced-colors.png`});
+        }
+        await inbox.getByRole("button", { name: "Refresh machine status" }).scrollIntoViewIfNeeded();
+      }
+      if (process.env.QA_ARTIFACTS) await page.screenshot({ path: `${process.env.QA_ARTIFACTS}/presence-${cell.name}.png`});
+    }
+    if (process.env.QA_ARTIFACTS) {
+      const { readFile, writeFile } = await import("node:fs/promises");
+      const css = await readFile(new URL("../../dist/app.css", import.meta.url), "utf8");
+      const dialog = await inbox.evaluate((node) => node.outerHTML);
+      await writeFile(`${process.env.QA_ARTIFACTS}/presence.html`, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Machine alerts</title><style>${css}</style></head><body>${dialog}</body></html>`);
+    }
+ });
 });
 
 /** A supervisor turn as the hub's drain seals it: an m263 frozen snapshot. */

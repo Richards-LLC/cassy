@@ -1,9 +1,11 @@
-import { test, expect, journeyPart, RECEIPTS } from "./journey";
+import { test, expect, journeyPart, type Journey } from "./journey";
+import type { Page } from "@playwright/test";
 import { ATLAS, PELICAN } from "./world";
-import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 
-test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, async ({ page, journey }) => {
+// Independent goals enter the same rendered conversation with a fresh live ask.
+// Capturing four rendering modes must not spend the reply goal's test budget.
+async function openQuestionless(page: Page, journey: Journey) {
   const workers = ["young-otter-14", "rapid-kestrel-30", "steady-stork-35", "ready-owl-88", "warm-phoenix-6", "keen-otter-80"];
   const hub = await journey.hub({ machines: [{ ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, workers }] }], paired: ["atlas"], fleet: { [PELICAN]: {
     agents: [
@@ -16,20 +18,25 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
       { id: "cas-5678", title: "Review before merge", status: "AWAITINGMERGE", updated_at: "2026-09-30T12:00:00Z" },
     ], epics: [], focused_epic: null, spawnNames: [],
   } } });
-  let ask = 0;
-  await journey.stage("Read a question without supplied choices", async () => {
-    await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
-    hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
-    ask = hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
-    await expect(page.locator(".pinned-ask")).toBeVisible();
-    await expect(page.locator("#status-view")).toContainText("Polish the conversation");
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
+  hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
+  const ask = hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
+  await expect(page.locator(".pinned-ask")).toBeVisible();
+  await expect(page.locator("#status-view")).toContainText("Polish the conversation");
+  return { hub, ask, workers };
+}
+
+test("HUB-J7 question and progress across light, dark, desktop and phone", journeyPart, async ({ page, journey }, testInfo) => {
+  await openQuestionless(page, journey);
+  await journey.stage("Capture question and progress across rendering modes", async () => {
+    const css = await (await page.request.get(new URL("app.css", page.url()).href)).text();
     for (const scheme of ["light", "dark"] as const) {
       await page.emulateMedia({ colorScheme: scheme });
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: width === 1280 ? 800 : 844 });
-        await page.screenshot({ path: join(RECEIPTS, "HUB-J7", `${scheme}-${width}.png`) });
+        await page.screenshot({ path: testInfo.outputPath(`${scheme}-${width}.png`) });
         // Preserve the actual rendered build DOM and exact build CSS for
         // offline strict mechanical QA; no reconstructed fixture markup.
         const dom = await page.evaluate(() => {
@@ -37,10 +44,15 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
           clone.querySelectorAll("script, link").forEach(node => node.remove());
           return clone.outerHTML;
         });
-        const css = await (await page.request.get(new URL("app.css", page.url()).href)).text();
-        writeFileSync(join(RECEIPTS, "HUB-J7", `${scheme}-${width}.html`), "<!doctype html>" + dom.replace("</head>", `<style>${css}</style></head>`));
+        writeFileSync(testInfo.outputPath(`${scheme}-${width}.html`), "<!doctype html>" + dom.replace("</head>", `<style>${css}</style></head>`));
       }
     }
+  });
+});
+
+test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, async ({ page, journey }, testInfo) => {
+  const { hub, ask, workers } = await openQuestionless(page, journey);
+  await journey.stage("Read a question without supplied choices", async () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await expect(page.getByRole("button", { name: "Yes, go ahead", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Hold", exact: true })).toHaveCount(0);
@@ -91,7 +103,7 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
       await page.emulateMedia(media);
       expect(await page.evaluate(query => matchMedia(query).matches, query)).toBe(true);
       await expect(question.locator(".chip.sent")).toHaveText("Send for review");
-      await page.screenshot({ path: join(RECEIPTS, "HUB-J7", `a11y-${name}.png`) });
+      await page.screenshot({ path: testInfo.outputPath(`a11y-${name}.png`) });
     }
   });
 });

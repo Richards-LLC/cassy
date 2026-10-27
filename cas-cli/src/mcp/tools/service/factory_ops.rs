@@ -14691,6 +14691,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_usage_limit_uses_first_refusal_until_a_real_answer() {
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        let refusal = r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","timestamp":"2026-10-27T12:00:00Z","message":{"content":[{"type":"text","text":"You've hit your limit · resets 5pm"}]}}"#;
+        let repeat = refusal.replace("12:00:00", "12:01:00");
+        std::fs::write(transcript.path(), format!("{refusal}\n{repeat}\n")).unwrap();
+        assert_eq!(codex_rollout_usage_limit_evidence(Some(transcript.path()), cas_mux::SupervisorCli::Claude),
+            UsageLimitEvidence::Limited { first_evidence: "2026-10-27T12:00:00Z".into() });
+        std::fs::write(transcript.path(), format!("{refusal}\n{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Continuing the task\"}}]}}}}\n")).unwrap();
+        assert_eq!(codex_rollout_usage_limit_evidence(Some(transcript.path()), cas_mux::SupervisorCli::Claude), UsageLimitEvidence::Recovered);
+        // Quoting a limit in user input is not terminal harness evidence.
+        std::fs::write(transcript.path(), r#"{"type":"user","message":{"content":"You've hit your limit"}}"#).unwrap();
+        assert_eq!(codex_rollout_usage_limit_evidence(Some(transcript.path()), cas_mux::SupervisorCli::Claude), UsageLimitEvidence::Recovered);
+    }
+
     /// cas-4a5e: a typo'd/missing codex config_dir must fail with a message
     /// naming the exact `auth.json` path that was checked — not a generic
     /// error and not the Claude-shaped wording.
@@ -15175,7 +15190,7 @@ mod tests {
     }
 
     #[test]
-    fn recommended_spawn_accounts_preserve_explicit_and_requester_overrides() {
+    fn recommended_spawn_accounts_preserve_explicit_and_override_inherited() {
         let now = "2026-10-27T12:00:00Z".parse().unwrap();
         let mut specs = Vec::new();
         for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
@@ -15193,12 +15208,14 @@ mod tests {
             assert_eq!(specs[offset].config_dir.as_deref(), Some(format!("/fixture/{}chosen", provider.prefix()).as_str()));
             assert_eq!(specs[offset + 1].config_dir.as_deref(), Some("/explicit/account"));
             assert_eq!(specs[offset + 2].requester_config_dir.as_deref(), Some("/requester/account"));
-            assert!(specs[offset + 2].config_dir.is_none());
+            assert_eq!(specs[offset + 2].config_dir, specs[offset].config_dir);
+            assert!(receipt.contains("recommended over inherited /requester/account"));
             assert!(receipt.contains(&format!("{} recommended account=chosen", provider.name())));
         }
         assert!(receipt.contains("resets in 6h, 41% left"));
         assert!(spawn_specs_summary(&specs, &[]).contains("account=/fixture/.codex-chosen"));
         specs[0].config_dir = None;
+        specs[0].requester_config_dir = Some("/fallback/account".into());
         let fallback = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
             let mut row = crate::account_selection::tests::row(provider, "full", 6, 100.0, 100.0);
             row.login_state = crate::account_registry::LoginState::LoggedIn;
@@ -15237,6 +15254,7 @@ mod tests {
                 Some(home.path().join(format!("{}later", provider.prefix())).to_str().unwrap()));
             assert!(receipt.contains(&format!("{} recommended account=later", provider.name())));
         }
+        assert_eq!(specs[0].requester_config_dir.as_deref(), Some("/fallback/account"));
     }
 
     #[test]

@@ -213,6 +213,23 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn project_policy_merges_only_present_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_home = temp.path().join("config");
+        let _env = crate::test_support::TestEnvGuard::with_vars(&[("XDG_CONFIG_HOME", config_home.to_str().unwrap())]);
+        let mut global = crate::config::Config::default();
+        global.accounts = Some(AccountsConfig { selection: AccountSelection::MostHeadroom, threshold: 75, disabled: vec!["/disabled".into()] });
+        crate::config::save_global_config(&global).unwrap();
+        let project = temp.path().join(".cas");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("config.toml"), "[accounts]\nthreshold = 80\n").unwrap();
+        let policy = load_policy(Some(&project));
+        assert_eq!(policy.selection, AccountSelection::MostHeadroom);
+        assert_eq!(policy.threshold, 80);
+        assert_eq!(policy.disabled, ["/disabled"]);
+    }
+
+    #[test]
     fn selection_table() {
         let now = "2026-10-27T12:00:00Z".parse().unwrap();
         let mut config = crate::config::Config::default();

@@ -549,6 +549,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A desktop keeps the worded End session line under each row (HUB-J14 covers it, including the last row's confirmation in view).
 - A failed end shows its error under the row and offers End session again.
+- A session named from the CLI can be ended under the same name rule, including `q`, `q2`, and `build_dev.v1`; the hub's launch/attach validation uses that rule too. The real authenticated handler regression `hub::tests::end_session_writes_audit_row` covers this boundary (cas-1ce3).
 
 ### HUB-J17 · Run the fleet from a conversation
 

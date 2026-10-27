@@ -131,6 +131,11 @@ invariants:
     check: 'Walk HUB-J16 in hub-web/e2e/journeys/end-session.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double ends
       the session; that the daemon stops its supervisor and workers is covered by the hub''s Rust tests'
+  HUB-J16-CLI-NAME:
+    bug:
+      task: cas-1ce3
+    statement: every session name accepted by the CLI registry also passes hub launch/attach validation and can be ended
+    check: 'Run the real authenticated handler regression hub::tests::end_session_writes_audit_row: create q, q2 and build_dev.v1 through SessionManager, verify launch name admission, then DELETE and read back removal and audit outcomes.'
   HUB-J17-GOAL:
     statement: pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming,
       and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing
@@ -1378,6 +1383,7 @@ journeys:
   - hub-web/src/spoken-names.ts
   invariants:
   - HUB-J16-GOAL
+  - HUB-J16-CLI-NAME
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

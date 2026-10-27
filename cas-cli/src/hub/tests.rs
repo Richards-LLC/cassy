@@ -4633,6 +4633,7 @@ async fn end_session_writes_audit_row() {
     let _home = crate::test_env_guard::TestEnvGuard::temp_home();
     let mut scopes = control_scopes();
     scopes.insert(Scope::FactoryManage);
+    scopes.insert(Scope::SessionLaunch);
     let fixture = ops_fixture(scopes);
 
     let (status, _) = fixture
@@ -4647,6 +4648,56 @@ async fn end_session_writes_audit_row() {
         assert_eq!(row["target_session"], "factory-gone-566b");
         assert_eq!(row["required_scope"], "factory:manage");
         assert_eq!(row["device_id"], fixture.device_id.as_str());
+    }
+
+    // cas-1ce3: names accepted by the CLI's real session registry must also
+    // pass the hub's launch/attach validation and reach End session cleanup.
+    let manager = crate::ui::factory::SessionManager::new();
+    for name in ["q", "q2", "build_dev.v1"] {
+        let metadata = crate::ui::factory::create_metadata(
+            name,
+            i32::MAX as u32, // A dead PID: cleanup must never signal a real process.
+            "supervisor",
+            &[],
+            None,
+            fixture.cas_dir.parent().unwrap().to_str(),
+            None,
+        );
+        manager.save_metadata(&metadata).unwrap();
+
+        let (status, body) = fixture
+            .call(
+                "POST",
+                "/v1/sessions",
+                Some(serde_json::json!({
+                    "target": {"kind": "project", "id": "not-a-registered-project"},
+                    "supervisor_cli": "claude",
+                    "name": name,
+                })),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
+        assert_eq!(
+            body["error"], "invalid_target",
+            "CLI name must pass launch validation: {name}: {body}"
+        );
+
+        let (status, body) = fixture
+            .call("DELETE", &format!("/v1/sessions/{name}"), None)
+            .await;
+        assert_eq!(
+            status, StatusCode::OK,
+            "CLI name must be endable: {name}: {body}"
+        );
+        assert_eq!(body["session"], name);
+        assert!(manager.find_session(Some(name)).unwrap().is_none());
+        let outcomes: Vec<_> = fixture
+            .audit("session_end")
+            .into_iter()
+            .filter(|row| row["target_session"] == name)
+            .map(|row| row["outcome"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(outcomes, ["requested", "cleaned_stale"], "{name}");
     }
 }
 

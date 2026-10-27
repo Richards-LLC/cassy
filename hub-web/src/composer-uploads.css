@@ -1,0 +1,9 @@
+.composer-uploads { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: var(--space-2); max-height: 30vh; overflow: auto; color: var(--ink); }
+.composer-uploads[hidden] { display: none; }
+.composer-file { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); min-width: 0; max-width: 100%; padding: var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: 12px; background: var(--bg-panel); color: var(--ink); }
+.composer-file span { overflow-wrap: anywhere; flex: 1; min-width: 0; }
+.composer-file img { width: 44px; height: 44px; object-fit: contain; }
+.composer-file pre { width: 100%; max-height: 5em; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.composer-file button { min-height: 44px; }
+.composer-uploads p { flex-basis: 100%; margin: 0; color: var(--ink-mid); font-size: 13px; }
+.composer-uploads .upload-error { color: var(--state-crit); }

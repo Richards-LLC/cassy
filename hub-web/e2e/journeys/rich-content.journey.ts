@@ -64,7 +64,11 @@ for (const [index, variant] of variants.entries()) {
         await expect(log.locator('[data-change="add"]')).toContainText("+launchWithEvidence()");
         await expect(log.locator('[data-change="remove"]')).toContainText("-launchWithoutEvidence()");
         await summary.click();
-        await expect.poll(() => hub.usagePosts.flatMap((post) => post.entries).some((entry) => entry.journey === "HUB-J22" && entry.count >= 2)).toBe(true);
+        // Counts stay local until the ordinary batched flush; read that journal.
+        await expect.poll(() => page.evaluate(() => {
+          const stored = JSON.parse(localStorage.getItem("commander.usage.v1") ?? "null") as { days?: Record<string, Record<string, number>> } | null;
+          return Object.values(stored?.days ?? {}).some((actions) => (actions["rich-content.inspect"] ?? 0) >= 2);
+        })).toBe(true);
       });
 
       await journey.stage("Decode an inline image without moving its file caption", async () => {

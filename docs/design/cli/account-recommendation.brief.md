@@ -40,3 +40,11 @@ folder can be recommended. A row outside the anchored reset group says
 `resets later than <recommended>`. Each row stays manually selectable. No machine
 schema or interaction changes. Commander profile probing can still take up to
 four seconds (QA F02, deferred by supervisor #4211163).
+
+## Missing reset metadata
+
+A reported nonzero percentage stays authoritative when its reset time is
+missing: 59% used means 41% left, and 95% used is excluded at the 90% threshold.
+Only a missing/zero percentage without a reset is unopened; a past timestamp
+still proves rollover. A losing unknown weekly reset says `weekly reset unknown;
+known resets first`. The short reason fits the existing bounded picker row.

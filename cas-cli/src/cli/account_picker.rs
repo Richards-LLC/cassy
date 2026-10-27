@@ -704,6 +704,14 @@ mod tests {
             assert_eq!(active_choice_index(&profiles), 1);
             assert!(idle_choices[1].to_string().contains("recommended: resets in 6h, 90% left"));
             assert!(idle_choices[0].to_string().contains("duplicate of alt"));
+            let mut unknown_reset_accounts = accounts.clone();
+            unknown_reset_accounts[1].windows[1].resets_at = None;
+            apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert!(profile_choices(&profiles)[1].to_string().contains("weekly reset unknown; known resets first"));
+            unknown_reset_accounts[0].flags.disabled = true;
+            apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
+            assert!(profile_choices(&profiles)[1].to_string().contains("weekly reset unknown, 41% left"));
+
             assert!(matches!(&choices[0], ProfileChoice::Existing { name, .. } if name == "main"));
             assert!(matches!(&choices[1], ProfileChoice::Existing { name, .. } if name == "alt"));
             assert_eq!(choices[2], ProfileChoice::NewLogin);

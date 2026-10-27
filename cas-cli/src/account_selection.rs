@@ -93,6 +93,15 @@ pub fn recommend<'a>(
             .excluded
             .push((skipped, format!("resets later than {}", account.name)));
     }
+    if reset.is_some() {
+        for &(skipped, candidate_reset, _, _) in candidates.iter().skip(1) {
+            if candidate_reset.is_none() {
+                result
+                    .excluded
+                    .push((skipped, "weekly reset unknown; known resets first".into()));
+            }
+        }
+    }
     let reset_reason = match reset {
         Some(reset) => {
             let minutes = (reset - now).num_minutes().max(1);
@@ -138,22 +147,20 @@ fn capacity(
         let Some(w) = account.windows.iter().find(|w| w.name == name) else {
             return Ok((None, 0.0));
         };
-        // Past timestamps remain evidence of rollover even when the registry
-        // clears the stale percentage. Null reset + known usage is unopened.
-        if w.resets_at.is_none_or(|reset| reset <= now) {
+        // A past timestamp proves rollover even if the registry cleared its
+        // old percentage. Missing reset metadata alone does not prove rollover.
+        if w.resets_at.is_some_and(|reset| reset <= now) {
             return Ok((None, 0.0));
         }
-        let used = w
-            .used_percent
-            .filter(|v| v.is_finite() && (0.0..=100.0).contains(v))
-            .ok_or_else(|| format!("{name} usage unknown"))?;
-        let Some(reset) = w.resets_at else {
-            return Ok((None, 0.0));
+        let used = match (w.used_percent, w.resets_at) {
+            (None, None) => 0.0, // Unopened window in an otherwise known account.
+            (Some(used), _) if used.is_finite() && (0.0..=100.0).contains(&used) => used,
+            _ => return Err(format!("{name} usage unknown")),
         };
         if used >= f64::from(threshold) {
             return Err(format!("{name} at {used:.0}% (threshold {threshold}%)"));
         }
-        Ok((Some(reset), used))
+        Ok((w.resets_at, used))
     };
     let (_, five) = window("5h")?;
     let (reset, weekly) = window("weekly")?;
@@ -501,7 +508,7 @@ pub(crate) mod tests {
                                 .iter()
                                 .find(|(a, _)| a.name == "a")
                                 .map(|(_, reason)| reason.as_str()),
-                            Some("weekly reset unknown; ranked after known resets")
+                            Some("weekly reset unknown; known resets first")
                         );
                     }
                     if case == "unknown reset weekly threshold"

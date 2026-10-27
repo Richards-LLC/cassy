@@ -502,6 +502,8 @@ export class ConversationView {
     const { supervisor } = this.options;
     this.element = document.createElement("div");
     this.element.className = "conversation-reading thread";
+    // The keyed reading anchor owns compensation, including spacer changes.
+    this.element.style.overflowAnchor = "none";
     if (this.options.accentClass) this.element.classList.add(this.options.accentClass);
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
@@ -550,7 +552,10 @@ export class ConversationView {
     this.pinned.setAttribute("role", "region"); this.pinned.setAttribute("aria-label", `Waiting on you: question from ${supervisor}`);
     // Browser pinning/focus recovery also emits scroll. Only a reading gesture
     // may start an older network request; explicit Load earlier works as well.
-    this.element.addEventListener("wheel", event => { this.earlierIntent = event.deltaY < 0; }, { passive: true });
+    this.element.addEventListener("wheel", event => {
+      this.earlierIntent = event.deltaY < 0;
+      if (this.earlierIntent && this.element.scrollTop <= Math.max(120, this.element.clientHeight / 2)) this.scrollWindow(true);
+    }, { passive: true });
     this.element.addEventListener("keydown", event => { this.earlierIntent = ["ArrowUp", "PageUp", "Home"].includes(event.key); });
     let touchY: number | undefined;
     this.element.addEventListener("touchstart", event => { touchY = event.touches[0]?.clientY; }, { passive: true });

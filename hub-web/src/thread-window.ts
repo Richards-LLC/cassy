@@ -38,7 +38,7 @@ export class ThreadWindow {
       const index = items.findIndex(item => item.key === anchor || (item.type === "group" && item.turns.some(turn => turn.key === anchor)));
       if (index >= 0 && (index < start || index >= end)) { start = Math.max(0, index - 6); end = Math.min(items.length, start + 20); }
     }
-    if (following && this.requested === undefined) {
+    if (following && this.requested === undefined && items.length > 20) {
       // Large bubbles need fewer rows; short updates still fill the viewport generously.
       while (start < end - 1 && total - this.offsets[start + 1]! >= viewport * 3) start++;
     }

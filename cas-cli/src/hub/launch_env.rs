@@ -196,6 +196,44 @@ pub fn resolve_for_project(
     })
 }
 
+/// cas-05cee: before Commander starts a Claude or Codex supervisor, link the
+/// launched account's empty shared slots. Returns the notices for the launch
+/// response; real items and retired folders are reported, never changed.
+pub fn ensure_account_links(cli: SupervisorCli, environment: &LaunchEnvironment) -> Vec<String> {
+    dirs::home_dir().map_or_else(Vec::new, |home| ensure_account_links_in(cli, environment, &home))
+}
+
+fn ensure_account_links_in(cli: SupervisorCli, environment: &LaunchEnvironment, home: &Path) -> Vec<String> {
+    let (provider, key) = match cli {
+        SupervisorCli::Claude => (crate::accounts::Provider::Claude, "CLAUDE_CONFIG_DIR"),
+        SupervisorCli::Codex => (crate::accounts::Provider::Codex, "CODEX_HOME"),
+        _ => return Vec::new(),
+    };
+    // `main` removes the selector and runs on the default folder.
+    let Some(folder) = environment
+        .set
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| PathBuf::from(value))
+        .or_else(|| {
+            environment
+                .remove
+                .iter()
+                .any(|name| name == key)
+                .then(|| home.join(format!(".{}", provider.name())))
+        })
+    else {
+        return Vec::new();
+    };
+    match crate::account_links::ensure(provider, home, &folder) {
+        Ok(ensured) => crate::account_links::notices(provider, home, &folder, &ensured),
+        Err(error) => vec![format!(
+            "Warning: could not link shared items in {}: {error:#}",
+            crate::account_links::short(home, &folder)
+        )],
+    }
+}
+
 fn probe_login(
     cli: SupervisorCli,
     executable: &Path,
@@ -676,6 +714,41 @@ fn bounded_output(mut command: Command, timeout: Duration) -> Result<std::proces
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commander_launch_links_the_launched_account_before_start() {
+        let home = tempfile::tempdir().unwrap();
+        let h = home.path();
+        for (provider, cli, key) in [
+            (crate::accounts::Provider::Claude, SupervisorCli::Claude, "CLAUDE_CONFIG_DIR"),
+            (crate::accounts::Provider::Codex, SupervisorCli::Codex, "CODEX_HOME"),
+        ] {
+            std::fs::create_dir_all(provider.base_dir(h).join("skills")).unwrap();
+            let account = h.join(format!("{}w@x.com", provider.prefix()));
+            std::fs::create_dir_all(&account).unwrap();
+            let environment = LaunchEnvironment {
+                executable: PathBuf::from("/bin/true"),
+                set: vec![(key.into(), account.clone().into_os_string())],
+                remove: Vec::new(),
+            };
+            assert_eq!(
+                ensure_account_links_in(cli, &environment, h),
+                [format!(
+                    "Linked 1 shared item in ~/{}w@x.com from ~/.cas/{}-base",
+                    provider.prefix(),
+                    provider.name()
+                )]
+            );
+            assert_eq!(std::fs::read_link(account.join("skills")).unwrap(), provider.base_dir(h).join("skills"));
+            // `main` runs on the default folder; a recreated one without a login is named, not linked.
+            let main = h.join(format!(".{}", provider.name()));
+            std::fs::create_dir_all(&main).unwrap();
+            let environment = LaunchEnvironment { set: Vec::new(), remove: vec![key.into()], ..environment };
+            let notices = ensure_account_links_in(cli, &environment, h);
+            assert!(notices[0].contains("is a retired account folder that came back"), "{notices:?}");
+            assert!(!main.join("skills").exists());
+        }
+    }
 
     #[test]
     fn profile_names_cannot_escape_the_provider_home() {

@@ -483,6 +483,53 @@ fn login_subcommand_links_a_new_account_to_the_shared_base() {
     );
 }
 
+/// cas-05cee: a launch links the chosen account's empty shared slots before
+/// the provider starts, and only warns about a real item in a slot.
+#[test]
+fn launch_links_empty_shared_slots_first_and_still_launches_on_a_real_item() {
+    for provider in ["claude", "codex"] {
+        let home = TempDir::new().unwrap();
+        let h = home.path();
+        cas::test_paths::warm_stub(
+            &h.join("bin").join(provider),
+            r#"#!/bin/sh
+if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true}'; exit 0; fi
+if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
+dir="${CLAUDE_CONFIG_DIR:-$CODEX_HOME}"
+[ -L "$dir/skills" ] && echo "LAUNCHED_WITH_SKILLS $dir"
+"#,
+        );
+        let base = h.join(format!(".cas/{provider}-base"));
+        for item in ["skills", "agents"] {
+            std::fs::create_dir_all(base.join(item)).unwrap();
+        }
+        let account = h.join(format!(".{provider}-w@x.com"));
+        std::fs::create_dir_all(account.join("agents")).unwrap();
+        let login = if provider == "claude" { ".credentials.json" } else { "auth.json" };
+        std::fs::write(account.join(login), "{\"secret\":1}").unwrap();
+
+        let output = cas_cmd(h)
+            .env_remove("CODEX_HOME")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+            .args([provider, "--bare", "w@x.com"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}{stderr}");
+        assert!(stdout.contains("LAUNCHED_WITH_SKILLS"), "{provider}: linked before launch: {stdout}{stderr}");
+        assert!(stderr.contains(&format!(
+            "Linked 1 shared item in ~/.{provider}-w@x.com from ~/.cas/{provider}-base\n"
+        )), "{stderr}");
+        assert!(stderr.contains(&format!(
+            "Warning: 1 shared item in ~/.{provider}-w@x.com not linked to ~/.cas/{provider}-base: agents. Fix: cas doctor --fix --yes\n"
+        )), "{stderr}");
+        assert!(account.join("agents").is_dir() && !account.join("agents").is_symlink());
+        assert_eq!(std::fs::read_to_string(account.join(login)).unwrap(), "{\"secret\":1}");
+    }
+}
+
 #[test]
 fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
     let home = home_with_profiles();

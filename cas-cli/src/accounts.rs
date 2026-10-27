@@ -314,7 +314,7 @@ impl Plan {
 }
 
 /// Whether `name` (after the prefix) looks like a login email.
-fn email_shaped(name: &str) -> bool {
+pub(crate) fn email_shaped(name: &str) -> bool {
     name.split_once('@')
         .is_some_and(|(user, domain)| !user.is_empty() && domain.contains('.'))
 }

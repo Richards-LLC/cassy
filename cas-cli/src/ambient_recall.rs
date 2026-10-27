@@ -50,6 +50,8 @@ const SEMANTIC_CANDIDATE_CAP_PER_NAMESPACE: usize = 32;
 const LEXICAL_INJECTION_CAP: usize = 3;
 const QUERY_TERM_CAP: usize = 16;
 const HISTORY_COMMIT_INJECTION_CAP: usize = 1;
+/// Supervisors need evidence pointers, not source previews on every turn.
+const SUPERVISOR_PACKET_BYTE_CAP: usize = 800;
 
 /// A focused epic is an explicit domain signal from the factory session. A
 /// row that does not overlap that domain needs an unambiguously strong vector
@@ -259,6 +261,8 @@ pub(crate) struct EvidenceCandidate {
     pub(crate) lexical_eligible: bool,
     pub(crate) lexical_weak: bool,
     pub(crate) strong_session_signal: bool,
+    #[serde(default)]
+    pub(crate) operator_context: bool,
     pub(crate) focus_mismatch: bool,
     pub(crate) semantic_score: Option<f64>,
     pub(crate) structural_score: f64,
@@ -270,6 +274,11 @@ pub(crate) struct EvidenceCandidate {
 }
 
 impl EvidenceCandidate {
+    fn is_operator_context(&self) -> bool {
+        self.surface == EvidenceSurface::Memory
+            && (self.operator_context || operator_memory_signal(&self.snippet))
+    }
+
     fn canonical_key(&self) -> String {
         format!("{}@{}", self.evidence_id, self.provenance.revision)
     }
@@ -302,6 +311,8 @@ pub(crate) struct RecallQuery {
     /// Their lexical overlaps are too weak to justify ambient injection alone.
     pub(crate) conversational: bool,
     pub(crate) task_id: Option<String>,
+    pub(crate) focus_epic_id: Option<String>,
+    pub(crate) code_requested: bool,
     pub(crate) files: Vec<String>,
     pub(crate) symbols: Vec<String>,
     pub(crate) focus_terms: Vec<String>,
@@ -316,6 +327,13 @@ pub(crate) struct RecallQuery {
 }
 
 impl RecallQuery {
+    fn binds_task(&self, id: &str, text: &str) -> bool {
+        [self.task_id.as_deref(), self.focus_epic_id.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|task| id == task || names_current_task(Some(task), &text.to_ascii_lowercase()))
+    }
+
     /// Whether the current turn already names `evidence_id` as a whole token.
     pub(crate) fn turn_names(&self, evidence_id: &str) -> bool {
         let id = evidence_id.trim().to_ascii_lowercase();
@@ -417,6 +435,8 @@ impl RecallQuery {
             role: identity.role,
             conversational: is_conversational_prompt(&request.prompt),
             task_id: request.task_id.clone(),
+            focus_epic_id: request.focus_epic_id.clone(),
+            code_requested: requests_code_recall(&request.prompt),
             files,
             symbols,
             focus_terms,
@@ -843,6 +863,7 @@ struct LocalRow {
     stale: bool,
     body_available: bool,
     locator: String,
+    operator_context: bool,
 }
 
 impl RecallRetriever for SqliteRecallRetriever {
@@ -857,13 +878,38 @@ impl RecallRetriever for SqliteRecallRetriever {
             return Vec::new();
         };
         let terms = query_terms(&query.canonical);
-        if terms.is_empty() {
+        if terms.is_empty()
+            && query.task_id.is_none()
+            && query.focus_epic_id.is_none()
+            && query.role != RecallRole::Supervisor
+        {
             return Vec::new();
         }
         let per_surface = limit.min(8).max(1);
         let mut rows = Vec::new();
-        for spec in local_surface_specs() {
-            rows.extend(read_surface(&conn, spec, &terms, scope, per_surface));
+        if !terms.is_empty() {
+            for spec in local_surface_specs() {
+                rows.extend(read_surface(
+                    &conn,
+                    spec,
+                    &terms,
+                    scope,
+                    per_surface,
+                    query.role,
+                ));
+            }
+        }
+        if query.role == RecallRole::Supervisor {
+            // A short/status turn still deserves the operator's preferences.
+            // The empty-term mode selects only bounded operator memory rows.
+            rows.extend(read_surface(
+                &conn,
+                local_surface_specs()[0],
+                &[],
+                scope,
+                per_surface,
+                query.role,
+            ));
         }
         // cas-4028: `task=` is deliberately excluded from lexical terms so an
         // identity value cannot manufacture relevance. That also made a row
@@ -874,9 +920,9 @@ impl RecallRetriever for SqliteRecallRetriever {
         // unchanged lexical terms, so identity buys retrieval and binding, not
         // a lexical score, and a merely similar id is rejected at the token
         // boundary rather than here.
-        if let Some(task_id) = query
-            .task_id
-            .as_deref()
+        for task_id in [query.task_id.as_deref(), query.focus_epic_id.as_deref()]
+            .into_iter()
+            .flatten()
             .map(str::trim)
             .filter(|id| !id.is_empty())
         {
@@ -886,24 +932,32 @@ impl RecallRetriever for SqliteRecallRetriever {
                 // would admit `cas-096e1` and friends. Keep only rows that
                 // bind on an exact token, so a supplemental read can never
                 // introduce a row the binding rule itself would reject.
-                let bound = read_surface(&conn, spec, &identity_needle, scope, per_surface)
-                    .into_iter()
-                    .filter(|row| {
-                        names_current_task(Some(task_id), &row.snippet.to_ascii_lowercase())
-                    });
+                let bound = read_surface(
+                    &conn,
+                    spec,
+                    &identity_needle,
+                    scope,
+                    per_surface,
+                    query.role,
+                )
+                .into_iter()
+                .filter(|row| {
+                    row.id == task_id
+                        || names_current_task(Some(task_id), &row.snippet.to_ascii_lowercase())
+                });
                 rows.extend(bound);
             }
             // Identity is (surface, id): ids are only unique within their own
             // table, so deduping on the bare id could silently drop a row from
             // a different surface that happens to share it.
-            let mut seen = HashSet::new();
-            rows.retain(|row| seen.insert((row.surface, row.id.clone())));
         }
+        let mut seen = HashSet::new();
+        rows.retain(|row| seen.insert((row.surface, row.id.clone())));
         let mut candidates: Vec<EvidenceCandidate> = rows
             .into_iter()
             .map(|row| local_candidate(row, query, &terms, self.as_of))
             .collect();
-        sort_candidates(&mut candidates);
+        sort_query_candidates(&mut candidates, query);
         candidates.truncate(limit);
         candidates
     }
@@ -1034,7 +1088,7 @@ impl RecallRetriever for SemanticRecallRetriever {
             };
             candidates.push(candidate);
         }
-        sort_candidates(&mut candidates);
+        sort_query_candidates(&mut candidates, query);
         candidates.truncate(limit);
         candidates
     }
@@ -1091,14 +1145,19 @@ fn read_semantic_rows(
 
     if include_shared {
         let mut knowledge = Vec::new();
+        let knowledge_scope = if query.role == RecallRole::Supervisor {
+            "(p.origin_project_id = ?2 or (p.origin = 'local' and coalesce(p.origin_project_id, '') = ''))"
+        } else {
+            "(p.origin = 'local' or p.origin_project_id = ?2)"
+        };
         if table_exists(conn, "knowledge_pages_fts")
             && let Ok(mut stmt) = conn.prepare(
-                "select p.id, substr(trim(p.title || ' ' || p.snippet || ' ' || p.page_type), 1, 480), \
+                &format!("select p.id, substr(trim(p.title || ' ' || p.snippet || ' ' || p.page_type), 1, 480), \
                         p.updated_at, p.rel_path from knowledge_pages_fts f \
                  join knowledge_pages p on p.row_id = f.rowid \
                  where knowledge_pages_fts match ?1 \
-                   and (p.origin = 'local' or p.origin_project_id = ?2) \
-                 order by bm25(knowledge_pages_fts), p.id limit ?3",
+                   and {knowledge_scope} \
+                 order by bm25(knowledge_pages_fts), p.id limit ?3"),
             )
             && let Ok(rows) = stmt.query_map(params![fts, scope.project_id, limit as i64], |row| {
                 semantic_knowledge_row(row, scope)
@@ -1109,9 +1168,12 @@ fn read_semantic_rows(
         extend_semantic_head(
             conn,
             &mut knowledge,
-            "select id, substr(trim(title || ' ' || snippet || ' ' || page_type), 1, 480), \
-                    updated_at, rel_path from knowledge_pages \
-             where origin = 'local' or origin_project_id = ?1 order by id limit ?2",
+            &format!(
+                "select id, substr(trim(title || ' ' || snippet || ' ' || page_type), 1, 480), \
+                    updated_at, rel_path from knowledge_pages p \
+             where {} order by id limit ?2",
+                knowledge_scope.replace("?2", "?1")
+            ),
             params![scope.project_id, limit as i64],
             limit,
             |row| semantic_knowledge_row(row, scope),
@@ -1237,6 +1299,7 @@ fn semantic_knowledge_row(
             stale: false,
             body_available: true,
             locator: row.get(3)?,
+            operator_context: false,
         },
     })
 }
@@ -1259,6 +1322,7 @@ fn semantic_history_commit_row(
             revision: row.get(2)?,
             stale: false,
             body_available: true,
+            operator_context: false,
         },
     })
 }
@@ -1282,6 +1346,7 @@ fn semantic_history_doc_row(
             stale: state.as_deref() == Some("closed"),
             body_available: true,
             locator: row.get(3)?,
+            operator_context: false,
         },
     })
 }
@@ -1301,6 +1366,7 @@ fn semantic_code_row(row: &rusqlite::Row<'_>, scope: &ScopeGate) -> rusqlite::Re
             stale: false,
             body_available: true,
             locator: row.get(3)?,
+            operator_context: false,
         },
     })
 }
@@ -1471,33 +1537,127 @@ fn table_exists(conn: &Connection, table: &str) -> bool {
     .unwrap_or(false)
 }
 
+const OPERATOR_MEMORY_MARKERS: &[&str] = &[
+    "operator decided",
+    "operator decision",
+    "operator corrected",
+    "operator correction",
+    "operator prefers",
+    "operator preference",
+    "operator requested",
+    "operator reacted",
+    "user prefers",
+    "user correction",
+    "user decided",
+];
+const OBSOLETE_MARKERS: &[&str] = &[
+    "is obsolete",
+    "[obsolete]",
+    "obsolete:",
+    "superseded by",
+    "no longer valid",
+];
+
+fn operator_memory_signal(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    OPERATOR_MEMORY_MARKERS
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+fn table_columns(conn: &Connection, table: &str) -> HashSet<String> {
+    let Ok(mut stmt) = conn.prepare(&format!("pragma table_info({table})")) else {
+        return HashSet::new();
+    };
+    stmt.query_map([], |row| row.get(1))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+fn operator_memory_sql(columns: &HashSet<String>, text: &str) -> String {
+    let mut signals: Vec<String> = OPERATOR_MEMORY_MARKERS
+        .iter()
+        .map(|marker| format!("lower({text}) like '%{marker}%'"))
+        .collect();
+    if columns.contains("type") {
+        signals.push("lower(type) = 'preference'".into());
+    }
+    if columns.contains("observation_type") {
+        signals.push("lower(observation_type) in ('preference', 'decision', 'correction')".into());
+    }
+    if columns.contains("tags") {
+        for tag in [
+            "preference",
+            "decision",
+            "correction",
+            "operator-preference",
+            "operator-decision",
+            "operator-correction",
+        ] {
+            signals.push(format!("lower(tags) like '%\"{tag}\"%'"));
+        }
+    }
+    signals.join(" or ")
+}
+
 fn read_surface(
     conn: &Connection,
     spec: LocalSurfaceSpec,
     terms: &[String],
     scope: &ScopeGate,
     limit: usize,
+    role: RecallRole,
 ) -> Vec<LocalRow> {
     if !table_exists(conn, spec.table) {
         return Vec::new();
     }
-    let term_predicate = (0..terms.len())
+    let columns = if spec.surface == EvidenceSurface::Memory {
+        table_columns(conn, spec.table)
+    } else {
+        HashSet::new()
+    };
+    let operator = if spec.surface == EvidenceSurface::Memory {
+        operator_memory_sql(&columns, spec.text)
+    } else {
+        "0".into()
+    };
+    let mut term_predicate = (0..terms.len())
         .map(|index| format!("lower({}) like ?{}", spec.text, index + 1))
         .collect::<Vec<_>>()
         .join(" or ");
+    if terms.is_empty() {
+        term_predicate = operator.clone();
+    }
     // Rank the matching rows before the bounded discovery window. Sorting
     // only by update time let refreshed weak rows evict exact current lessons.
-    let overlap_score = (0..terms.len())
+    let mut overlap_score = (0..terms.len())
         .map(|index| format!("(lower(substr({}, 1, 480)) like ?{})", spec.text, index + 1))
         .collect::<Vec<_>>()
         .join(" + ");
+    if terms.is_empty() {
+        // SQLite interprets ORDER BY (0) as an invalid column ordinal.
+        overlap_score = "0.0".into();
+    }
     let team_index = terms.len() + 1;
     let limit_index = terms.len() + 2;
-    let extra = spec
+    let project_parameter = format!("?{}", terms.len() + 3);
+    let mut extra = spec
         .extra_scope_predicate
         .replace(":project_id", &format!("?{}", terms.len() + 3));
+    if role == RecallRole::Supervisor {
+        extra.push_str(&format!(" and ({}) = 0", spec.stale));
+        for marker in OBSOLETE_MARKERS {
+            extra.push_str(&format!(" and lower({}) not like '%{marker}%'", spec.text));
+        }
+        if columns.contains("origin_project") {
+            extra.push_str(&format!(" and (origin_project is null or origin_project in ('', 'unknown', {project_parameter}))"));
+        }
+        if spec.surface == EvidenceSurface::Knowledge {
+            extra.push_str(&format!(" and (origin_project_id = {project_parameter} or (origin = 'local' and coalesce(origin_project_id, '') = ''))"));
+        }
+    }
     let sql = format!(
-        "select {}, {}, {}, {}, substr({}, 1, 480), {}, {}, {} from {} \
+        "select {}, {}, {}, {}, substr({}, 1, 480), {}, {}, {}, coalesce(({operator}), 0) from {} \
          where ({}) and ({} is null or {} = ?{}) and coalesce({}, '') != 'private' \
          and ({}) order by ({}) desc, {} desc, {} asc limit ?{}",
         spec.id,
@@ -1509,8 +1669,7 @@ fn read_surface(
         spec.stale,
         spec.locator,
         spec.table,
-        spec.extra_scope_predicate
-            .replace(":project_id", &format!("?{}", terms.len() + 3)),
+        extra,
         spec.team,
         spec.team,
         team_index,
@@ -1552,6 +1711,7 @@ fn read_surface(
             stale: row.get::<_, i64>(6)? != 0,
             body_available: spec.body_available,
             locator: row.get(7)?,
+            operator_context: row.get(8)?,
         })
     }) else {
         return Vec::new();
@@ -1970,8 +2130,7 @@ fn local_candidate(
     let lexical = matched.len() as f64 / terms.len().max(1) as f64;
     let lexical_match_count = matched.len();
     let recency_score = recency_score(&row.revision, as_of);
-    let binding = query.task_id.as_deref() == Some(row.id.as_str())
-        || names_current_task(query.task_id.as_deref(), &haystack)
+    let binding = query.binds_task(&row.id, &haystack)
         || query.files.iter().any(|file| haystack.contains(file))
         || query.symbols.iter().any(|symbol| haystack.contains(symbol));
     let role_score = match (query.role, row.surface) {
@@ -2032,6 +2191,8 @@ fn local_candidate(
         lexical_eligible,
         lexical_weak,
         strong_session_signal,
+        operator_context: row.operator_context
+            || (row.surface == EvidenceSurface::Memory && operator_memory_signal(&haystack)),
         focus_mismatch,
         semantic_score: None,
         structural_score: structural,
@@ -2097,7 +2258,15 @@ pub(crate) fn build_local_ambient_recall_context(
     cas_root: &Path,
     prompt: &str,
 ) -> Option<RecallPacket> {
-    build_ambient_recall_context_with_factory_identity(input, cas_root, Some(prompt), false, None, None, false)
+    build_ambient_recall_context_with_factory_identity(
+        input,
+        cas_root,
+        Some(prompt),
+        false,
+        None,
+        None,
+        false,
+    )
 }
 
 /// Build an ambient packet for a factory launch before the harness has made
@@ -2403,6 +2572,63 @@ fn is_conversational_prompt(prompt: &str) -> bool {
     !names_task && !names_code && !names_file
 }
 
+/// Only this turn's explicit request can opt a supervisor into Code cards.
+/// Historical file changes, tool-result paths and relayed lifecycle summaries
+/// are context, not a request to search the code index.
+fn requests_code_recall(prompt: &str) -> bool {
+    if crate::hooks::handlers::handlers_middle::is_harness_prompt(prompt) {
+        return false;
+    }
+    let lower = prompt.to_ascii_lowercase();
+    let mut request = lower.trim_start();
+    for _ in 0..3 {
+        if let Some(rest) = ["please ", "can you ", "could you "]
+            .iter()
+            .find_map(|prefix| request.strip_prefix(prefix))
+        {
+            request = rest.trim_start();
+        } else {
+            break;
+        }
+    }
+    // Mentioning Code recall (including asking to suppress it) is not an
+    // opt-in. Require an affirmative lookup command or a concrete reference.
+    [
+        "search code",
+        "search the code",
+        "find code",
+        "find the code",
+        "show code",
+        "show the code",
+        "inspect code",
+        "inspect the code",
+        "trace code",
+        "trace the code",
+        "recall code",
+        "look up code",
+        "explain code",
+    ]
+    .iter()
+    .any(|phrase| {
+        request.strip_prefix(phrase).is_some_and(|rest| {
+            rest.chars()
+                .next()
+                .is_none_or(|ch| ch.is_whitespace() || ch == ':')
+        })
+    }) || lower.contains("::")
+        || lower.split_whitespace().any(|token| {
+            let token = token.trim_matches(|ch: char| {
+                !ch.is_ascii_alphanumeric() && !matches!(ch, '/' | '.' | '_' | '-' | '(' | ')')
+            });
+            token.ends_with("()")
+                || [
+                    ".rs", ".ts", ".tsx", ".js", ".py", ".go", ".java", ".rb", ".sh", ".sql",
+                ]
+                .iter()
+                .any(|extension| token.ends_with(extension))
+        })
+}
+
 fn hook_request(
     input: &cas_core::hooks::types::HookInput,
     cas_root: &Path,
@@ -2420,17 +2646,31 @@ fn hook_request(
     };
 
     if table_exists(&conn, "tasks") {
+        request.focus_epic_id = crate::ui::factory::preferred_epic_id_from_session_metadata();
+        let task_hint = match identity.role {
+            RecallRole::Worker => Some(identity.agent_name.clone()),
+            RecallRole::Supervisor => prompt
+                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_')
+                .filter(|token| token.starts_with("cas-"))
+                .take(8)
+                .find(|id| {
+                    conn.query_row("select 1 from tasks where id = ?1", [id], |_| Ok(()))
+                        .is_ok()
+                })
+                .map(str::to_owned)
+                .or_else(|| request.focus_epic_id.clone()),
+        };
         let role_predicate = match identity.role {
-            RecallRole::Worker => "and assignee = ?1",
-            RecallRole::Supervisor => "and (?1 is not null)",
+            RecallRole::Worker => "status = 'in_progress' and assignee = ?1",
+            RecallRole::Supervisor => "id = ?1",
         };
         let sql = format!(
             "select id, title, labels, notes from tasks \
-             where status = 'in_progress' {role_predicate} \
+             where {role_predicate} \
              order by case when task_type = 'epic' then 0 else 1 end, updated_at desc limit 1"
         );
         if let Ok((id, title, labels, notes)) =
-            conn.query_row(&sql, [&identity.agent_name], |row| {
+            conn.query_row(&sql, [task_hint.as_deref()], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -2455,8 +2695,7 @@ fn hook_request(
         // A pinned/session epic is a domain boundary, not an authorization
         // boundary. Its title and labels make that topic available to ranking
         // without adding another store or network read to the hook path.
-        if let Some(focus_id) = crate::ui::factory::preferred_epic_id_from_session_metadata() {
-            request.focus_epic_id = Some(focus_id.clone());
+        if let Some(focus_id) = request.focus_epic_id.as_deref() {
             if let Ok((title, labels)) = conn.query_row(
                 "select title, labels from tasks where id = ?1 and task_type = 'epic'",
                 [&focus_id],
@@ -2680,6 +2919,19 @@ fn sort_candidates(candidates: &mut [EvidenceCandidate]) {
             .then_with(|| b.relevance.total_cmp(&a.relevance))
             .then_with(|| a.evidence_id.cmp(&b.evidence_id))
     });
+}
+
+fn sort_query_candidates(candidates: &mut [EvidenceCandidate], query: &RecallQuery) {
+    sort_candidates(candidates);
+    if query.role == RecallRole::Supervisor {
+        candidates.sort_by_key(|candidate| {
+            (
+                !query.binds_task(&candidate.evidence_id, &candidate.snippet),
+                !candidate.is_operator_context(),
+                !candidate.binding,
+            )
+        });
+    }
 }
 
 /// A conservative, shrunk outcome adjustment over resolved evidence only.
@@ -3248,18 +3500,36 @@ pub(crate) fn render_packet(
     ledger: &mut RecallLedger,
 ) -> Option<(RecallPacket, Vec<EvidenceCandidate>)> {
     let policy = identity.role.policy();
-    let byte_budget = policy
+    let mut byte_budget = policy
         .default_tokens
         .min(policy.ceiling_tokens)
         .min(policy.emergency_tokens)
         .saturating_mul(4);
+    if identity.role == RecallRole::Supervisor {
+        byte_budget = byte_budget.min(SUPERVISOR_PACKET_BYTE_CAP);
+    }
     let query_hash = stable_hash(&query.canonical);
     let mut authored_omitted = candidates.rejected_authored;
-    let delta: Vec<EvidenceCandidate> = candidates
+    let mut policy_omitted = 0;
+    let mut delta: Vec<EvidenceCandidate> = candidates
         .candidates
         .iter()
         .filter(|candidate| !ledger.has_seen(candidate))
         .filter(|candidate| !query.turn_names(&candidate.evidence_id))
+        .filter(|candidate| {
+            let allowed = identity.role != RecallRole::Supervisor
+                || (!candidate.stale
+                    && !OBSOLETE_MARKERS
+                        .iter()
+                        .any(|marker| candidate.snippet.to_ascii_lowercase().contains(marker))
+                    && (query.binds_task(&candidate.evidence_id, &candidate.snippet)
+                        || candidate.is_operator_context()
+                        || (query.code_requested && candidate.surface == EvidenceSurface::Code)));
+            if !allowed {
+                policy_omitted += 1;
+            }
+            allowed
+        })
         .filter(|candidate| {
             let authored = ledger.has_authored(candidate);
             if authored {
@@ -3269,6 +3539,11 @@ pub(crate) fn render_packet(
         })
         .cloned()
         .collect();
+    if identity.role == RecallRole::Supervisor {
+        // Binding is authoritative even when accumulated tool terms have a
+        // higher score. Stable sorting preserves relevance within each group.
+        sort_query_candidates(&mut delta, query);
+    }
     if delta.is_empty() {
         ledger.last_query_hash = query_hash;
         return None;
@@ -3303,12 +3578,17 @@ pub(crate) fn render_packet(
     // when the only local hits are common corpus words that evade the bounded
     // document-frequency floor.
     for strong_pass in [true, false] {
+        if identity.role == RecallRole::Supervisor && strong_pass {
+            continue;
+        }
         for weak_pass in [false, true] {
             for candidate in delta.iter().filter(|candidate| {
                 let weak_lexical_only = !candidate.binding
                     && candidate.lexical_weak
                     && candidate.semantic_score.is_none();
-                candidate.strong_session_signal == strong_pass && weak_lexical_only == weak_pass
+                (identity.role == RecallRole::Supervisor
+                    || candidate.strong_session_signal == strong_pass)
+                    && weak_lexical_only == weak_pass
             }) {
                 if injected.len() == cap {
                     break;
@@ -3322,6 +3602,7 @@ pub(crate) fn render_packet(
                 if query.conversational
                     && is_weak_lexical_only(candidate)
                     && !candidate.strong_session_signal
+                    && !(identity.role == RecallRole::Supervisor && candidate.is_operator_context())
                 {
                     continue;
                 }
@@ -3332,12 +3613,17 @@ pub(crate) fn render_packet(
                     && !candidate.lexical_eligible
                     && !independently_semantic
                     && !candidate.strong_session_signal
+                    && !(identity.role == RecallRole::Supervisor && candidate.is_operator_context())
                 {
                     continue;
                 }
-                let lexical_only = !candidate.binding && candidate.semantic_score.is_none();
+                let lexical_only = !candidate.binding
+                    && candidate.semantic_score.is_none()
+                    && !(identity.role == RecallRole::Supervisor
+                        && candidate.is_operator_context());
                 if lexical_only
                     && !candidate.strong_session_signal
+                    && !(identity.role == RecallRole::Supervisor && candidate.is_operator_context())
                     && ((semantic_evidence_exists && candidate.lexical_match_count < 3)
                         || lexical_injected == LEXICAL_INJECTION_CAP)
                 {
@@ -3345,17 +3631,31 @@ pub(crate) fn render_packet(
                 }
                 if weak_pass
                     && !candidate.strong_session_signal
+                    && !(identity.role == RecallRole::Supervisor && candidate.is_operator_context())
                     && weak_lexical_injected == non_weak_injected
                 {
                     continue;
                 }
-                let Some(why_relevant) = injection_reason(candidate) else {
+                let reason = if identity.role == RecallRole::Supervisor
+                    && query.binds_task(&candidate.evidence_id, &candidate.snippet)
+                {
+                    Some("exact task/epic binding".into())
+                } else if identity.role == RecallRole::Supervisor && candidate.is_operator_context()
+                {
+                    Some("operator preference/decision/correction".into())
+                } else {
+                    injection_reason(candidate)
+                };
+                let Some(why_relevant) = reason else {
                     continue;
                 };
                 let mut candidate = candidate.clone();
                 candidate.why_relevant = why_relevant;
-                let card = render_card(&candidate);
+                let card = render_card(&candidate, identity.role);
                 if full.len() + 1 + card.len() + footer_reserve > byte_budget {
+                    if identity.role == RecallRole::Supervisor {
+                        continue;
+                    }
                     break;
                 }
                 if is_history_commit(&candidate) && !candidate.binding {
@@ -3379,7 +3679,7 @@ pub(crate) fn render_packet(
         return None;
     }
 
-    let omitted = delta.len().saturating_sub(injected.len()) + authored_omitted;
+    let omitted = delta.len().saturating_sub(injected.len()) + authored_omitted + policy_omitted;
     full.push_str(&format!(
         "\n[recall disclosure: injected={} omitted={} scope_rejected={} bodies=tool-pull-only]",
         injected.len(),
@@ -3445,7 +3745,7 @@ fn injection_reason(candidate: &EvidenceCandidate) -> Option<String> {
         .map(|score| format!("semantic match {score:.3}"))
 }
 
-fn render_card(candidate: &EvidenceCandidate) -> String {
+fn render_card(candidate: &EvidenceCandidate, role: RecallRole) -> String {
     let flags = [
         candidate.binding.then_some("binding"),
         candidate
@@ -3466,6 +3766,16 @@ fn render_card(candidate: &EvidenceCandidate) -> String {
     } else {
         format!(" flags={flags}")
     };
+    if role == RecallRole::Supervisor {
+        return format!(
+            "- [{}] {:?} | why={}{} @{}",
+            truncate_utf8(&clean_scalar(&candidate.evidence_id, 96), 96),
+            candidate.surface,
+            truncate_utf8(&clean_scalar(&candidate.why_relevant, 72), 72),
+            flags,
+            truncate_utf8(&clean_scalar(&candidate.provenance.revision, 16), 16),
+        );
+    }
     format!(
         "- [{}] {:?} {} — {} | why={} | provenance={}:{}@{}{}{}",
         clean_scalar(&candidate.evidence_id, 96),
@@ -3542,7 +3852,8 @@ pub(crate) fn retrieve_candidates(
     candidates
         .retain(|candidate| !(candidate.surface == EvidenceSurface::Memory && candidate.stale));
     candidates.retain(|candidate| {
-        !candidate.focus_mismatch
+        (identity.role == RecallRole::Supervisor && candidate.is_operator_context())
+            || !candidate.focus_mismatch
             || candidate
                 .semantic_score
                 .is_some_and(|score| score >= FOCUSED_EPIC_SEMANTIC_FLOOR)
@@ -3553,7 +3864,7 @@ pub(crate) fn retrieve_candidates(
         .filter(|candidate| authored_evidence.contains(&candidate.evidence_id))
         .count();
     candidates.retain(|candidate| !authored_evidence.contains(&candidate.evidence_id));
-    sort_candidates(&mut candidates);
+    sort_query_candidates(&mut candidates, &query);
     candidates.truncate(policy.candidate_cap);
     Some(RecallCandidates {
         candidates,
@@ -3572,6 +3883,7 @@ fn fuse_candidate(existing: &mut EvidenceCandidate, incoming: EvidenceCandidate)
     existing.lexical_eligible |= incoming.lexical_eligible;
     existing.lexical_weak &= incoming.lexical_weak;
     existing.strong_session_signal |= incoming.strong_session_signal;
+    existing.operator_context |= incoming.operator_context;
     existing.focus_mismatch |= incoming.focus_mismatch;
     existing.semantic_score = match (existing.semantic_score, incoming.semantic_score) {
         (Some(a), Some(b)) => Some(a.max(b)),
@@ -3762,6 +4074,7 @@ mod tests {
             lexical_eligible: true,
             lexical_weak: false,
             strong_session_signal: false,
+            operator_context: false,
             focus_mismatch: false,
             semantic_score: None,
             structural_score: 0.0,
@@ -4031,8 +4344,315 @@ mod tests {
     }
 
     #[test]
-    fn cas_4caa_expired_memory_cards_are_labeled_expired() {
+    fn supervisor_captured_packet_replay_is_compact_and_code_requires_a_request() {
+        #[derive(Deserialize)]
+        struct Replay {
+            query_hash: String,
+            prompt: String,
+            baseline_bytes: usize,
+            baseline_matched: usize,
+            candidates: Vec<EvidenceCandidate>,
+        }
+        // Captured UserPromptSubmit and PostToolUse packets from the same real
+        // supervisor session; candidate scores come from its decision traces.
+        let replays: Vec<Replay> =
+            serde_json::from_str(include_str!("../tests/data/ambient-supervisor-replay.json"))
+                .unwrap();
+        let references =
+            regex::Regex::new(r"\bcas-[a-z0-9]+\b|[\w/.-]+\.(?:rs|ts|md|py)\b|\b\w+::\w+\b")
+                .unwrap();
+        let mut measurements = Vec::new();
+        for replay in replays {
+            for (role, requested_code) in [
+                (RecallRole::Supervisor, false),
+                (RecallRole::Supervisor, true),
+                (RecallRole::Worker, false),
+            ] {
+                let identity = identity(role);
+                let request = RecallRequest {
+                    prompt: if requested_code {
+                        "Search code symbols for this task".into()
+                    } else {
+                        replay.prompt.clone()
+                    },
+                    // Historical file/tool context must not opt supervisors in.
+                    files: vec!["src/ambient_recall.rs".into()],
+                    ..Default::default()
+                };
+                let query = RecallQuery::build(&identity, &request).unwrap();
+                let retriever = FixedRetriever {
+                    calls: Cell::new(0),
+                    rows: replay.candidates.clone(),
+                };
+                let candidates = retrieve_candidates(&identity, &request, &[&retriever]).unwrap();
+                let rendered =
+                    render_packet(&identity, &query, &candidates, &mut RecallLedger::default());
+                let (bytes, injected) = rendered
+                    .map(|(packet, rows)| (packet.full.len(), rows))
+                    .unwrap_or_default();
+                let code = injected
+                    .iter()
+                    .filter(|row| row.surface == EvidenceSurface::Code)
+                    .count();
+                let prompt_refs: Vec<_> = references
+                    .find_iter(&replay.prompt)
+                    .map(|value| value.as_str().to_ascii_lowercase())
+                    .collect();
+                let matched = injected
+                    .iter()
+                    .filter(|row| {
+                        let text =
+                            format!("{} {}", row.evidence_id, row.snippet).to_ascii_lowercase();
+                        prompt_refs.iter().any(|reference| text.contains(reference))
+                    })
+                    .count();
+                measurements.push(serde_json::json!({
+                    "query": replay.query_hash, "role": role, "requested_code": requested_code,
+                    "captured_count": replay.candidates.len(), "captured_bytes": replay.baseline_bytes,
+                    "captured_matched": replay.baseline_matched, "injected": injected.len(),
+                    "bytes": bytes, "code": code, "matched": matched,
+                }));
+                eprintln!(
+                    "replay={} role={role:?} requested_code={requested_code} before_bytes={} after_bytes={bytes} injected={} code={code}",
+                    replay.query_hash,
+                    replay.baseline_bytes,
+                    injected.len()
+                );
+                if role == RecallRole::Supervisor {
+                    assert!(
+                        injected.iter().all(|row| !row.stale),
+                        "stale evidence survived"
+                    );
+                    assert!(
+                        injected
+                            .iter()
+                            .all(|row| !row.evidence_id.starts_with("cas-kn-mig-")),
+                        "unbound migrated knowledge crowded out operator context"
+                    );
+                    assert!(
+                        bytes <= 800,
+                        "supervisor packet exceeds its budget: {bytes}"
+                    );
+                    if !requested_code {
+                        assert_eq!(
+                            code, 0,
+                            "ambient file/tool context requested Code implicitly"
+                        );
+                        for prompt in [
+                            "Suppress unrequested Code recall for supervisors",
+                            "Do not search code",
+                            "Code symbols are unrelated",
+                        ] {
+                            let negative = RecallQuery::build(
+                                &identity,
+                                &RecallRequest {
+                                    prompt: prompt.into(),
+                                    ..Default::default()
+                                },
+                            )
+                            .unwrap();
+                            let rows = render_packet(
+                                &identity,
+                                &negative,
+                                &candidates,
+                                &mut RecallLedger::default(),
+                            )
+                            .map(|(_, rows)| rows)
+                            .unwrap_or_default();
+                            assert!(
+                                rows.iter().all(|row| row.surface != EvidenceSurface::Code),
+                                "mentioning unwanted Code opted in: {prompt}"
+                            );
+                        }
+                    }
+                } else {
+                    assert!(code > 0, "worker code recall was suppressed");
+                }
+                if requested_code {
+                    assert!(
+                        code > 0,
+                        "explicit supervisor code request lost its evidence"
+                    );
+                }
+            }
+        }
+        // Keep numeric replay evidence inspectable when nextest hides passing
+        // stdout. This is ignored build output, never a source snapshot.
+        let workspace = crate::test_paths::workspace_root();
+        if workspace.join("Cargo.toml").is_file() {
+            let report = workspace.join("target/supervisor-recall-replay.json");
+            fs::create_dir_all(report.parent().unwrap()).unwrap();
+            fs::write(report, serde_json::to_vec_pretty(&measurements).unwrap()).unwrap();
+        } else {
+            eprintln!(
+                "SKIP numeric replay artifact: source checkout absent; all replay assertions ran"
+            );
+        }
+    }
+
+    #[test]
+    fn supervisor_uses_exact_turn_task_and_epic_before_ambient_tool_context() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_NAME", "worker-one");
+        env.set("CAS_FACTORY_SESSION", "factory-one");
+        let root = crate::store::init_cas_dir(env.home()).unwrap();
+        let tasks = crate::store::open_task_store_local(&root).unwrap();
+        let mut unrelated = Task::new("cas-noise".into(), "Neon PostHog Nuxt".into());
+        unrelated.status = TaskStatus::InProgress;
+        tasks.add(&unrelated).unwrap();
+        tasks
+            .add(&Task::new(
+                "cas-target".into(),
+                "Review token budget".into(),
+            ))
+            .unwrap();
+        let entries = crate::store::open_store_local(&root).unwrap();
+        for (id, content) in [
+            (
+                "mem-task",
+                "Decision for cas-target: preserve exact evidence",
+            ),
+            ("mem-epic", "Decision for cas-focus: compact packets"),
+            (
+                "mem-neighbor",
+                "Decision for cas-focus-extra: unrelated work",
+            ),
+        ] {
+            entries
+                .add(&Entry {
+                    id: id.into(),
+                    content: content.into(),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
         let identity = identity(RecallRole::Supervisor);
+        let input = cas_core::hooks::types::HookInput {
+            session_id: "supervisor-exact-turn".into(),
+            agent_role: Some("supervisor".into()),
+            ..Default::default()
+        };
+        for (id, content, kind, origin) in [
+            (
+                "mem-preference",
+                "Keep panes short and put commands in my clipboard.",
+                crate::types::EntryType::Preference,
+                None,
+            ),
+            (
+                "mem-correction",
+                "Operator corrected the report style: use actual design skills.",
+                crate::types::EntryType::Learning,
+                None,
+            ),
+            (
+                "mem-decision",
+                "Operator decided to keep precise evidence.",
+                crate::types::EntryType::Learning,
+                None,
+            ),
+            (
+                "mem-foreign",
+                "Keep panes short for this other customer.",
+                crate::types::EntryType::Preference,
+                Some("gabber-studio"),
+            ),
+            (
+                "mem-obsolete",
+                "Historical investigation for cas-target; its blanket claim that Codex has no lifecycle hooks is obsolete and must not guide current setup.",
+                crate::types::EntryType::Preference,
+                None,
+            ),
+        ] {
+            entries
+                .add(&Entry {
+                    id: id.into(),
+                    content: content.into(),
+                    entry_type: kind,
+                    origin_project: origin.map(str::to_owned),
+                    ..Default::default()
+                })
+                .unwrap();
+        }
+        let mut request = hook_request(&input, &root, &identity, "Review cas-target");
+        assert_eq!(request.task_id.as_deref(), Some("cas-target"));
+        // Session focus is supplied by the factory metadata resolver in the hook.
+        request.focus_epic_id = Some("cas-focus".into());
+        request.focus_epic_title = Some("Token budget".into());
+        let query = RecallQuery::build(&identity, &request).unwrap();
+        let local = SqliteRecallRetriever::existing(&root).unwrap();
+        let mut noisy = candidate("mem-tool-noise", EvidenceScope::Global);
+        noisy.strong_session_signal = true;
+        noisy.binding = true; // Historical file context is weaker than this turn's task.
+        noisy.relevance = 99.0;
+        let noise = FixedRetriever {
+            calls: Cell::new(0),
+            rows: vec![noisy],
+        };
+        let candidates = retrieve_candidates(&identity, &request, &[&local, &noise]).unwrap();
+        for id in ["mem-preference", "mem-correction", "mem-decision"] {
+            assert!(
+                candidates
+                    .candidates
+                    .iter()
+                    .any(|row| row.evidence_id == id),
+                "operator context was not recalled: {id}"
+            );
+        }
+        let (packet, injected) =
+            render_packet(&identity, &query, &candidates, &mut RecallLedger::default()).unwrap();
+        let ids: Vec<_> = injected
+            .iter()
+            .map(|row| row.evidence_id.as_str())
+            .collect();
+        assert!(
+            ids.contains(&"mem-task"),
+            "exact task evidence missing: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"mem-epic"),
+            "exact epic evidence missing: {ids:?}"
+        );
+        assert!(!ids.contains(&"mem-neighbor"));
+        assert!(!ids.contains(&"mem-obsolete"));
+        assert!(!ids.contains(&"mem-foreign"));
+        assert!(!ids.contains(&"mem-tool-noise"));
+        assert!(
+            ids.contains(&"mem-preference"),
+            "operator preference lost the budget: {ids:?}"
+        );
+        assert!(
+            ids[..2].contains(&"mem-task") && ids[..2].contains(&"mem-epic"),
+            "tool noise preceded task/epic bindings: {ids:?}"
+        );
+        assert!(packet.full.len() <= 800);
+        assert!(
+            !packet.full.contains("Decision for"),
+            "supervisor received evidence bodies"
+        );
+        let unbound = hook_request(&input, &root, &identity, "Give me an update please");
+        assert_ne!(unbound.task_id.as_deref(), Some("cas-noise"));
+        let hook_packet = build_local_ambient_recall_context(&input, &root, "Review cas-target")
+            .expect("exact task evidence must survive the real hook path");
+        assert!(hook_packet.full.contains("mem-task"));
+        assert!(hook_packet.full.len() <= 800);
+        let personal = build_local_ambient_recall_context(
+            &cas_core::hooks::types::HookInput {
+                session_id: "supervisor-personal-turn".into(),
+                ..input
+            },
+            &root,
+            "Give me an update please",
+        )
+        .unwrap();
+        assert!(personal.full.contains("mem-preference"));
+        assert!(!personal.full.contains("mem-foreign"));
+        assert!(!personal.full.contains("cas-noise"));
+    }
+
+    #[test]
+    fn cas_4caa_expired_memory_cards_are_labeled_expired() {
+        let identity = identity(RecallRole::Worker);
         let query = RecallQuery::build(
             &identity,
             &RecallRequest {
@@ -4664,18 +5284,17 @@ mod tests {
 
         assert_eq!(&ids[..2], &["current-code", "current-memory"]);
         assert_eq!(ids[2], "weak-task");
-        assert_eq!(ids[3], "closed-task");
+        assert!(
+            !ids.contains(&"closed-task"),
+            "stale tasks must not be recalled"
+        );
         let weak_task = candidates
             .iter()
             .find(|candidate| candidate.evidence_id == "weak-task")
             .unwrap();
-        let closed_task = candidates
-            .iter()
-            .find(|candidate| candidate.evidence_id == "closed-task")
-            .unwrap();
+
         assert!(weak_task.lexical_weak);
         assert_eq!(weak_task.role_score, 0.08);
-        assert_eq!(closed_task.role_score, 0.08);
     }
 
     /// cas-3c98 (GH #991): the reported match shapes, and matches built only
@@ -4709,7 +5328,9 @@ mod tests {
         );
         assert_eq!(redact_prompt(&wake), "", "{wake}");
         assert_eq!(
-            redact_prompt(&format!("[cas #33981 supervisor-authored 4s first]\n\n{wake}")),
+            redact_prompt(&format!(
+                "[cas #33981 supervisor-authored 4s first]\n\n{wake}"
+            )),
             ""
         );
         // Real content still counts, including a commit-sha prefix and a task id.
@@ -4878,8 +5499,16 @@ mod tests {
                 let terms = query_terms(&query.canonical);
                 assert!(terms.iter().any(|term| term == "host"));
                 assert!(terms.iter().any(|term| term == "load"));
-                let (_, injected) =
-                    render_packet(&identity, &query, &rows, &mut RecallLedger::default()).unwrap();
+                let rendered =
+                    render_packet(&identity, &query, &rows, &mut RecallLedger::default());
+                if role == RecallRole::Supervisor {
+                    assert!(
+                        rendered.is_none(),
+                        "unbound build history is not operator context"
+                    );
+                    continue;
+                }
+                let (_, injected) = rendered.unwrap();
                 assert_eq!(
                     injected[0].evidence_id,
                     fixture["memory_id"].as_str().unwrap()
@@ -4933,7 +5562,7 @@ mod tests {
     /// exclusion remains in the disclosure denominator.
     #[test]
     fn ambient_floor_rejects_live_stopword_slug_and_semantic_noise_shapes() {
-        let identity = identity(RecallRole::Supervisor);
+        let identity = identity(RecallRole::Worker);
         let query = RecallQuery::build(
             &identity,
             &RecallRequest {
@@ -5145,8 +5774,8 @@ mod tests {
             "exact task binding was lost: {packet:?}"
         );
         assert!(
-            ids.contains(&"current-release-guidance"),
-            "useful current recovery guidance was lost: {packet:?}"
+            !ids.contains(&"current-release-guidance"),
+            "unbound procedure crowded out exact task evidence: {packet:?}"
         );
         assert!(
             !ids.contains(&"flock-history"),
@@ -5356,6 +5985,7 @@ mod tests {
                 stale: false,
                 body_available: true,
                 locator: "weak-release".into(),
+                operator_context: false,
             },
             &query,
             &query_terms(&query.canonical),
@@ -5387,7 +6017,7 @@ mod tests {
 
     #[test]
     fn conversational_prompts_omit_weak_lexical_cards_but_keep_bindings() {
-        let identity = identity(RecallRole::Supervisor);
+        let identity = identity(RecallRole::Worker);
         let query = RecallQuery::build(
             &identity,
             &RecallRequest {
@@ -5707,7 +6337,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        let identity = identity(RecallRole::Supervisor);
+        let identity = identity(RecallRole::Worker);
         let request = RecallRequest {
             prompt: "pass support entity file wording".into(),
             task_id: Some("cas-legal".into()),
@@ -6125,8 +6755,13 @@ mod tests {
             .unwrap();
 
         let drain_started = Instant::now();
-        let drain =
-            crate::cloud::embed_drain::drain_all_pending_with(&cas_root, 32, &embedder, crate::cloud::CodeVectorDrain::Drain).unwrap();
+        let drain = crate::cloud::embed_drain::drain_all_pending_with(
+            &cas_root,
+            32,
+            &embedder,
+            crate::cloud::CodeVectorDrain::Drain,
+        )
+        .unwrap();
         let drain_ms = drain_started.elapsed().as_millis();
         assert!(!drain.capability_absent);
         assert!(drain.problems().is_empty(), "{:?}", drain.problems());
@@ -6529,6 +7164,7 @@ mod tests {
                     .map(|index| {
                         let mut row = candidate(&format!("e-{index}"), EvidenceScope::Global);
                         row.snippet = "bounded evidence ".repeat(30);
+                        row.operator_context = true;
                         row
                     })
                     .collect(),

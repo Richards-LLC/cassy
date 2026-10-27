@@ -34,6 +34,14 @@ pub fn resolve(
     cli: SupervisorCli,
     profile: Option<&str>,
 ) -> Result<LaunchEnvironment, LaunchError> {
+    resolve_for_project(cli, profile, None)
+}
+
+pub fn resolve_for_project(
+    cli: SupervisorCli,
+    profile: Option<&str>,
+    cas_root: Option<&Path>,
+) -> Result<LaunchEnvironment, LaunchError> {
     let name = match cli {
         SupervisorCli::Claude => "claude",
         SupervisorCli::Codex => "codex",
@@ -80,7 +88,7 @@ pub fn resolve(
     let mut remove = Vec::new();
     let configured = configured_profile(cli)?;
     let recommended = if profile.is_none() && configured.is_none() {
-        recommended_profile(cli, &home)
+        recommended_profile(cli, &home, cas_root)
     } else { None };
     let mut profile_name = choose_profile_name(profile, configured.as_deref(), recommended.as_deref()).to_string();
     if !valid_profile_name(&profile_name) {
@@ -258,11 +266,12 @@ fn provider(cli: SupervisorCli) -> Option<crate::accounts::Provider> {
     }
 }
 
-fn recommended_profile(cli: SupervisorCli, home: &Path) -> Option<String> {
+fn recommended_profile(cli: SupervisorCli, home: &Path, cas_root: Option<&Path>) -> Option<String> {
     let provider = provider(cli)?;
     let accounts = crate::account_registry::collect_for(provider, home, false).ok()?;
-    let policy = crate::account_selection::load_policy(None);
-    let selection = crate::account_selection::recommend(&accounts, provider, chrono::Utc::now(), &policy);
+    let policy = crate::account_selection::load_policy(cas_root);
+    let selection =
+        crate::account_selection::recommend(&accounts, provider, chrono::Utc::now(), &policy);
     if selection.recommended.is_none() {
         for (account, reason) in &selection.excluded {
             tracing::info!(account = %account.display_name, %reason, "No eligible account; retaining default profile");
@@ -272,6 +281,13 @@ fn recommended_profile(cli: SupervisorCli, home: &Path) -> Option<String> {
 }
 
 pub fn default_profile_name(cli: SupervisorCli) -> Result<String, LaunchError> {
+    default_profile_name_for_project(cli, None)
+}
+
+pub fn default_profile_name_for_project(
+    cli: SupervisorCli,
+    cas_root: Option<&Path>,
+) -> Result<String, LaunchError> {
     if let Some(configured) = configured_profile(cli)? {
         return Ok(configured);
     }
@@ -279,7 +295,9 @@ pub fn default_profile_name(cli: SupervisorCli) -> Result<String, LaunchError> {
         cli: cli_name(cli),
         detail: "home directory is unavailable".into(),
     })?;
-    if let Some(recommended) = recommended_profile(cli, &home) { return Ok(recommended) }
+    if let Some(recommended) = recommended_profile(cli, &home, cas_root) {
+        return Ok(recommended);
+    }
     let key = match cli {
         SupervisorCli::Claude => "CLAUDE_CONFIG_DIR",
         SupervisorCli::Codex => "CODEX_HOME",
@@ -368,6 +386,13 @@ pub struct LaunchProfile {
 /// Profiles for Commander account picker; login is checked through
 /// the official CLI rather than by opening any credential file.
 pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
+    profiles_for_project(cli, None)
+}
+
+pub fn profiles_for_project(
+    cli: SupervisorCli,
+    cas_root: Option<&Path>,
+) -> Result<Vec<LaunchProfile>, LaunchError> {
     let (main_dir, prefix) = match cli {
         SupervisorCli::Claude => (".claude", ".claude-"),
         SupervisorCli::Codex => (".codex", ".codex-"),
@@ -479,18 +504,37 @@ pub fn profiles(cli: SupervisorCli) -> Result<Vec<LaunchProfile>, LaunchError> {
                     }
                 }
             }
-            mark_recommendation(&mut rows, &accounts, provider, chrono::Utc::now(), &crate::account_selection::load_policy(None));
+            mark_recommendation(
+                &mut rows,
+                &accounts,
+                provider,
+                chrono::Utc::now(),
+                &crate::account_selection::load_policy(cas_root),
+            );
         }
     }
     Ok(rows)
 }
 
-fn mark_recommendation(rows: &mut [LaunchProfile], accounts: &[crate::account_registry::Account],
-    provider: crate::accounts::Provider, now: chrono::DateTime<chrono::Utc>, policy: &crate::config::AccountsConfig) {
+fn mark_recommendation(
+    rows: &mut [LaunchProfile],
+    accounts: &[crate::account_registry::Account],
+    provider: crate::accounts::Provider,
+    now: chrono::DateTime<chrono::Utc>,
+    policy: &crate::config::AccountsConfig,
+) {
     let selection = crate::account_selection::recommend(accounts, provider, now, policy);
     for row in rows {
-        row.recommendation = selection.recommended.as_ref().filter(|r| r.account.name == row.name && row.logged_in).map(|r| r.reason.clone());
-        row.exclusion = selection.excluded.iter().find(|(a, _)| a.name == row.name).map(|(_, reason)| reason.clone());
+        row.recommendation = selection
+            .recommended
+            .as_ref()
+            .filter(|r| r.account.name == row.name && row.logged_in)
+            .map(|r| r.reason.clone());
+        row.exclusion = selection
+            .excluded
+            .iter()
+            .find(|(a, _)| a.name == row.name)
+            .map(|(_, reason)| reason.clone());
     }
 }
 
@@ -658,8 +702,29 @@ mod tests {
             assert_eq!(rows[2].exclusion.as_deref(), Some("duplicate of chosen"));
             assert!(rows[1].logged_in && rows[2].logged_in, "exclusions stay manually selectable");
             assert_eq!(choose_profile_name(Some("other"), None, Some("chosen")), "other");
+            // Commander uses the selected project's threshold, not only the global one.
+            let project = tempfile::tempdir().unwrap();
+            std::fs::write(
+                project.path().join("config.toml"),
+                "[accounts]\nthreshold = 10\n",
+            )
+            .unwrap();
+            mark_recommendation(
+                &mut rows,
+                &accounts,
+                provider,
+                "2026-10-27T12:00:00Z".parse().unwrap(),
+                &crate::account_selection::load_policy(Some(project.path())),
+            );
+            assert!(rows[0].recommendation.is_none());
+            assert!(
+                rows[0]
+                    .exclusion
+                    .as_deref()
+                    .unwrap()
+                    .contains("threshold 10%")
+            );
         }
-
     }
 
     #[test]

@@ -1799,8 +1799,19 @@ fn launch_session_blocking(
         );
     }
 
+    let root = match super::projects::resolve_launch_target(&request.target) {
+        Ok(root) => root.path,
+        Err(error) => {
+            return launch_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                &error.to_string(),
+            );
+        }
+    };
+    let project_cas_root = root.join(".cas");
     let chosen_profile = if let Some(profile) = request.profile.as_deref() {
-        let profiles = match super::launch_env::profiles(supervisor_cli) {
+        let profiles = match super::launch_env::profiles_for_project(supervisor_cli, Some(&project_cas_root)) {
             Ok(profiles) => profiles,
             Err(error) => {
                 return launch_error(
@@ -1817,7 +1828,7 @@ fn launch_session_blocking(
             }
         }
     } else {
-        match super::launch_env::default_profile_name(supervisor_cli) {
+        match super::launch_env::default_profile_name_for_project(supervisor_cli, Some(&project_cas_root)) {
             Ok(profile) => profile,
             Err(error) => {
                 return launch_error(
@@ -1829,16 +1840,6 @@ fn launch_session_blocking(
         }
     };
 
-    let root = match super::projects::resolve_launch_target(&request.target) {
-        Ok(root) => root.path,
-        Err(error) => {
-            return launch_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_target",
-                &error.to_string(),
-            );
-        }
-    };
     let mut pending = match launches.lock() {
         Ok(lock) => lock,
         Err(_) => {
@@ -1889,7 +1890,7 @@ fn launch_session_blocking(
     }
     pending.remove(&root);
 
-    let environment = match super::launch_env::resolve(supervisor_cli, request.profile.as_deref()) {
+    let environment = match super::launch_env::resolve_for_project(supervisor_cli, Some(&chosen_profile), Some(&project_cas_root)) {
         Ok(environment) => environment,
         Err(error) => {
             let code = match error {

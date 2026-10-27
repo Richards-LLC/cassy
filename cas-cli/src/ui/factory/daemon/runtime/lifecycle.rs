@@ -347,6 +347,12 @@ pub(super) fn enqueue_worker_delivery_stalled_relay(
     )
 }
 
+pub(super) fn enqueue_usage_limit_switch_relay(
+    cas_dir: &std::path::Path, worker: &str, occurrence: &str, detail: &str,
+) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_detail(cas_dir, "worker_unavailable", worker, None, None, detail, occurrence)
+}
+
 /// Surface a terminal harness-side refusal even when its MCP child continues
 /// heartbeating. The evidence is collected from the harness artifact, not
 /// inferred from heartbeat age.

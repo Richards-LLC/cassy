@@ -1,3 +1,4 @@
+pub(crate) mod limit_switch;
 use crate::factory_target_cache::missing_gitdir_checkouts;
 use crate::mcp::tools::core::workflow::verification_tools::VERIFICATION_REJECTED_REOPEN_LABEL;
 use crate::mcp::tools::service::imports::*;
@@ -1481,14 +1482,17 @@ fn recommend_spawn_accounts(
     let mut notices = Vec::new();
     for (provider, cli) in [(crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
         (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex)] {
-        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none() && s.requester_config_dir.is_none()) { continue }
+        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none()) { continue }
         let accounts = match collect(provider) {
             Ok(rows) => rows,
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
         if let Some(recommended) = selection.recommended {
-            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none() && s.requester_config_dir.is_none()) {
+            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none()) {
+                if let Some(inherited) = spec.requester_config_dir.as_deref() {
+                    notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
+                }
                 spec.config_dir = Some(recommended.account.folder.to_string_lossy().into_owned());
             }
             notices.push(format!("{} recommended account={} ({}): {}", provider.name(), recommended.account.display_name,
@@ -2814,12 +2818,7 @@ impl CasService {
                 .requester_from_env
                 .then(|| requester_secure_storage_dir(spec.cli))
                 .flatten();
-            if spec.cli == cas_mux::SupervisorCli::Codex
-                && let Some(config_dir) = spec.config_dir.as_deref()
-            {
-                preflight_codex_config_dir(config_dir)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-            }
+
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
@@ -2847,6 +2846,12 @@ impl CasService {
         };
         let mut config_dir_warnings = Vec::new();
         for spec in &specs {
+            if spec.cli == cas_mux::SupervisorCli::Codex
+                && let Some(config_dir) = spec.config_dir.as_deref().or(spec.requester_config_dir.as_deref())
+            {
+                preflight_codex_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
             if spec.cli == cas_mux::SupervisorCli::Claude
                 && let Some(config_dir) = spec.config_dir.as_deref()
             {
@@ -10788,14 +10793,7 @@ fn codex_sessions_dir_for_worker_account(account_dir: Option<&str>) -> Option<st
     if account_dir.is_empty() {
         return None;
     }
-    let expanded = account_dir.strip_prefix('~').map_or_else(
-        || std::path::PathBuf::from(account_dir),
-        |suffix| {
-            dirs::home_dir()
-                .map(|home| home.join(suffix.trim_start_matches('/')))
-                .unwrap_or_else(|| std::path::PathBuf::from(account_dir))
-        },
-    );
+    let expanded = normalized_worker_account_path(account_dir);
     Some(expanded.join("sessions"))
 }
 
@@ -11099,6 +11097,13 @@ fn auth_failure_evidence_at(
 
 /// The account directory a worker was actually spawned against, which is what
 /// a remedy has to name on a host running several of them.
+/// Account selectors share the backend's tilde expansion; canonical paths
+/// also make symlink aliases compare as the same subscription directory.
+fn normalized_worker_account_path(raw: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(cas_pty::expand_codex_home(raw));
+    path.canonicalize().unwrap_or(path)
+}
+
 pub(crate) fn worker_account_dir(agent: &cas_types::Agent) -> Option<String> {
     agent
         .metadata
@@ -11127,7 +11132,7 @@ fn codex_rollout_usage_limit_evidence(
     rollout: Option<&std::path::Path>,
     cli: cas_mux::SupervisorCli,
 ) -> UsageLimitEvidence {
-    if cli != cas_mux::SupervisorCli::Codex {
+    if !matches!(cli, cas_mux::SupervisorCli::Codex | cas_mux::SupervisorCli::Claude) {
         return UsageLimitEvidence::Recovered;
     }
     let Some(rollout) = rollout else {
@@ -11145,10 +11150,19 @@ fn codex_rollout_usage_limit_evidence(
     // not a byte offset, counting from the first whole line after the cut.
     let mut latest_terminal = None;
     for (line_index, line) in tail.lines().enumerate() {
-        let limited = line.contains("You've hit your usage limit")
-            && (line.contains("\"has_credits\":false") || line.contains("\"has_credits\": false"));
-        let completed = line.contains("\"type\":\"task_complete\"")
-            || line.contains("\"type\": \"task_complete\"");
+        // Read only harness records. A user quoting a limit is not an outage.
+        let record = serde_json::from_str::<serde_json::Value>(line).ok();
+        let (limited, completed) = if cli == cas_mux::SupervisorCli::Claude {
+            let assistant = record.as_ref().and_then(|r| r.get("type")).and_then(|v| v.as_str()) == Some("assistant");
+            let api_error = record.as_ref().and_then(|r| r.get("isApiErrorMessage")).and_then(|v| v.as_bool()) == Some(true);
+            let text = line.to_ascii_lowercase();
+            (assistant && api_error && (text.contains("you've hit your limit") || text.contains("you've hit your usage limit")
+                || record.as_ref().and_then(|r| r.get("error")).and_then(|v| v.as_str()) == Some("rate_limit")), assistant && !api_error)
+        } else {
+            (line.contains("You've hit your usage limit")
+                && (line.contains("\"has_credits\":false") || line.contains("\"has_credits\": false")),
+             line.contains("\"type\":\"task_complete\"") || line.contains("\"type\": \"task_complete\""))
+        };
         if limited {
             let timestamp = serde_json::from_str::<serde_json::Value>(line)
                 .ok()
@@ -11159,9 +11173,9 @@ fn codex_rollout_usage_limit_evidence(
                         .map(str::to_owned)
                 })
                 .unwrap_or_else(|| format!("tail-{}", start + line_index as u64));
-            latest_terminal = Some(UsageLimitEvidence::Limited {
-                first_evidence: timestamp,
-            });
+            if !matches!(latest_terminal, Some(UsageLimitEvidence::Limited { .. })) {
+                latest_terminal = Some(UsageLimitEvidence::Limited { first_evidence: timestamp });
+            }
         } else if completed {
             latest_terminal = Some(UsageLimitEvidence::Recovered);
         }
@@ -11500,7 +11514,14 @@ fn worker_status_transcript_path_for_account(
             );
             worker_status_path_from_resolution(cached.resolution, cli)
         }
-        cas_mux::SupervisorCli::Claude => transcript_path_fast(clone_path, session_id),
+        cas_mux::SupervisorCli::Claude => match account_dir {
+            Some(account) => {
+                let path = normalized_worker_account_path(account).join("projects")
+                    .join(escaped_project_slug(clone_path?)).join(format!("{session_id}.jsonl"));
+                path.is_file().then_some(path)
+            }
+            None => transcript_path_fast(clone_path, session_id),
+        },
         // cas-7296 owns OpenCode worker-status session mapping.
         cas_mux::SupervisorCli::OpenCode => None,
     }
@@ -14691,6 +14712,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_usage_limit_uses_first_refusal_until_a_real_answer() {
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        let refusal = r#"{"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","timestamp":"2026-10-27T12:00:00Z","message":{"content":[{"type":"text","text":"You've hit your limit · resets 5pm"}]}}"#;
+        let repeat = refusal.replace("12:00:00", "12:01:00");
+        std::fs::write(transcript.path(), format!("{refusal}\n{repeat}\n")).unwrap();
+        assert_eq!(codex_rollout_usage_limit_evidence(Some(transcript.path()), cas_mux::SupervisorCli::Claude),
+            UsageLimitEvidence::Limited { first_evidence: "2026-10-27T12:00:00Z".into() });
+        std::fs::write(transcript.path(), format!("{refusal}\n{{\"type\":\"assistant\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"Continuing the task\"}}]}}}}\n")).unwrap();
+        assert_eq!(codex_rollout_usage_limit_evidence(Some(transcript.path()), cas_mux::SupervisorCli::Claude), UsageLimitEvidence::Recovered);
+        // Quoting a limit in user input is not terminal harness evidence.
+        std::fs::write(transcript.path(), r#"{"type":"user","message":{"content":"You've hit your limit"}}"#).unwrap();
+        assert_eq!(codex_rollout_usage_limit_evidence(Some(transcript.path()), cas_mux::SupervisorCli::Claude), UsageLimitEvidence::Recovered);
+    }
+
     /// cas-4a5e: a typo'd/missing codex config_dir must fail with a message
     /// naming the exact `auth.json` path that was checked — not a generic
     /// error and not the Claude-shaped wording.
@@ -15175,7 +15211,7 @@ mod tests {
     }
 
     #[test]
-    fn recommended_spawn_accounts_preserve_explicit_and_requester_overrides() {
+    fn recommended_spawn_accounts_preserve_explicit_and_override_inherited() {
         let now = "2026-10-27T12:00:00Z".parse().unwrap();
         let mut specs = Vec::new();
         for cli in [cas_mux::SupervisorCli::Claude, cas_mux::SupervisorCli::Codex] {
@@ -15193,12 +15229,16 @@ mod tests {
             assert_eq!(specs[offset].config_dir.as_deref(), Some(format!("/fixture/{}chosen", provider.prefix()).as_str()));
             assert_eq!(specs[offset + 1].config_dir.as_deref(), Some("/explicit/account"));
             assert_eq!(specs[offset + 2].requester_config_dir.as_deref(), Some("/requester/account"));
-            assert!(specs[offset + 2].config_dir.is_none());
+            assert_eq!(specs[offset + 2].config_dir, specs[offset].config_dir);
+            assert!(receipt.contains("recommended over inherited /requester/account"));
             assert!(receipt.contains(&format!("{} recommended account=chosen", provider.name())));
         }
         assert!(receipt.contains("resets in 6h, 41% left"));
         assert!(spawn_specs_summary(&specs, &[]).contains("account=/fixture/.codex-chosen"));
+        // Recommendation-populated directories pass through the same final preflight.
+        assert!(preflight_codex_config_dir(specs[3].config_dir.as_deref().unwrap()).unwrap_err().contains("auth.json"));
         specs[0].config_dir = None;
+        specs[0].requester_config_dir = Some("/fallback/account".into());
         let fallback = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
             let mut row = crate::account_selection::tests::row(provider, "full", 6, 100.0, 100.0);
             row.login_state = crate::account_registry::LoginState::LoggedIn;
@@ -15237,6 +15277,7 @@ mod tests {
                 Some(home.path().join(format!("{}later", provider.prefix())).to_str().unwrap()));
             assert!(receipt.contains(&format!("{} recommended account=later", provider.name())));
         }
+        assert_eq!(specs[0].requester_config_dir.as_deref(), Some("/fallback/account"));
     }
 
     #[test]

@@ -2563,6 +2563,10 @@ button.chip:disabled { cursor: default; }
 /* cas-d382 QA F01: Copy command is one line, beside or under the command, never wrapped. */
 .fleet-permission-command .fleet-permission-copy { flex: none; white-space: nowrap; }
 
+/* A code's share controls can outgrow a landscape phone. The field list
+   scrolls already; let the bounded dialog scroll any remaining overflow too,
+   rather than clipping it at dialog[open]'s hidden outer edge. */
+#pair-dialog { overflow: auto; }
 #pair-dialog > .cloud-brand { margin-bottom: var(--space-4); }
 .conversation-sidebar > footer { flex-shrink: 0; padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
 @media (max-height: 30rem) {

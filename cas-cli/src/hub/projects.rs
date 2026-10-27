@@ -151,6 +151,23 @@ pub fn list_projects(sessions: &[HubSession]) -> Result<Vec<ProjectEntry>> {
     Ok(projects_from_rows(registry_rows()?, sessions, true))
 }
 
+fn project_entry(main: &Path, last_touched_at: DateTime<Utc>) -> ProjectEntry {
+    let id = stable_id("project", main);
+    ProjectEntry {
+        id: id.clone(),
+        name: main
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        path: main.to_path_buf(),
+        last_touched_at,
+        touch_count: 0,
+        running_session: None,
+        target: LaunchTarget::Project { id },
+    }
+}
+
 fn projects_from_rows(
     rows: Vec<KnownRepo>,
     sessions: &[HubSession],
@@ -173,21 +190,7 @@ fn projects_from_rows(
         }
         let entry = projects
             .entry(main.clone())
-            .or_insert_with(|| ProjectEntry {
-                id: stable_id("project", &main),
-                name: main
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned(),
-                path: main.clone(),
-                last_touched_at: row.last_touched_at,
-                touch_count: 0,
-                running_session: None,
-                target: LaunchTarget::Project {
-                    id: stable_id("project", &main),
-                },
-            });
+            .or_insert_with(|| project_entry(&main, row.last_touched_at));
         entry.last_touched_at = entry.last_touched_at.max(row.last_touched_at);
         entry.touch_count = entry.touch_count.saturating_add(row.touch_count);
     }
@@ -198,13 +201,24 @@ fn projects_from_rows(
         let Some(project_dir) = session.project_dir.as_deref() else {
             continue;
         };
-        if let Some(main) = canonical_main_repo(Path::new(project_dir)) {
-            if let Some(project) = projects.get_mut(&main) {
-                project
-                    .running_session
-                    .get_or_insert_with(|| session.name.clone());
-            }
-        }
+        // cas-0273: a running project is listed for Attach whether or not the
+        // host registry ever recorded it; Conversations already shows it.
+        let Some(main) = canonical_main_repo(Path::new(project_dir))
+            .or_else(|| Path::new(project_dir).canonicalize().ok())
+        else {
+            continue;
+        };
+        let touched = [&session.last_activity_at, &session.started_at]
+            .into_iter()
+            .flatten()
+            .find_map(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc))
+            .unwrap_or_else(Utc::now);
+        projects
+            .entry(main.clone())
+            .or_insert_with(|| project_entry(&main, touched))
+            .running_session
+            .get_or_insert_with(|| session.name.clone());
     }
     let mut result: Vec<_> = projects.into_values().collect();
     result.sort_by(|a, b| {

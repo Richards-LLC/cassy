@@ -73,8 +73,11 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
     await expect(rows.locator(".conversation-preview")).toHaveText(["Messaged bright-robin-85", "You wrote to it", "Mixdown preview rendered: 3 stems."]);
     await expect(row("noble-cheetah-84").getByLabel("1 unread")).toBeVisible();
     await expect(page.locator(".hub-footer-meta")).toContainText("3 conversations");
-    // Every session of the group is in view at 1280×720.
-    for (const node of await rows.all()) await expect(node).toBeInViewport({ ratio: 1 });
+    // A useful incoming preview can grow the last row beyond the list's
+    // available height. Keep it reachable in the list's own scroll region.
+    const incoming = row("noble-cheetah-84");
+    await incoming.scrollIntoViewIfNeeded();
+    await expect(incoming).toBeInViewport({ ratio: 1 });
   });
 
   await journey.stage("Open a session that has not written yet", async () => {

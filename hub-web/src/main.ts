@@ -812,6 +812,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
       attachPreviewedSession(machine.id);
+      attachIncomingConversationPreviews(machine.id, items);
       render();
     },
     onMachineEvent: (event) => {
@@ -2515,6 +2516,23 @@ function attachPreviewedSession(machineId: string): void {
   previewedSession = undefined;
   if (selectedMachineId !== target.machineId || selectedSession !== target.session || !target.session) return;
   if (visibleSessions(machineId).some((session) => session.name === target.session)) void attachSelectedSession(machineId, target.session);
+}
+
+/** Load the first page for unopened rows after the supervisor writes to Commander. */
+function attachIncomingConversationPreviews(machineId: string, listed: readonly HubSession[]): void {
+  const connection = connections.get(machineId);
+  if (!connection) return;
+  for (const session of listed) {
+    if (session.last_activity !== "supervisor → Commander") continue;
+    if (selectedMachineId === machineId && selectedSession === session.name) continue;
+    const key = sessionKey(machineId, session.name);
+    const page = conversationHistoryPages.get(key);
+    const attachment = connection.attachSnapshot(session.name);
+    if (page?.loaded || page?.requested || page?.unavailable || (attachment && attachment.phase !== "idle")) continue;
+    // History arrives in Welcome on the normal device-scoped session stream;
+    // the row then derives its unread count and preview from that page.
+    void connection.attach(session.name);
+  }
 }
 
 /**

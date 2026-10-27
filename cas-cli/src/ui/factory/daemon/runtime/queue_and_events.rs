@@ -2125,6 +2125,9 @@ pub enum SupervisorWakeClass {
     /// cas-cd3f: the startup brief CAS queues when it launches a supervisor,
     /// which must begin that session's first turn. Daemon-stamped only.
     Startup,
+    /// cas-bf20: the operator's own message from a hub-verified paired device.
+    /// Only the hub's device-session stamp can raise it.
+    Operator,
 }
 
 impl SupervisorWakeClass {
@@ -2172,6 +2175,9 @@ pub enum WakeSender {
         role: cas_types::AgentRole,
         name: String,
     },
+    /// cas-bf20: the hub verified this row against a paired device session
+    /// (`QueueOrigin::PairedDevice`): the operator, not an agent.
+    Operator,
     /// The row was stamped `registered_agent`, but the id no longer resolves
     /// to a registry row. Treated as unestablished: a sender that has been
     /// deregistered is not an authority, and silently promoting it to
@@ -6650,6 +6656,9 @@ impl FactoryDaemon {
         prompt: &str,
     ) -> Option<SupervisorWakeClass> {
         use crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source;
+        // cas-bf20: checked before the acknowledgement filter because the
+        // operator's "ok" is usually an approval, not a receipt.
+        if *sender == WakeSender::Operator { return Some(SupervisorWakeClass::Operator); }
         if crate::supervisor_message_wakes::quiet(prompt) || crate::mcp::tools::service::agent_search_system::message::parse_peer_copy(prompt).is_some() { return None; }
         match sender {
             // cas-f02b / cas-3dcb: a lifecycle transition, worker death, spawn
@@ -6781,6 +6790,8 @@ impl FactoryDaemon {
                     } else { None }
                 }
             },
+            // cas-bf20: returned before the acknowledgement filter above.
+            WakeSender::Operator => Some(SupervisorWakeClass::Operator),
             // An unstamped, explicitly-unattributed or no-longer-resolvable
             // sender never wakes, whatever the payload says.
             WakeSender::Unstamped | WakeSender::Unattributed | WakeSender::Unresolvable => None,
@@ -6831,10 +6842,9 @@ impl FactoryDaemon {
         match origin {
             None => WakeSender::Unstamped,
             Some(cas_store::QueueOrigin::Unattributed) => WakeSender::Unattributed,
-            // cas-7f81: a verified operator row keeps today's Commander wake
-            // behaviour (inbox-only) until the reply path (cas-7f59) defines
-            // its wake policy; the provenance header already names it.
-            Some(cas_store::QueueOrigin::PairedDevice { .. }) => WakeSender::Unattributed,
+            // cas-bf20: the hub stamps PairedDevice only for a verified
+            // device session (cas-e8df), so it carries the operator's wake.
+            Some(cas_store::QueueOrigin::PairedDevice { .. }) => WakeSender::Operator,
             Some(cas_store::QueueOrigin::Daemon) => WakeSender::Daemon,
             Some(cas_store::QueueOrigin::RegisteredAgent { .. }) => match resolved {
                 Some(agent) => WakeSender::Registered {
@@ -6910,7 +6920,7 @@ impl FactoryDaemon {
                 WakeSender::Unresolvable => {
                     "stamped sender no longer resolves to a registered agent (cas-d9a8)"
                 }
-                WakeSender::Daemon | WakeSender::Registered { .. } => {
+                WakeSender::Daemon | WakeSender::Registered { .. } | WakeSender::Operator => {
                     "supervisor rows wake the pane only for lifecycle, peer-supervisor, merge-request, worker action, blocker, verification-dispatch, Slack-activity or fired-reminder envelopes (cas-dab2, cas-d9a8, cas-48e5, cas-8725, cas-e753, cas-835e)"
                 }
             });
@@ -6966,6 +6976,9 @@ impl FactoryDaemon {
                 "supervisor pane is quiet and the row is a reminder the daemon fired"
             }
             SupervisorWakeClass::Startup => "startup brief for a newly launched supervisor",
+            SupervisorWakeClass::Operator => {
+                "supervisor pane is quiet and the row is the operator's verified Commander message"
+            }
         })
     }
 

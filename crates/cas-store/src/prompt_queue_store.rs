@@ -16391,6 +16391,7 @@ mod tests {
             candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
             vec![urgent]
         );
+        store.record_recipient_surfaced(urgent, "claude-worker", SurfacingSource::TransportClaimed).unwrap();
         let bounce = store
             .enqueue_delivery_stalled_bounce(
                 urgent,
@@ -16415,6 +16416,10 @@ mod tests {
         );
         let bounced = store.message_delivery_report(bounce).unwrap().unwrap();
         assert_eq!(bounced.target, "supervisor");
+        // pin: a claimed transport is still unconfirmed, so it must count in the degraded-channel notice.
+        assert!(bounced.prompt.contains("2 unconfirmed message(s)"), "{}", bounced.prompt);
+        let reported = serde_json::to_value(store.message_delivery_report(urgent).unwrap().unwrap()).unwrap();
+        assert_eq!(reported["channel_stalled_notice_id"], bounce);
 
         let very_old = (Utc::now() - chrono::Duration::seconds(31 * 60)).to_rfc3339();
         store
@@ -16436,6 +16441,8 @@ mod tests {
         store
             .poll_unseen_for_recipient("claude-worker", Some("session"), 10)
             .unwrap();
+        let reported = serde_json::to_value(store.message_delivery_report(normal).unwrap().unwrap()).unwrap();
+        assert!(reported["channel_stalled_notice_id"].is_null(), "reading resumes the channel");
         assert!(
             store
                 .delivery_stalled_candidates("session", 10 * 60, 30 * 60, 10)

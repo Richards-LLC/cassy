@@ -227,6 +227,11 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     if (nextWork === start) return;
     closeGroup(); coalesce = undefined;
     const run = work.slice(start, nextWork);
+    // Work that opens the thread sits under its own day, not above the first label.
+    if (lastDay === undefined) {
+      lastDay = dayKey(run[0]!.at);
+      items.push({ type: "day", key: `day:${lastDay}`, label: dayLabel(run[0]!.at, now) });
+    }
     items.push({ type: "work", key: `work:${run[0]!.id}`, events: run });
   };
 

@@ -110,7 +110,7 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
 
 /** Hand focus back to the control a repaint replaced. */
 export function refocus(container: HTMLElement, focusKey: string): void {
-  container.querySelector<HTMLElement>(`[data-focus-key="${CSS.escape(focusKey)}"]`)?.focus({ preventScroll: true });
+  [...container.querySelectorAll<HTMLElement>("[data-focus-key]")].find((node) => node.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
 }
 
 /**
@@ -119,6 +119,8 @@ export function refocus(container: HTMLElement, focusKey: string): void {
  */
 export function renderWork(node: HTMLElement, item: ThreadWork, context: WorkRowsContext, speaker: string, onRepaint?: (topBefore: number) => void): void {
   const document = node.ownerDocument;
+  // A repaint (a detail landing, an event appended) keeps the reader's focus.
+  const focused = document.activeElement instanceof HTMLElement && node.contains(document.activeElement) ? document.activeElement.dataset.focusKey : undefined;
   const open = context.isOpen(item.key);
   const last = item.events.at(-1);
   const time = clockLabel(last?.at);
@@ -153,4 +155,5 @@ export function renderWork(node: HTMLElement, item: ThreadWork, context: WorkRow
     children.push(rows);
   }
   node.replaceChildren(...children);
+  if (focused) refocus(node, focused);
 }

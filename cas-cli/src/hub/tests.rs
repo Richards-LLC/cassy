@@ -2722,8 +2722,9 @@ fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() 
         request_id: "events-1".into(),
         before: None,
         limit: 100,
+        agent: None,
     });
-    assert_eq!(required_scope(&ClientMessage::WorkEventsRequest { request_id: "e".into(), before: None, limit: 0 }), Some(Scope::PaneRead));
+    assert_eq!(required_scope(&ClientMessage::WorkEventsRequest { request_id: "e".into(), before: None, limit: 0, agent: Some("swift-fox-2".into()) }), Some(Scope::PaneRead));
     assert!(super::server::is_pane_read_message(&ClientMessage::WorkEventDetailRequest {
         request_id: "d".into(),
         event_id: "q:1".into(),
@@ -2748,8 +2749,19 @@ fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() 
     .unwrap();
     assert!(!admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &page), "the old client never receives work events");
     assert!(admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &history), "its history page still arrives");
+    let appended = serde_json::to_vec(&DaemonMessage::WorkEventsAppended {
+        schema_version: crate::ui::factory::WORK_EVENT_SCHEMA_VERSION,
+    })
+    .unwrap();
+    assert!(!admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &appended), "no notice before the socket reads a page");
     assert!(admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &page));
-    assert!(new_client.is_empty() && old_client.is_empty());
+    assert!(old_client.is_empty());
+    // cas-ff22: having read a page, the socket hears each change notice; the
+    // older Commander that never asked does not.
+    assert!(admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &appended));
+    assert!(admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &appended), "the follow mark is not consumed");
+    assert!(!admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &appended));
+    assert!(!admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &page), "the answered page is not relayed twice");
 }
 
 #[test]

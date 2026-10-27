@@ -17,6 +17,7 @@ fn scope(cli: cas_mux::SupervisorCli) -> WorkEventScope {
     WorkEventScope {
         session: "factory-1".into(),
         supervisors: vec![source(cli)],
+        workers: Vec::new(),
         agents: HashMap::from([
             ("sup-1".to_owned(), "calm-otter-1".to_owned()),
             ("worker-1".to_owned(), "swift-fox-2".to_owned()),
@@ -45,7 +46,7 @@ fn page(
     limit: u16,
 ) -> (Vec<WorkEvent>, bool, Option<String>) {
     let resolve = |_: &SupervisorSource| Some(path.to_path_buf());
-    match index.page(scope, stores, &resolve, "page".into(), before, limit).unwrap() {
+    match index.page(scope, stores, &resolve, "page".into(), before, limit, None).unwrap() {
         DaemonMessage::WorkEvents { events, has_earlier, next_before, schema_version, .. } => {
             assert_eq!(schema_version, WORK_EVENT_SCHEMA_VERSION);
             (events, has_earlier, next_before)
@@ -177,7 +178,7 @@ fn a_token_in_tool_output_never_leaves_the_daemon() {
     ]);
     let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
     let resolve = |_: &SupervisorSource| Some(path.clone());
-    let page = index.page(&scope, &stores, &resolve, "page".into(), None, 10).unwrap();
+    let page = index.page(&scope, &stores, &resolve, "page".into(), None, 10, None).unwrap();
     let DaemonMessage::WorkEvents { events, .. } = &page else { panic!("page") };
     let detail = index.detail(&scope, &stores, &resolve, "detail".into(), events[0].id.clone());
     let wire = format!("{}{}", serde_json::to_string(&page).unwrap(), serde_json::to_string(&detail).unwrap());
@@ -233,6 +234,68 @@ fn task_db_and_hook_events_join_the_session_stream() {
         unreachable!()
     };
     assert_eq!(detail, None, "another session's row does not resolve");
+}
+
+/// cas-ff22: a worker's timeline reads that worker's own transcript and
+/// rows, never the supervisor's; the session stream still reads only the
+/// supervisor. The change probe moves when either transcript grows, and only
+/// a changed probe tells the stream's followers, once each.
+#[test]
+fn a_worker_timeline_reads_its_own_transcript_and_the_probe_tells_followers_of_changes() {
+    let temp = tempfile::tempdir().unwrap();
+    let supervisor_path = temp.path().join("supervisor.jsonl");
+    let worker_path = temp.path().join("worker.jsonl");
+    claude_turn(&supervisor_path);
+    write_lines(&worker_path, &[json!({"type":"assistant","timestamp":at(6),"message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"w-1","name":"Read","input":{"file_path":"/repo/src/limits.rs"}}
+    ]}})]);
+    let mut scope = scope(cas_mux::SupervisorCli::Claude);
+    scope.workers.push(SupervisorSource {
+        agent_id: "worker-1".into(),
+        agent_name: "swift-fox-2".into(),
+        harness_session: "harness-2".into(),
+        cli: cas_mux::SupervisorCli::Claude,
+        account_dir: None,
+    });
+    let resolve = |source: &SupervisorSource| {
+        Some(if source.agent_id == "worker-1" { worker_path.clone() } else { supervisor_path.clone() })
+    };
+    let (stores, mut index) = (WorkEventStores::default(), WorkEventIndex::default());
+    let events = |index: &mut WorkEventIndex, agent: Option<&str>| match index
+        .page(&scope, &stores, &resolve, "page".into(), None, 10, agent)
+        .unwrap()
+    {
+        DaemonMessage::WorkEvents { events, .. } => events,
+        other => panic!("not a page: {other:?}"),
+    };
+
+    let timeline = events(&mut index, Some("swift-fox-2"));
+    assert_eq!(timeline.len(), 1);
+    assert_eq!((timeline[0].agent.as_deref(), timeline[0].label.as_str()), (Some("swift-fox-2"), "Read limits.rs"));
+    assert!(events(&mut index, None).iter().all(|event| event.agent.as_deref() == Some("calm-otter-1")));
+    let DaemonMessage::WorkEventDetail { detail: Some(text), .. } =
+        index.detail(&scope, &stores, &resolve, "detail".into(), timeline[0].id.clone())
+    else {
+        panic!("a worker's own event resolves");
+    };
+    assert!(text.contains("/repo/src/limits.rs"), "{text}");
+
+    let mut service = WorkEventService::default();
+    service.subscribers.extend([3, 1]);
+    let first = index.fingerprint(&scope, &stores, &resolve).unwrap();
+    assert!(service.settle_probe(Some(first.clone())).is_empty(), "the first probe is the baseline");
+    assert!(service.settle_probe(Some(index.fingerprint(&scope, &stores, &resolve).unwrap())).is_empty(), "nothing new, nothing sent");
+    write_lines(&worker_path, &[json!({"type":"assistant","timestamp":at(7),"message":{"role":"assistant","content":[
+        {"type":"tool_use","id":"w-2","name":"Bash","input":{"command":"cargo test","description":"Run the tests"}}
+    ]}})]);
+    let grown = index.fingerprint(&scope, &stores, &resolve).unwrap();
+    assert_ne!(grown, first, "a worker's transcript growing moves the probe without indexing it");
+    let notices = service.settle_probe(Some(grown));
+    let told: Vec<usize> = notices.iter().map(|notice| notice.client_id).collect();
+    assert_eq!(told, vec![1, 3]);
+    assert!(notices.iter().all(|notice| matches!(notice.message, DaemonMessage::WorkEventsAppended { .. })));
+    assert!(service.probe_due(Instant::now(), |client| client == 3), "a live follower keeps the probe running");
+    assert!(!service.probe_due(Instant::now(), |_| false), "no live follower, no probe");
 }
 
 /// Measurement on a real transcript (cas-8f88 acceptance): run with

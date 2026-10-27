@@ -698,7 +698,13 @@ mod tests {
             apply_recommendation(&mut profiles, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
             let choices = profile_choices(&profiles);
             assert_eq!(active_choice_index(&profiles), 1);
-            assert!(choices[1].to_string().contains("recommended: resets in 6h, 41% left"));
+            let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+            let reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(6)), now);
+            assert!(choices[1].to_string().contains(&format!("recommended: {reset}, 41% left")), "{}", choices[1]);
+            for name in ["5h", "weekly"] {
+                assert!(choices[1].to_string().lines().any(|line| line.contains(name) && line.contains("resets ")), "{}", choices[1]);
+            }
+            assert!(choices.iter().all(|choice| choice.to_string().lines().all(|line| text_width(line) <= 76)));
             assert!(choices[0].to_string().contains("resets later than alt"));
             let mut idle_accounts = accounts.clone();
             idle_accounts[1].windows.remove(0);

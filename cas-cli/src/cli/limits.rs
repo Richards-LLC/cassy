@@ -248,6 +248,17 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
     }
 }
 
+/// Human reset text; the stored/JSON instant stays UTC RFC3339.
+pub(crate) fn format_reset(reset: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    format_reset_in(reset, now.with_timezone(&Local))
+}
+
+fn format_reset_in<Tz: TimeZone>(reset: Option<DateTime<Utc>>, now: DateTime<Tz>) -> String
+where Tz::Offset: fmt::Display {
+    reset.map(|reset| reset.with_timezone(&now.timezone()).format("%Y-%m-%d %H:%M %Z").to_string())
+        .unwrap_or_else(|| "reset time unknown".into())
+}
+
 fn display_reset(value: &str) -> String {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -604,6 +615,26 @@ impl fmt::Debug for ClaudeOauth {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_reset_format_table() {
+        use chrono::FixedOffset;
+        let zone = FixedOffset::west_opt(4 * 3600).unwrap();
+        let now = "2026-10-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap().with_timezone(&zone);
+        for (reset, expected) in [
+            (Some("2026-10-27T18:00:00Z"), "resets Tue 14:00 (in 6h)"),
+            (Some("2026-10-28T13:00:00Z"), "resets Wed 09:00 (in 1d)"),
+            (Some("2026-10-31T13:00:00Z"), "resets Sat Oct 31 09:00 (in 4d)"),
+            (Some("2026-10-27T11:00:00Z"), "reset, usage unknown until next session"),
+            (None, "reset time unknown"),
+        ] {
+            let reset = reset.map(|value| value.parse().unwrap());
+            assert_eq!(format_reset_in(reset, now), expected);
+        }
+        // UTC tomorrow can still be local today; keep the local calendar date.
+        let late = "2026-10-28T02:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        assert_eq!(format_reset_in(Some(late), now), "resets Tue 22:00 (in 14h)");
+    }
 
     #[test]
     fn structured_auth_needed_marks_stale_without_matching_error_prose() {

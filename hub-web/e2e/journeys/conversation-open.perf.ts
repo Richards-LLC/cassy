@@ -205,16 +205,10 @@ for (const profile of [
       const base = await startProfile(cdp);
       const since = phase === "reload_resume" ? 0 : await page.evaluate((phase) => { const p = (window as any).perfProbe; p.paintEnabled = phase !== "accumulated"; p.active = true; p.t0 = performance.now(); p.firstPaint = 0; p.latestPaint = 0; p.tailSamples = []; return p.t0; }, phase);
       const requestStart = hub.historyRequests.length;
-      await action();
-      if (phase === "initial" && process.env.CONVERSATION_PERF_REQUIRE_ALL_ACKED === "1") {
-        await expect.poll(() => {
-          const acked = new Set(hub.persistedReplies.map((reply) => reply.notification_id));
-          return capture.pending_replies!.filter((reply) => !acked.has(reply.notification_id as number)).length;
-        }, { timeout: 30_000, message: "every frozen pending notification must be durably ACKed before reconnect" }).toBe(0);
-      }
+      const actionComplete = action();
       const composer = page.getByRole("textbox", { name: "Your message", exact: true });
       await expect(composer).toBeVisible();
-      const interactive = await page.evaluate(async () => {
+      const acknowledgeInput = () => page.evaluate(async () => {
         const start = performance.now();
         const input = document.querySelector<HTMLTextAreaElement>("#message-text")!;
         input.focus();
@@ -225,6 +219,18 @@ for (const profile of [
         input.value = ""; input.dispatchEvent(new Event("input", { bubbles: true }));
         return result;
       });
+      // First accepted input runs while pending replies are still draining.
+      // Keep the historical end-of-drain metric as a separate measurement.
+      const firstInput = await acknowledgeInput();
+      expect(firstInput.value_retained).toBe(true);
+      await actionComplete;
+      if (phase === "initial" && process.env.CONVERSATION_PERF_REQUIRE_ALL_ACKED === "1") {
+        await expect.poll(() => {
+          const acked = new Set(hub.persistedReplies.map((reply) => reply.notification_id));
+          return capture.pending_replies!.filter((reply) => !acked.has(reply.notification_id as number)).length;
+        }, { timeout: 30_000, message: "every frozen pending notification must be durably ACKed before reconnect" }).toBe(0);
+      }
+      const interactive = await acknowledgeInput();
       expect(interactive.value_retained).toBe(true);
       await settle(page);
       const probe = await page.evaluate((since) => {
@@ -240,7 +246,7 @@ for (const profile of [
       const before = Object.fromEntries(base.metrics.map((m: any) => [m.name, m.value]));
       const pendingIds = [...new Set((capture.pending_replies ?? []).map((reply) => reply.notification_id as number))];
       const ackedIds = new Set(hub.persistedReplies.filter((reply) => reply.session === capture.session).map((reply) => reply.notification_id));
-      results[phase] = { ...probe, interactive_upper_bound_ms: interactive.at - probe.tap_at, input_ack_ms: interactive.input_ack_ms,
+      results[phase] = { ...probe, first_input_acknowledged_ms: firstInput.at - probe.tap_at, first_input_ack_ms: firstInput.input_ack_ms, interactive_upper_bound_ms: interactive.at - probe.tap_at, input_ack_ms: interactive.input_ack_ms,
         history_requests: hub.historyRequests.length - requestStart,
         websocket_payload_bytes: probe.frames.reduce((sum: number, f: any) => sum + f.bytes, 0),
         history_payload_bytes: probe.frames.filter((f: any) => f.history).reduce((sum: number, f: any) => sum + f.bytes, 0),

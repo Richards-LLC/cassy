@@ -827,7 +827,9 @@ export class ConversationHistory {
     // cas-9e33: keep the mark this visit shows, so a reload shows it too.
     if (!this.liveMarks.has(id) && !this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) this.liveMarks.set(id, this.machineAhead);
     const key = Math.max(at, this.latestAt());
-    this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead, true);
+    // Catch-up uses the same frame as a fresh reply. Its queue id still
+    // precedes the durable tail, even though this browser sees it just now.
+    this.reply(reply, key, session, key === at ? undefined : at, at, "durable", this.machineAhead, true);
   }
 
   /** Merge a durable supervisor turn in the machine's sequence, keeping its own stamp (cas-1f13). */

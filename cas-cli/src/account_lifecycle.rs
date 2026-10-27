@@ -497,7 +497,7 @@ fn security(args: &[String], input: Option<&str>) -> Result<Output> {
 }
 fn service(folder: &Path) -> String {
     // TODO(cas-3870): use crate::claude_credentials::keychain_service when its epic reaches this base.
-    crate::capability::claude_keychain_service(folder.to_str())
+    crate::claude_credentials::keychain_service(folder.to_str())
 }
 fn keychain_delete(
     folder: &Path,

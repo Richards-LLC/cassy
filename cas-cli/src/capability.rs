@@ -18,7 +18,6 @@ use cas_pty::{Harness, HarnessConformanceReceipt};
 use fs2::FileExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
@@ -335,19 +334,6 @@ fn write_claude_auth_cache(file: &mut File, evidence: &CapabilityEvidence) -> st
     file.write_all(&bytes)
 }
 
-/// Claude's Keychain selector hashes NFC text, without canonicalizing paths.
-// TODO(cas-3870): use crate::claude_credentials::keychain_service when its epic reaches this base.
-pub(crate) fn claude_keychain_service(account_dir: Option<&str>) -> String {
-    account_dir
-        .filter(|dir| !dir.trim().is_empty())
-        .map(|dir| {
-            let normalized: String = dir.nfc().collect();
-            let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-            format!("Claude Code-credentials-{}", &hash[..8])
-        })
-        .unwrap_or_else(|| "Claude Code-credentials".to_string())
-}
-
 fn ssh_login_keychain_unavailable(
     account_dir: Option<&str>,
     deadline: Deadline,
@@ -380,9 +366,7 @@ fn ssh_login_keychain_unavailable(
             }
         }
     }
-    // Match Claude's secure-storage selector: hash the NFC selector text, not
-    // a canonicalized path. An unscoped process uses the legacy service.
-    let service = claude_keychain_service(account_dir);
+    let service = crate::claude_credentials::keychain_service(account_dir);
     let mut metadata = Command::new("security");
     metadata.args(["find-generic-password", "-s", &service]);
     matches!(run(&mut metadata, deadline, AUTH_PROBE_TIMEOUT), Ok(output) if output.status.code() == Some(36))

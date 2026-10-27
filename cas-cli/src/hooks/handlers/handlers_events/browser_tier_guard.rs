@@ -4,6 +4,7 @@ use cas_core::hooks::types::HookInput;
 
 fn selected(args: &[String]) -> bool {
     let mut i = 0;
+    let mut targeted = false;
     while i < args.len() {
         let arg = &args[i];
         if arg.starts_with('>') || arg == "2>&1" {
@@ -14,9 +15,9 @@ fn selected(args: &[String]) -> bool {
                 .then(|| args.get(i + 1).map(String::as_str))
                 .flatten()
         });
-        if grep.is_some_and(|s| {
-            !s.is_empty()
-                && s.split('|').all(|id| {
+        if let Some(grep) = grep {
+            targeted |= !grep.is_empty()
+                && grep.split('|').all(|id| {
                     let id = id.trim_matches(|c| c == '(' || c == ')' || c == '^' || c == '$');
                     let Some((surface, number)) = id.split_once("-J") else {
                         return false;
@@ -25,9 +26,9 @@ fn selected(args: &[String]) -> bool {
                         && surface.chars().all(|c| c.is_ascii_uppercase())
                         && !number.is_empty()
                         && number.chars().all(|c| c.is_ascii_digit())
-                })
-        }) {
-            return true;
+                });
+            i += if arg == "--grep" || arg == "-g" { 2 } else { 1 };
+            continue;
         }
         if matches!(
             arg.as_str(),
@@ -44,15 +45,54 @@ fn selected(args: &[String]) -> bool {
             i += 2;
             continue;
         }
-        if !arg.starts_with('-')
-            && (arg.ends_with(".spec.ts") || arg.ends_with(".journey.ts"))
-            && !arg.chars().any(|c| matches!(c, '*' | '$' | '`'))
-        {
-            return true;
+        if !arg.starts_with('-') {
+            let filename = std::path::Path::new(arg)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if arg.starts_with('.')
+                || filename.starts_with('.')
+                || arg.chars().any(|c| {
+                    matches!(
+                        c,
+                        '\\' | '+'
+                            | '('
+                            | ')'
+                            | '|'
+                            | '{'
+                            | '}'
+                            | '^'
+                            | '*'
+                            | '?'
+                            | '['
+                            | ']'
+                            | '$'
+                            | '`'
+                    )
+                })
+            {
+                return false;
+            }
+            if let Some(stem) = [
+                ".spec.ts",
+                ".spec.mjs",
+                ".spec.js",
+                ".spec.tsx",
+                ".journey.ts",
+            ]
+            .iter()
+            .find_map(|suffix| filename.strip_suffix(suffix))
+            {
+                if !stem.chars().any(char::is_alphanumeric) {
+                    return false;
+                }
+                // Keep scanning: another positional regex could widen the run.
+                targeted = true;
+            }
         }
         i += 1;
     }
-    false
+    targeted
 }
 
 fn unfiltered(command: &str, depth: usize) -> bool {

@@ -50,6 +50,7 @@ pub(crate) mod violet_consumer;
 pub(crate) mod violet_intake;
 pub(crate) mod violet_reader;
 mod violet_body;
+pub(crate) mod work_events;
 mod ws_client;
 
 /// cas-ac7e (GH #130): the daemon struct holds outstanding urgent wake probes,

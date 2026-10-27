@@ -8061,8 +8061,16 @@ impl FactoryDaemon {
                     // supervisor is told once per row.
                     warn_supervisor: self.app.supervisor_name().to_string(),
                     session: self.session_name.clone(),
+                    claim_token: self.queue_jobs.inject_claim_token(queued.id, &queued.target),
                 },
             );
+            // cas-dd2e: the Teams write completed, but the turn is still
+            // owed. Keeping this reservation makes NOT_ALREADY_CONSUMED_SQL
+            // hide the row from every later selection, so readiness can
+            // never grant its deferred wake. Persist the held-copy marker
+            // first, and release only if that write succeeds; retry dedup
+            // and hook recovery continue to use it. The token-scoped release
+            // cannot erase a recipient's newer receipt.
             self.lifecycle_redelivery_attempts
                 .entry(queued.id)
                 .or_insert_with(std::time::Instant::now);

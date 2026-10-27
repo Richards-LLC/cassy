@@ -420,7 +420,11 @@ fn h1_death_05_fixture_process_entry() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        std::fs::write(port_file, listener.local_addr().unwrap().port().to_string()).unwrap();
+        // Publish only complete contents: write() creates an empty file before
+        // filling it, which races the parent's readiness reader.
+        let ready = std::path::Path::new(&port_file).with_extension("ready");
+        std::fs::write(&ready, listener.local_addr().unwrap().port().to_string()).unwrap();
+        std::fs::rename(ready, port_file).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
         let welcome = DaemonMessage::Welcome {
@@ -749,6 +753,43 @@ async fn h1_http_surface_is_real_and_origin_authorized() {
                 .starts_with(magic),
             "{uri}"
         );
+    }
+
+    // cas-397a: built lazy chunks use the same router as fixed assets. The
+    // compile-time fixtures are excluded from production binaries.
+    for (uri, status, mime, cache, body) in [
+        ("/commander/chunk-test-Ab12_cd3.js", StatusCode::OK, Some("text/javascript; charset=utf-8"), Some("public, max-age=31536000, immutable"), Some(&b"export const fixture = true;\n"[..])),
+        ("/commander/chunk-test-Ab1-_cd3.css", StatusCode::OK, Some("text/css; charset=utf-8"), Some("public, max-age=31536000, immutable"), Some(&b".fixture { color: red; }\n"[..])),
+        ("/commander/app.js", StatusCode::OK, Some("text/javascript; charset=utf-8"), Some("no-cache, no-store, must-revalidate"), None),
+        ("/commander/", StatusCode::OK, Some("text/html; charset=utf-8"), Some("no-cache, no-store, must-revalidate"), None),
+        ("/commander/chunk-missing-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js.map", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.html", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.JS", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js/extra", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/../chunk-test-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test..-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/%63hunk-test-Ab12_cd3.js", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3%2Ejs", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js%00", StatusCode::NOT_FOUND, None, None, None),
+        ("/commander/chunk-test-Ab12_cd3.js%2Fextra", StatusCode::NOT_FOUND, None, None, None),
+    ] {
+        let response = app.clone().oneshot(Request::get(uri)
+            .header("content-type", "text/html") // Request MIME never controls the response.
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), status, "{uri}");
+        if let Some(mime) = mime {
+            assert_eq!(response.headers()["content-type"], mime, "{uri}");
+        }
+        if let Some(cache) = cache {
+            assert_eq!(response.headers()["cache-control"], cache, "{uri}");
+        } else {
+            assert!(!response.headers().contains_key("cache-control"), "{uri}");
+        }
+        if let Some(body) = body {
+            assert_eq!(to_bytes(response.into_body(), usize::MAX).await.unwrap(), body, "{uri}");
+        }
     }
 
     let denied = app
@@ -2700,6 +2741,56 @@ fn hub_history_response_is_consumed_by_only_the_requesting_socket() {
         &None,
         &frame
     ));
+}
+
+/// cas-8f88: a work-events answer reaches only the socket whose request it
+/// answers. An older Commander never sends that request, so it never sees
+/// the frame, and its own history page still flows as before.
+#[test]
+fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() {
+    use super::server::{PendingRefs, admit_correlated_daemon_frame, client_correlation_ref};
+    let session = |request: &ClientMessage| {
+        let (request_id, kind) = client_correlation_ref(&serde_json::to_vec(request).unwrap()).unwrap();
+        PendingRefs::from([(("factory-1".to_string(), request_id), kind)])
+    };
+    // The exact frame an older Commander sends: no work-event fields.
+    let old_history: ClientMessage = serde_json::from_value(serde_json::json!({
+        "ConversationHistoryRequest": {"request_id": "history-1", "limit": 50}
+    }))
+    .unwrap();
+    let mut old_client = session(&old_history);
+    let mut new_client = session(&ClientMessage::WorkEventsRequest {
+        request_id: "events-1".into(),
+        before: None,
+        limit: 100,
+    });
+    assert_eq!(required_scope(&ClientMessage::WorkEventsRequest { request_id: "e".into(), before: None, limit: 0 }), Some(Scope::PaneRead));
+    assert!(super::server::is_pane_read_message(&ClientMessage::WorkEventDetailRequest {
+        request_id: "d".into(),
+        event_id: "q:1".into(),
+    }));
+    let page = serde_json::to_vec(&DaemonMessage::WorkEvents {
+        request_id: "events-1".into(),
+        schema_version: crate::ui::factory::WORK_EVENT_SCHEMA_VERSION,
+        events: Vec::new(),
+        has_earlier: false,
+        next_before: None,
+    })
+    .unwrap();
+    let history = serde_json::to_vec(&DaemonMessage::ConversationHistory {
+        request_id: "history-1".into(),
+        messages: Vec::new(),
+        replies: Vec::new(),
+        has_earlier: false,
+        next_before: None,
+        earlier_messages: Vec::new(),
+        earlier_replies: Vec::new(),
+    })
+    .unwrap();
+    assert!(!admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &page), "the old client never receives work events");
+    assert!(admit_correlated_daemon_frame(&mut old_client, "factory-1", &None, &history), "its history page still arrives");
+    assert!(admit_correlated_daemon_frame(&mut new_client, "factory-1", &None, &page));
+    assert!(new_client.is_empty() && old_client.is_empty());
 }
 
 #[test]

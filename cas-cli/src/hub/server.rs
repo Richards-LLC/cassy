@@ -109,6 +109,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
+        .route("/commander/{*asset}", get(commander_chunk).options(preflight::<R>))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -253,6 +254,29 @@ fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response
     response.headers_mut().insert(
         "cache-control",
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+const COMMANDER_CHUNKS: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/commander_chunks.rs"));
+
+async fn commander_chunk(OriginalUri(uri): OriginalUri) -> Response {
+    // Use the original, encoded path: Path<String> would decode forbidden `%`
+    // sequences before validation. Never consult the filesystem at runtime.
+    let Some(name) = uri.path().strip_prefix("/commander/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(mime) = super::chunk_assets::content_type(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((_, bytes)) = COMMANDER_CHUNKS.iter().find(|(asset, _)| *asset == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = commander_asset(bytes, mime);
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
     );
     response
 }
@@ -2191,6 +2215,39 @@ fn spawn_factory_daemon(
 mod launch_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn machine_hub_launch_does_not_inherit_its_originating_project_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let grok = bin.join("grok");
+        std::fs::write(&grok, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("CAS_ROOT", "/hub-origin/.cas");
+        let environment = super::super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).unwrap();
+        // Execute with the same environment application as the direct/cgroup
+        // daemon path: --cwd must choose the store, not the hub's launch cwd.
+        let mut child = std::process::Command::new("/bin/sh");
+        child.args(["-c", "printf '%s' \"${CAS_ROOT-unset}\""]);
+        apply_launch_environment(&mut child, &environment);
+        let output = child.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "unset");
+        #[cfg(target_os = "linux")]
+        {
+            let command = systemd_unit_command(
+                std::path::Path::new("/usr/bin/cas"),
+                std::path::Path::new("/projects/chosen"), "chosen", 0,
+                cas_mux::SupervisorCli::Grok, &environment,
+                std::path::Path::new("/tmp/chosen.log"),
+            );
+            assert!(command.get_args().any(|arg| arg == "--property=UnsetEnvironment=CAS_ROOT"),
+                "the login manager's environment must also drop the originating store");
+        }
+    }
+
     #[test]
     fn daemon_arguments_keep_project_path_as_one_argument() {
         let args = factory_daemon_args(
@@ -2852,6 +2909,8 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
         ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::WorkEventsRequest { .. }
+            | ClientMessage::WorkEventDetailRequest { .. }
             | ClientMessage::OperatorReplyPersisted { .. }
     )
 }
@@ -3343,8 +3402,12 @@ fn client_message_ref(bytes: &[u8]) -> Option<String> {
     client_ref
 }
 
+/// The request id of a private read whose answer only its requester may
+/// receive: a history page, or a work-events page or detail (cas-8f88).
 fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
-    let ClientMessage::ConversationHistoryRequest { request_id, .. } =
+    let (ClientMessage::ConversationHistoryRequest { request_id, .. }
+    | ClientMessage::WorkEventsRequest { request_id, .. }
+    | ClientMessage::WorkEventDetailRequest { request_id, .. }) =
         serde_json::from_slice::<ClientMessage>(bytes).ok()?
     else {
         return None;
@@ -3365,7 +3428,7 @@ pub(crate) enum PendingRefKind {
 /// client reference.
 pub(crate) type PendingRefs = HashMap<(String, String), PendingRefKind>;
 
-fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
+pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
     client_message_ref(bytes)
         .map(|client_ref| (client_ref, PendingRefKind::Send))
         .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
@@ -3524,7 +3587,9 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             client_ref: Some(client_ref),
             message,
         }) => consume(client_ref, Some(Err(message))),
-        Ok(DaemonMessage::ConversationHistory { request_id, .. }) => consume(request_id, None),
+        Ok(DaemonMessage::ConversationHistory { request_id, .. })
+        | Ok(DaemonMessage::WorkEvents { request_id, .. })
+        | Ok(DaemonMessage::WorkEventDetail { request_id, .. }) => consume(request_id, None),
         _ => Correlation::Uncorrelated,
     }
 }

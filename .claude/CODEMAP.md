@@ -131,6 +131,7 @@
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
 - `cas-cli/src/ui/factory/daemon/runtime/ws_client.rs`, `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - Commander attachment/input delivery and durable operator replies.
+- `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged Commander work events (thinking, tool calls, task and worker events) from transcripts and the task DB; schema in `docs/guides/commander-work-events.md`.
 - `hub-web/src/usage.ts` - per-journey usage counter (action to HUB journey map), flushed to every paired machine.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - browser journeys and isolated previews; `hub-web/e2e/journeys/real-hub-server.mjs` owns the real hub/daemon recovery fixture.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - Slack routing and daemon entrypoints.

@@ -353,7 +353,9 @@ impl FactoryDaemon {
                 // Delivery receipts are emitted by the authenticated hub
                 // connector, never by the local GUI client.
             }
-            ClientMessage::ConversationHistoryRequest { .. } => {
+            ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::WorkEventsRequest { .. }
+            | ClientMessage::WorkEventDetailRequest { .. } => {
                 // Durable conversation history is a paired Commander surface;
                 // the local GUI has no authenticated device scope to attach.
             }

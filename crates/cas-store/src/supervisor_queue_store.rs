@@ -289,6 +289,49 @@ impl SqliteSupervisorQueueStore {
         None
     }
 
+    /// Newest notifications for one factory session at or before `until`,
+    /// newest first (cas-8f88 work events): rows addressed to one of
+    /// `supervisor_ids`, or whose payload names the session. Read-only; the
+    /// caller drops rows at the `until` boundary it already served.
+    pub fn list_for_session_until(
+        &self,
+        factory_session: &str,
+        supervisor_ids: &[String],
+        until: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<SupervisorNotification>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let addressed = (0..supervisor_ids.len())
+            .map(|index| format!("?{}", index + 4))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, supervisor_id, event_type, payload, priority, created_at, processed_at,
+                    transition_key, prompt_delivered_at
+             FROM supervisor_queue
+             WHERE (supervisor_id IN ({addressed})
+                    OR (json_valid(payload) AND json_extract(payload, '$.factory_session') = ?1))
+               AND (?2 IS NULL OR julianday(created_at) <= julianday(?2))
+             ORDER BY julianday(created_at) DESC, id DESC
+             LIMIT ?3"
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            factory_session.to_owned().into(),
+            until.map(|at| at.to_rfc3339()).into(),
+            (limit as i64).into(),
+        ];
+        values.extend(supervisor_ids.iter().map(|id| id.clone().into()));
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(values), Self::notification_from_row)?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(rows)
+    }
+
     fn notification_from_row(row: &rusqlite::Row) -> rusqlite::Result<SupervisorNotification> {
         let processed_at_str: Option<String> = row.get(6)?;
         let processed_at = processed_at_str.and_then(|s| Self::parse_datetime(&s));

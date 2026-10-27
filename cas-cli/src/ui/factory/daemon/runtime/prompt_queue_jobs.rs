@@ -102,6 +102,7 @@ pub(crate) enum QueueStamp {
         pane_bytes: u64,
         warn_supervisor: String,
         session: String,
+        claim_token: Option<cas_store::ClaimToken>,
     },
     /// One declined wake-gate pass (cas-9e81 detail; cas-786a6 L4). Control
     /// counts declines from the selection snapshot; this persists the one.
@@ -202,6 +203,7 @@ impl QueueStamp {
                 pane_bytes,
                 warn_supervisor,
                 session,
+                claim_token,
             } => queue.record_deferred_inbox(row, *pane_bytes).inspect_err(|_| {
                 // cas-1ba0: the Teams copy survives, but without this marker
                 // a tool boundary cannot take the claim. Report the degraded
@@ -228,6 +230,14 @@ impl QueueStamp {
                         "failed to persist supervisor warning about deferred inbox handoff"
                     );
                 }
+            }).and_then(|()| {
+                // Release only after the durable handoff marker landed. If
+                // that write failed, keep the claim so a hook cannot render
+                // a second body alongside the surviving Teams copy.
+                if let Some(token) = claim_token {
+                    queue.release_recipient_transport_claim(row, recipient, *token)?;
+                }
+                Ok(())
             }),
             Self::WakeDecline { detail } => queue.record_wake_gate_decline(row, detail).map(drop),
             Self::ObservedWakeReceipt => queue.record_recipient_surfaced(
@@ -1240,6 +1250,10 @@ impl QueueJobs {
         if let Some(claim_token) = self.in_flight.token_of(row, recipient) {
             self.stamp(cas_dir, row, recipient, QueueStamp::ReleaseClaim { claim_token });
         }
+    }
+
+    pub(crate) fn inject_claim_token(&self, row: i64, recipient: &str) -> Option<cas_store::ClaimToken> {
+        self.in_flight.token_of(row, recipient)
     }
 
     /// Cancel a prepared batch member if its leader was consumed meanwhile.

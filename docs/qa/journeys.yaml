@@ -145,6 +145,14 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub''s project catalog,
       folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab
       closing is proven at epic assembly on a real machine'
+  HUB-J13-LAUNCH-STORE:
+    statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
+    check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.
+    bug: {task: cas-dd2e}
+  HUB-J13-STARTUP-WAKE:
+    statement: A startup brief written to Teams before the supervisor pane is ready remains eligible for its deferred wake; an inbox transport reservation never suppresses the retry or claims a model turn.
+    check: Run supervisor_single_turn_tests::claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready through real startup enqueue, Teams and PTY input capture; require one submitted wake after readiness and one Teams body, with no provider-generated reply.
+    bug: {task: cas-dd2e}
   HUB-J14-GOAL:
     statement: each session opens onto its own conversation, or an honest empty state with its live activity, never
       another session's old thread; I can retire a stale one
@@ -229,6 +237,16 @@ invariants:
     statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
 bug_families:
+  deferred-session-startup:
+    title: A deferred startup wake must retry after pane readiness instead of remaining hidden by its transport claim
+    tasks: [cas-dd2e]
+    invariants: [HUB-J13-GOAL, HUB-J13-STARTUP-WAKE]
+    journeys: [HUB-J13]
+  cross-project-session-launch:
+    title: A machine hub's originating store must not override the project selected for New session
+    tasks: [cas-dd2e]
+    invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
+    journeys: [HUB-J13]
   clean-home-launch-remedies:
     title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
     tasks: [cas-a1bc]
@@ -1211,6 +1229,12 @@ journeys:
   - hub-web/src/connection.ts
   - hub-web/src/conversation-shell.ts
   - hub-web/e2e/journeys/launch-session.journey.ts
+  - hub-web/e2e/journeys/real-hub.journey.ts
+  - hub-web/e2e/journeys/real-hub-server.mjs
+  - cas-cli/src/hub/server.rs
+  - cas-cli/src/hub/launch_env.rs
+  - cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs
+  - cas-cli/src/ui/factory/daemon/runtime/supervisor_single_turn_tests.rs
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/artifact-open.ts
@@ -1251,12 +1275,15 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-LAUNCH-STORE
+  - HUB-J13-STARTUP-WAKE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/launch-session.journey.ts
-  catalog_gaps: the hub's project catalog, folder browse and session start are doubled; that a hub-started session
-    survives a hub restart and the tab closing is proven at epic assembly on a real machine
+  catalog_gaps: The catalog suite doubles the hub protocol. The separate real-hub HUB-J13 part covers project browse,
+    session start, reaper/daemon/PTY startup, first message and reply without a planted CAS_ROOT.
+    Provider and service placement alone are inert; official model action remains a bounded live check.
 - id: HUB-J14
   name: Tell a project's live sessions apart
   status: live

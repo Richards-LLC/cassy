@@ -110,14 +110,8 @@ fn preflight_claude_config_dir_with(
     if trimmed.is_empty() {
         return Err("config_dir is empty; expected a Claude configuration directory".to_string());
     }
-    let path = trimmed.strip_prefix('~').map_or_else(
-        || std::path::PathBuf::from(trimmed),
-        |suffix| {
-            dirs::home_dir()
-                .map(|home| home.join(suffix.trim_start_matches('/')))
-                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
-        },
-    );
+    let selector = cas_pty::expand_claude_selector(trimmed);
+    let path = std::path::Path::new(&selector);
     let settings_error = |error: &dyn std::fmt::Display| {
         format!("config_dir preflight failed: missing or unreadable settings.json: {error}")
     };
@@ -130,8 +124,11 @@ fn preflight_claude_config_dir_with(
         Err(error) => return Err(settings_error(&error)),
     }
     if macos {
-        let service = claude_profile_keychain_service(&path.to_string_lossy());
-        if !keychain_item_exists(&service) {
+        let service = claude_profile_keychain_service(&selector);
+        if !keychain_item_exists(&service)
+            && !std::fs::File::open(path.join(".credentials.json"))
+                .is_ok_and(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+        {
             return Err(format!(
                 "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service {service})"
             ));
@@ -15205,10 +15202,21 @@ mod tests {
             claude_profile_keychain_service("/tmp/cafe\u{301}"),
             "Claude Code-credentials-0873cca0"
         );
-        for present in [true, false] {
+        for (keychain_present, file_state) in [
+            (true, "missing"),
+            (false, "readable"),
+            (false, "missing"),
+            (false, "directory"),
+        ] {
             let profile = tempfile::tempdir().unwrap();
             valid_claude_config(profile.path());
-            std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+            let credentials = profile.path().join(".credentials.json");
+            if file_state != "readable" {
+                std::fs::remove_file(&credentials).unwrap();
+                if file_state == "directory" {
+                    std::fs::create_dir(&credentials).unwrap();
+                }
+            }
             let probed = std::cell::Cell::new(false);
             let result = preflight_claude_config_dir_with(
                 profile.path().to_str().unwrap(),
@@ -15217,18 +15225,52 @@ mod tests {
                     assert!(service.starts_with("Claude Code-credentials-"), "{service}");
                     assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
                     probed.set(true);
-                    present
+                    keychain_present
                 },
             );
             assert_eq!(
                 result.is_ok(),
-                present,
-                "Keychain present={present}: {result:?}"
+                keychain_present || file_state == "readable",
+                "Keychain present={keychain_present}, file={file_state}: {result:?}"
             );
+            if let Err(error) = result {
+                // pin: preserve the actionable credential error for existing callers.
+                assert!(
+                    error.starts_with(
+                        "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service "
+                    ),
+                    "{error}"
+                );
+            }
             assert!(
                 probed.get(),
                 "darwin must probe the selected profile's Keychain item"
             );
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_hashes_the_launched_selector() {
+        let profile = tempfile::tempdir().unwrap();
+        valid_claude_config(profile.path());
+        std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+        for raw in [
+            profile.path().display().to_string(),
+            format!("  {}/  ", profile.path().display()),
+        ] {
+            let mut launch = cas_pty::PtyConfig::default();
+            launch.apply_claude_config_dir(Some(&raw), Some("explicit"));
+            let (_, launched_selector) = launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                .unwrap();
+            let expected_service = claude_profile_keychain_service(launched_selector);
+            preflight_claude_config_dir_with(&raw, true, |service| {
+                assert_eq!(service, expected_service, "selector {raw:?}");
+                true
+            })
+            .unwrap();
         }
     }
 
@@ -18962,6 +19004,8 @@ effort = "high"
         let rel = "2026/08/18/rollout-2026-08-18T17-22-01-live.jsonl";
         let (account_home, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
         let account_dir = account_home.path().to_str().expect("utf-8 account home");
+        // macOS temp roots can be spelled /var or /private/var; compare the real file.
+        let expected_rollout = sessions.join(rel).canonicalize().unwrap();
 
         let resolved = resolve_worker_transcript_path_for_account(
             Some(clone),
@@ -18969,7 +19013,7 @@ effort = "high"
             cas_mux::SupervisorCli::Codex,
             Some(account_dir),
         );
-        assert_eq!(resolved, Some(sessions.join(rel)));
+        assert_eq!(resolved, Some(expected_rollout.clone()));
 
         let status_path = worker_status_transcript_path_for_account(
             Some(clone),
@@ -18977,7 +19021,7 @@ effort = "high"
             cas_mux::SupervisorCli::Codex,
             Some(account_dir),
         );
-        assert_eq!(status_path, Some(sessions.join(rel)));
+        assert_eq!(status_path, Some(expected_rollout.clone()));
 
         let mut agent = cas_types::Agent::new(
             "codex-kind-owl-71-session".to_string(),
@@ -18994,7 +19038,7 @@ effort = "high"
             .insert("worker_account_dir".to_string(), account_dir.to_string());
         assert_eq!(
             worker_transcript_path_for_agent(account_home.path(), &agent),
-            Some(sessions.join(rel)),
+            Some(expected_rollout),
             "the registered worker's spawn-time CODEX_HOME must reach all agent-aware callers"
         );
     }

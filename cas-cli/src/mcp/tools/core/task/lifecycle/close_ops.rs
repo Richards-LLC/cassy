@@ -8484,6 +8484,12 @@ impl CasCore {
         // still points there. Track only an attributed, receipted pushed fix.
         let reviewed_delivery = if close_disposition.requires_delivery_gates()
             && task.task_type != TaskType::Epic
+            && task.execution_note.as_deref() != Some("no-code")
+            // A legacy worktree alone locates a checkout; it does not bind
+            // a factory delivery or declare an integration target.
+            && (has_recorded_code_delivery(&task)
+                || task.deliverables.work_target.is_some()
+                || req.commit_receipt.is_some())
             && has_delivery_to_measure(&task)
             && (close_repo_verified || worker_worktree_path.is_some())
         {
@@ -9023,7 +9029,7 @@ impl CasCore {
             // Exact approved B must land, even when legacy branch selection
             // or patch-equivalence admitted its earlier merged anchor A.
             if let Some(reviewed) = reviewed_delivery.as_ref()
-                && let Some(refusal) = reviewed.merge_refusal(&close_project_root, &task, &resolved_parent_branch)
+                && let Some(refusal) = reviewed.merge_refusal(&close_project_root, &task, &resolved_parent_branch, req.commit_receipt.as_deref())
             {
                 return Ok(Self::tool_error(refusal));
             }

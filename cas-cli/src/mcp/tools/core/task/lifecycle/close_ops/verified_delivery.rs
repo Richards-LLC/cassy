@@ -62,6 +62,7 @@ impl ReviewedDelivery {
         repo: &std::path::Path,
         task: &Task,
         target: &str,
+        receipt: Option<&str>,
     ) -> Option<String> {
         // Synthetic origin refs do not displace a local-only project's
         // integration authority. Published projects answer for live origin.
@@ -70,6 +71,15 @@ impl ReviewedDelivery {
         } else {
             preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode).0
         };
+        // Preserve an explicit canonical squash receipt only when its full
+        // tree equals this exact verified head and it is on the authoritative
+        // target. A receipt for earlier A cannot stand in for changed B.
+        if receipt.is_some_and(|receipt| {
+            git_commit_is_ancestor(repo, receipt, &reference)
+                && target_reachable_squash_of(repo, &self.repository.head_commit, receipt, target)
+        }) {
+            return None;
+        }
         (!git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)).then(|| format!(
             "MERGE REQUIRED: task {} was verified at exact head {} (dispatch {}), which is not contained in {reference}. An earlier merged anchor cannot authorize this correction. Merge this exact verified delivery into {target}, then retry close.",
             task.id, self.repository.head_commit, self.dispatch,

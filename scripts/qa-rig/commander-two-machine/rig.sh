@@ -55,7 +55,7 @@ PY
     fi
     if [[ ! -d "$RIG/project/.git" ]]; then
         ( rig_env; cd "$RIG/project"; git init -q .; cas init --yes --no-integrations >/dev/null
-          printf '[factory]\nai_enrichment = false\n' > .cas/config.toml )
+          printf '[factory.ai_enrichment]\nenabled = false\n' > .cas/config.toml )
     fi
 }
 

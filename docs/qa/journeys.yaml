@@ -261,6 +261,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  disposable-hub-config-table:
+    title: Disposable hub fixtures must write parseable AI enrichment config so real composer uploads can store files
+    tasks: [cas-6217, cas-de58]
+    invariants: [HUB-J24-GOAL]
+    journeys: [HUB-J24]
   slow-phone-composer-upload:
     title: Generic request deadlines and generic refusals prevent large phone attachments from reaching the supervisor
     tasks: [cas-fed8]
@@ -1972,7 +1977,10 @@ journeys:
   - hub-web/src/composer-uploads.ts
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
+  - hub-web/e2e/journeys/real-hub.journey.ts
+  - scripts/qa-rig/commander-two-machine/rig.sh
   edge_paths:
+  - The real disposable hub loads its generated project config and stores a picked file with byte-for-byte host readback.
   - A 4 or 10 MiB phone file reaches the hub over 512 kbit/s transport without the ordinary 10 second request timeout.
   - A refused file is named among multiple attachments; unsupported types do not prescribe reconnecting.
   - A missing session shows the hub refusal text and keeps the files for recovery.

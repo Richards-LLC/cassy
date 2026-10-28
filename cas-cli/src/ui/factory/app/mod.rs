@@ -3179,7 +3179,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
     let mut prompt = match supervisor_cli {
         cas_mux::SupervisorCli::Codex => format!(
             "Codex supervisor startup:\n\
-- Use skills: cas-supervisor, cas-codex-supervisor-checklist, cas-codebase-design\n\
+- Run cas-codex-supervisor-checklist once now; triage from the supervisor core in your developer instructions. Open cas-supervisor or cas-codebase-design only for epic planning, releases, worker recovery or an unfamiliar refusal\n\
 - No hooks: call MCP tools explicitly (tasks/memory/rules/search)\n\
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: mcp__cs__coordination action=whoami; mcp__cs__task action=list task_type=epic; mcp__cs__task action=ready"
@@ -4224,6 +4224,11 @@ mod tests {
             );
         }
         assert!(!prompt.contains("/cas-supervisor-checklist"));
+        // cas-ef39: startup triage comes from the resident core, not a full
+        // skill load that compaction would make the supervisor repeat.
+        // pin: this sentence is the routing instruction under test.
+        let routes_to_core = prompt.contains("triage from the supervisor core in your developer instructions");
+        assert!(routes_to_core, "Codex startup must point triage at the resident core: {prompt}");
         for skill in ["cas-supervisor", "cas-codex-supervisor-checklist"] {
             assert!(
                 prompt.contains(skill),

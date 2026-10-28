@@ -550,6 +550,20 @@ pub fn handle_session_start(
         assembler.append_protected(banner);
     }
 
+    // Native hooks name their harness explicitly; MCP startup uses this
+    // process's own role/harness. `input.source` describes the startup reason
+    // and the MCP path sets it to "codex" even for other harnesses.
+    let is_codex = cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+        .map(|harness| harness.eq_ignore_ascii_case("codex"))
+        .unwrap_or_else(|_| {
+            crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Codex
+        });
+    if is_codex {
+        assembler.append_protected(
+            "Codex skills: if the `finish` skill is installed, type `$finish` or say `finish` to wrap up the session.".to_string(),
+        );
+    }
+
     // Render under the aggregate budget before the worktree assertion, which
     // must stay verbatim at the very top of whatever survives.
     let context = assembler.render();
@@ -733,7 +747,11 @@ mod large_artifact_staging_tests {
         let launched = std::time::SystemTime::now();
         let input = session_input(tmp.path().to_str().unwrap());
         handle_session_start(&input, Some(tmp.path())).unwrap();
-        assert!(crate::factory_hook_canary::fired_since(tmp.path(), "canary-worker-1", launched));
+        assert!(crate::factory_hook_canary::fired_since(
+            tmp.path(),
+            "canary-worker-1",
+            launched
+        ));
 
         let plain = tempfile::tempdir().unwrap();
         env.remove("CAS_FACTORY_MODE");
@@ -1144,11 +1162,41 @@ mod large_artifact_staging_tests {
             })
             .unwrap();
 
-        for (label, role, worker_cli) in [
-            ("plain", None, None),
-            ("worker", Some("worker"), Some("claude")),
-            ("supervisor", Some("supervisor"), Some("codex")),
-            ("codex-worker", Some("worker"), Some("codex")),
+        for (label, role, worker_cli, supervisor_cli, hook_harness, expects_hint) in [
+            ("plain", None, None, None, None, false),
+            ("worker", Some("worker"), Some("claude"), None, None, false),
+            (
+                "supervisor",
+                Some("supervisor"),
+                Some("claude"),
+                Some("codex"),
+                None,
+                true,
+            ),
+            (
+                "codex-worker",
+                Some("worker"),
+                Some("codex"),
+                None,
+                None,
+                true,
+            ),
+            (
+                "claude-supervisor",
+                Some("supervisor"),
+                Some("codex"),
+                Some("claude"),
+                None,
+                false,
+            ),
+            (
+                "claude-hook",
+                Some("worker"),
+                Some("codex"),
+                None,
+                Some("claude"),
+                false,
+            ),
         ] {
             let mut env = staging_env(role.unwrap_or("worker"));
             if role.is_none() {
@@ -1162,6 +1210,14 @@ mod large_artifact_staging_tests {
                 Some(cli) => env.set("CAS_FACTORY_WORKER_CLI", cli),
                 None => env.remove("CAS_FACTORY_WORKER_CLI"),
             }
+            match supervisor_cli {
+                Some(cli) => env.set("CAS_FACTORY_SUPERVISOR_CLI", cli),
+                None => env.remove("CAS_FACTORY_SUPERVISOR_CLI"),
+            }
+            match hook_harness {
+                Some(harness) => env.set("CAS_HOOK_HARNESS", harness),
+                None => env.remove("CAS_HOOK_HARNESS"),
+            }
             let input = HookInput {
                 session_id: format!("budget-session-{label}"),
                 cwd: tmp.path().to_string_lossy().into_owned(),
@@ -1171,6 +1227,23 @@ mod large_artifact_staging_tests {
             };
             let context =
                 additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            // pin: supported invocation must survive the aggregate context budget,
+            // and describe the reader's harness rather than its workers' harness.
+            let hint = context
+                .lines()
+                .find(|line| line.starts_with("Codex skills:"));
+            assert_eq!(
+                hint.is_some(),
+                expects_hint,
+                "{label}: finish hint presence"
+            );
+            if let Some(hint) = hint {
+                assert!(
+                    hint.contains("`$finish`") && hint.contains("say `finish`"),
+                    "{label}: {hint}"
+                );
+                assert!(!hint.contains("/finish"), "{label}: {hint}");
+            }
             assert!(
                 context.len() <= SESSION_START_BUDGET_BYTES,
                 "{label} SessionStart payload is {} bytes, over the {SESSION_START_BUDGET_BYTES}B \

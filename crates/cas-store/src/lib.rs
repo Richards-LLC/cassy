@@ -36,20 +36,22 @@ use std::time::Duration;
 pub const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub mod lane_guard;
-pub mod task_note_markers;
 pub mod shared_db;
+pub mod task_note_markers;
 pub mod wait_budget;
 
+mod accepted_proposal_store;
 mod agent_store;
-pub mod communication_slo;
+mod artifact_store;
 mod code_index_purge;
 mod code_store;
 mod code_vector_store;
 mod commit_link_store;
+pub mod communication_slo;
 mod delegation_receipt_store;
-mod artifact_store;
 mod delivery_store;
 mod entity_store;
+mod epic_split_store;
 pub mod error;
 mod event_store;
 mod external_task_dependency_store;
@@ -64,16 +66,14 @@ mod loop_store;
 pub mod markdown;
 mod prompt_queue_store;
 mod prompt_store;
-mod qa_pass_store;
-mod accepted_proposal_store;
 mod qa_batch_store;
-mod rule_candidate_store;
-mod epic_split_store;
+mod qa_pass_store;
 mod recording_store;
 mod recording_text_store;
 mod reminder_store;
 pub mod retention;
 mod retrieval_store;
+mod rule_candidate_store;
 mod skill_store;
 mod spawn_queue_store;
 mod spec_store;
@@ -109,7 +109,9 @@ pub use trace_archive::{
 };
 
 // Agent store for multi-agent coordination
-pub use agent_store::{AGENT_SESSION_END_SCHEMA,AGENT_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore};
+pub use agent_store::{
+    AGENT_SCHEMA, AGENT_SESSION_END_SCHEMA, AgentStore, LeaseHistoryEntry, SqliteAgentStore,
+};
 
 // Event store for activity tracking (sidecar)
 pub use event_store::{
@@ -118,6 +120,14 @@ pub use event_store::{
 };
 
 // Code store for indexed source code
+pub use accepted_proposal_store::{
+    ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS, accepted_proposal_target, accepted_proposal_targets,
+    record_accepted_proposal_target,
+};
+pub use artifact_store::{
+    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
+    SqliteArtifactStore, looks_like_signed_upload_url,
+};
 pub use code_index_purge::{
     BatchedWrites, CODE_WRITE_DEFAULT_BATCH, CODE_WRITE_MAX_BATCH, CodeIndexPurgeStats,
     PurgeSymbol, RepositoryScope, ScanReceiptScope, SqliteCodeIndexPurge, WriteBatching,
@@ -133,48 +143,43 @@ pub use delegation_receipt_store::{
     DelegationReserveOutcome, DelegationReserveRequest, DelegationVerdict,
     SqliteDelegationReceiptStore,
 };
+pub use delivery_store::{
+    DELIVERY_SCHEMA, build_worker_completion_receipt, clear_pending_observed_delivery_merge,
+    create_worker_delivery, create_worker_delivery_with_dispatch,
+    create_worker_delivery_with_dispatch_for_lease, get_latest_worker_delivery,
+    get_worker_delivery_by_receipt, has_pending_observed_delivery_merge,
+    list_worker_delivery_events, record_observed_delivery_merge,
+    record_pending_observed_delivery_merge, transition_worker_delivery,
+    transition_worker_delivery_verification_with_conn, worker_delivery_transaction_id,
+};
 pub use epic_split_store::{
     EPIC_SPLIT_DECISION_SCHEMA_STATEMENTS, EPIC_SPLIT_RELEASE_SCHEMA_STATEMENTS,
-    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection,
-    SplitState, decide_epic_split, decide_epic_split_by, finish_epic_split_work, get_epic_split,
-    insert_epic_split, list_epic_splits, list_epic_split_child_releases,
-    mark_epic_split_child_released, open_epic_splits, pending_epic_split_work,
-};
-pub use qa_pass_store::{
-    NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
-    claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
-    open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer,
-    release_qa_claim_for_task, resolve_qa_pass, satisfying_qa_pass_for_head,
-    satisfying_qa_passes, set_qa_task,
-    waive_qa_pass, withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
-};
-pub use qa_batch_store::{QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, record_qa_batch_receipt,
-    list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors, defer_qa_batch_evidence, has_qa_batch_deferral};
-pub use rule_candidate_store::{
-    RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
-    list_rule_candidates, observe_rule_candidate, rule_candidate_similarity, similar_rule_candidates,
-};
-pub use accepted_proposal_store::{
-    ACCEPTED_PROPOSAL_SCHEMA_STATEMENTS, accepted_proposal_target, accepted_proposal_targets,
-    record_accepted_proposal_target,
-};
-pub use artifact_store::{
-    ARTIFACT_SCHEMA, ARTIFACT_SCHEMA_STATEMENTS, NewArtifact, PublishedArtifact,
-    SqliteArtifactStore, looks_like_signed_upload_url,
-};
-pub use delivery_store::{
-    DELIVERY_SCHEMA, build_worker_completion_receipt, create_worker_delivery,
-    create_worker_delivery_with_dispatch, create_worker_delivery_with_dispatch_for_lease,
-    get_latest_worker_delivery, get_worker_delivery_by_receipt, list_worker_delivery_events,
-    clear_pending_observed_delivery_merge, has_pending_observed_delivery_merge,
-    record_observed_delivery_merge, record_pending_observed_delivery_merge,
-    transition_worker_delivery, transition_worker_delivery_verification_with_conn,
-    worker_delivery_transaction_id,
+    EPIC_SPLIT_SCHEMA_STATEMENTS, EpicSplit, SplitDirection, SplitState, decide_epic_split,
+    decide_epic_split_by, finish_epic_split_work, get_epic_split, insert_epic_split,
+    list_epic_split_child_releases, list_epic_splits, mark_epic_split_child_released,
+    open_epic_splits, pending_epic_split_work,
 };
 pub use external_verification_gate::{
     EXTERNAL_PRODUCTION_VERIFICATION_GATE, ExternalVerificationOutcome,
     ExternalVerificationRequest, GateAssessment, RequiredCheck, assess_response,
     assessment_for_outcome, authorize_request, record_assessment,
+};
+pub use qa_batch_store::{
+    QA_BATCH_SCHEMA_STATEMENTS, QaBatchReceipt, defer_qa_batch_evidence, has_qa_batch_deferral,
+    list_qa_batch_receipts, qa_batch_receipts_for_task, qa_task_implementation_actors,
+    record_qa_batch_receipt,
+};
+pub use qa_pass_store::{
+    NewQaPass, QA_PASS_SCHEMA_STATEMENTS, QaPassOpen, assert_may_review_qa_task, carry_qa_pass,
+    claim_qa_pass, latest_failed_qa_reviewers, latest_qa_pass, list_qa_passes, open_qa_pass,
+    open_qa_pass_reporting_superseded, release_qa_claim_for_reviewer, release_qa_claim_for_task,
+    resolve_qa_pass, satisfying_qa_pass_for_head, satisfying_qa_passes, set_qa_task, waive_qa_pass,
+    withdraw_open_qa_pass, withdraw_qa_pass_for_qa_task,
+};
+pub use rule_candidate_store::{
+    RULE_CANDIDATE_MATCH, RULE_CANDIDATE_SCHEMA_STATEMENTS, RuleCandidate, RuleCandidateOccurrence,
+    list_rule_candidates, observe_rule_candidate, rule_candidate_similarity,
+    similar_rule_candidates,
 };
 pub use sqlite_code_store::{CODE_SCHEMA, SqliteCodeStore};
 
@@ -223,32 +228,29 @@ pub use loop_store::{LOOP_SCHEMA, LoopStore, SqliteLoopStore};
 
 // Verification store for task quality gates
 pub use verification_store::{
-    REQUEST_CHANGES_AUDIT_PREFIX, request_changes_audit_note,
     IssuedVerifierCapability, ParentDependencyUpdate, ProofScopeCorrectionOutcome,
-    RequestChangesBoundary, RequestChangesOutcome, SqliteVerificationStore,
-    TaskReopenLifecycleOutbox, VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT,
-    VERIFICATION_SCHEMA, VerificationStore, add_system_verification, add_verification_with_conn,
-    adopt_orphaned_verification_dispatches,
+    REQUEST_CHANGES_AUDIT_PREFIX, RequestChangesBoundary, RequestChangesOutcome,
+    SqliteVerificationStore, TaskReopenLifecycleOutbox,
+    VERIFICATION_DISPATCH_REPOSITORY_PROOF_STATEMENT, VERIFICATION_SCHEMA, VerificationStore,
+    add_system_verification, add_verification_with_conn, adopt_orphaned_verification_dispatches,
     bind_server_verifier_handoff, bind_server_verifier_handoff_and_register_child,
     bind_verifier_capability, cancel_unbound_server_verifier_handoff, claim_verification_dispatch,
     claim_verification_dispatch_bound, consume_server_verifier_handoff_with_conn,
-    consume_verifier_capability_with_conn, correct_parked_delivery_proof_scope,
-    correct_parked_delivery_proof_targets, correct_parked_delivery_execution_note,
+    consume_verifier_capability_with_conn, correct_parked_delivery_execution_note,
+    correct_parked_delivery_proof_scope, correct_parked_delivery_proof_targets,
     create_verification_dispatch, create_verification_dispatch_bound,
     create_verification_dispatch_bound_with_conn, expired_verification_dispatches,
-    get_latest_verification_dispatch, has_active_verification_dispatch,
-    get_latest_verification_dispatch_with_conn, get_verification_dispatch,
-    get_verification_dispatch_with_conn, get_verification_for_dispatch,
-    inspect_bound_server_verifier_handoff, inspect_verifier_capability,
-    invalidate_verification_dispatch_and_reopen_task_exact,
+    get_latest_verification_dispatch, get_latest_verification_dispatch_with_conn,
+    get_verification_dispatch, get_verification_dispatch_with_conn, get_verification_for_dispatch,
+    has_active_verification_dispatch, inspect_bound_server_verifier_handoff,
+    inspect_verifier_capability, invalidate_verification_dispatch_and_reopen_task_exact,
     invalidate_verification_dispatch_for_new_cycle,
     invalidate_verification_dispatch_for_repository_drift, issue_server_verifier_handoff,
     issue_server_verifier_handoff_with_secret, issue_verifier_capability,
-    reopen_closed_task_atomic,
-    reopen_terminal_task_atomic, request_changes_for_parked_delivery,
-    resolve_verification_dispatch_for_add, resolve_verification_dispatch_for_add_with_conn,
-    resolve_verification_dispatch_with_conn, save_verification_issues_with_conn,
-    timeout_verification_dispatch, update_system_verification,
+    reopen_closed_task_atomic, reopen_terminal_task_atomic, request_changes_audit_note,
+    request_changes_for_parked_delivery, resolve_verification_dispatch_for_add,
+    resolve_verification_dispatch_for_add_with_conn, resolve_verification_dispatch_with_conn,
+    save_verification_issues_with_conn, timeout_verification_dispatch, update_system_verification,
 };
 
 // Durable Viktor thread watches used by the embedded daemon's inbound bridge.
@@ -286,26 +288,24 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    QUIET_MESSAGE_MARKER,
-    PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, missing_prompt_queue_columns,
-    repair_legacy_prompt_queue_schema,
-    AdmissionOutcome, OperatorCommandAdmission,
-    BudgetedSurface, InboxHandoffState, HOOK_SURFACE_BUDGET_CHARS, HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain,
-    NOTICE_DIGEST_KIND, PEER_COPY_KIND,
-    fits_hook_surface, hook_surface_cost,
-    OPERATOR_CLOUD_SCHEMA_STATEMENTS, OperatorCloudBacklog, OperatorCloudClaim,
-    OperatorCloudSettlement, OperatorFeedBinding, OperatorSealedBytes, is_routing_id,
+    AdmissionOutcome, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryRetryState, DeliveryStage,
+    EnqueueIdempotentResult, EnqueueOutcome, HOOK_SURFACE_BUDGET_CHARS,
+    HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain, InboxHandoffState, MessageDeliveryReport,
+    MessageStatus, NOTICE_DIGEST_KIND, OPERATOR_CLOUD_SCHEMA_STATEMENTS,
+    OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
+    ObservationStatus, OperatorCloudBacklog, OperatorCloudClaim, OperatorCloudSettlement,
+    OperatorCommandAdmission, OperatorDeliveryClaim, OperatorDeliveryEvent,
+    OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorFeedBinding,
+    OperatorRelayReceipt, OperatorSealedBytes, OperatorStamp, OperatorTurn, OperatorTurnMetadata,
+    PEER_COPY_KIND, PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, PROMPT_QUEUE_STALE_TTL_SECS,
+    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptQueueStore, PromptRetentionSweep,
+    PromptRetryDisposition, QUIET_MESSAGE_MARKER, QueueOrigin, QueuedPrompt,
+    RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, RelayAlertState, RetriedPrompt,
+    SqlitePromptQueueStore, SurfacingSource, UndeliveredLifecycleRelay,
+    WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt, WorkerPeerMessageEnqueue, fits_hook_surface,
+    hook_surface_cost, inbox_signal_file_name, is_routing_id, missing_prompt_queue_columns,
+    read_inbox_signal, repair_legacy_prompt_queue_schema, reply_confirms_delivered_message,
     session_routing_id,
-    OPERATOR_DELIVERY_SCHEMA_STATEMENTS, OperatorDeliveryClaim, OperatorDeliveryEvent,
-    OperatorDeliveryTransport, OperatorDrainLimits, OperatorDrainReport, OperatorRelayReceipt,
-    OperatorTurn, OperatorTurnMetadata, OPERATOR_REPLY_RECEIPTS_SCHEMA_STATEMENTS,
-    ConfirmationSource, DeliveryStage, EnqueueIdempotentResult, EnqueueOutcome,
-    MessageDeliveryReport, MessageStatus, ObservationStatus, PROMPT_QUEUE_STALE_TTL_SECS,
-    PROMPT_RETRY_MAX_AGE_SECS, PendingReason, PromptRetentionSweep, RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX, PromptQueueStore, PromptRetryDisposition, ClaimToken,
-    OperatorStamp, QueueOrigin, QueuedPrompt, RelayAlertState, RetriedPrompt, SqlitePromptQueueStore, SurfacingSource,
-    UndeliveredLifecycleRelay, WORKER_PEER_MESSAGE_BURST_LIMIT, WakeAttempt,
-    WorkerPeerMessageEnqueue, inbox_signal_file_name, read_inbox_signal,
-    reply_confirms_delivered_message,
 };
 
 // Reminder store for supervisor "Remind Me" feature
@@ -327,7 +327,7 @@ pub use retrieval_store::{
 // Spawn queue store for worker lifecycle commands
 pub use spawn_queue_store::{
     SPAWN_QUEUE_SCHEMA, SpawnAction, SpawnLifecycle, SpawnLifecycleState, SpawnQueueStore,
-    SpawnRequest, SqliteSpawnQueueStore,
+    SpawnRequest, SqliteSpawnQueueStore, USAGE_LIMIT_EPISODE_SCHEMA,
 };
 
 // Prompt store for tracking user prompts (code attribution)
@@ -736,7 +736,9 @@ pub trait TaskStore: Send + Sync {
         _expected: &Task,
         _receipt_id: &str,
     ) -> Result<DateTime<Utc>> {
-        Err(StoreError::Other("atomic guarded task updates are unsupported by this store".into()))
+        Err(StoreError::Other(
+            "atomic guarded task updates are unsupported by this store".into(),
+        ))
     }
 
     /// Apply a replicated row only if the expected local clock still matches.
@@ -773,7 +775,9 @@ pub trait TaskStore: Send + Sync {
     /// Append marker-bearing text prepared by artifact publication or the
     /// server-attested proposal renderer. Never pass caller text here.
     fn append_trusted_note(&self, _task_id: &str, _formatted_note: &str) -> Result<DateTime<Utc>> {
-        Err(StoreError::Other("trusted task-note append is unsupported by this store".into()))
+        Err(StoreError::Other(
+            "trusted task-note append is unsupported by this store".into(),
+        ))
     }
 
     fn append_trusted_note_with_mutation_receipt(
@@ -782,7 +786,9 @@ pub trait TaskStore: Send + Sync {
         _formatted_note: &str,
         _receipt_id: &str,
     ) -> Result<DateTime<Utc>> {
-        Err(StoreError::Other("atomic trusted task-note append is unsupported by this store".into()))
+        Err(StoreError::Other(
+            "atomic trusted task-note append is unsupported by this store".into(),
+        ))
     }
 
     /// Append one note and bind a generic durable mutation receipt in the same

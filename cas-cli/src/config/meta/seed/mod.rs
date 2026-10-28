@@ -1,5 +1,6 @@
 use crate::config::meta::registry::ConfigRegistry;
 
+mod accounts;
 mod coordination;
 mod daemon;
 mod history;
@@ -21,6 +22,7 @@ mod viktor;
 
 pub(crate) fn populate_registry(registry: &mut ConfigRegistry) {
     sections::add_section_descriptions(registry);
+    accounts::register_accounts(registry);
     hooks_and_code::register_hooks_and_code(registry);
     daemon::register_daemon(registry);
     history::register_history(registry);

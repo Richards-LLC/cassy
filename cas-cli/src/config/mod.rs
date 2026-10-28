@@ -1,6 +1,8 @@
 //! Configuration management for Cassy
 
 pub mod meta;
+mod accounts;
+pub use accounts::{AccountSelection, AccountsConfig};
 
 pub use meta::{ConfigMeta, ConfigRegistry, ConfigType, Constraint, registry};
 
@@ -28,6 +30,9 @@ pub use settings::*;
 /// Main configuration struct
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Config {
+    /// Shared account recommendation policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accounts: Option<AccountsConfig>,
     /// Sync configuration (rules to .claude/rules/)
     #[serde(default)]
     pub sync: SyncConfig,
@@ -259,6 +264,7 @@ impl Config {
                 }
             };
         }
+        merge_option!(accounts);
         merge_option!(cloud);
         merge_option!(skill_validation);
         merge_option!(skills);

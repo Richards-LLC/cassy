@@ -26,7 +26,10 @@ use cas_recording::{RecordingWriter, WriterConfig};
 
 fn record_runtime_capabilities(cli: SupervisorCli, config: &PtyConfig) {
     if let Some(evidence) = cli.backend().runtime_capability_evidence(config) {
-        tracing::info!(?evidence, "Contextual Codex feature declarations; trust and native invocation are separate");
+        tracing::info!(
+            ?evidence,
+            "Contextual Codex feature declarations; trust and native invocation are separate"
+        );
     }
 }
 
@@ -431,6 +434,47 @@ impl Pane {
         factory_session: Option<&str>,
         active_workers: Option<usize>,
     ) -> Result<Self> {
+        Self::worker_resuming(
+            name,
+            cwd,
+            cas_root,
+            supervisor_name,
+            supervisor_cli,
+            cli,
+            model,
+            effort,
+            config_dir,
+            config_dir_source,
+            secure_storage_dir,
+            rows,
+            cols,
+            teams,
+            factory_session,
+            active_workers,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn worker_resuming(
+        name: &str,
+        cwd: PathBuf,
+        cas_root: Option<&PathBuf>,
+        supervisor_name: &str,
+        supervisor_cli: SupervisorCli,
+        cli: SupervisorCli,
+        model: Option<&str>,
+        effort: Option<&str>,
+        config_dir: Option<&str>,
+        config_dir_source: Option<&str>,
+        secure_storage_dir: Option<Option<&str>>,
+        rows: u16,
+        cols: u16,
+        teams: Option<&TeamsSpawnConfig>,
+        factory_session: Option<&str>,
+        active_workers: Option<usize>,
+        resume_session: Option<&str>,
+    ) -> Result<Self> {
         cli.backend().prepare_workdir(&cwd, config_dir)?;
         let mut config = Self::build_worker_config(
             name,
@@ -447,6 +491,9 @@ impl Pane {
             teams,
             active_workers,
         );
+        if let Some(id) = resume_session {
+            config.resume_worker_session(cli.backend().name(), id)?;
+        }
         push_factory_session_env(&mut config, cli, factory_session);
         record_runtime_capabilities(cli, &config);
         let session_id = cas_session_id_from_config(&config);

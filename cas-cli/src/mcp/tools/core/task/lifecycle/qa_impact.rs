@@ -164,7 +164,7 @@ impl CasCore {
         let window = close_ops::resolve_task_commit_receipt_window(
             task.created_at,
             &history,
-            close_ops::task_commit_identity(task, latest),
+            close_ops::task_commit_identity_in_repo(repo, task, latest).map_err(|e| anyhow!(e))?,
         );
         let target = close_ops::freshest_target_ref(repo, target);
         let paths = close_ops::task_attribution::paths(repo, &target, &window, Some(head))

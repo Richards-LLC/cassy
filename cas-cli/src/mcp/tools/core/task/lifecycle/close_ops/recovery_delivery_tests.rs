@@ -296,6 +296,11 @@ async fn close_classifies_delivery_after_start_boundary_gh1382() {
             assert!(output.contains("MERGE REQUIRED"), "API-only delivery must park: {output}");
             assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{output}");
             assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+            let state = tasks.get_execution_state(TASK).unwrap().unwrap();
+            let files: Vec<_> = state["qa_impact"]["unowned"].as_array().unwrap().iter()
+                .filter_map(|entry| entry["file"].as_str()).collect();
+            assert!(files.contains(&surface), "API change must appear in delivered impact: {state}");
+            assert!(!files.contains(&"inherited.vue"), "inherited UI must not select a review journey: {state}");
             git(repo, &["merge", "-q", "--no-ff", BRANCH, "-m", "Integrate API delivery"]);
             git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
             let output = close_output(&f).await;

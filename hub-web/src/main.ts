@@ -85,7 +85,7 @@ import { enrollPairedInstallation } from "./inbox/hub-enrollment";
 import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
-import { countUsage, usage, type UsageAction } from "./usage";
+import { countAttentionDelivery, countUsage, usage, type UsageAction } from "./usage";
 import { WorkPicture } from "./work-picture";
 import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
@@ -1162,6 +1162,7 @@ function applyOperatorNotice(machine: StoredMachine, session: string, reply: Ope
     if (plan.action === "raise") await addAttention(machine, session, NOTICE_KIND, plan.content, noticeTime(reply.at));
     else if (plan.action === "resolve") {
       let matching = attention.filter(item => item.fingerprint === plan.fingerprint);
+      countAttentionDelivery(matching);
       // Retain a tombstone even when resolution arrived before its alert.
       if (!matching.length) {
         const raised = planNotice(machine.id, session, { ...reply, notice: { ...reply.notice!, resolved: false } }, () => false);
@@ -1265,7 +1266,7 @@ function settleLaunchDropped(machineId: string): void {
 async function acknowledgeAttentionGroup(items: AttentionItem[]): Promise<void> {
   const acknowledgedAt = new Date().toISOString();
   const pending = items.filter((item) => !item.acknowledgedAt);
-  if (pending.some((item) => item.kind === NOTICE_KIND)) countUsage("attention.delivery");
+  countAttentionDelivery(pending);
   for (const item of pending) item.acknowledgedAt = acknowledgedAt;
   await Promise.all(pending.map((item) => attentionStore.put(item)));
   render();

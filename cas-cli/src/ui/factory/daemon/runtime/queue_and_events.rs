@@ -13472,9 +13472,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
-    /// names the relay it is about and whether that relay has since been
-    /// seen; a supervisor turn carries no notice.
     #[tokio::test]
     async fn notice_receipt_frames_drain_only_the_attention_lane_after_reconnect() {
         use cas_store::QueueOrigin;
@@ -13501,6 +13498,9 @@ mod tests {
         assert!(row.acked_at.is_none(), "persistence is not an operator read");
     }
 
+    /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
+    /// names the relay it is about and whether that relay has since been
+    /// seen; a supervisor turn carries no notice.
     #[test]
     fn operator_notices_mark_daemon_alerts_and_follow_their_relay() {
         let temp = tempfile::TempDir::new().unwrap();

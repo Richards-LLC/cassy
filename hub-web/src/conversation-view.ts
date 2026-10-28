@@ -701,9 +701,11 @@ export class ConversationView {
     const modelOptions = { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) };
     // A visual chunk boundary must not split a logical unconfirmed run.
     this.unconfirmedByKey = new Map();
-    for (const item of threadModel(events, modelOptions)) {
-      if (item.type !== "group" || item.side !== "you") continue;
-      for (const [index, run] of this.deriveUnconfirmedRuns(item)) this.unconfirmedByKey.set(item.turns[index]!.key, run);
+    if (events.some(event => event.kind === "send" && event.value.state === "unconfirmed")) {
+      for (const item of threadModel(events, modelOptions)) {
+        if (item.type !== "group" || item.side !== "you") continue;
+        for (const [index, run] of this.deriveUnconfirmedRuns(item)) this.unconfirmedByKey.set(item.turns[index]!.key, run);
+      }
     }
     const model = threadModel(events, { ...modelOptions, groupSize: 4 });
     const focused = documentActiveKey(this.msgs);

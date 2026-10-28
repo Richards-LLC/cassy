@@ -417,6 +417,11 @@ bug_families:
     tasks: [cas-ef7a]
     invariants: [HUB-J12-TRUTHFUL-WORKING]
     journeys: [HUB-J12]
+  history-journey-fixture-races:
+    title: History controls select conversation rows and distinguish settled host layout and storage from hostile-frame effects
+    tasks: [cas-e155, cas-b255, cas-c3ac]
+    invariants: [HUB-J4-GOAL, HUB-J4-VISUAL-SANDBOX, HUB-J4-MESSAGE-HIERARCHY]
+    journeys: [HUB-J4]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

@@ -1254,6 +1254,10 @@ mod tests {
             } if device_id == "phone-7"
         ));
         let _ = message;
+        // Attention persistence has a separate application receipt.
+        let notice = r#"{"OperatorNoticePersisted":{"notification_id":76,"device_id":"phone-7"}}"#;
+        let decoded = serde_json::from_str::<ClientMessage>(notice).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), notice);
     }
 
     #[test]

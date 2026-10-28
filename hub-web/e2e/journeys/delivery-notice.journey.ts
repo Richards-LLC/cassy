@@ -62,11 +62,16 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("The delivery problem is one attention item", async () => {
     await expect(attentionItems).toHaveCount(1);
+    const receiptIds = () => hub.frames.filter(frame => frame.kind === "OperatorNoticePersisted")
+      .map(frame => (frame.body as { notification_id: number }).notification_id);
+    await expect.poll(receiptIds, { message: "attention commit sends its own persistence receipt" }).toEqual([901]);
+    expect(hub.persistedReplies.some(reply => reply.notification_id === 901)).toBe(false);
     // The watchdog raises it again (a repeat and a live replay): still one.
     const repeat = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: false } });
     // The page has handled the repeat before it is counted, rather than after
     // a fixed pause a loaded host can outrun (cas-c4b2).
     await hub.received(repeat);
+    await expect.poll(receiptIds).toEqual([901, repeat]);
     await settle(page);
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");

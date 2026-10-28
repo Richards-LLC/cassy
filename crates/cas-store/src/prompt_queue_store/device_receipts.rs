@@ -114,6 +114,13 @@ mod tests {
         let row = store.queued_prompt(id).unwrap().unwrap();
         assert!(row.processed_at.is_some());
         assert!(row.acked_at.is_none());
+        // A conversation ACK must never consume a daemon attention notice.
+        let notice = store.enqueue_idempotent(
+            "relay-watchdog", "operator", "notice", Some("session-a"), None, None,
+            "notice", Some(&QueueOrigin::Daemon),
+        ).unwrap().id();
+        assert!(store.record_operator_reply_persisted(notice, "session-a", "phone").is_err());
+        assert!(store.queued_prompt(notice).unwrap().unwrap().processed_at.is_none());
         let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
         let receipts: i64 = conn
             .query_row(

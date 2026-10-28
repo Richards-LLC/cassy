@@ -8,48 +8,17 @@ type Preview = HTMLElement & {
   available?: () => boolean;
 };
 
-/** Connection callbacks let cached conversation nodes leave and re-enter safely. */
+/** The lifecycle travels with media code, leaving only the reserved box here. */
+function installPreview(document: Document): Promise<void> {
+  return import("./rich-media").then(({ installMediaPreviews }) => installMediaPreviews(document));
+}
 function previewElement(document: Document): Preview {
-  const view = document.defaultView as (Window & typeof globalThis) | null;
-  if (!view) return document.createElement("div");
-  const tag = "commander-media-preview";
-  if (!view.customElements.get(tag)) view.customElements.define(tag, class extends view.HTMLElement {
-    loadPreview?: () => Promise<void>;
-    machineId?: string;
-    available?: () => boolean;
-    private observer?: IntersectionObserver;
-    private loading = false;
-    private retryAfterLoad = false;
-    private get complete(): boolean { return this.dataset.previewState === "ready" || this.dataset.previewState === "failed"; }
-    retryPreview(): void {
-      if (this.loading) { this.retryAfterLoad = true; return; }
-      if (this.dataset.previewState !== "waiting") return;
-      this.dataset.previewState = "pending";
-      this.connectedCallback();
-    }
-    connectedCallback(): void {
-      this.observer?.disconnect(); this.observer = undefined;
-      if (this.complete || this.loading) return;
-      if (this.dataset.previewState === "waiting" && this.available?.() === false) return;
-      const load = async () => {
-        this.observer?.disconnect(); this.observer = undefined;
-        if (this.complete || this.loading || !this.isConnected) return;
-        this.loading = true;
-        this.dataset.previewState = "loading";
-        try { await this.loadPreview?.(); }
-        finally {
-          this.loading = false;
-          if (this.retryAfterLoad) { this.retryAfterLoad = false; this.retryPreview(); }
-          else if (this.isConnected && this.dataset.previewState === "loading") this.connectedCallback();
-        }
-      };
-      if (!view.IntersectionObserver) { void load(); return; }
-      this.observer = new view.IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) void load(); });
-      this.observer.observe(this);
-    }
-    disconnectedCallback(): void { this.observer?.disconnect(); this.observer = undefined; }
+  const viewport = document.createElement("commander-media-preview") as Preview;
+  void installPreview(document).catch(() => {
+    viewport.dataset.previewState = "waiting";
+    viewport.textContent = "Preview unavailable. Open the file below.";
   });
-  return document.createElement(tag) as Preview;
+  return viewport;
 }
 
 /** Reserve media's final viewport before any lazy code, URL or bytes arrive. */
@@ -82,6 +51,8 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
 /** Only transient failures on this machine retry; loaded media keeps its node. */
 export function retryAttachmentPreviews(root: ParentNode, machineId: string): void {
   for (const preview of root.querySelectorAll<Preview>("commander-media-preview")) {
-    if (preview.machineId === machineId) preview.retryPreview?.();
+    if (preview.machineId !== machineId) continue;
+    if (preview.retryPreview) preview.retryPreview();
+    else void installPreview(preview.ownerDocument).catch(() => { /* Next reconnect can retry the chunk. */ });
   }
 }

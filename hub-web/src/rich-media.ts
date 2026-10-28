@@ -2,6 +2,49 @@ import "./rich-content.css";
 import type { ArtifactViewResult } from "./artifact-open";
 import type { ArtifactRef } from "./types";
 
+/** Connection callbacks let cached conversation nodes leave and re-enter safely. */
+export function installMediaPreviews(document: Document): void {
+  const view = document.defaultView as (Window & typeof globalThis) | null;
+  if (!view) return;
+  const tag = "commander-media-preview";
+  if (!view.customElements.get(tag)) view.customElements.define(tag, class extends view.HTMLElement {
+    declare loadPreview?: () => Promise<void>;
+    declare machineId?: string;
+    declare available?: () => boolean;
+    private observer?: IntersectionObserver;
+    private loading = false;
+    private retryAfterLoad = false;
+    private get complete(): boolean { return this.dataset.previewState === "ready" || this.dataset.previewState === "failed"; }
+    retryPreview(): void {
+      if (this.loading) { this.retryAfterLoad = true; return; }
+      if (this.dataset.previewState !== "waiting") return;
+      this.dataset.previewState = "pending";
+      this.connectedCallback();
+    }
+    connectedCallback(): void {
+      this.observer?.disconnect(); this.observer = undefined;
+      if (this.complete || this.loading) return;
+      if (this.dataset.previewState === "waiting" && this.available?.() === false) return;
+      const load = async () => {
+        this.observer?.disconnect(); this.observer = undefined;
+        if (this.complete || this.loading || !this.isConnected) return;
+        this.loading = true;
+        this.dataset.previewState = "loading";
+        try { await this.loadPreview?.(); }
+        finally {
+          this.loading = false;
+          if (this.retryAfterLoad) { this.retryAfterLoad = false; this.retryPreview(); }
+          else if (this.isConnected && this.dataset.previewState === "loading") this.connectedCallback();
+        }
+      };
+      if (!view.IntersectionObserver) { void load(); return; }
+      this.observer = new view.IntersectionObserver((entries) => { if (entries.some((entry) => entry.isIntersecting)) void load(); });
+      this.observer.observe(this);
+    }
+    disconnectedCallback(): void { this.observer?.disconnect(); this.observer = undefined; }
+  });
+}
+
 /** Tickets stay in ephemeral DOM and are never added to the reply journal. */
 export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>): Promise<void> {
   const document = viewport.ownerDocument;

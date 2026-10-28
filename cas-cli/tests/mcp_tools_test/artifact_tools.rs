@@ -639,6 +639,16 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             .get(&task.id)
             .is_err()
     );
+    let mut forged_id = foreign_fetch.clone();
+    forged_id.id = Some("art-forged".into());
+    let forged = foreign_service
+        .artifact(Parameters(forged_id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        forged.data.as_ref().unwrap()["state"],
+        "metadata_unavailable"
+    );
     let mut foreign_fetch = req("fetch");
     foreign_fetch.task_id = Some(task.id.clone());
     foreign_fetch.id = Some(attached_id.clone());
@@ -674,40 +684,6 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .unwrap();
         (root, service)
     };
-    for tamper in ["id", "origin_project"] {
-        let mut forged = synced.clone();
-        if tamper == "id" {
-            forged.id = "cas-forged".into();
-        } else {
-            forged.origin_project = Some("github.com/attacker/other".into());
-        }
-        let override_task = Mock::given(method("GET"))
-            .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
-            .and(query_param("project_id", "github.com/source/blue"))
-            .and(header("Authorization", "Bearer fixture-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(&forged))
-            .with_priority(1)
-            .mount_as_scoped(&server)
-            .await;
-        let (root, service) = fresh_recipient(&mut env);
-        let refused = service
-            .artifact(Parameters(foreign_fetch.clone()))
-            .await
-            .unwrap_err();
-        assert_eq!(
-            refused.data.as_ref().unwrap()["state"],
-            "metadata_unavailable",
-            "{tamper}: {refused:?}"
-        );
-        assert!(
-            cas_store::SqliteArtifactStore::open(&root.path().join(".cas"))
-                .unwrap()
-                .get(id)
-                .unwrap()
-                .is_none()
-        );
-        drop(override_task);
-    }
     let mut conflicting = synced.clone();
     conflicting.origin_project = Some("github.com/source/green".into());
     conflicting.notes = conflicting.notes.replace(sha, &"0".repeat(64));
@@ -851,6 +827,46 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             .iter()
             .filter(|r| r.url.path() == "/download")
             .all(|r| !r.headers.contains_key("authorization"))
+    );
+
+    // A forged owner in a scoped task response cannot lend its proof to the
+    // authenticated source project.
+    let mut forged_owner = synced.clone();
+    forged_owner.origin_project = Some("github.com/attacker/other".into());
+    Mock::given(method("GET"))
+        .and(path("/api/account/projects"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"projects": [
+                {"team_id":"team-source","canonical_id":"github.com/source/blue","scope":"team"}
+            ]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(query_param("project_id", "github.com/source/blue"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&forged_owner))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let (forged_root, forged_service) = fresh_recipient(&mut env);
+    let refused = forged_service
+        .artifact(Parameters(foreign_fetch))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused.data.as_ref().unwrap()["state"],
+        "metadata_unavailable"
+    );
+    assert!(
+        cas_store::SqliteArtifactStore::open(&forged_root.path().join(".cas"))
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .is_none()
     );
 }
 

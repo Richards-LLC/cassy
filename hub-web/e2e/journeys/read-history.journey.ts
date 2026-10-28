@@ -13,6 +13,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
   hub.supervisorSays(PELICAN, [
     "| Tab | State |", "| --- | --- |",
     "| **Daniel Open Hours** | Tracks *open hours* in `time-tracking`; [details](https://example.org/hours) stay available. |",

@@ -33937,6 +33937,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             let regeneration = f2eb_commit(p, dist, "bundle(merged);\n", &format!(
                 "build(hub-web): regenerate dist from merged sources\n\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-0c988).", &merge[..9]));
             let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
+            // pin: close audit must name the actual regeneration commit and proven source path.
             assert!(matches!(&outcome, MergeStateGateOutcome::ProceedWithNote(note)
                 if note.contains(&regeneration) && note.contains(source)), "sync_tip={sync_tip}: {outcome:?}");
             let row = collect_epic_branch_statuses(&[task.clone()], "main", p).remove(0);

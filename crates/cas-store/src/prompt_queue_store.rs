@@ -463,6 +463,9 @@ pub enum PromptRetryDisposition {
 /// A prompt in the queue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueuedPrompt {
+    /// Render-only reference. Never a body observation, confirmation or action.
+    #[serde(skip)]
+    pub reference_only: bool,
     /// Unique prompt ID
     pub id: i64,
     /// Source agent (who sent the prompt)
@@ -3943,6 +3946,7 @@ impl SqlitePromptQueueStore {
             .unwrap_or_default();
 
         Ok(QueuedPrompt {
+            reference_only: false,
             id: row.get(0)?,
             source: row.get(1)?,
             target: row.get(2)?,
@@ -10292,13 +10296,9 @@ impl SqlitePromptQueueStore {
                     Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;
                 }
             }
-            let mut reference_ids = std::collections::HashSet::new();
             let prompts = prompts.into_iter().map(|prompt| {
-                let delivery = Self::recipient_delivery_on_conn(&tx, prompt, recipient, named_read)?;
-                if !delivery.is_full() { reference_ids.insert(match &delivery {
-                    RecipientDelivery::Reference(row) => row.id, _ => unreachable!(),
-                }); }
-                Ok(delivery.into_prompt())
+                Self::recipient_delivery_on_conn(&tx, prompt, recipient, named_read)
+                    .map(RecipientDelivery::into_prompt)
             }).collect::<Result<Vec<_>>>()?;
 
             // cas-1f0c: keep only what the caller can render whole; a row
@@ -10351,7 +10351,7 @@ impl SqlitePromptQueueStore {
                 let resurfaces_poll =
                     matches!(transport, TransportEligibility::PolledBefore(_));
                 for prompt in &prompts {
-                    if reference_ids.contains(&prompt.id) { continue; }
+                    if prompt.reference_only { continue; }
                     stmt.execute(params![
                         prompt.id,
                         recipient,
@@ -10381,7 +10381,7 @@ impl SqlitePromptQueueStore {
                         // recipient's turn must not mark it confirmed for the
                         // peers that have not seen it (its read state lives in
                         // the per-recipient receipt table).
-                        if prompt.target == "all_workers" || reference_ids.contains(&prompt.id) {
+                        if prompt.target == "all_workers" || prompt.reference_only {
                             continue;
                         }
                         ack_stmt.execute(params![seen_at, prompt.id])?;
@@ -10398,7 +10398,7 @@ impl SqlitePromptQueueStore {
                 // is per-recipient, so one drain must not consume the row for
                 // peers.
                 for prompt in &prompts {
-                    if reference_ids.contains(&prompt.id) {
+                    if prompt.reference_only {
                         tx.execute("UPDATE prompt_queue_recipient_seen SET poll_settled = 'repeat reference rendered'
                             WHERE prompt_id = ?1 AND recipient = ?2 AND source = 'inbox_poll'",
                             params![prompt.id, recipient])?;
@@ -17916,6 +17916,7 @@ mod tests {
     fn test_merge_two_lane_peeks_quota_contract() {
         fn row(id: i64, session: Option<&str>, priority: u8) -> QueuedPrompt {
             QueuedPrompt {
+                reference_only: false,
                 id,
                 source: "s".into(),
                 target: "t".into(),

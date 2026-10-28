@@ -1101,6 +1101,7 @@ mod tests {
 
     fn row(id: i64, source: &str, prompt: &str) -> QueuedPrompt {
         QueuedPrompt {
+            reference_only: false,
             id,
             source: source.to_string(),
             target: "worker-1".to_string(),

@@ -358,6 +358,7 @@ mod viktor_provenance_tests {
     #[test]
     fn viktor_queue_rows_keep_the_standard_provenance_envelope() {
         let row = QueuedPrompt {
+            reference_only: false,
             id: 73,
             source: "viktor".to_string(),
             target: "worker-1".to_string(),
@@ -390,6 +391,7 @@ mod viktor_provenance_tests {
     #[test]
     fn provenance_marks_only_rows_past_the_operational_freshness_window() {
         let row = QueuedPrompt {
+            reference_only: false,
             id: 74,
             source: "director".to_string(),
             target: "worker-1".to_string(),
@@ -418,6 +420,7 @@ mod viktor_provenance_tests {
 
     fn commander_row(origin: Option<cas_store::QueueOrigin>) -> QueuedPrompt {
         QueuedPrompt {
+            reference_only: false,
             id: 75,
             source: "commander:Daniel@iphone-15".to_string(),
             target: "supervisor".to_string(),
@@ -3570,6 +3573,12 @@ impl CasService {
         let now = chrono::Utc::now();
         let mut body = String::new();
         for message in &messages {
+            if message.reference_only {
+                body.push_str(&format!("**[{}] From: {}**\n{}\n\n", message.id, message.source, message.prompt));
+                rendered += 1;
+                continue;
+            }
+
             // A supervisor can claim a queue row directly through inbox_poll,
             // bypassing the daemon's transport-time check. Re-run the exact
             // merge-request predicate here so an invalidated delivery anchor
@@ -5065,6 +5074,7 @@ mod inbox_poll_identity_tests {
     #[test]
     fn a_named_progress_relay_is_shown_after_its_task_moves_on() {
         let relay = |source: &str, transition: &str, new: &str| cas_store::QueuedPrompt {
+            reference_only: false,
             id: 7,
             source: source.to_string(),
             target: "supervisor".to_string(),
@@ -7349,6 +7359,7 @@ mod cas_89e1_post_merge_message_type_tests {
     #[test]
     fn verified_commander_rows_print_the_exact_operator_reply_command() {
         let mut row = cas_store::QueuedPrompt {
+            reference_only: false,
             id: 3139,
             source: "commander:Daniel@Soundwave".into(),
             target: "supervisor".into(),

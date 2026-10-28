@@ -2510,6 +2510,7 @@ mod tests {
         origin: cas_store::QueueOrigin,
     ) -> cas_store::QueuedPrompt {
         cas_store::QueuedPrompt {
+            reference_only: false,
             id,
             source: source.to_string(),
             target: "true-leopard-45".to_string(),

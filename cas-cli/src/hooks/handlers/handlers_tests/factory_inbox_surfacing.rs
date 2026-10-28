@@ -1808,7 +1808,7 @@ fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
     deliver_to_claude_worker(&store, &mut worker, next_id, next);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let teammate_turn = worker.next_teammate_turn().unwrap();
-    assert_eq!(teammate_turn.matches(kept).count(), 1, "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(kept).count(), 0, "{teammate_turn}");
     assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
     assert_eq!(teammate_turn.matches(next).count(), 1, "{teammate_turn}");
     assert!(!worker.take_turn("continuing my work").contains(kept));
@@ -1836,7 +1836,7 @@ fn cas_6ccb_the_repeat_runs_once_per_turn_without_new_mail() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let turn = worker.take_turn_without_prompt_hook("<teammate-message teammate_id=\"peer\">\nping\n</teammate-message>");
-    assert_eq!(turn.matches(kept).count(), 1, "{turn}");
+    assert_eq!(turn.matches(kept).count(), 0, "{turn}");
     assert!(turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{turn}");
     assert!(turn.contains("one-time repeat"), "{turn}");
     assert!(!worker.tool_call().contains(kept));

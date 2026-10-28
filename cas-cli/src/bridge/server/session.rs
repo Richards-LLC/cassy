@@ -239,6 +239,17 @@ fn session_agents(
         .collect()
 }
 
+/// A live lane can still be at its spawn base before any work is delivered.
+/// Its zero-ahead count is not a merge receipt for the new assignment.
+fn has_recorded_delivery(task: &cas_types::Task) -> bool {
+    let delivery = &task.deliverables;
+    delivery.factory_branch_anchor.is_some()
+        || delivery.parked_branch.is_some()
+        || delivery.merge_commit.is_some()
+        || delivery.delivery_pr_merge_commit.is_some()
+        || delivery.integration_batch.is_some()
+}
+
 /// Optional evidence never turns a timed-out/unreadable proof into zero work.
 /// Prioritize the focused epic and bound the overall read; the shared collector
 /// caches immutable verdicts, allowing later refreshes to complete cold proofs.
@@ -322,6 +333,7 @@ fn project_deliveries(
             }
             checked_ids.insert(child.id.clone());
             if !child.has_delivery_to_integrate()
+                || !has_recorded_delivery(child)
                 || (row.recorded_anchor.is_none() && row.factory_branch.is_none())
                 || row.unmerged_count != 0
                 || !row.dropped_paths.is_empty()
@@ -372,7 +384,7 @@ fn project_deliveries(
         let Ok(record) = store.get(&task.id) else {
             continue;
         };
-        if !record.has_delivery_to_integrate() {
+        if !record.has_delivery_to_integrate() || !has_recorded_delivery(&record) {
             continue;
         }
         let Some(context) = record.deliverables.work_target.as_ref().and_then(|target| {
@@ -539,6 +551,7 @@ mod focused_epic_tests {
         git(&["add", "file"]);
         git(&["commit", "-m", "delivery"]);
         let anchor = git(&["rev-parse", "HEAD"]);
+        git(&["branch", "factory/fresh-worker", &anchor]);
         let store = crate::store::open_task_store(&root).unwrap();
         let mut epic = Task::new("cas-epic".into(), "Epic".into());
         epic.task_type = TaskType::Epic;
@@ -551,6 +564,9 @@ mod focused_epic_tests {
         ] {
             let mut child = Task::new(id.into(), id.into());
             child.status = status;
+            if id == "cas-open" {
+                child.assignee = Some("fresh-worker".into());
+            }
             if delivered {
                 child.deliverables.factory_branch_anchor = Some(anchor.clone());
                 child.deliverables.merge_commit = Some(anchor.clone());

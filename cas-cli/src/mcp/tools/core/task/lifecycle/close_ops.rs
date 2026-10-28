@@ -16,6 +16,7 @@ pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_pat
 pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod merge_queue_proof;
 mod merged_verification;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
@@ -10485,6 +10486,7 @@ impl CasCore {
 
         let mut waived_risk_gate = None;
         let mut accepted_inherited_scoped_failures = None;
+        let mut accepted_merge_queue_proof = None;
         if close_disposition.requires_delivery_gates() {
             let proof_repo = worker_worktree_path
                 .as_deref()
@@ -10795,31 +10797,46 @@ impl CasCore {
                     build_proofs,
                     &mut scoped_proof_cache,
                 ) {
-                    // The cache already holds this result; an unresolved
-                    // surface is the refusal the gate just returned.
-                    let Ok(required_targets) = required_scoped_proof_targets(
+                    // A registered supervisor may cite an already successful
+                    // queue run. Substitute only the scoped test obligation;
+                    // the ordinary content, CI and QA gates still run.
+                    match merge_queue_proof::verify(
+                        req.reason.as_deref().unwrap_or_default(),
                         proof_repo,
-                        target_repo,
-                        &changed_paths,
-                        &mut scoped_proof_cache,
-                    ) else {
-                        return Ok(Self::tool_error(epic_refusal(scoped_error)));
-                    };
-                    if required_targets.is_empty() {
-                        return Ok(Self::tool_error(epic_refusal(scoped_error)));
-                    }
-                    match validate_inherited_scoped_failures(
-                        &task,
-                        &self.cas_root,
-                        proof_repo,
-                        scoped_proof_base.as_deref(),
-                        &required_targets,
+                        delivered_tip.as_deref(),
                     ) {
-                        Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
-                        Err(audit_error) => {
-                            return Ok(Self::tool_error(epic_refusal(format!(
-                                "{scoped_error} Inherited base-red audit rejected: {audit_error}"
-                            ))));
+                        Ok(Some(proof)) => accepted_merge_queue_proof = Some(proof),
+                        Err(error) => return Ok(Self::tool_error(epic_refusal(format!(
+                            "{scoped_error} Merge-queue proof rejected: {error}"
+                        )))),
+                        Ok(None) => {
+                            // The cache already holds this result; an unresolved
+                            // surface is the refusal the gate just returned.
+                            let Ok(required_targets) = required_scoped_proof_targets(
+                                proof_repo,
+                                target_repo,
+                                &changed_paths,
+                                &mut scoped_proof_cache,
+                            ) else {
+                                return Ok(Self::tool_error(epic_refusal(scoped_error)));
+                            };
+                            if required_targets.is_empty() {
+                                return Ok(Self::tool_error(epic_refusal(scoped_error)));
+                            }
+                            match validate_inherited_scoped_failures(
+                                &task,
+                                &self.cas_root,
+                                proof_repo,
+                                scoped_proof_base.as_deref(),
+                                &required_targets,
+                            ) {
+                                Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
+                                Err(audit_error) => {
+                                    return Ok(Self::tool_error(epic_refusal(format!(
+                                        "{scoped_error} Inherited base-red audit rejected: {audit_error}. Alternatively, cite merge_group_run=<run id> in the supervisor override reason to reuse successful CI for a landed tree containing this delivery."
+                                    ))));
+                                }
+                            }
                         }
                     }
                 }
@@ -11155,6 +11172,11 @@ impl CasCore {
             if let Some(measurement) = accepted_inherited_scoped_failures.as_deref() {
                 task.notes.push_str(&format!(
                     "\n\n[{timestamp}] DECISION: supervisor accepted inherited scoped failures after comparing durable base and delivery logs: {measurement}"
+                ));
+            }
+            if let Some(proof) = accepted_merge_queue_proof.as_deref() {
+                task.notes.push_str(&format!(
+                    "\n\n[{timestamp}] DECISION: supervisor reused verified merge-queue scoped proof: {proof}"
                 ));
             }
         }
@@ -27788,7 +27810,7 @@ mod merge_state_gate_tests {
         git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "land delivery"]);
         git(p, &["push", "-q", "origin", "main"]);
         assert_ne!(head_sha(p), queue);
-        let tree = if case == "wrong-tree" { rev_parse_local(p, "main~1^{tree}") } else { tree };
+        let tree = if case == "wrong-tree" { "a".repeat(40) } else { tree };
         let proof_head = if case == "before-delivery" { rev_parse_local(p, "main~1") } else { queue };
         let tree = if case == "before-delivery" { rev_parse_local(p, "main~1^{tree}") } else { tree };
         let mut run = serde_json::json!({

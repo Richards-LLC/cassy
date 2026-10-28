@@ -200,6 +200,7 @@ struct Indexed {
     line: u64,
     block: usize,
     result_line: Option<u64>,
+    result_call: Option<String>,
 }
 
 /// Forward, incremental index of one transcript's work events.
@@ -314,6 +315,7 @@ impl TranscriptIndex {
             line,
             block,
             result_line: None,
+            result_call: None,
         });
     }
 
@@ -383,6 +385,7 @@ impl TranscriptIndex {
         for target in std::iter::once(index).chain(parent) {
             let indexed = &mut self.events[target];
             indexed.result_line = Some(line);
+            indexed.result_call = Some(call.to_owned());
             indexed.event.error = failed;
             if let Some(tool) = &mut indexed.event.tool {
                 tool.exit_code = exit_code;
@@ -407,7 +410,7 @@ impl TranscriptIndex {
                     .into()
                 });
             }
-            if let Some(session) = &session {
+            if running && let Some(session) = &session {
                 self.command_sessions
                     .insert(session.clone(), parent.unwrap_or(index));
             }
@@ -683,6 +686,7 @@ impl TranscriptIndex {
     /// The unredacted detail of one indexed event.
     fn detail(&self, line: u64, block: usize) -> Option<String> {
         let indexed = self.find(line, block)?;
+        if !indexed.event.has_detail { return None }
         let value = self.read_line(line)?;
         let result = indexed
             .result_line
@@ -713,7 +717,7 @@ impl TranscriptIndex {
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                 }
-                let call = item.get("id").and_then(Value::as_str);
+                let call = indexed.result_call.as_deref().or_else(|| item.get("id").and_then(Value::as_str));
                 let output = result.as_ref().and_then(|value| {
                     value
                         .pointer("/message/content")?

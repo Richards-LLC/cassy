@@ -481,6 +481,8 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     ]);
     let (scope, stores, mut index) = (super::tests::scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
     let (events, _, _) = page(&mut index, &scope, &stores, &claude, None, 10);
+    let original_detail = serde_json::to_string(&detail(&mut index, &scope, &stores, &claude, &events[0].id)).unwrap();
+    assert!(original_detail.contains("done"), "a background command retains its final poll output");
     let wire = serde_json::to_value(events).unwrap();
     assert_eq!(wire[0]["lifecycle"]["outcome"], "success");
     assert_eq!(wire[0]["tool"]["exit_code"], 0);

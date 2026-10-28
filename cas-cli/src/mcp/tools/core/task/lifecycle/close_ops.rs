@@ -33939,7 +33939,7 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
             // pin: close audit must name the actual regeneration commit and proven source path.
             assert!(matches!(&outcome, MergeStateGateOutcome::ProceedWithNote(note)
-                if note.contains(&regeneration) && note.contains(source)), "sync_tip={sync_tip}: {outcome:?}");
+                if note.contains(&regeneration) && note.contains(source)), "{outcome:?}");
             let row = collect_epic_branch_statuses(&[task.clone()], "main", p).remove(0);
             assert!(!row.blocks_epic_close(), "{row:?}");
             // A later deletion of the rebuilt output is not regeneration.

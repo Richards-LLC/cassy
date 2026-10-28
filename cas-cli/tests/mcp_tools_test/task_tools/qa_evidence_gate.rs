@@ -541,6 +541,127 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
     );
 }
 
+/// GH #1373: a required docs-only correction must not strand API evidence
+/// on the declined code commit. Exercise request_changes, restart, push and
+/// the actual close gate, with stale/unrelated evidence as negative controls.
+#[tokio::test]
+async fn request_changes_accepts_only_pushed_correction_api_evidence_cas_9e60() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("app/api/widgets.ts", "export const status = 400;\n")],
+        "",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let config_text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        config_text.replace(
+            "independent_pass = false",
+            "independent_pass = false\napi_paths = ['app/api/**']",
+        ),
+    )
+    .unwrap();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let branch = format!("factory/test-agent-{TASK}");
+    git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+    let remote = tempfile::tempdir().unwrap();
+    git(
+        &fx.repo,
+        &["init", "-q", "--bare", remote.path().to_str().unwrap()],
+    );
+    git(
+        &fx.repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&fx.repo, &["push", "-q", "origin", "main", &branch]);
+    let original = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let artifacts = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let write_ledger = |head: &str| {
+        std::fs::write(artifacts.join("LEDGER.md"), format!(
+            "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
+        )).unwrap();
+        std::fs::write(artifacts.join("contracts.diff"), "").unwrap();
+    };
+    write_ledger(&original);
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(anchor(&fx), Some(original.clone()));
+
+    let supervisor = cas_6f10_supervisor(&fx);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    supervisor
+        .cas_task_request_changes(Parameters(TaskRequestChangesRequest {
+            id: TASK.into(),
+            reason: "Keep the API fix and add the required regression case before re-delivery"
+                .into(),
+        }))
+        .await
+        .unwrap();
+    env.remove("CAS_AGENT_ROLE");
+    fx.core
+        .cas_task_start(Parameters(IdRequest { id: TASK.into() }))
+        .await
+        .unwrap();
+    let corrected = commit_file(
+        &fx.repo,
+        "docs/qa/journeys.yaml",
+        r#"version: 1
+updated: "2026-10-28"
+invariants:
+  INV-API:
+    statement: Invalid widget input returns HTTP 400
+    check: POST invalid input and read the response
+    bug: {task: cas-ev01}
+journeys:
+  - id: API-WIDGETS
+    name: Reject invalid widget input
+    status: live
+    entry: {url: /api/widgets, trigger: POST}
+    steps: [post invalid input, read response]
+    owners: [app/api/widgets.ts]
+    invariants: [INV-API]
+    traffic: {share_pct: 100, basis: requests}
+"#,
+    );
+    git(&fx.repo, &["push", "-q", "origin", &branch]);
+    assert_eq!(
+        git(&fx.repo, &["rev-parse", &format!("origin/{branch}")]),
+        corrected
+    );
+    let unrelated = git(
+        &fx.repo,
+        &["commit-tree", "main^{tree}", "-m", "unrelated root"],
+    );
+
+    for (head, accepted) in [(&original, false), (&unrelated, false), (&corrected, true)] {
+        write_ledger(head);
+        let result = close_text(&fx.core, TASK).await;
+        if accepted {
+            assert!(result.contains("MERGE REQUIRED"), "{result}");
+            assert!(!result.contains("QA EVIDENCE REJECTED"), "{result}");
+            assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{result}");
+            assert_eq!(anchor(&fx), Some(corrected.clone()), "{result}");
+            assert!(
+                fx.notes()
+                    .contains("API HTTP transcript and contract diff accepted"),
+                "{}",
+                fx.notes()
+            );
+        } else {
+            assert!(
+                result.contains("API transcript head_sha does not match the delivered commit"),
+                "head={head}: {result}"
+            );
+            assert_eq!(fx.status(), TaskStatus::InProgress, "{result}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn user_facing_close_without_a_bundle_is_rejected_with_the_next_command() {
     let mut test_env = TestEnvGuard::temp_home();

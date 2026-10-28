@@ -11800,11 +11800,11 @@ mod tests {
         };
         assert_eq!(
             scan(),
-            vec![pending_wake, pending_completion, abandoned_undelivered],
+            vec![pending_wake, abandoned_undelivered],
             "only never-delivered supervisor relays past the window are escalation candidates \
              (transported {transported}, acked {acked}, superseded {superseded}, seen {seen}, \
              fresh {fresh}, worker-bound {worker_bound}, other session {other_session}, \
-             worker message {worker_message} must be excluded)"
+             worker message {worker_message}, completion FYI {pending_completion} must be excluded)"
         );
 
         let alerted = store
@@ -11822,7 +11822,7 @@ mod tests {
         assert!(matches!(alerted, EnqueueIdempotentResult::Created(_)));
         assert_eq!(
             scan(),
-            vec![pending_completion, abandoned_undelivered],
+            vec![abandoned_undelivered],
             "a relay with an operator alert on record is not selected again"
         );
     }
@@ -20602,6 +20602,11 @@ mod cas_bf890_notice_digest_tests {
             EnqueueIdempotentResult::Created(id) => id,
             _ => unreachable!(),
         };
+        let alertable = store.undelivered_supervisor_lifecycle_relays(SESSION, &["supervisor"], 0, 50).unwrap();
+        assert_eq!(alertable.iter().map(|row| row.id).collect::<Vec<_>>(), vec![action], "digest rows must not become operator watchdog pages");
+        store.conn.lock().unwrap().execute("UPDATE prompt_queue SET created_at=?", [(Utc::now() - chrono::Duration::seconds(61)).to_rfc3339()]).unwrap();
+        assert_eq!(store.list_undelivered_lifecycle_relays(50).unwrap().iter().map(|row| row.prompt_id).collect::<Vec<_>>(), vec![action]);
+        assert_eq!(store.undelivered_lifecycle_relay_count().unwrap(), 1);
         // Export transport payloads and daemon wake eligibility from this
         // exact replay. This is queue evidence, not model token accounting.
         let replay_rows = store.peek_for_targets(&["supervisor", "lead-sup"], Some(SESSION), 50).unwrap();

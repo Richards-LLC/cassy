@@ -1,4 +1,4 @@
-// Measurement, not a synthetic scale test: replay captured real Commander rows.
+// Opening flows replay captured real Commander rows; scroll reuses the frozen independent-QA fixture.
 // No real credentials; no sends, dismissals, control claims or live service writes.
 import { test, expect, type CDPSession, type Page } from "@playwright/test";
 import { createServer, type Server } from "node:http";
@@ -7,6 +7,7 @@ import { resolve, extname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { decode } from "@jridgewell/sourcemap-codec";
 import { HubDouble, type HistoryPage, type WorkWorld } from "./hub-double";
+import { ATLAS } from "./world";
 
 type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[]; work?: WorkWorld };
 const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
@@ -197,6 +198,7 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
   const directory = join(output, `${profile.name}${scrollFlow ? `-${profile.colorScheme}` : ""}-${info.repeatEachIndex}`);
   await mkdir(directory, { recursive: true });
   const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone", colorScheme: profile.colorScheme });
+  if (scrollFlow) await context.tracing.start({ snapshots: { dom: true, aria: true, screen: false }, screenshots: false, sources: true });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: profile.cpu });
@@ -205,7 +207,9 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
   await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
   const hub = new HubDouble(page, {
     time: { now: () => performance.timeOrigin + performance.now(), delay: (callback, ms) => { setTimeout(callback, ms); } },
-    paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" }] }],
+    ...(scrollFlow ? { paired: [ATLAS.id], machines: [ATLAS] } : {
+      paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" as const }] }],
+    }),
     history: { [capture.session]: capture.pages },
     ...(capture.work ? { work: { [capture.session]: capture.work } } : {}),
   });
@@ -302,7 +306,7 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
         source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms, pending_replies: capture.pending_replies?.length,
         show_work: showWork, work_events: capture.work?.events.length ?? 0,
         flow: process.env.CONVERSATION_PERF_FLOW ?? "history", replay_cadence: "history response plus batches of ten pending OperatorReply frames, paced by browser rAF; fastest-case replay, daemon scheduling/network excluded",
-        label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
+        label: scrollFlow ? "real-bundle, frozen three-page independent-QA fixture, protocol-double" : "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
     };
     const backlog = process.env.CONVERSATION_PERF_FLOW === "backlog";
     if (backlog) expect(capture.pending_replies?.length, "capture real pending rows, not fabricated history").toBeGreaterThan(50);
@@ -407,5 +411,8 @@ for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation
       // fix must be able to rerun this exact command with a bounded window.
     }
     expect(errors).toEqual([]);
-  } finally { await context.close(); }
+  } finally {
+    if (scrollFlow) await context.tracing.stop({ path: join(directory, "playwright.trace.zip") });
+    await context.close();
+  }
 });

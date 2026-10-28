@@ -382,6 +382,12 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
             &WakeSender::Unattributed, &prompt.target, &row.source, &row.prompt), None,
             "the director envelope cannot grant an unauthenticated wake");
+        git(f.remote.path(), &["config", "uploadpack.hideRefs", &format!("refs/heads/{branch}")]);
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Err(_))), "an unavailable source fetch defers the sole action instead of consuming it");
+        git(f.remote.path(), &["config", "--unset", "uploadpack.hideRefs"]);
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(Some(_)))), "source recovery retains the original queued action");
         let head = &prompt.merge_alert.as_ref().unwrap().factory_tip;
         task.status = TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(head.clone());

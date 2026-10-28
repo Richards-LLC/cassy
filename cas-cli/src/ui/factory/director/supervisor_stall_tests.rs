@@ -233,8 +233,8 @@ fn a_blocked_task_does_not_hide_its_idle_worker_from_ready_work_gh1302() {
     );
 }
 
-/// cas-7456 (GH #1302 E): idle workers sat beside 134 ready tasks for 10 h.
-/// Ready work outside the focused epic, or with no epic focused, still pages.
+/// cas-c73a: a pinned epic cannot fall through to the project backlog.
+/// With no focus, retain the existing project-wide ready-work policy.
 #[test]
 fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
     let now = Utc.with_ymd_and_hms(2026, 10, 20, 11, 0, 0).unwrap();
@@ -253,12 +253,65 @@ fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
         idle_workers: vec!["gold-fox".into()],
     });
 
-    for focus in [Some("cas-epic"), None] {
-        let state = supervisor_actionable_state(&snapshot, focus, "supervisor", &HashSet::new(), now, 600, |_| None);
-        assert_eq!(state, expected, "focus {focus:?}");
-    }
+    let state = supervisor_actionable_state(&snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None);
+    assert_eq!(state, None, "a pinned epic has no ready children");
+    assert!(!wake_for(state, now), "unrelated backlog must produce no supervisor_stalled wake");
+    assert_eq!(supervisor_actionable_state(&snapshot, None, "supervisor", &HashSet::new(), now, 600, |_| None), expected);
     let text = expected.unwrap().next_step_text();
     assert!(text.contains("cas-r09 and 2 more to idle worker(s) gold-fox"), "{text}");
+    snapshot.ready_tasks.push(task("cas-focused", TaskStatus::Open, None, Some("cas-epic")));
+    snapshot.ready_tasks.push(task("cas-other-epic", TaskStatus::Open, None, Some("cas-other")));
+    let focused = supervisor_actionable_state(&snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None);
+    assert_eq!(focused, Some(SupervisorActionableState::AssignReadyWork {
+        task_ids: vec!["cas-focused".into()], idle_workers: vec!["gold-fox".into()],
+    }));
+}
+
+#[test]
+fn pending_reviewers_are_not_idle_assignment_candidates_cas_c73a() {
+    use cas_factory::{ActiveLeaseSummary, PendingQaSummary};
+    let now = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
+    for identity in ["id-reviewer", "reviewer"] {
+        let mut snapshot = data();
+        snapshot.ready_tasks.push(task("cas-focused", TaskStatus::Open, None, Some("cas-epic")));
+        let mut implementer = worker("implementer", now - Duration::hours(1));
+        implementer.current_task = Some("cas-review".into());
+        implementer.active_lease = Some(ActiveLeaseSummary {
+            task_id: "cas-review".into(), task_title: "Under review".into(), task_status: TaskStatus::AwaitingMerge,
+            close_rejected_reason: None,
+            pending_qa: Some(PendingQaSummary { pass_id: "qa-current".into(), round: 1, qa_task_id: None,
+                bound_head: "review-head".into(), reviewer_agent_id: Some(identity.into()), claimed: false,
+                deadline_at: now + Duration::minutes(30) }),
+        });
+        snapshot.agents = vec![implementer, worker("reviewer", now - Duration::hours(1))];
+        let action = |snapshot: &DirectorData| supervisor_actionable_state(snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None);
+        assert_eq!(action(&snapshot), None, "pending reviewer {identity} is reserved");
+        snapshot.agents[0].active_lease.as_mut().unwrap().pending_qa = None;
+        assert!(matches!(action(&snapshot), Some(SupervisorActionableState::AssignReadyWork { .. })), "unreserved worker remains available");
+        snapshot.agents[1].qa_reviewer_between_rounds = true;
+        assert_eq!(action(&snapshot), None, "reviewer between rounds remains reserved");
+        snapshot.agents[1].qa_reviewer_between_rounds = false;
+        snapshot.ready_tasks.push(task("cas-open-qa-role", TaskStatus::Open, Some("reviewer"), None));
+        assert_eq!(action(&snapshot), None, "an assigned open QA role is not idle for new work");
+    }
+}
+
+#[test]
+fn identical_assignment_nudge_has_a_session_cooldown_cas_c73a() {
+    let start = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
+    let action = Some(SupervisorActionableState::AssignReadyWork {
+        task_ids: vec!["cas-ready".into()], idle_workers: vec!["gold-fox".into()],
+    });
+    let mut tracker = SupervisorStallTracker::default();
+    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(10)), false, start, 600).wake.is_some());
+    // The session receipt survives a daemon serialization round trip and a
+    // supervisor tool call; neither may restart an identical assignment nag.
+    let mut tracker: SupervisorStallTracker = serde_json::from_str(&serde_json::to_string(&tracker).unwrap()).unwrap();
+    assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(10)), false, start + Duration::minutes(10), 600).wake.is_none());
+    let active = Some(start + Duration::minutes(11));
+    assert!(tracker.observe(action.clone(), active, false, start + Duration::minutes(11), 600).wake.is_none());
+    assert!(tracker.observe(action.clone(), active, false, start + Duration::minutes(21), 600).wake.is_none());
+    assert!(tracker.observe(action, active, false, start + Duration::minutes(30), 600).wake.is_some());
 }
 
 /// cas-7456 (GH #1302 D): two supervisors left their idle page unanswered for

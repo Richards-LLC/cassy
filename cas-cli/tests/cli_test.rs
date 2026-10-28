@@ -100,7 +100,7 @@ fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
     });
     cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
 
-    for selector in [vec!["--files", "src/flow.ts"], vec!["--task", "cas-legacy-impact"]] {
+    for selector in [vec!["--task", "cas-legacy-impact"], vec!["--files", "src/flow.ts"]] {
         let output = cas_cmd(root)
             .current_dir(root)
             .args(["qa", "impact"])

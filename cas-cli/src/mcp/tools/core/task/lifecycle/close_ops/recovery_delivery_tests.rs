@@ -400,6 +400,25 @@ async fn first_close_explicit_final_receipt_binds_qa_and_merge_request_gh1389() 
     task.deliverables.historical_factory_branch_anchors.clear();
     tasks.update(&task).unwrap();
 
+    let unrelated = git(f.dir.path(), &["rev-parse", "main"]);
+    for (label, receipt) in [("prior head", &f.predecessor), ("unrelated target", &unrelated)] {
+        let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some(format!("{label} receipt must refuse")),
+            commit_receipt: Some(receipt.clone()),
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+        })).await.unwrap());
+        assert!(output.contains("REJECTED") || output.contains("REFUSED"), "{label}: {output}");
+        let unchanged = tasks.get(TASK).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::InProgress, "{label}: {output}");
+        assert_eq!(unchanged.deliverables.factory_branch_anchor.as_deref(), Some(f.predecessor.as_str()));
+        assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+    }
+
     let parked = close(&f).await;
     assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
     assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));

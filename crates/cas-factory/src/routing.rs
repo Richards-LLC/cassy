@@ -1958,6 +1958,31 @@ candidates = ["primary", "fallback"]
             decision.warnings[0],
             "fallback: fallback (primary primary unavailable: Codex account is logged out)"
         );
+
+        let account = recipe_route_identity(&registry.recipes["primary"], "/accounts/codex");
+        for dimension in ["harness", "provider", "endpoint", "model", "stale", "unavailable", "unknown"] {
+            let mut identity = account.clone();
+            let mut evidence = CapabilityEvidence::new(CapabilityAvailability::Available, now);
+            match dimension {
+                "harness" => identity.harness = "claude".into(),
+                "provider" => identity.provider = "other".into(),
+                "endpoint" => identity.endpoint = "https://other.example".into(),
+                "model" => identity.model = "other".into(),
+                "stale" => evidence.ttl_ms = 0,
+                "unavailable" => evidence.availability = CapabilityAvailability::Unavailable,
+                "unknown" => evidence.availability = CapabilityAvailability::Unknown,
+                _ => unreachable!(),
+            }
+            let mut candidate = snapshot.clone();
+            candidate.record(identity, evidence);
+            assert_eq!(resolve_lane_from_registry("test", &candidate, &registry).unwrap().recipe_id,
+                "fallback", "{dimension} account evidence cannot authorize this route");
+        }
+        snapshot.record(account, CapabilityEvidence::new(CapabilityAvailability::Available, now));
+        let decision = resolve_lane_from_registry("test", &snapshot, &registry).unwrap();
+        assert_eq!(decision.recipe_id, "primary");
+        assert_eq!(decision.spec.config_dir.as_deref(), Some("/accounts/codex"));
+        assert!(decision.warnings.is_empty(), "another account is still the primary recipe");
     }
 
     #[test]

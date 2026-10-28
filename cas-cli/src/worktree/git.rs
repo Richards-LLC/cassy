@@ -1755,6 +1755,14 @@ impl GitOperations {
     /// Inside `.git/` it also stays invisible to `git status` in every
     /// checkout.
     fn add_temp_worktree(&self, start_point: &str) -> Result<TempWorktree> {
+        self.add_temp_worktree_bounded(start_point, None)
+    }
+
+    fn add_temp_worktree_bounded(
+        &self,
+        start_point: &str,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<TempWorktree> {
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -1775,10 +1783,20 @@ impl GitOperations {
             GitError::CommandFailed(format!("Path contains invalid UTF-8: {}", path.display()))
         })?;
 
-        let output = Command::new("git")
+        // Own cleanup before starting Git, including a failed/timed-out
+        // checkout that has already created its directory or admin entry.
+        let guard = TempWorktree {
+            repo_root: self.repo_root.clone(),
+            path: path.clone(),
+        };
+        let mut command = Command::new("git");
+        command
             .args(["worktree", "add", "--detach", path_str, start_point])
-            .current_dir(&self.repo_root)
-            .output()?;
+            .current_dir(&self.repo_root);
+        let output = match timeout {
+            Some(timeout) => Self::run_command_bounded(command, timeout)?,
+            None => command.output()?,
+        };
 
         if !output.status.success() {
             return Err(GitError::CommandFailed(format!(
@@ -1788,10 +1806,7 @@ impl GitOperations {
             )));
         }
 
-        Ok(TempWorktree {
-            repo_root: self.repo_root.clone(),
-            path,
-        })
+        Ok(guard)
     }
 
     /// Check if the worktree has uncommitted changes

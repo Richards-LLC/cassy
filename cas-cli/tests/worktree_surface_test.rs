@@ -2118,12 +2118,23 @@ fn register_worker_agent(cas_root: &Path, name: &str, factory_session: Option<&s
 
 #[tokio::test]
 async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
-    for origin_only in [false, true] {
+    for (origin_only, target_valid) in [(false, true), (true, true), (true, false)] {
         let repo = GitRepo::new();
         let mut env = test_env();
         let cas_root = init_cas_dir(&repo.root, &mut env).expect("init_cas_dir");
         disable_system_a(&cas_root);
 
+        if origin_only {
+            // GH #1386: the unrelated supervisor tree gives the opposite
+            // validation result from the target being merged and pushed.
+            std::fs::write(
+                repo.root.join("push-input.txt"),
+                if target_valid { "invalid" } else { "valid" },
+            )
+            .unwrap();
+            run_git(&["add", "push-input.txt"], &repo.root);
+            run_git(&["commit", "-m", "supervisor validation input"], &repo.root);
+        }
         run_git(&["branch", "epic/foo"], &repo.root);
         let remote = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
         if origin_only {
@@ -2151,9 +2162,19 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
             run_git(&["config", "user.email", "peer@example.test"], &peer);
             run_git(&["config", "user.name", "Peer"], &peer);
             std::fs::write(peer.join("peer-target.txt"), "peer target content\n").unwrap();
-            run_git(&["add", "peer-target.txt"], &peer);
+            std::fs::write(
+                peer.join("push-input.txt"),
+                if target_valid { "valid" } else { "invalid" },
+            )
+            .unwrap();
+            run_git(&["add", "peer-target.txt", "push-input.txt"], &peer);
             run_git(&["commit", "-m", "peer advances epic"], &peer);
             run_git(&["push", "origin", "epic/foo"], &peer);
+            if target_valid {
+                // Moving validation must not change a relative local origin.
+                let relative_origin = format!("../{}", remote.path().file_name().unwrap().to_str().unwrap());
+                run_git(&["remote", "set-url", "origin", &relative_origin], &repo.root);
+            }
             run_git(&["branch", "-D", "epic/foo"], &repo.root);
             run_git(
                 &["update-ref", "-d", "refs/remotes/origin/epic/foo"],
@@ -2167,7 +2188,24 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                     .unwrap()
                     .success()
             );
+            let hook = repo.root.join(".git/hooks/pre-push");
+            let log = remote.path().join("push-tree.log");
+            let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
+            std::fs::write(&hook, format!(
+                "#!/bin/sh\nwhile read local_ref local_sha remote_ref remote_sha; do\n\
+                 printf '%s %s %s\\n' \"$local_sha\" \"$(git rev-parse HEAD)\" \"$(cat push-input.txt)\" >> {}\n\
+                 test \"$(cat push-input.txt)\" = valid || exit 1\ndone\n",
+                quote(&log)
+            )).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
+        let remote_before = origin_only.then(|| {
+            git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+        });
 
         // cas-bd5f: task must belong to alice (matching worker/task/epic).
         let (_epic_id, worker_task_id) =
@@ -2226,14 +2264,24 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
                 String::from_utf8_lossy(&epic_tree.stdout).contains("peer-target.txt"),
                 "the peer's origin-only target commit must survive the merge"
             );
+            let target_sha = git_stdout(&repo.root, &["rev-parse", "epic/foo"]);
             assert_eq!(
-                git_stdout(&repo.root, &["rev-parse", "epic/foo"]),
-                git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"])
+                std::fs::read_to_string(remote.path().join("push-tree.log")).unwrap().trim(),
+                format!("{target_sha} {target_sha} {}", if target_valid { "valid" } else { "invalid" }),
+                "the real pre-push hook must inspect exactly the pushed target, not supervisor HEAD; receipt: {text}"
             );
-            assert_eq!(
-                git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
-                git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
-            );
+            let remote_after = git_stdout(remote.path(), &["rev-parse", "refs/heads/epic/foo"]);
+            if target_valid {
+                assert_eq!(target_sha, remote_after, "unrelated supervisor failure must not block push: {text}");
+                assert!(!text.contains("NOT PUSHED"), "{text}");
+                assert_eq!(
+                    git_stdout(&repo.root, &["rev-parse", "epic/foo@{upstream}"]),
+                    git_stdout(&repo.root, &["rev-parse", "origin/epic/foo"])
+                );
+            } else {
+                assert_eq!(Some(remote_after), remote_before, "a failing target hook must not publish the merge");
+                assert!(text.contains("NOT PUSHED"), "an unrelated passing tree must not bypass target validation: {text}");
+            }
         }
     }
 }
@@ -3234,7 +3282,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let hook = hooks.join("pre-push");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
     std::fs::write(&hook, format!(
-        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n git -C {} push origin refs/heads/epic/race:refs/heads/epic/race || exit 1\nfi\n",
+        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n (unset $(git rev-parse --local-env-vars); git -C {} push origin refs/heads/epic/race:refs/heads/epic/race) || exit 1\nfi\n",
         quote(&hooks.join("peer-pushed")), quote(&peer)
     )).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -484,6 +484,14 @@ pub enum ClientMessage {
         device_id: String,
     },
 
+    /// Attention persistence is separate from conversation replies. The hub
+    /// authenticates device_id; the daemon verifies notice provenance.
+    OperatorNoticePersisted {
+        notification_id: i64,
+        #[serde(default)]
+        device_id: String,
+    },
+
     /// Request a bounded page of durable operator/supervisor conversation
     /// turns. The hub overwrites `device_id` from its authenticated session.
     ConversationHistoryRequest {
@@ -1254,6 +1262,10 @@ mod tests {
             } if device_id == "phone-7"
         ));
         let _ = message;
+        // Attention persistence has a separate application receipt.
+        let notice = r#"{"OperatorNoticePersisted":{"notification_id":76,"device_id":"phone-7"}}"#;
+        let decoded = serde_json::from_str::<ClientMessage>(notice).unwrap();
+        assert_eq!(serde_json::to_string(&decoded).unwrap(), notice);
     }
 
     #[test]

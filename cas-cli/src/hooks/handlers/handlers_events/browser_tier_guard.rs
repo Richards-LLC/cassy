@@ -50,16 +50,17 @@ fn selected(args: &[String]) -> bool {
             i += 2;
             continue;
         }
-        // The direct CLI includes its subcommand; the verified runner does not.
-        if i == 0 && arg == "test" {
-            i += 1;
-            continue;
-        }
         if !arg.starts_with('-') {
-            let spec = arg
-                .rsplit_once(':')
-                .filter(|(_, line)| !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()))
-                .map_or(arg.as_str(), |(spec, _)| spec);
+            let mut spec = arg.as_str();
+            // Playwright accepts file:line and file:line:column selectors.
+            for _ in 0..2 {
+                let Some((file, _)) = spec.rsplit_once(':').filter(|(_, coordinate)| {
+                    !coordinate.is_empty() && coordinate.bytes().all(|c| c.is_ascii_digit())
+                }) else {
+                    break;
+                };
+                spec = file;
+            }
             let filename = std::path::Path::new(spec)
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -163,7 +164,15 @@ fn unfiltered(command: &str, depth: usize) -> bool {
             let verified = words[..i]
                 .iter()
                 .any(|w| w.ends_with("run-verified-tests.mjs"));
-            if (verified || args.iter().any(|a| a == "test")) && !selected(args) {
+            let needs_selection = verified || args.iter().any(|a| a == "test");
+            // The direct CLI consumes its subcommand; the verified runner adds
+            // that subcommand itself, so all of its args are filters/options.
+            let args = if !verified && args.first().is_some_and(|arg| arg == "test") {
+                &args[1..]
+            } else {
+                args
+            };
+            if needs_selection && !selected(args) {
                 return true;
             }
         }

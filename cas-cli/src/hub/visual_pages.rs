@@ -42,6 +42,12 @@ pub(crate) fn page_csp(frame_ancestor: &str) -> String {
         .replace("{frame_ancestor}", frame_ancestor)
 }
 
+/// Response marker for `security_headers`: serve this sandbox policy in
+/// place of Commander's application CSP and frame denial. Only the visual
+/// page route sets it; an answer without it keeps Commander's strict policy.
+#[derive(Clone)]
+pub(crate) struct PageContentSecurityPolicy(pub axum::http::HeaderValue);
+
 /// The page itself: HTML only. Passed to the shared artifact byte path
 /// (`artifact_proxy`), which keeps the thread, size, Range and no-bearer rules.
 pub(crate) const PAGE_MIME_ALLOWLIST: &[&str] = &["text/html"];

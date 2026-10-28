@@ -170,6 +170,11 @@ invariants:
       edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the daemon''s notice
       state and resolution announcement are doubled; that the daemon announces a real relay reaching the supervisor
       is proven by its Rust tests and at epic assembly'
+  HUB-J15-NOTICE-PERSISTENCE:
+    statement: Attention notices are acknowledged only after durable storage, drain across batches, and stay drained after reconnect; conversation receipts are separate.
+    check: Run the HUB-J15 pending-notice reconnect part and read back attention storage, notice receipt IDs, and pending rows; verify daemon/store provenance fences with their Rust tests.
+    bug:
+      task: cas-bdbb
   HUB-J16-GOAL:
     statement: see at least six of the sessions at once, and end one with a confirmation that appears immediately,
       is focused and is fully visible
@@ -1492,6 +1497,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J15-GOAL
+  - HUB-J15-NOTICE-PERSISTENCE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

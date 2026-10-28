@@ -2314,6 +2314,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
 
     let daemon_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let daemon_port = daemon_listener.local_addr().unwrap().port();
+    let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -2336,6 +2337,8 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
             .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
             .await
             .unwrap();
+        let receipt = socket.next().await.unwrap().unwrap();
+        receipt_tx.send(serde_json::from_slice::<serde_json::Value>(&receipt.into_data()).unwrap()).unwrap();
         futures_util::future::pending::<()>().await;
     });
 
@@ -2413,6 +2416,15 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
         socket.next().await,
         Some(Ok(WsMessage::Binary(_)))
     ));
+
+    // A read-only viewer needs no control lease to persist attention. The
+    // authenticated hub replaces a spoofed device before forwarding it.
+    socket.send(WsMessage::Text(serde_json::json!({"OperatorNoticePersisted": {
+        "notification_id": 76, "device_id": "forged-device"
+    }}).to_string().into())).await.unwrap();
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), receipt_rx).await.unwrap().unwrap();
+    assert_eq!(receipt["OperatorNoticePersisted"]["notification_id"], 76);
+    assert_eq!(receipt["OperatorNoticePersisted"]["device_id"], device_id);
 
     cli_auth.revoke_device(&device_id, Utc::now()).unwrap();
     let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2535,6 +2547,9 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&keyframe), Some(Scope::PaneRead));
     assert_eq!(required_scope(&scrollback), Some(Scope::PaneRead));
     assert_eq!(required_scope(&history), Some(Scope::PaneRead));
+    let notice_receipt = ClientMessage::OperatorNoticePersisted { notification_id: 76, device_id: "phone".into() };
+    assert_eq!(required_scope(&notice_receipt), Some(Scope::PaneRead));
+    assert!(super::server::is_pane_read_message(&notice_receipt));
     assert!(super::server::is_pane_read_message(&keyframe));
     assert!(super::server::is_pane_read_message(&scrollback));
     assert!(super::server::is_pane_read_message(&history));
@@ -5287,6 +5302,7 @@ async fn visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets(
     for (id, mime, session) in [
         ("art-page", "text/html", OPS_SESSION),
         ("art-chart", "image/png", OPS_SESSION),
+        ("art-diagram", "image/svg+xml", OPS_SESSION),
         ("art-other-page", "text/html", OPS_SESSION),
         ("art-data", "application/json", OPS_SESSION),
         ("art-foreign", "image/png", "another-session"),
@@ -5360,6 +5376,12 @@ async fn visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets(
         assert!(!headers.contains_key("x-frame-options"), "frame-ancestors replaces DENY for the minting origin");
         assert!(!headers.contains_key("access-control-allow-origin"), "no origin may read a page by script");
     }
+    // cas-a473: an SVG sibling, a document when opened alone, also keeps the
+    // media route's own sandbox beside the page policy.
+    let svg = get(format!("{ticket_root}art-diagram"), None).await.unwrap();
+    assert_eq!(svg.status(), StatusCode::OK);
+    let policies: Vec<_> = svg.headers().get_all("content-security-policy").iter().map(|value| value.to_str().unwrap().to_owned()).collect();
+    assert_eq!(policies, [expected_csp, "default-src 'none'; sandbox"]);
 
     // A second page, JSON, another session's file, a missing artifact and an
     // unknown ticket are refused under Commander's own strict policy.
@@ -5393,6 +5415,8 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     for (id, mime, session, size) in [
         ("art-image", "image/png", OPS_SESSION, 6),
         ("art-video", "video/mp4", OPS_SESSION, 6),
+        ("art-svg", "image/SvG+xMl", OPS_SESSION, 6),
+        ("art-stream", "video/mp4", OPS_SESSION, 2 * 1024 * 1024),
         ("art-pdf", "application/pdf", OPS_SESSION, 6),
         ("art-html", "text/html", OPS_SESSION, 6),
         ("art-large", "image/png", OPS_SESSION, cas_types::ARTIFACT_MAX_BYTES + 1),
@@ -5420,6 +5444,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     ).with_auth(f.auth.clone()).with_artifact_cloud_client(
         crate::artifacts::cloud::ArtifactUploadClient::new(&upstream.uri(), "fixture-cloud-token")
     );
+    let tick = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let start = std::time::Instant::now();
+    let media_state = media_state.with_artifact_stream_clock(Arc::new(move || {
+        // First chunk, half a second, one second, then frozen: no wall-clock wait.
+        let tick = tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst).min(2);
+        start + std::time::Duration::from_millis(tick as u64 * 500)
+    }));
     f.app = router(media_state.clone());
     let origin = upstream.uri();
     wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -5435,6 +5466,9 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         .and(wiremock::matchers::path_regex("^/blob/"))
         .respond_with(|request: &wiremock::Request| {
             assert!(request.headers.get("authorization").is_none(), "cloud bearer must stay at Cloud");
+            if request.url.path().ends_with("cloud-art-stream") {
+                return wiremock::ResponseTemplate::new(200).set_body_bytes(vec![b'v'; 2 * 1024 * 1024]);
+            }
             match request.headers.get("range").and_then(|value| value.to_str().ok()) {
                 Some("bytes=2-4") => wiremock::ResponseTemplate::new(206)
                     .insert_header("Content-Range", "bytes 2-4/6").set_body_bytes(b"cde"),
@@ -5448,6 +5482,8 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     for (session, artifact, expected) in [
         (OPS_SESSION, "art-image", StatusCode::OK),
         (OPS_SESSION, "art-video", StatusCode::OK),
+        (OPS_SESSION, "art-svg", StatusCode::OK),
+        (OPS_SESSION, "art-stream", StatusCode::OK),
         (OPS_SESSION, "art-pdf", StatusCode::OK),
         (OPS_SESSION, "art-html", StatusCode::NOT_FOUND),
         (OPS_SESSION, "art-large", StatusCode::NOT_FOUND),
@@ -5468,6 +5504,28 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         }
         assert!(upstream.received_requests().await.unwrap().is_empty(), "ticket issuance never fetches upstream");
     }
+    // Count actual auth-store reads through the router, across many body chunks.
+    let before_checks = f.auth.active_context_check_count();
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-stream/content?t={}", tickets["art-stream"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap().len(), 2 * 1024 * 1024);
+    let checks = f.auth.active_context_check_count() - before_checks;
+    let mut followup_failures = Vec::new();
+    if checks != 4 { followup_failures.push(format!("auth reads: expected two eager and two timed checks, got {checks}")); }
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-svg/content?t={}", tickets["art-svg"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/SvG+xMl");
+    if !response.headers().get_all("content-security-policy").iter().any(|value| value == "default-src 'none'; sandbox") {
+        followup_failures.push("SVG response lacks restrictive sandbox CSP".to_owned());
+    }
+    assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), &b"abcdef"[..]);
+    assert!(followup_failures.is_empty(), "{}", followup_failures.join("; "));
+    // The new GET rows fetched upstream; ticket issuance above still did not.
+    let initial_fetches = upstream.received_requests().await.unwrap().len();
     // Same paired origin, independently authenticated device, insufficient scope.
     let denied_key = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
     let denied_scopes = [Scope::MachineRead].into_iter().collect();
@@ -5483,7 +5541,7 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         .header("dpop", sign_dpop(&denied_key, &denied.credential, "POST", &uri, now, &uuid::Uuid::new_v4().to_string()))
         .body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(upstream.received_requests().await.unwrap().is_empty());
+    assert_eq!(upstream.received_requests().await.unwrap().len(), initial_fetches);
     let post_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
     let now = chrono::Utc::now();
     let context = f.auth.authenticate_dpop(&format!("DPoP {}", f.credential),
@@ -5559,13 +5617,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     std::fs::write(auth_path, saved).unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
-    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-image", now - chrono::Duration::minutes(6)).unwrap().ticket;
+    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-video", now - chrono::Duration::minutes(6)).unwrap().ticket;
     let valid = tickets["art-image"].clone();
     let mut tampered = valid.clone();
     tampered.replace_range(3..4, if &tampered[3..4] == "A" { "B" } else { "A" });
     for (case, session, artifact, mut ticket) in [
         ("missing", OPS_SESSION, "art-image", String::new()),
-        ("expired", OPS_SESSION, "art-image", expired),
+        ("expired", OPS_SESSION, "art-video", expired),
         ("tampered", OPS_SESSION, "art-image", tampered),
         ("wrong artifact", OPS_SESSION, "art-pdf", valid.clone()),
         ("wrong session", "another-session", "art-image", valid.clone()),
@@ -5592,5 +5650,15 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
         assert_eq!(upstream.received_requests().await.unwrap().len(), before, "{case} fetched upstream");
+        if case == "expired" {
+            let (status, fresh) = f.call("POST", &format!("/v1/sessions/{OPS_SESSION}/artifacts/art-video/ticket"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            let response = f.app.clone().oneshot(Request::get(format!(
+                "/v1/sessions/{OPS_SESSION}/artifacts/art-video/content?t={}", fresh["ticket"].as_str().unwrap()))
+                .header("range", "bytes=0-0").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(response.headers()["content-range"], "bytes 0-0/6");
+            assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), &b"a"[..]);
+        }
     }
 }

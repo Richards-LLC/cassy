@@ -35,7 +35,7 @@ Referrer-Policy: no-referrer
 Cache-Control: no-store
 ```
 
-The machine's general `X-Frame-Options: DENY` is left off these responses only. `frame-ancestors` takes its place and names exactly one origin. The policy text lives in `cas-cli/src/hub/visual_page_csp.txt`. The Rust route and the browser journey's machine double both read that file, so they can't drift apart.
+The route marks its response with a page policy that the machine's shared security-header layer serves in place of Commander's own. The machine's general `X-Frame-Options: DENY` is left off these responses only. An SVG sub-asset also keeps the media route's `default-src 'none'; sandbox` policy beside the page policy. `frame-ancestors` takes its place and names exactly one origin. The policy text lives in `cas-cli/src/hub/visual_page_csp.txt`. The Rust route and the browser journey's machine double both read that file, so they can't drift apart.
 
 ## Threats and controls
 

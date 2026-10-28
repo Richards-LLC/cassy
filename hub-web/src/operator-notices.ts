@@ -65,3 +65,20 @@ export function noticeTime(at: string | undefined, now: number = Date.now()): st
   if (!Number.isFinite(parsed)) return undefined;
   return new Date(Math.min(parsed, now)).toISOString();
 }
+
+/** A history replay cannot overtake an uncommitted live notice for its session. */
+export class NoticePersistence {
+  private readonly writes = new Map<string, Promise<void>>();
+
+  keep(key: string, reply: OperatorReply, persist: () => Promise<void>, current: () => Promise<boolean>, acknowledge: () => void): Promise<void> {
+    if (!isOperatorNotice(reply) || !Number.isSafeInteger(reply.notification_id) || reply.notification_id <= 0) return Promise.resolve();
+    const pending = (this.writes.get(key) ?? Promise.resolve()).then(async () => {
+      if (!await current()) return;
+      await persist();
+      if (await current()) acknowledge();
+    }).catch(() => { /* Failed storage or stale access never authorizes a receipt; reconnect retries. */ });
+    this.writes.set(key, pending);
+    void pending.then(() => { if (this.writes.get(key) === pending) this.writes.delete(key); });
+    return pending;
+  }
+}

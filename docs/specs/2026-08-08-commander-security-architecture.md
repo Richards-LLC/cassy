@@ -146,6 +146,7 @@ default-src 'none';
 script-src 'self';
 style-src 'self';
 img-src 'self' data:;
+media-src 'self';
 font-src 'self';
 connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:*;
 frame-src 'self' https: http://127.0.0.1:*;
@@ -153,9 +154,13 @@ object-src 'none';
 base-uri 'none';
 frame-ancestors 'none';
 form-action 'none';
-worker-src 'none';
+worker-src 'self';
 manifest-src 'self'
 ```
+
+`worker-src 'self'` permits the self-hosted PDF.js module worker used by attachment previews. Images, video and audio use the session-authorized attachment byte proxy, so `img-src` and `media-src` need no external HTTPS source. SVG media responses additionally enforce `default-src 'none'; sandbox`, alongside the application policy, to disable script and document-origin privileges when opened directly.
+
+Attachment byte streams have a 10-second connect limit and 120-second socket read/write idle limits, with no whole-body deadline. A long pause caused by downstream backpressure does not consume a total transfer budget. If a connection is interrupted or a ticket expires before a later Range request, consumers must POST a new ticket to `/v1/sessions/{session}/artifacts/{artifact}/ticket` using their current session-read credential, then retry the requested byte range at `/v1/sessions/{session}/artifacts/{artifact}/content?t=...`. The `bytes=0-0` probe returns 206 with `Content-Range`; ticket URLs contain no pairing credential. This is a recovery contract for consumers, not a claim that every renderer automatically resumes playback. Pairing revocation or credential-generation changes still refuse renewal and subsequent reads; stream authorization is rechecked at most once per second of active transfer, after the first chunk.
 
 The broad secure-scheme allowance in `connect-src` is not an authorization grant: the browser client may initiate connections only to catalog entries, and every target hub independently enforces exact Origin, DPoP, and scope. Plaintext IPv6 loopback may be added only with an equivalently literal loopback source expression verified by browser tests; plaintext hostnames, LAN addresses, and wildcard subdomains are not allowed. Responses also send `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and `Strict-Transport-Security: max-age=31536000` on TLS origins. `includeSubDomains` is omitted because a hub must not assert policy for DNS names it does not control. Framing is forbidden by both CSP and any legacy frame header retained for compatibility.
 

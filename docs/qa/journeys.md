@@ -536,6 +536,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A notice from another session never appears here, in the thread or its earlier sections.
 - A dismissed notice stays dismissed when history replays it.
+- Pending notices commit to attention before their separate persistence receipt; more than one batch drains to zero, and reconnect never resends drained notices. A receipt cannot consume a conversation reply.
 - A session that leaves the catalog retires its open notices.
 
 ### HUB-J16 · End a session from my phone

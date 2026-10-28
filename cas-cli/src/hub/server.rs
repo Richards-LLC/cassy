@@ -55,6 +55,8 @@ pub struct HubState<R: SessionReadModel> {
     artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
     /// Visual reply page tickets (cas-3aff).
     pages: super::visual_pages::PageTickets,
+    #[cfg(test)]
+    artifact_stream_clock: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -82,6 +84,8 @@ impl<R: SessionReadModel> HubState<R> {
             #[cfg(test)]
             artifact_cloud_client: None,
             pages: super::visual_pages::PageTickets::default(),
+            #[cfg(test)]
+            artifact_stream_clock: None,
         }
     }
 
@@ -94,6 +98,12 @@ impl<R: SessionReadModel> HubState<R> {
     #[cfg(test)]
     pub(crate) fn with_artifact_cloud_client(mut self, client: crate::artifacts::cloud::ArtifactUploadClient) -> Self {
         self.artifact_cloud_client = Some(client);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_stream_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.artifact_stream_clock = Some(clock);
         self
     }
 
@@ -422,12 +432,14 @@ async fn security_headers(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    // A visual reply page carries its own sandbox policy (cas-3aff); every
-    // other response, and any page-route answer without one, gets Commander's.
-    let page_route = request.uri().path().starts_with("/v1/pages/");
     let mut response = next.run(request).await;
+    let additional_csp = response.extensions_mut()
+        .remove::<artifact_proxy::AdditionalContentSecurityPolicy>();
+    // A visual reply page carries its own sandbox policy in place of
+    // Commander's (cas-3aff); every other response gets Commander's.
+    let page_policy = response.extensions_mut()
+        .remove::<super::visual_pages::PageContentSecurityPolicy>();
     let headers = response.headers_mut();
-    let page_policy = page_route && headers.contains_key("content-security-policy");
     if matches!(
         transport,
         TransportSecurity::Tls13 | TransportSecurity::TrustedLoopbackTlsProxy
@@ -442,7 +454,11 @@ async fn security_headers(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    if page_policy {
+    if let Some(page) = page_policy {
+        headers.insert("content-security-policy", page.0);
+        if let Some(policy) = additional_csp {
+            headers.append("content-security-policy", policy.0);
+        }
         return response;
     }
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
@@ -463,6 +479,9 @@ async fn security_headers(
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
         )),
     );
+    if let Some(policy) = additional_csp {
+        headers.append("content-security-policy", policy.0);
+    }
     response
 }
 
@@ -2614,9 +2633,22 @@ async fn visual_page<R: SessionReadModel>(
     // A page is navigated to, never read by script: no origin may read it.
     response.headers_mut().remove("access-control-allow-origin");
     if response.status().is_success() {
-        let output = response.headers_mut();
-        output.insert("content-security-policy", policy);
-        output.insert("content-disposition", HeaderValue::from_static("inline"));
+        let svg = response.headers().get("content-type").is_some_and(|mime| {
+            mime.to_str()
+                .is_ok_and(|mime| mime.eq_ignore_ascii_case("image/svg+xml"))
+        });
+        response
+            .headers_mut()
+            .insert("content-disposition", HeaderValue::from_static("inline"));
+        let extensions = response.extensions_mut();
+        extensions.insert(super::visual_pages::PageContentSecurityPolicy(policy));
+        // cas-a473: SVG is a document when opened alone; it keeps the media
+        // route's own sandbox on top of the page policy.
+        if svg {
+            extensions.insert(artifact_proxy::AdditionalContentSecurityPolicy(
+                HeaderValue::from_static("default-src 'none'; sandbox"),
+            ));
+        }
     }
     response
 }
@@ -2966,7 +2998,8 @@ async fn handle_client_message(
         *attribution = verified_attribution(context);
     }
     if let ClientMessage::ConversationHistoryRequest { device_id, .. }
-        | ClientMessage::OperatorReplyPersisted { device_id, .. } = &mut message {
+        | ClientMessage::OperatorReplyPersisted { device_id, .. }
+        | ClientMessage::OperatorNoticePersisted { device_id, .. } = &mut message {
         // History is private to the authenticated paired device. Do not trust
         // a browser-supplied selector, even though this is a read operation.
         *device_id = context.device_id.clone();
@@ -3050,6 +3083,7 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
             | ClientMessage::WorkEventsRequest { .. }
             | ClientMessage::WorkEventDetailRequest { .. }
             | ClientMessage::OperatorReplyPersisted { .. }
+            | ClientMessage::OperatorNoticePersisted { .. }
     )
 }
 

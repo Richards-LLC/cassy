@@ -230,14 +230,17 @@ function conversationHistoryPage(key: string): { hasEarlier: boolean; nextBefore
 }
 function updateConversationViews(): void { for (const view of conversationViews.values()) view.update(); syncConversationContext(); persistPendingSends(); persistArrivals(); syncEarlyThread(); }
 let replyPresentationFrame: number | undefined;
-/** Socket catch-up and journal receipts share one presentation per frame. */
+/** Socket catch-up and journal receipts share one presentation after a frame.
+ * Yield past the shell's measurement/resize callbacks rather than combining
+ * their layout and an entire catch-up presentation into one long frame task.
+ */
 function scheduleReplyPresentation(): void {
   if (replyPresentationFrame !== undefined) return;
-  replyPresentationFrame = requestAnimationFrame(() => {
+  replyPresentationFrame = requestAnimationFrame(() => window.setTimeout(() => {
     replyPresentationFrame = undefined;
     updateConversationViews();
     renderConversationList();
-  });
+  }, 0));
 }
 // What the desktop context rail can show beyond the header (P10): the last
 // status and attention renders record whether they had anything for the open

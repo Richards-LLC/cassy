@@ -526,7 +526,11 @@ mod tests {
     /// return-contract proof and renders unsupplied fields neutrally.
     #[test]
     fn merge_request_review_shows_contract_proof_and_neutral_gaps() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, base, head) = two_commit_repo();
+        let outside = temp.path().join("outside-manifest");
+        assert!(relay_evidence_manifest(&temp.path().join(".cas"), outside.to_str().unwrap(), "proof").is_err());
+        assert!(!outside.exists(), "invalid task IDs must be rejected before any evidence write");
         let task = Task::new("cas-fixture".into(), "Fixture".into());
         let worker = "status: ready\n\
                       tip: abc on factory/w; worktree: clean\n\

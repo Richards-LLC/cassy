@@ -10891,6 +10891,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "empty",
         "foreign",
         "target-change",
+        "target-same-branch",
         "target-dirty",
         "target-invalid",
         "target-foreign",
@@ -10920,7 +10921,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         env.agent_store().update(&supervisor).unwrap();
         // Squashing can lose only the anchor; reset recovery also drops an
         // inherited local-only supervisor base. Both need an audited rebind.
-        if shape != "squashed-anchor" {
+        if !matches!(shape, "squashed-anchor" | "target-same-branch") {
             git(&[
                 "commit",
                 "--allow-empty",
@@ -10969,7 +10970,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .await
                 .unwrap();
         }
-        let branch = if shape == "per-task-branch" || retargeted {
+        let branch = if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
             let branch = format!("factory/{worker}-{}", task.id);
             git(&["switch", "-qc", &branch, "origin/main"]);
             branch

@@ -71,4 +71,3 @@ An explicit `CODEX_HOME` remains authoritative. Otherwise the shared accounts
 resolver supplies every registered home. A config link installed by Cassy to
 its known Codex base is written at that regular base file, preserving the link;
 arbitrary config symlinks retain the filesystem refusal.
-

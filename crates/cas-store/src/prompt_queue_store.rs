@@ -1693,11 +1693,21 @@ impl SqlitePromptQueueStore {
             }
             return Ok(None);
         }
-        if !prompt.source.starts_with("lifecycle-wake:") { return Ok(None); }
+        // Non-waking lifecycle notices wait for the supervisor's next turn in
+        // the digest. Revalidate them there too: a started notice must not
+        // look current after the task has already moved to awaiting_merge.
+        if !prompt.source.starts_with("lifecycle-wake:")
+            && !prompt.source.starts_with("lifecycle:")
+        { return Ok(None); }
         if let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) {
-            return Ok(Self::terminal_relay_task_status(tx, has_tasks, &envelope.task_id)?
+            if !has_tasks { return Ok(None); }
+            let status: Option<String> = tx.query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![&envelope.task_id], |row| row.get(0),
+            ).optional()?;
+            return Ok(status
                 .filter(|status| status != &envelope.new_status.to_string())
-                .map(|status| terminal_detail(&envelope.task_id, &status)));
+                .map(|status| format!("relay for {} superseded by later task state {status} at recipient drain", envelope.task_id)));
         }
         let point_in_time = if prompt.source.starts_with("lifecycle-wake:ci-red-run:") {
             if let Some(envelope) = cas_types::parse_ci_red_run_envelope(&prompt.prompt) {
@@ -1733,7 +1743,7 @@ impl SqlitePromptQueueStore {
         tx: &ImmediateTx<'_>,
         prompts: Vec<QueuedPrompt>,
     ) -> Result<Vec<QueuedPrompt>> {
-        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("verification-dispatch:")) {
+        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("lifecycle:") || prompt.source.starts_with("verification-dispatch:")) {
             return Ok(prompts);
         }
         let has_tasks: bool = tx.query_row(

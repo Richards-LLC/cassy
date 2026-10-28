@@ -173,6 +173,11 @@ fn digest_row(notices: &[QueuedPrompt]) -> Option<String> {
     if notices.is_empty() {
         return None;
     }
+    // This matches the lifecycle relay escalation window. A digest is only
+    // read at a turn boundary, so an old FYI must carry its age rather than
+    // arrive looking like a new transition.
+    const LIFECYCLE_DELIVERY_WINDOW_SECS: i64 = 9 * 60;
+    let now = chrono::Utc::now();
     let named: Vec<String> = notices
         .iter()
         .take(DIGEST_NAMED)
@@ -183,7 +188,17 @@ fn digest_row(notices: &[QueuedPrompt]) -> Option<String> {
                 .map(str::trim)
                 .filter(|summary| !summary.is_empty())
                 .unwrap_or("system notice");
-            format!("#{} {summary}", row.id)
+            let delayed = if row.source.starts_with("lifecycle:")
+                && cas_types::parse_lifecycle_envelope(&row.prompt).is_some()
+            {
+                let age_secs = (now - row.created_at).num_seconds().max(0);
+                (age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS)
+                    .then(|| format!(" [delayed {}m]", age_secs / 60))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            format!("#{} {summary}{delayed}", row.id)
         })
         .collect();
     let more = notices.len().saturating_sub(DIGEST_NAMED);
@@ -1122,7 +1137,9 @@ mod tests {
 
     #[test]
     fn lifecycle_digest_names_a_relay_delayed_past_delivery_window() {
-        let mut delayed = row(13952, "lifecycle:13952", "started");
+        let occurrence = Utc::now().to_rfc3339();
+        let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"cas-example\" new=\"in_progress\" occurrence=\"{occurrence}\">started</task-lifecycle>");
+        let mut delayed = row(13952, "lifecycle:13952", &body);
         delayed.created_at = Utc::now() - chrono::Duration::minutes(29);
         delayed.summary = Some("task_started: cas-example".into());
         let mut timely = row(13956, "lifecycle:13956", "closed");

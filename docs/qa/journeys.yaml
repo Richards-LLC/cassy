@@ -310,6 +310,7 @@ invariants:
     statement: Project-list accessibility labels remain inside the scrolling navigation and never extend the viewport-sized conversation shell.
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
     bug: {task: cas-2a07}
+# Add bug cases in bug-families/<slug>.yaml; see journey-registry.md.
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

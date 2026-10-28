@@ -633,11 +633,9 @@ fn opencode_hosted_provider_config(model: &str) -> Option<serde_json::Value> {
     }))
 }
 
-/// Add explicit Claude config and credential-store directories to a worker.
-///
-/// This deliberately does nothing for omitted values so ordinary process
-/// inheritance remains untouched for existing spawns.
-fn expand_claude_selector(config_dir: &str) -> String {
+/// Normalize an explicit Claude account selector exactly as passed to a worker.
+/// Shared with spawn preflight so credential-store hashes use the same spelling.
+pub fn expand_claude_selector(config_dir: &str) -> String {
     let config_dir = config_dir.trim();
     let config_dir = config_dir
         .strip_suffix('/')

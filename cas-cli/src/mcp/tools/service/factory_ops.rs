@@ -110,14 +110,8 @@ fn preflight_claude_config_dir_with(
     if trimmed.is_empty() {
         return Err("config_dir is empty; expected a Claude configuration directory".to_string());
     }
-    let path = trimmed.strip_prefix('~').map_or_else(
-        || std::path::PathBuf::from(trimmed),
-        |suffix| {
-            dirs::home_dir()
-                .map(|home| home.join(suffix.trim_start_matches('/')))
-                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
-        },
-    );
+    let selector = cas_pty::expand_claude_selector(trimmed);
+    let path = std::path::Path::new(&selector);
     let settings_error = |error: &dyn std::fmt::Display| {
         format!("config_dir preflight failed: missing or unreadable settings.json: {error}")
     };
@@ -130,8 +124,11 @@ fn preflight_claude_config_dir_with(
         Err(error) => return Err(settings_error(&error)),
     }
     if macos {
-        let service = claude_profile_keychain_service(&path.to_string_lossy());
-        if !keychain_item_exists(&service) {
+        let service = claude_profile_keychain_service(&selector);
+        if !keychain_item_exists(&service)
+            && !std::fs::File::open(path.join(".credentials.json"))
+                .is_ok_and(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+        {
             return Err(format!(
                 "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service {service})"
             ));
@@ -15238,9 +15235,12 @@ mod tests {
             );
             if let Err(error) = result {
                 // pin: preserve the actionable credential error for existing callers.
-                assert!(error.starts_with(
-                    "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service "
-                ), "{error}");
+                assert!(
+                    error.starts_with(
+                        "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service "
+                    ),
+                    "{error}"
+                );
             }
             assert!(
                 probed.get(),

@@ -96,9 +96,10 @@ export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
  * The longest the machine connection waits between reconnect attempts. The
  * exponential backoff's 30 s ceiling suits a hub that is down; a network that
  * came back without telling the page (Tailscale switched on again: no
- * `online` event) must not wait that long to be noticed (cas-0978).
+ * `online` event) needs time for dialing and attach within a five-second
+ * recovery window, even after a long outage.
  */
-export const MACHINE_RETRY_CEILING_MS = 10_000;
+export const MACHINE_RETRY_CEILING_MS = 3_000;
 
 /** How long a health ping on the machine socket may go unanswered when the
  * page has reason to doubt it (back online, woken, network changed). */

@@ -753,8 +753,18 @@ describe("Commander live connection lifecycle", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(connection.snapshot()).toMatchObject({ phase: "backoff", stage: "auth" }));
     expect(connection.snapshot().authFailure).toBeUndefined();
+    // A longer real outage must still recover within five seconds of the
+    // machine returning, even after the retry delay has reached its ceiling.
+    for (const delay of [2_000, 4_000, 8_000]) {
+      await vi.advanceTimersByTimeAsync(delay);
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("backoff"));
+    }
     hub.block(false);
-    await vi.advanceTimersByTimeAsync(MACHINE_RETRY_CEILING_MS);
+    const retryIn = connection.snapshot().nextRetryAt! - Date.now();
+    expect(retryIn, "leave time for dialing within the five-second recovery window").toBeLessThanOrEqual(4_000);
+    // Stop at the retry so the synthetic clock cannot outrun native signing
+    // and manufacture a request deadline after the machine has returned.
+    await vi.advanceTimersByTimeAsync(retryIn);
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     expect(hub.streams).toHaveLength(2);
     expect(hub.streams[1]!.credential).toContain("opaque-browser-blocked");

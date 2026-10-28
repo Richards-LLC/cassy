@@ -39,6 +39,9 @@ export type ConnectionState = ConnectionSnapshot;
 // Leave a retired writer readable briefly for its in-flight receipts. Calling
 // close() immediately discards those frames even with onmessage installed.
 const LEGACY_RECEIPT_DRAIN_MS = 5_000;
+// A short-lived SSE stream can flap while its terminal socket still speaks.
+// Keep that event-only retry backoff separate from actual outage recovery.
+const EVENT_RETRY_CEILING_MS = 10_000;
 
 function revealDormant(): boolean {
   let storage: Storage | undefined;
@@ -560,8 +563,10 @@ export class HubConnectionSupervisor {
       const cause = this.failureCause(error);
       this.transition("failed", stage, { reason: stageFailureDetail(stage, target, reason), cause });
       // Capped well below the backoff's 30 s ceiling: a network that returns
-      // without an event (Tailscale switched on) is noticed within 10 s.
-      const delay = Math.min(MACHINE_RETRY_CEILING_MS, backoffDelay(this.attempt++));
+      // without an event (Tailscale switched on) still has time to reattach
+      // within the five-second recovery window.
+      const ceiling = liveSince === undefined ? MACHINE_RETRY_CEILING_MS : EVENT_RETRY_CEILING_MS;
+      const delay = Math.min(ceiling, backoffDelay(this.attempt++));
       const networkAccessHelp = isNetworkFailure(error) ? await localNetworkAccessHelp(this.machine.baseUrl, this.machine.label, permission => { cause.permission = permission; }) : undefined;
       if (!this.desired) return;
       this.transition("backoff", stage, { reason: stageFailureDetail(stage, target, reason), retryInMs: delay, networkAccessHelp, cause });

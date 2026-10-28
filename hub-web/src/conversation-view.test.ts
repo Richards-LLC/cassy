@@ -100,7 +100,8 @@ describe("ConversationView (Pebble thread)", () => {
     document.body.replaceChildren(view.element);
     for (let id = 1; id <= 240; id++) history.reply(reply(id, "answer"), at(9, 0) + id * 1000);
     view.update();
-    expect(view.element.querySelectorAll(".conversation-turn").length).toBeLessThanOrEqual(80);
+    const coldShortCount = view.element.querySelectorAll(".conversation-turn").length;
+    expect(coldShortCount).toBeLessThanOrEqual(80);
     expect(view.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
     expect(view.element.querySelector('[data-key="reply:1"]')).toBeNull();
     const first = view.element.querySelector<HTMLElement>(".conversation-turn")!.dataset.key;
@@ -112,6 +113,15 @@ describe("ConversationView (Pebble thread)", () => {
     view.jump.click();
     expect(view.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
     view.dispose();
+    // Before any browser measurements, long Markdown must not mount the
+    // same number of bubbles as one-line updates and force a giant layout.
+    const longHistory = new ConversationHistory();
+    for (let id = 1; id <= 240; id++) longHistory.reply(reply(id, "answer", "Long release evidence. ".repeat(60)), at(9, 0) + id * 1000);
+    const longView = new ConversationView(document, longHistory, "sup");
+    document.body.replaceChildren(longView.element); longView.update();
+    expect(longView.element.querySelectorAll(".conversation-turn").length).toBeLessThan(coldShortCount);
+    expect(longView.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
+    longView.dispose();
   });
   it("shows session dividers and the no-earlier-history marker", () => {
     const history = new ConversationHistory();

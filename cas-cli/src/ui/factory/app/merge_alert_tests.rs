@@ -310,6 +310,61 @@ fn cas_65e8_settled_lanes_stop_probing_and_ready_survives_restart() {
     assert_eq!(std::fs::read_dir(&receipts).unwrap().count(), 0);
 }
 
+/// Green lane CI can omit the newly failing test; only the worker can mark
+/// this test-first checkpoint complete. Exercise producer, cache and release.
+#[test]
+fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
+    let mut f = Fixture::new();
+    f.in_progress();
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = Some("test-first".into());
+    task.deliverables.factory_branch_anchor = None;
+    let tip = git(f.repo.path(), &["rev-parse", "HEAD"]);
+    // Replace the fixture delivery with a real test-only, intentionally red
+    // commit. Its lane CI fixture remains green because that lane skips it.
+    git(f.repo.path(), &["reset", "--hard", "epic/test"]);
+    std::fs::write(f.repo.path().join("regression_test.rs"), "#[test] fn regression() { assert!(false); }\n").unwrap();
+    git(f.repo.path(), &["add", "regression_test.rs"]);
+    git(f.repo.path(), &["commit", "-qm", "test: red test-first checkpoint"]);
+    git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
+    let checkpoint = git(f.repo.path(), &["rev-parse", "HEAD"]);
+    assert_ne!(tip, checkpoint);
+    for notes in [
+        String::new(),
+        format!("[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint {checkpoint}.\nNot merge-ready; no production implementation."),
+    ] {
+        task.notes = notes;
+        store.update(&task).unwrap();
+        let prompts = f.relay();
+        assert!(prompts.iter().all(|prompt| !prompt.is_merge_ready()),
+            "a test-first checkpoint is not a completed delivery: {prompts:?}");
+    }
+    // Completion may be recorded before park. It must invalidate the settled
+    // negative read and produce one immediate signal without a new commit.
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:01] 📝 PROGRESS PASS {checkpoint}: completed test-only correction; regression green."));
+    store.update(&task).unwrap();
+    let mut ready = f.relay().into_iter().find(|prompt| prompt.is_merge_ready())
+        .expect("worker completion enables the pre-park signal");
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    // A later checkpoint correction must withdraw a signal already cached,
+    // receipted and queued, even though the Git tip and lane CI did not move.
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:02] 📝 PROGRESS Correction: {checkpoint} remains a red checkpoint, not merge-ready."));
+    store.update(&task).unwrap();
+    assert!(!f.app.refresh_prompt_for_delivery(&mut ready));
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    // Ordinary park is an explicit completion boundary. Historical checkpoint
+    // notes cannot silence its single signal (use a fresh receipt store).
+    std::fs::remove_dir_all(f.app.cas_dir.join("receipts/merge-ready")).unwrap();
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.factory_branch_anchor = Some(checkpoint);
+    store.update(&task).unwrap();
+    let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &mut f.event else { unreachable!() };
+    active.task_status = TaskStatus::AwaitingMerge;
+    assert_eq!(f.relay().iter().filter(|prompt| prompt.is_merge_ready()).count(), 1);
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+}
+
 #[test]
 fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
     for status in [TaskStatus::InProgress, TaskStatus::Blocked] {

@@ -5201,7 +5201,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   for (const worker of workers) {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(worker.name), chip(worker.agent?.status));
+    line.append(identifier(worker.name), chip(worker.agent?.liveness ?? worker.agent?.status));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
@@ -5223,7 +5223,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   for (const task of tasks) {
     const row = document.createElement("article"); row.className = "status-row status-task";
     const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(task.id), chip(task.status));
+    line.append(identifier(task.id), chip(task.delivery_state === "merged" ? "Merged, closing" : task.status));
     const title = document.createElement("p");
     title.className = "status-task-title";
     title.textContent = String(task.title ?? "");

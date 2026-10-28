@@ -642,7 +642,7 @@ fn factory_rehome_label(agent: &cas_types::Agent) -> String {
 /// session. Prefer the freshest heartbeat: it is the strongest evidence of
 /// which same-name process is currently answering. This keeps a live respawn
 /// from being hidden behind its older ghost row.
-fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
+pub(crate) fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
     let original_len = agents.len();
     let mut by_identity = std::collections::BTreeMap::<(String, String), cas_types::Agent>::new();
 
@@ -11269,19 +11269,34 @@ const STATUS_ROLLOUT_ENTRIES: usize = 256;
 const STATUS_ROLLOUT_FILES: usize = 8;
 fn status_codex_rollout_entries(root: &std::path::Path) -> impl Iterator<Item = std::io::Result<std::fs::DirEntry>> {
     // Codex uses sessions/YYYY/MM/DD/rollout-*.jsonl. Prefer new calendar
-    // folders. Bound read_dir itself before sorting, including errors and
-    // directory entries; sorting WalkDir would eagerly enumerate whole folders.
+    // folders and sort each day's filenames newest-first before applying the
+    // unchanged 256-entry sample cap. Only one day's entries are materialized
+    // for sorting; errors and non-file entries still count toward the cap.
     let mut pending = vec![(root.join("sessions"), 0)];
     let mut entries = Vec::new();
     while let Some((dir, depth)) = pending.pop() {
+        let remaining = STATUS_ROLLOUT_ENTRIES - entries.len();
+        if remaining == 0 { break; }
         let Ok(children) = std::fs::read_dir(dir) else { continue };
-        for entry in children.take(STATUS_ROLLOUT_ENTRIES - entries.len()) {
-            if let Ok(entry) = &entry {
-                if depth < 3 && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    pending.push((entry.path(), depth + 1));
+
+        if depth == 3 {
+            let mut day_entries = children.collect::<Vec<_>>();
+            day_entries.sort_unstable_by(|left, right| match (left, right) {
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+                (Ok(left), Ok(right)) => right.file_name().cmp(&left.file_name()),
+            });
+            entries.extend(day_entries.into_iter().take(remaining));
+        } else {
+            for entry in children.take(remaining) {
+                if let Ok(entry) = &entry {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        pending.push((entry.path(), depth + 1));
+                    }
                 }
+                entries.push(entry);
             }
-            entries.push(entry);
         }
         if entries.len() == STATUS_ROLLOUT_ENTRIES { break; }
         pending.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -19878,12 +19893,6 @@ effort = "high"
         let recent = root.join("sessions/2026/10/27");
         std::fs::create_dir_all(&archive).unwrap();
         std::fs::create_dir_all(&recent).unwrap();
-        for i in 0..300 {
-            let path = archive.join(format!("rollout-{i:03}.jsonl"));
-            std::fs::write(&path, "{}\n").unwrap();
-            std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
-                .set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
-        }
         let now = chrono::Utc::now();
         for i in 0..=STATUS_ROLLOUT_FILES {
             let path = recent.join(format!("rollout-{i:02}.jsonl"));
@@ -19895,13 +19904,60 @@ effort = "high"
             std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
                 .set_modified(std::time::SystemTime::UNIX_EPOCH+std::time::Duration::from_secs(i as u64+10))).unwrap();
         }
+        let prior_entries = status_codex_rollout_entries(&root).count();
+        let archive_budget = STATUS_ROLLOUT_ENTRIES.saturating_sub(prior_entries);
+        assert!(archive_budget > 1 && archive_budget < 300, "fixture cap must split the 300-file day");
+        for i in 0..300 {
+            let path = archive.join(format!("rollout-{i:03}.jsonl"));
+            std::fs::write(&path, "{}\n").unwrap();
+            std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
+        }
+        let old_sample = std::fs::read_dir(&archive).unwrap().take(archive_budget)
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let newest_candidates = (0..300).rev().take(archive_budget)
+            .map(|i| format!("rollout-{i:03}.jsonl"))
+            .filter(|name| name != "rollout-299.jsonl")
+            .collect::<Vec<_>>();
+        let skipped_newest = newest_candidates.iter()
+            .find(|name| !old_sample.contains(*name))
+            // Some filesystems already enumerate this prefix newest-first.
+            // Keep that valid layout as a control instead of panicking.
+            .or_else(|| newest_candidates.iter().find(|name| old_sample.contains(*name)))
+            .expect("fixture must contain a newest-name candidate")
+            .clone();
+        let newest_path = archive.join(&skipped_newest);
+        std::fs::write(&newest_path, serde_json::json!({"rate_limits": {
+            "primary": {"window_minutes":300,"resets_at":now.timestamp()+3600},
+            "secondary": {"window_minutes":10080,"resets_at":now.timestamp()+86400}
+        }}).to_string()).unwrap();
+        std::fs::File::open(newest_path).unwrap().set_times(std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH+std::time::Duration::from_secs(31))).unwrap();
+        let newest_named_path = archive.join("rollout-299.jsonl");
+        std::fs::write(&newest_named_path, serde_json::json!({"rate_limits": {
+            "primary": {"window_minutes":300,"resets_at":now.timestamp()+7200},
+            "secondary": {"window_minutes":10080,"resets_at":now.timestamp()+172800}
+        }}).to_string()).unwrap();
+        std::fs::File::open(newest_named_path).unwrap().set_times(std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH+std::time::Duration::from_secs(30))).unwrap();
         let inspected = status_codex_rollout_entries(&root).count();
         assert!(inspected <= STATUS_ROLLOUT_ENTRIES, "status scanned {inspected} entries");
         let mut agent = cas_types::Agent::new("bounded-reset".into(), "worker".into());
         agent.metadata.insert("worker_cli".into(), "codex".into());
         agent.metadata.insert("worker_account_dir".into(), root.to_string_lossy().into_owned());
+        let newest = worker_usage_reset_lines(&agent, None, now);
+        let expected_reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(1)), now);
+        assert!(newest.contains(&format!("5h: {expected_reset}")) && newest.contains("weekly: resets "),
+            "newest rollout name in a 300-file day folder must survive the inventory cap: {newest}");
+        std::fs::remove_file(archive.join(&skipped_newest)).unwrap();
+        let newest_named = worker_usage_reset_lines(&agent, None, now);
+        let expected_named_reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(2)), now);
+        assert!(newest_named.contains(&format!("5h: {expected_named_reset}")),
+            "the newest filename must remain in the capped sample: {newest_named}");
+        std::fs::remove_file(archive.join("rollout-299.jsonl")).unwrap();
         let unknown = worker_usage_reset_lines(&agent, None, now);
-        assert!(!unknown.contains("resets "), "an older file beyond the read budget must stay unknown: {unknown}");
+        assert!(!unknown.contains("resets "), "an older file outside the newest 8 by mtime must stay unknown: {unknown}");
         std::fs::remove_file(recent.join(format!("rollout-{:02}.jsonl", STATUS_ROLLOUT_FILES))).unwrap();
         let known = worker_usage_reset_lines(&agent, None, now);
         assert!(known.contains("5h: resets ") && known.contains("weekly: resets "), "{known}");

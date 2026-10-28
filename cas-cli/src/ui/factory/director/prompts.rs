@@ -1140,6 +1140,9 @@ pub(crate) fn refresh_ci_merge_signal(
             return false;
         }
         if task.status != TaskStatus::AwaitingMerge {
+            if !super::events::delivery_marked_ready(task, &original.factory_tip) {
+                return false;
+            }
             // A pre-park signal must still name the current pushed lane, never
             // an earlier green tip after the worker has committed again.
             let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo_root, branch);

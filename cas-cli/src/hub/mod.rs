@@ -503,6 +503,21 @@ pub enum DaemonLiveness {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HubSession {
     pub name: String,
+    /// The recorded supervisor harness, normalized to its backend name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Local account-file identity for the recorded selector. Only exposed
+    /// through the session:read-authorized session catalog, never credentials.
+    /// Legacy registrations without a proven selector remain unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_email: Option<String>,
+    /// Canonical project identity, falling back to the main project's folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// This machine answered the local catalog. A dormant session's daemon
+    /// may be dead while its machine remains online; those are separate facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_online: Option<bool>,
     pub project_dir: Option<String>,
     pub supervisor: String,
     pub workers: Vec<String>,
@@ -667,6 +682,12 @@ impl LocalSessionReadModel {
                 let mut projected = hub_session(session);
                 projected.cloud_project_id = session_cas_root(session)
                     .and_then(|cas_root| cloud_project_id(&cas_root));
+                projected.project = projected.cloud_project_id.clone().or_else(|| {
+                    session_cas_root(session)?
+                        .parent()?
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                });
                 if let Some((at, label)) = self.last_activity(session) {
                     projected.last_activity_at = Some(at);
                     projected.last_activity = Some(label);
@@ -776,8 +797,13 @@ pub(crate) fn activity_label(source: &str, target: &str) -> String {
 /// this metadata is read from carries an empty `workers[]` even for a session
 /// running five of them, which made every session report "0 workers".
 fn hub_session(session: &SessionInfo) -> HubSession {
+    let (harness, account_email) = session_account(session);
     HubSession {
         name: session.name.clone(),
+        harness,
+        account_email,
+        project: None,
+        machine_online: Some(true),
         project_dir: session.metadata.project_dir.clone(),
         supervisor: session.metadata.supervisor.name.clone(),
         workers: session.project_worker_names(),
@@ -804,6 +830,53 @@ fn hub_session(session: &SessionInfo) -> HubSession {
                 pid_starttime,
             }),
     }
+}
+
+/// Read only this session's registered supervisor. Neither names/prompts nor
+/// the hub process's provider variables establish the account of another pane.
+fn session_account(session: &SessionInfo) -> (Option<String>, Option<String>) {
+    let agent = session_cas_root(session)
+        .and_then(|root| open_agent_store(&root).ok())
+        .and_then(|store| store.list(None).ok())
+        .and_then(|agents| {
+            agents
+                .into_iter()
+                .filter(|agent| {
+                    agent.role == cas_types::AgentRole::Supervisor
+                        && agent.factory_session.as_deref() == Some(session.name.as_str())
+                        && agent.name == session.metadata.supervisor.name
+                })
+                .max_by_key(|agent| agent.registered_at)
+        });
+    let Some(agent) = agent else {
+        return (None, None);
+    };
+    let Some(harness) = agent
+        .metadata
+        .get("supervisor_cli")
+        .and_then(|cli| crate::harness_policy::parse_harness(cli))
+    else {
+        return (None, None);
+    };
+    let provider = match harness {
+        cas_mux::SupervisorCli::Claude => Some(crate::accounts::Provider::Claude),
+        cas_mux::SupervisorCli::Codex => Some(crate::accounts::Provider::Codex),
+        _ => None,
+    };
+    let email = provider.and_then(|provider| {
+        // Older registrations wrote CODEX_HOME here even for Claude. Require
+        // the provider binding captured alongside the corrected selector.
+        let recorded = agent.metadata.get("supervisor_account_harness")?;
+        if crate::harness_policy::parse_harness(recorded) != Some(harness) {
+            return None;
+        }
+        let selector = std::path::Path::new(agent.metadata.get("supervisor_account_dir")?);
+        if !selector.is_absolute() {
+            return None;
+        }
+        provider.login_email(&dirs::home_dir()?, selector)
+    });
+    (Some(harness.backend().name().to_owned()), email)
 }
 
 /// A session's metadata names the supervisor, but does not prove that the
@@ -969,6 +1042,10 @@ impl SessionReadModel for RecordingReadModel {
 pub fn fixture_session(name: &str) -> HubSession {
     HubSession {
         name: name.to_owned(),
+        harness: None,
+        account_email: None,
+        project: None,
+        machine_online: None,
         project_dir: Some("/tmp/project".into()),
         supervisor: "supervisor".into(),
         workers: vec!["worker-1".into()],

@@ -742,16 +742,18 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Steps
 
 1. Open plain text without loading rich renderers
-2. Read a diagram and inspect its source; bad input stays readable
-3. Expand a unified diff
-4. Decode an inline image without moving its file caption
-5. Read the real PDF first page inline
-6. Play video and audio on demand; unavailable files keep Open
+2. Copy exact source and wrap a code frame with the keyboard
+3. Read a diagram and inspect its source; bad input stays readable
+4. Expand a unified diff
+5. Decode an inline image without moving its file caption
+6. Read the real PDF first page inline
+7. Play video and audio on demand; unavailable files keep Open
 
 The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named journey against a registered local candidate at `HUB_RICH_HUB_URL` (its `/commander/` URL). It starts no server and keeps the same protocol double; the hub binary supplies the HTML, scripts, styles and lazy assets.
 
 #### Expected experience
 
+- Copy retains literal source; clipboard refusal is visible. Wrap is per block and long lines fit 390px without page overflow; unknown languages stay readable.
 - Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
 - Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.

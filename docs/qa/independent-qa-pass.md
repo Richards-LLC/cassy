@@ -78,6 +78,26 @@ non-empty reason. The waiver is:
 - recorded on the pass as `state=waived` with the supervisor as issuer;
 - listed with its reason in `coordination action=epic_status`.
 
+### Historical obsolete QA work items
+
+A waiver or superseding round retires its obsolete QA work item. Older stored
+rounds can still have Open children after their delivery closed. Inspect one
+closed delivery with `verification action=qa_status task_id=<delivery>`, then
+use a live registered supervisor to run:
+
+```text
+verification action=qa_reconcile task_id=<closed-delivery> limit=25
+```
+
+This explicit repair cancels at most `limit` obsolete QA children of that
+closed delivery (default 25, range 1–100). Repeat for the same delivery until
+zero are retired. It preserves a work item referenced by a pending, claimed,
+passed, failed or timed-out round, including an active replacement that reused
+an older work-item id. It retains review notes, findings, artifacts and pass
+records; it creates no waiver or replacement verdict. Each cancellation records
+its obsolete pass and delivery in the close reason. `qa_status` and `task ready`
+do not trigger this repair, and the command never scans other deliveries.
+
 The opposite request exists too (cas-74284). A supervisor can ask for a pass
 on a parked delivery that the park did not judge user-facing, for example
 a UI change parked with no demo_statement, whose field the delivery-proof

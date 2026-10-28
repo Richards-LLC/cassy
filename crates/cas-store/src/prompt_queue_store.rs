@@ -1693,11 +1693,21 @@ impl SqlitePromptQueueStore {
             }
             return Ok(None);
         }
-        if !prompt.source.starts_with("lifecycle-wake:") { return Ok(None); }
+        // Non-waking lifecycle notices wait for the supervisor's next turn in
+        // the digest. Revalidate them there too: a started notice must not
+        // look current after the task has already moved to awaiting_merge.
+        if !prompt.source.starts_with("lifecycle-wake:")
+            && !prompt.source.starts_with("lifecycle:")
+        { return Ok(None); }
         if let Some(envelope) = cas_types::parse_lifecycle_envelope(&prompt.prompt) {
-            return Ok(Self::terminal_relay_task_status(tx, has_tasks, &envelope.task_id)?
+            if !has_tasks { return Ok(None); }
+            let status: Option<String> = tx.query_row(
+                "SELECT status FROM tasks WHERE id = ?1",
+                params![&envelope.task_id], |row| row.get(0),
+            ).optional()?;
+            return Ok(status
                 .filter(|status| status != &envelope.new_status.to_string())
-                .map(|status| terminal_detail(&envelope.task_id, &status)));
+                .map(|status| format!("relay for {} superseded by later task state {status} at recipient drain", envelope.task_id)));
         }
         let point_in_time = if prompt.source.starts_with("lifecycle-wake:ci-red-run:") {
             if let Some(envelope) = cas_types::parse_ci_red_run_envelope(&prompt.prompt) {
@@ -1733,7 +1743,8 @@ impl SqlitePromptQueueStore {
         tx: &ImmediateTx<'_>,
         prompts: Vec<QueuedPrompt>,
     ) -> Result<Vec<QueuedPrompt>> {
-        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("verification-dispatch:")) {
+        const LIFECYCLE_DELIVERY_WINDOW_SECS: i64 = 9 * 60;
+        if !prompts.iter().any(|prompt| prompt.source.starts_with("lifecycle-wake:") || prompt.source.starts_with("lifecycle:") || prompt.source.starts_with("verification-dispatch:")) {
             return Ok(prompts);
         }
         let has_tasks: bool = tx.query_row(
@@ -1742,7 +1753,7 @@ impl SqlitePromptQueueStore {
         )?;
         let now = Utc::now();
         let mut current = Vec::with_capacity(prompts.len());
-        for prompt in prompts {
+        for mut prompt in prompts {
             if let Some(detail) = Self::supervisor_relay_expiry_reason(tx, has_tasks, &prompt, now)? {
                 // Preserve forensic transport history on a previously polled
                 // row. Early stages can advance to Suppressed; acknowledgement
@@ -1765,6 +1776,19 @@ impl SqlitePromptQueueStore {
                     params![acked_via, now.to_rfc3339(), prompt.id],
                 )?;
             } else {
+                // Carry the delay on the returned queue row, so both a hook
+                // digest and an explicit inbox poll show that this is old
+                // news. Keep the persisted body and delivery receipts intact.
+                if (prompt.source.starts_with("lifecycle:")
+                    || prompt.source.starts_with("lifecycle-wake:"))
+                    && cas_types::parse_lifecycle_envelope(&prompt.prompt).is_some()
+                {
+                    let age_secs = (now - prompt.created_at).num_seconds().max(0);
+                    if age_secs >= LIFECYCLE_DELIVERY_WINDOW_SECS {
+                        let summary = prompt.summary.get_or_insert_with(|| "task lifecycle".into());
+                        summary.push_str(&format!(" [delayed {}m]", age_secs / 60));
+                    }
+                }
                 current.push(prompt);
             }
         }
@@ -10642,6 +10666,68 @@ mod tests {
                     "withholding must not fabricate a fresh hook/poll receipt: {path}");
             }
         }
+    }
+
+    #[test]
+    fn started_digest_is_withdrawn_when_a_later_task_transition_supersedes_it() {
+        let (temp, store) = create_test_store();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("session".into());
+        agents.register(&supervisor).unwrap();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-started-digest".into(), "relay target".into());
+        task.status = TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let started = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"13952\" occurrence=\"{}\">started</task-lifecycle>", task.id, Utc::now().to_rfc3339());
+        let old = store.enqueue_idempotent("lifecycle:13952", "supervisor", &started, Some("session"), Some("task_started"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
+        let EnqueueIdempotentResult::Created(old) = old else { panic!("new relay") };
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.update(&task).unwrap();
+        let merge = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"13956\" occurrence=\"{}\">merge required</task-lifecycle>", task.id, Utc::now().to_rfc3339());
+        let current = store.enqueue_idempotent("lifecycle-wake:13956", "supervisor", &merge, Some("session"), Some("task_awaiting_merge"), None, "merge-13956", Some(&QueueOrigin::Daemon)).unwrap();
+        let EnqueueIdempotentResult::Created(current) = current else { panic!("new relay") };
+        assert!(store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows.is_empty(), "stale started digest must not reach next turn");
+        assert_eq!(store.message_delivery_report(old).unwrap().unwrap().pending_reason, Some(PendingReason::SupersededStale));
+        assert_eq!(store.recipient_receipt(old, "supervisor").unwrap(), None);
+        assert_eq!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![current]);
+    }
+
+    #[test]
+    fn delayed_current_lifecycle_digest_keeps_its_queue_age_for_visible_label() {
+        let (temp, store) = create_test_store();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("session".into());
+        agents.register(&supervisor).unwrap();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-current-digest".into(), "relay target".into());
+        task.status = TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, task.updated_at.to_rfc3339());
+        let result = store.enqueue_idempotent("lifecycle:13952", "supervisor", &body, Some("session"), Some("task_started: cas-current-digest"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
+        let EnqueueIdempotentResult::Created(id) = result else { panic!("new relay") };
+        let queued_at = Utc::now() - chrono::Duration::minutes(29);
+        store.conn.lock().unwrap().execute(
+            "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+            params![queued_at.to_rfc3339(), id],
+        ).unwrap();
+        let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+        assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
+        assert_eq!(surfaced[0].id, id);
+        assert_eq!(surfaced[0].created_at, queued_at);
+        assert!(surfaced[0].summary.as_deref().is_some_and(|summary| summary.contains("[delayed 29m]")), "{:?}", surfaced[0].summary);
+        assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
     }
 
     #[test]

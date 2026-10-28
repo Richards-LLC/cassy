@@ -27,7 +27,12 @@ export function installMediaPreviews(document: Document): void {
     connectedCallback(): void {
       this.observer?.disconnect(); this.observer = undefined;
       if (this.complete || this.loading) return;
-      if (this.dataset.previewState === "waiting" && this.available?.() === false) return;
+      if (this.dataset.previewState === "waiting") {
+        if (this.available?.() === false) return;
+        // A cached failed preview is hidden. Restore its reserved box before
+        // observing, so re-entry after an offscreen reconnect can intersect.
+        this.dataset.previewState = "pending";
+      }
       const load = async () => {
         this.observer?.disconnect(); this.observer = undefined;
         if (this.complete || this.loading || !this.isConnected) return;

@@ -148,11 +148,11 @@ pub use protocol::{
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{
-    SessionInfo, SessionManager, create_metadata, daemon_log_path, daemon_trace_log_path,
+    SessionInfo, SessionManager, SessionEndOutcome, create_metadata, daemon_log_path, daemon_trace_log_path,
     generate_session_name, metadata_path, panic_log_path, provisioner_pin_path, session_log_dir,
     socket_path, tui_log_path,
 };
-pub(crate) use session::{daemon_identity_is_live, record_daemon_lifecycle};
+pub(crate) use session::{EndedSession, daemon_identity_is_live, record_daemon_lifecycle};
 use std::io;
 use std::path::Path;
 

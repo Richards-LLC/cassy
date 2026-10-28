@@ -14,6 +14,8 @@ interface ListMarker {
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const HEADING = /^\s{0,3}#{1,6}(?:\s+|$)(.*)$/;
+const CALLOUT = /^\s{0,3}>[ \t]?\[!(NOTE|WARNING|CAUTION)\][ \t]*$/i;
+const QUOTE_LINE = /^\s{0,3}>[ \t]?/;
 const LIST = /^(\s*)([-+*]|\d+[.)])\s+(.*)$/;
 const LEGACY_NUMBER = /(?:\(\d+\)|\d+\))(?=[ \t]+)/g;
 const ALL_CAPS_LABEL = "[A-Z][A-Z0-9]*(?:[ \\t]+[A-Z][A-Z0-9]*)*";
@@ -37,7 +39,7 @@ function closesFence(line: string, opening: string): boolean {
 }
 
 function isBlockStart(line: string): boolean {
-  return isFence(line) || HEADING.test(line) || listMarker(line) !== undefined;
+  return isFence(line) || HEADING.test(line) || CALLOUT.test(line) || listMarker(line) !== undefined;
 }
 
 function leadingPlainText(source: string): string | undefined {
@@ -48,7 +50,7 @@ function leadingPlainText(source: string): string | undefined {
 function hasMarkdownMarkers(source: string): boolean {
   if (INLINE_MARKDOWN.test(source)) return true;
   return source.split("\n").some((line) => {
-    if (isFence(line) || HEADING.test(line)) return true;
+    if (isFence(line) || HEADING.test(line) || CALLOUT.test(line)) return true;
     const marker = listMarker(line);
     // A closing parenthesis is the legacy prose form handled below. A dot or
     // a bullet at line start remains the Markdown contract.
@@ -260,6 +262,10 @@ function renderList(document: Document, lines: string[], start: number, baseInde
 
 /** Render the supported reply subset as safe DOM nodes. */
 export function renderMarkdown(document: Document, source: string): HTMLElement[] {
+  return renderBlocks(document, source, true);
+}
+
+function renderBlocks(document: Document, source: string, allowCallouts: boolean): HTMLElement[] {
   // Keep original line separators for Copy; prose parsing still uses lines.
   const parts = normalizePlainText(source).split(/(\r\n|\r|\n)/);
   const lines = parts.filter((_, part) => part % 2 === 0);
@@ -292,9 +298,32 @@ export function renderMarkdown(document: Document, source: string): HTMLElement[
 
     const heading = HEADING.exec(line);
     if (heading) {
-      const lead = document.createElement("p"); lead.className = "markdown-heading";
+      // Keep the scale modest while preserving the message's semantic outline.
+      const level = Math.min(3, line.trimStart().match(/^#+/)![0].length);
+      const lead = document.createElement(`h${level}`); lead.className = "markdown-heading";
       const bold = document.createElement("strong"); appendInline(document, bold, heading[1]!); lead.append(bold);
       nodes.push(lead); index += 1; continue;
+    }
+
+    const callout = allowCallouts ? CALLOUT.exec(line) : null;
+    if (callout) {
+      const kind = callout[1]!.toLowerCase();
+      const label = kind[0]!.toUpperCase() + kind.slice(1);
+      const aside = document.createElement("aside");
+      aside.className = "markdown-callout"; aside.dataset.kind = kind;
+      aside.setAttribute("aria-label", label);
+      const title = document.createElement("p"); title.className = "markdown-callout-label";
+      const strong = document.createElement("strong"); strong.textContent = label;
+      title.append(strong); aside.append(title);
+      index += 1;
+      const body: string[] = [];
+      while (index < lines.length && QUOTE_LINE.test(lines[index]!)) {
+        body.push(lines[index]!.replace(QUOTE_LINE, "") + (parts[index * 2 + 1] ?? ""));
+        index += 1;
+      }
+      // Reuse safe blocks; nested callout markers stay literal, with bounded depth.
+      aside.append(...renderBlocks(document, body.join(""), false));
+      nodes.push(aside); continue;
     }
 
     const marker = listMarker(line);

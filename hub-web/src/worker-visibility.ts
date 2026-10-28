@@ -24,7 +24,7 @@ export function readablePanes(panes: readonly PaneInfo[]): PaneInfo[] {
  * session picker and its "N available" count.
  */
 export function sessionReachable(session: HubSession, catalogFresh = true): boolean {
-  return catalogFresh && !session.unreachable && session.dormant !== true
+  return !session.ended && catalogFresh && !session.unreachable && session.dormant !== true
     && session.liveness === "live" && Boolean(session.supervisor.trim());
 }
 
@@ -38,6 +38,7 @@ export function pendingSessionLabel(session: HubSession | undefined, machineConn
 
 export function visibleCatalog(sessions: readonly HubSession[], pending: (name: string) => boolean, catalogFresh = true, recovery = false): HubSession[] {
   return sessions.flatMap(session => {
+    if (session.ended && session.supervisor.trim()) return [session];
     if (sessionReachable(session, catalogFresh)) return [session];
     if (pending(session.name)) return [{ ...session, unreachable: true }];
     // The recovery view ("Show dormant sessions") lists every supervisor,

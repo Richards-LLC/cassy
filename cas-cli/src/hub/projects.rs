@@ -453,6 +453,10 @@ mod tests {
         ];
         let sessions = vec![HubSession {
             name: "factory-main".into(),
+            harness: None,
+            account_email: None,
+            project: None,
+            machine_online: None,
             project_dir: Some(linked.to_string_lossy().into_owned()),
             supervisor: "supervisor".into(),
             workers: vec![],
@@ -460,6 +464,7 @@ mod tests {
             ws_port: Some(1),
             liveness: DaemonLiveness::Live,
             dormant: false,
+            ended: None,
             last_activity_at: None,
             last_activity: None,
             started_at: None,

@@ -197,7 +197,7 @@
     ]
   },
   "statusLine": {
-    "command": "cas statusline",
+    "command": "cas statusline --with-session",
     "type": "command"
   }
 }

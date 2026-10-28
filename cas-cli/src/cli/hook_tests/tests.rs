@@ -45,6 +45,9 @@ fn configure_migrates_bare_statuslines_in_every_profile_once() {
         "statusLine": {"type": "command", "command": "cas statusline", "padding": 2},
         "theme": "dark", "permissions": {"deny": ["Read(secret)"]}
     });
+    let project_path = project.path().join(".claude/settings.json");
+    std::fs::create_dir(project_path.parent().unwrap()).unwrap();
+    std::fs::write(&project_path, original.to_string()).unwrap();
     let mut paths = Vec::new();
     for name in [".claude", ".claude-alt", ".claude-work"] {
         let dir = home.path().join(name);
@@ -59,6 +62,10 @@ fn configure_migrates_bare_statuslines_in_every_profile_once() {
     let custom_bytes = r#"{"statusLine":{"type":"command","command":"my-statusline"},"theme":"light"}"#;
     std::fs::write(&custom_path, custom_bytes).unwrap();
     configure_claude_hooks_with_home(project.path(), false, Some(home.path())).unwrap();
+    let project_settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&project_path).unwrap()).unwrap();
+    assert_eq!(project_settings["statusLine"]["command"], "cas statusline --with-session");
+    assert_eq!(project_settings["theme"], original["theme"]);
+    assert_eq!(project_settings["permissions"]["deny"], original["permissions"]["deny"]);
     let mut expected = original;
     expected["statusLine"]["command"] = "cas statusline --with-session".into();
     let before: Vec<_> = paths.iter().map(|path| {

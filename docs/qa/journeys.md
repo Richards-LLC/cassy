@@ -787,6 +787,9 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 #### Edge paths
 
 - The hub refuses oversized or unsupported bytes, traversal names stay within host storage, and unsigned or unknown-session requests write nothing.
+- A slow 512 kbit/s phone upload budgets the base64 payload size (4 and 10 MiB regression rows); ordinary requests still time out promptly.
+- A refusal names the failed attachment, keeps all pending files, and gives no reconnect advice for an unsupported type. A missing session shows the hub's own explanation.
+- Phone HEIC, AVIF and MOV containers are identified from their brands and stored with their correct media types, regardless of filename.
 - Reusing an upload identity with different bytes is a conflict; replaying the same bytes returns the same artifact.
 
 ### HUB-J25 · See the whole picture of the work

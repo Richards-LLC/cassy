@@ -1964,6 +1964,11 @@ journeys:
   - hub-web/src/composer-uploads.ts
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
+  edge_paths:
+  - A 4 or 10 MiB phone file reaches the hub over 512 kbit/s transport without the ordinary 10 second request timeout.
+  - A refused file is named among multiple attachments; unsupported types do not prescribe reconnecting.
+  - A missing session shows the hub refusal text and keeps the files for recovery.
+  - HEIC, AVIF and MOV bytes retain their media types in host artifact storage.
   invariants: [HUB-J24-GOAL]
   traffic:
     share_pct: null

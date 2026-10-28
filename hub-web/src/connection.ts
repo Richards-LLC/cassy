@@ -659,7 +659,14 @@ export class HubConnectionSupervisor {
     this.clockOffsetMs = Math.abs(offset) > 5_000 ? offset : 0;
   }
 
-  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string }> {
+    // Budget the base64 wire payload at 64 KiB/s (512 kbit/s), plus signing,
+    // JSON overhead and hub storage time. Ordinary reads keep their short deadline.
+    const timeoutMs = 10_000 + Math.ceil(data.length / 65_536) * 1000;
+    return this.request("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data }, undefined, timeoutMs);
+  }
+
+  async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal, timeoutMs?: number): Promise<T> {
     return withRequestDeadline(async boundedSignal => {
     const startedAt = performance.now();
     const { response, refusal } = await this.authorizedFetch(method, path, {
@@ -667,6 +674,10 @@ export class HubConnectionSupervisor {
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: boundedSignal,
     });
+    if (response.status === 403) {
+      const error = await hubRequestError(method, path, response.clone());
+      if (error.code === "session_denied") throw error;
+    }
     if (response.status === 401 || response.status === 403) {
       const kind = authFailureKind(response.status, refusal, this.machine.expiresAt);
       throw new AuthenticationError(kind, authFailureMessage(kind, refusal), response.headers?.get("x-cas-request-id") ?? undefined);
@@ -677,7 +688,7 @@ export class HubConnectionSupervisor {
     const result = await response.json() as T;
     boundedSignal.throwIfAborted();
     return result;
-    }, signal);
+    }, signal, timeoutMs);
   }
 
   async refreshSessions(signal: AbortSignal = AbortSignal.timeout(SOCKET_PROBE_TIMEOUT_MS)): Promise<HubSession[]> {

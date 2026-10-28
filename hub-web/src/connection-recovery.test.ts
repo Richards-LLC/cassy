@@ -66,6 +66,28 @@ describe("bounded connection recovery (cas-2b3a5)", () => {
     await vi.advanceTimersByTimeAsync(10_000); await rejected;
     expect(vi.getTimerCount()).toBe(0);
   });
+  it.each([4, 10])("uploads a %i MiB phone file over a throttled transport", async mebibytes => {
+    vi.stubGlobal("crypto", webcrypto);
+    const machine = { id: "hub", label: "Phone", baseUrl: "https://hub.test", credential: "secret", credentialId: "credential", deviceId: "device", scopes: [] as [], expiresAt: "2027-01-01T00:00:00Z", ...await createDeviceKey() };
+    const connection = new HubConnectionSupervisor(machine, { onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {}, onOutput: () => {}, onSocketError: () => {} });
+    const file = new File([new Uint8Array(mebibytes * 1024 * 1024)], "photo.jpg");
+    const data = Buffer.from(await file.arrayBuffer()).toString("base64");
+    let transferring: (() => void) | undefined;
+    const started = new Promise<void>(resolve => { transferring = resolve; });
+    vi.useFakeTimers();
+    // 64 KiB/s of serialized request bytes (512 kbit/s), including base64 expansion.
+    vi.stubGlobal("fetch", vi.fn((_url, init: RequestInit) => new Promise<Response>(resolve => {
+      setTimeout(() => resolve(new Response(JSON.stringify({ path: "/host/photo.jpg", artifact_id: "art-photo" }))), Math.ceil(String(init.body).length / 65_536 * 1000));
+      transferring!();
+    })));
+    const result = connection.uploadFile("session", "id", file.name, data);
+    const delivered = result.then(value => ({ value }), error => ({ error }));
+    await started;
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(await delivered).toMatchObject({ value: { path: "/host/photo.jpg" } });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
   it("processes a flood without parallel catalog requests or dropping the trailing refresh", async () => {
     vi.useFakeTimers();
     const releases: (() => void)[] = [];

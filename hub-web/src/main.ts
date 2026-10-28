@@ -3958,7 +3958,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
       const connection = connections.get(machine.id);
       if (!connection) throw new Error("The machine is disconnected.");
       try {
-        return await connection.request<{ path: string; artifact_id: string }>("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data });
+        return await connection.uploadFile(session, id, name, data);
       } catch (error) {
         const detail = (error as { detail?: string })?.detail;
         if (detail) throw new Error(detail);

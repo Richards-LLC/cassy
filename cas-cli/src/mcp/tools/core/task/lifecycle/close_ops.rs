@@ -6759,6 +6759,21 @@ impl CasCore {
         recorded: &str,
         tip: Option<&str>,
     ) -> bool {
+        self.tip_is_own_task_lineage_with_receipt(
+            task_store, task, repo_path, measured_branch, recorded, tip, false,
+        )
+    }
+
+    fn tip_is_own_task_lineage_with_receipt(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        measured_branch: Option<&str>,
+        recorded: &str,
+        tip: Option<&str>,
+        explicit_final_tip: bool,
+    ) -> bool {
         let (Some(branch), Some(tip)) = (measured_branch, tip) else {
             return false;
         };
@@ -6797,7 +6812,7 @@ impl CasCore {
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
                 && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
-                    !subjects.is_empty()
+                    (explicit_final_tip || !subjects.is_empty())
                         && subjects.iter().all(|subject| message_references_task(subject, &task.id))
                 })
         });
@@ -6836,6 +6851,7 @@ impl CasCore {
         parent_branch: &str,
         measured_branch: Option<&str>,
         measured_tip: Option<&str>,
+        explicit_receipt: Option<&str>,
     ) -> Task {
         let mut parking = task.clone();
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
@@ -6848,13 +6864,28 @@ impl CasCore {
         };
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
         let advance = if git_commit_is_ancestor(repo_path, recorded, &tip) {
-            self.tip_is_own_task_lineage(
+            // GH #1389: a final target-sync merge can add no non-merge task
+            // subjects after the commit-time anchor. A worker's explicit
+            // receipt still identifies that pushed final branch tip; the
+            // attribution check below must continue to vet its first-parent
+            // path, imported target and sibling lease boundary.
+            let named_final_tip = explicit_receipt
+                .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
+                .is_some_and(|receipt| receipt == tip)
+                && measured_branch.is_some_and(|branch| {
+                    task.assignee.as_deref().is_some_and(|assignee| {
+                        branch.strip_prefix("origin/").unwrap_or(branch)
+                            == close_measured_factory_branch(repo_path, task, assignee)
+                    })
+                });
+            self.tip_is_own_task_lineage_with_receipt(
                 task_store,
                 task,
                 repo_path,
                 measured_branch,
                 recorded,
                 measured_tip,
+                named_final_tip,
             ) && parked_anchor_advance_with_target_is_attributable(
                 repo_path,
                 recorded,
@@ -8888,6 +8919,7 @@ impl CasCore {
                         self.advance_commit_time_anchor_before_park(
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, measured_branch.as_deref(), anchor.as_deref(),
+                            req.commit_receipt.as_deref(),
                         )
                     } else { task.clone() };
                     let park_anchor = if task.status == TaskStatus::AwaitingMerge {

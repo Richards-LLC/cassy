@@ -257,7 +257,15 @@ invariants:
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
+  HUB-J24-PHONE-UPLOAD:
+    statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
+    check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  slow-phone-composer-upload:
+    title: Generic request deadlines and generic refusals prevent large phone attachments from reaching the supervisor
+    tasks: [cas-fed8]
+    invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD]
+    journeys: [HUB-J24]
   expired-toast-announcement:
     title: Expired connection notices must leave an empty live region while subsequent notices still announce
     tasks: [cas-326e8]
@@ -1964,7 +1972,12 @@ journeys:
   - hub-web/src/composer-uploads.ts
   - hub-web/src/composer-uploads.css
   - hub-web/e2e/journeys/paste-content.journey.ts
-  invariants: [HUB-J24-GOAL]
+  edge_paths:
+  - A 4 or 10 MiB phone file reaches the hub over 512 kbit/s transport without the ordinary 10 second request timeout.
+  - A refused file is named among multiple attachments; unsupported types do not prescribe reconnecting.
+  - A missing session shows the hub refusal text and keeps the files for recovery.
+  - HEIC, AVIF and MOV bytes retain their media types in host artifact storage.
+  invariants: [HUB-J24-GOAL, HUB-J24-PHONE-UPLOAD]
   traffic:
     share_pct: null
     basis: New journey; no production traffic attribution yet.

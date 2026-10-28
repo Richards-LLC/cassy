@@ -13,6 +13,14 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
       await page.route("https://*.test/v1/sessions/*/uploads/*", async route => {
         const id = route.request().url().split("/").at(-1)!;
         const body = route.request().postDataJSON() as { name: string; data: string };
+        if (body.name === "unsupported.bin" || body.name === "orphan.png") {
+          const missing = body.name === "orphan.png";
+          await route.fulfill({ status: missing ? 403 : 415,
+            json: missing ? { error: "session_denied", detail: "This session is not available on this machine." }
+              : { error: "unsupported_file", detail: "This file type is not supported." },
+            headers: { "access-control-allow-origin": "*" } });
+          return;
+        }
         attempts.push(id);
         const prior = uploads.get(id);
         if (prior) expect(body).toEqual({ name: prior.name, data: prior.data });
@@ -64,6 +72,24 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         await expect(page.locator(".composer-uploads")).toBeHidden();
         await expect(page.locator("#message-status")).toBeHidden();
         await expect(field).toHaveValue("");
+      });
+      await journey.stage("A refusal names its file and keeps the hub's reason", async () => {
+        const pick = async (files: { name: string; mimeType: string; buffer: Buffer }[]) => {
+          const chooser = page.waitForEvent("filechooser");
+          await page.getByRole("button", { name: "Attach files", exact: true }).click();
+          await (await chooser).setFiles(files);
+        };
+        await pick([{ name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("notes") },
+          { name: "unsupported.bin", mimeType: "application/octet-stream", buffer: Buffer.from([0, 1, 2]) }]);
+        await send.click();
+        await expect(page.locator("#message-status")).toContainText("unsupported.bin: This file type is not supported.");
+        await expect(page.locator(".upload-error")).not.toContainText("reconnect");
+        await page.getByRole("button", { name: "Remove unsupported.bin", exact: true }).click();
+        await pick([{ name: "orphan.png", mimeType: "image/png", buffer: Buffer.from(PNG, "base64") }]);
+        await send.click();
+        await expect(page.locator("#message-status")).toContainText("orphan.png: This session is not available on this machine.");
+        await expect(page.locator(".upload-error")).toContainText("Your files are kept here.");
+        await expect(page.getByRole("button", { name: "Remove orphan.png", exact: true })).toBeVisible();
       });
     };
     if (width === 1280 && colorScheme === "light") test("HUB-J24 paste content into the composer", run);

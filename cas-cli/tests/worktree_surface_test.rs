@@ -2286,6 +2286,237 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
     }
 }
 
+struct ReboundMergeFixture {
+    repo: GitRepo,
+    origin: TempDir,
+    cas_root: PathBuf,
+    worker: PathBuf,
+    branch: String,
+    tip: String,
+    service: CasService,
+}
+
+async fn rebound_merge_fixture(env: &mut TestEnvGuard) -> ReboundMergeFixture {
+    let repo = GitRepo::new();
+    let origin = TempDir::new_in(cas::test_paths::runtime_fixture_parent()).unwrap();
+    run_git(
+        &["init", "--bare", origin.path().to_str().unwrap()],
+        &repo.root,
+    );
+    run_git(
+        &["remote", "add", "origin", origin.path().to_str().unwrap()],
+        &repo.root,
+    );
+    run_git(&["branch", "epic/rebound"], &repo.root);
+    run_git(&["push", "origin", "main", "epic/rebound"], &repo.root);
+    let base = git_stdout(&repo.root, &["rev-parse", "HEAD"]);
+    let cas_root = init_cas_dir(&repo.root, env).unwrap();
+    std::fs::write(cas_root.join("config.toml"),
+        "[verification]\nenabled=false\n[project]\ncanonical_id='rebound'\n[worktrees]\nenabled=false\n").unwrap();
+    cas::store::known_repos::register_repo_strict(&repo.root).unwrap();
+    let worker = cas_root.join("worktrees/alice");
+    repo.add_worktree(&worker, "factory/alice");
+    std::fs::write(worker.join("historical.txt"), "unrelated old task\n").unwrap();
+    run_git(&["add", "historical.txt"], &worker);
+    run_git(&["commit", "-m", "cas-dead: historical lane"], &worker);
+    run_git(&["push", "origin", "factory/alice"], &worker);
+    register_delivery_agent(
+        &cas_root,
+        "rebound-worker",
+        "alice",
+        AgentRole::Worker,
+        "rebound-session",
+    );
+    register_delivery_agent(
+        &cas_root,
+        "rebound-supervisor",
+        "supervisor",
+        AgentRole::Supervisor,
+        "rebound-session",
+    );
+    let agents = open_agent_store(&cas_root).unwrap();
+    let mut agent = agents.get("rebound-worker").unwrap();
+    agent
+        .metadata
+        .insert("clone_path".into(), worker.display().to_string());
+    agents.update(&agent).unwrap();
+    let tasks = open_task_store(&cas_root).unwrap();
+    let mut epic = Task::new("epic-rebound".into(), "Rebound epic".into());
+    epic.task_type = TaskType::Epic;
+    epic.branch = Some("epic/rebound".into());
+    tasks.add(&epic).unwrap();
+    let mut task = Task::new("cas-e429".into(), "Rebound delivery".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some("alice".into());
+    task.depth = TaskDepth::Light;
+    task.risk = vec![cas::types::TaskRisk::None];
+    let target = WorkTarget {
+        repo_selector: "project:rebound".into(),
+        target_branch: "epic/rebound".into(),
+    };
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target,
+        assignee: "alice".into(),
+        branch: "factory/alice".into(),
+        base_sha: base,
+    });
+    tasks
+        .create_atomic(&task, &[], Some(&epic.id), None)
+        .unwrap();
+    let branch = "factory/alice-cas-e429".to_string();
+    run_git(&["switch", "-c", &branch, "epic/rebound"], &worker);
+    std::fs::write(worker.join("delivery.txt"), "approved task delivery\n").unwrap();
+    run_git(&["add", "delivery.txt"], &worker);
+    run_git(&["commit", "-m", "cas-e429: approved delivery"], &worker);
+    run_git(&["push", "origin", &branch], &worker);
+    let tip = git_stdout(&worker, &["rev-parse", "HEAD"]);
+    let service = delivery_service(&cas_root, "rebound-supervisor");
+    env.set_current_dir(&repo.root);
+    service
+        .task(Parameters(task_req(serde_json::json!({
+            "action": "rebind_branch", "id": task.id, "branch": branch,
+            "reason": "Approve the per-task delivery instead of the historical worker lane",
+        }))))
+        .await
+        .expect("real supervisor rebind succeeds");
+    assert_eq!(
+        tasks
+            .get(&task.id)
+            .unwrap()
+            .deliverables
+            .factory_branch_start
+            .unwrap()
+            .branch,
+        branch
+    );
+    ReboundMergeFixture {
+        repo,
+        origin,
+        cas_root,
+        worker,
+        branch,
+        tip,
+        service,
+    }
+}
+
+#[tokio::test]
+async fn test_worktree_merge_honors_rebound_task_branch_gh1397() {
+    let mut env = test_env();
+    let fixture = rebound_merge_fixture(&mut env).await;
+    let historical = git_stdout(&fixture.repo.root, &["rev-parse", "factory/alice"]);
+    let mut request = coord_req("worktree_merge");
+    request.id = Some("alice".into());
+    request.task_id = Some("cas-e429".into());
+    request.cleanup = Some(false);
+    let response = fixture
+        .service
+        .coordination(Parameters(request))
+        .await
+        .unwrap();
+    let text = get_text(&response);
+    assert!(text.contains("Merged worktree"), "{text}");
+    let tree = git_stdout(
+        &fixture.repo.root,
+        &["ls-tree", "-r", "--name-only", "epic/rebound"],
+    );
+    assert!(
+        tree.contains("delivery.txt"),
+        "approved task commit must land: {tree}\n{text}"
+    );
+    assert!(
+        !tree.contains("historical.txt"),
+        "historical generic lane must stay out: {tree}"
+    );
+    run_git(
+        &["merge-base", "--is-ancestor", &fixture.tip, "epic/rebound"],
+        &fixture.repo.root,
+    );
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "factory/alice"]),
+        historical
+    );
+    assert_eq!(
+        git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]),
+        git_stdout(
+            fixture.origin.path(),
+            &["rev-parse", "refs/heads/epic/rebound"]
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_worktree_merge_refuses_stale_or_conflicting_rebound_ref_gh1397() {
+    let mut env = test_env();
+    let parent = cas::test_paths::runtime_fixture_parent();
+    for case in ["missing", "remote-conflict", "binding-conflict"] {
+        let fixture = rebound_merge_fixture(&mut env).await;
+        let before = git_stdout(&fixture.repo.root, &["rev-parse", "epic/rebound"]);
+        match case {
+            "missing" => {
+                run_git(&["switch", "factory/alice"], &fixture.worker);
+                run_git(&["branch", "-D", &fixture.branch], &fixture.repo.root);
+                run_git(
+                    &["push", "origin", "--delete", &fixture.branch],
+                    &fixture.repo.root,
+                );
+            }
+            "remote-conflict" => run_git(
+                &[
+                    "update-ref",
+                    &format!("refs/heads/{}", fixture.branch),
+                    &before,
+                ],
+                fixture.origin.path(),
+            ),
+            _ => {
+                let tasks = open_task_store(&fixture.cas_root).unwrap();
+                let mut task = tasks.get("cas-e429").unwrap();
+                task.deliverables
+                    .factory_branch_start
+                    .as_mut()
+                    .unwrap()
+                    .assignee = "another-worker".into();
+                tasks.update(&task).unwrap();
+            }
+        }
+        let refs_before = git_stdout(&fixture.repo.root, &["show-ref"]);
+        let origin_before = git_stdout(fixture.origin.path(), &["show-ref"]);
+        let head_before = git_stdout(&fixture.worker, &["rev-parse", "HEAD"]);
+        let mut request = coord_req("worktree_merge");
+        request.id = Some("alice".into());
+        request.task_id = Some("cas-e429".into());
+        request.cleanup = Some(false);
+        let error = fixture
+            .service
+            .coordination(Parameters(request))
+            .await
+            .expect_err(case);
+        assert!(
+            error.message.contains("DELIVERY BRANCH")
+                && error.message.contains("No merge was attempted"),
+            "{case}: {error}"
+        );
+        assert_eq!(
+            git_stdout(&fixture.repo.root, &["show-ref"]),
+            refs_before,
+            "{case}: local refs changed"
+        );
+        assert_eq!(
+            git_stdout(fixture.origin.path(), &["show-ref"]),
+            origin_before,
+            "{case}: origin mutated"
+        );
+        assert_eq!(
+            git_stdout(&fixture.worker, &["rev-parse", "HEAD"]),
+            head_before,
+            "{case}: source checkout moved"
+        );
+        env.set_current_dir(&parent);
+    }
+}
+
 #[tokio::test]
 async fn remote_only_delivery_uses_normal_merge_gates_and_receipt_cas_efff() {
     let mut env = test_env();

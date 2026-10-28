@@ -115,6 +115,7 @@ describe("a page attachment shows inline in a sandboxed frame (cas-3aff)", () =>
       expect(frame.title).toBe("Release report card.html, a page from the supervisor");
       expect(page!.querySelector("iframe[srcdoc]")).toBeNull();
       expect(failed!.querySelector("iframe")).toBeNull();
+      // pin: the failed frame must say where the page can still be opened.
       expect(failed!.querySelector(".visual-status")?.textContent).toBe("This page can't be shown here. Open the file above to try it in a tab.");
       history.reply(reply(81, "Also tagged.", undefined, "answer"), at(10, 2)); view.update();
       expect(view.element.querySelector("iframe")).toBe(frame);

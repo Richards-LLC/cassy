@@ -33,6 +33,10 @@ unwrap_used = "warn"
 # archive. See docs/third-party/blake3-1.8.6.md.
 [patch.crates-io]
 blake3 = { path = "vendor/blake3-1.8.6" }
+# Exact crates.io 0.25.0 source (inquire's terminal reader) plus one additive
+# function, event::take_buffered_events. Matches only `^0.25`; crossterm 0.29
+# users resolve from crates.io unchanged. See docs/third-party/crossterm-0.25.0.md.
+crossterm = { path = "vendor/crossterm-0.25.0" }
 
 [profile.release]
 lto = true

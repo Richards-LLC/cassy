@@ -561,9 +561,10 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
     }
 }
 
-/// Picker new-login on a real terminal: keys typed together with the email
-/// reach the duplicate question through the terminal's own line discipline,
-/// in order, with its editing, EOF and Ctrl-C meanings intact.
+/// Picker new-login on a real terminal: keys inquire read ahead of the
+/// duplicate question are handed over without reading the terminal again, so
+/// finished answers, EOF and Ctrl-C keep their order and meaning; everything
+/// newer is the terminal's own input.
 #[cfg(unix)]
 #[tokio::test]
 async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_providers() {
@@ -606,14 +607,18 @@ exit 0
         // (keys written with the email, output that triggers the next write,
         // keys written then, succeeds). Everything typed after the email's
         // Enter is the terminal's own input, in order, until the question.
-        let cases: [(&[u8], &str, &[u8], bool); 9] = [
+        let cases: [(&[u8], &str, &[u8], bool); 10] = [
             (b"typed@example.com\ry\r", "", b"", true),
-            // Enter typed during the login finishes the echoed `y`.
-            (b"typed@example.com\ry", "LOGIN_STARTED", b"\r", true),
+            // Chooser, email and answer in one write share one reader queue.
+            (b"\x1b[F\rtyped@example.com\ry\r", "", b"", true),
             // Answers are consumed in order: the first one, `n`, wins.
             (b"typed@example.com\rn\ry\r", "", b"", false),
             (b"typed@example.com\ry\x15\r", "", b"", false),
+            // An unfinished, never-displayed `n` is dropped; later keys are
+            // the terminal's own, so Backspace then `y` answers yes and a
+            // lone Enter during the login is an empty answer.
             (b"typed@example.com\rn", "[y/N] ", b"\x7fy\r", true),
+            (b"typed@example.com\ry", "LOGIN_STARTED", b"\r", false),
             // EOF between the two readers, in every position, cancels.
             (b"typed@example.com\r\x04", "", b"", false),
             (b"typed@example.com\ry", "LOGIN_STARTED", b"\x04", false),
@@ -659,8 +664,9 @@ exit 0
                             let text = String::from_utf8_lossy(&output).into_owned();
                             if step == 0 && text.contains("list-profiles") {
                                 // End selects the last row: the new-login entry.
-                                pty.write(b"\x1b[F\r").await.unwrap();
-                                step = 1;
+                                let whole = with_email.starts_with(b"\x1b[F");
+                                pty.write(if whole { with_email } else { b"\x1b[F\r" }).await.unwrap();
+                                step = if whole { 2 } else { 1 };
                             } else if step == 1 && text.contains("Email for the new") {
                                 pty.write(with_email).await.unwrap();
                                 step = 2;

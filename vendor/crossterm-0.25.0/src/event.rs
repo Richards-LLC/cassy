@@ -215,6 +215,18 @@ pub fn read() -> Result<Event> {
     }
 }
 
+/// Cassy patch: remove and return, oldest first, every [`Event`] this process
+/// already read from the terminal but has not delivered: the reader queue,
+/// then events the source's parser completed. It never creates, polls or
+/// reads the source, so with no reader it returns an empty `Vec`. Internal
+/// events (cursor-position replies) stay queued, in order.
+pub fn take_buffered_events() -> Vec<Event> {
+    match INTERNAL_EVENT_READER.lock().as_mut() {
+        Some(reader) => reader.take_buffered_events(),
+        None => Vec::new(),
+    }
+}
+
 /// Polls to check if there are any `InternalEvent`s that can be read within the given duration.
 pub(crate) fn poll_internal<F>(timeout: Option<Duration>, filter: &F) -> Result<bool>
 where

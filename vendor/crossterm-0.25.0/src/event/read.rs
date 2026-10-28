@@ -93,6 +93,26 @@ impl InternalEventReader {
         }
     }
 
+    /// Cassy patch: every public event already read but not delivered, oldest
+    /// first: the queue, then events the source parsed. Never polls or reads
+    /// the source; internal events are kept queued in their original order.
+    pub(crate) fn take_buffered_events(&mut self) -> Vec<Event> {
+        let mut buffered: Vec<InternalEvent> = self.events.drain(..).collect();
+        buffered.append(&mut self.skipped_events);
+        if let Some(source) = self.source.as_mut() {
+            buffered.extend(source.take_buffered());
+        }
+        let mut events = Vec::new();
+        for event in buffered {
+            match event {
+                InternalEvent::Event(event) => events.push(event),
+                #[cfg(unix)]
+                internal => self.events.push_back(internal),
+            }
+        }
+        events
+    }
+
     pub(crate) fn read<F>(&mut self, filter: &F) -> Result<InternalEvent>
     where
         F: Filter,
@@ -380,6 +400,49 @@ mod tests {
         assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
         assert!(reader.read(&InternalEventFilter).is_err());
         assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_take_buffered_drains_queue_then_parser_without_reading() {
+        // Cassy patch: the handoff must never read the terminal.
+        struct ParsedOnly(Vec<InternalEvent>);
+        impl EventSource for ParsedOnly {
+            fn try_read(
+                &mut self,
+                _timeout: Option<Duration>,
+            ) -> Result<Option<InternalEvent>, ErrorKind> {
+                panic!("take_buffered must not read the terminal");
+            }
+
+            fn take_buffered(&mut self) -> Vec<InternalEvent> {
+                std::mem::take(&mut self.0)
+            }
+
+            #[cfg(feature = "event-stream")]
+            fn waker(&self) -> super::super::sys::Waker {
+                unimplemented!();
+            }
+        }
+        let cursor = InternalEvent::CursorPosition(3, 4);
+        let mut reader = InternalEventReader {
+            events: vec![InternalEvent::Event(Event::Resize(1, 1)), cursor.clone()].into(),
+            source: Some(Box::new(ParsedOnly(vec![InternalEvent::Event(Event::Resize(2, 2))]))),
+            skipped_events: Vec::new(),
+        };
+        assert_eq!(
+            reader.take_buffered_events(),
+            vec![Event::Resize(1, 1), Event::Resize(2, 2)]
+        );
+        // Internal replies stay queued for their own readers.
+        assert_eq!(reader.events, VecDeque::from(vec![cursor]));
+        assert!(reader.take_buffered_events().is_empty());
+    }
+
+    #[test]
+    fn test_take_buffered_events_never_creates_the_reader() {
+        assert!(crate::event::take_buffered_events().is_empty());
+        assert!(crate::event::INTERNAL_EVENT_READER.lock().is_none());
     }
 
     #[derive(Default)]

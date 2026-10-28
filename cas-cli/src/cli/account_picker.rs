@@ -588,30 +588,22 @@ static TYPEAHEAD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new()
 /// A typed-ahead Ctrl-D: ends the line it follows, as the terminal would.
 const TYPED_EOF: char = '\u{4}';
 
-/// Hand the email prompt's type-ahead over at the point the terminal's own
-/// line discipline takes input back.
+/// Hand the email prompt's type-ahead over to the terminal's own line
+/// discipline.
 ///
-/// inquire reads through crossterm 0.25, which takes every byte available at
-/// once and keeps the events after Enter in a private queue that a later
-/// `std::io::stdin()` read never sees. Draining that queue with `poll(0)` also
-/// reads the terminal once the queue is empty, and crossterm drops the empty
-/// read that is a canonical EOF. So first take whatever the now-canonical
-/// terminal already holds (finished lines and EOF markers, typed after the
-/// prompt left raw mode), then the queue, which was typed before it. Only
-/// finished records carry over: the queue's unfinished, never-displayed tail
-/// is dropped. A queued Ctrl-C cancels now, as it would have when typed.
+/// inquire reads through crossterm 0.25, which reads up to 1 KiB at once and
+/// keeps every key parsed after Enter in a private queue that a later
+/// `std::io::stdin()` read never sees. The vendored
+/// `take_buffered_events` returns exactly those already-read keys, oldest
+/// first, without reading the terminal, so newer input stays queued in the
+/// kernel behind them. Only finished records carry over: a line ended by
+/// Enter or Ctrl-J, Ctrl-D (EOF) and Ctrl-C, which cancels now as it would
+/// have when typed. Ctrl-U and Backspace edit the queued line; its unfinished,
+/// never-displayed tail is dropped.
 fn stash_typeahead(provider_label: &str) -> Result<()> {
-    use crossterm_inquire::event::{self, Event};
-    #[cfg(unix)]
-    let canonical = {
-        use std::io::IsTerminal;
-        if std::io::stdin().is_terminal() { drain_canonical(libc::STDIN_FILENO) } else { String::new() }
-    };
-    #[cfg(not(unix))]
-    let canonical = String::new();
+    use crossterm_inquire::event::Event;
     let mut queued = String::new();
-    while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-        let Ok(event) = event::read() else { break };
+    for event in crossterm_inquire::event::take_buffered_events() {
         let Event::Key(key) = event else { continue };
         if queue_key(&mut queued, key).is_break() {
             // Nothing is staged yet; die by SIGINT like an ordinary Ctrl-C.
@@ -623,40 +615,37 @@ fn stash_typeahead(provider_label: &str) -> Result<()> {
         }
     }
     queued.truncate(queued.rfind(['\n', TYPED_EOF]).map_or(0, |end| end + 1));
-    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    typed.push_str(&queued);
-    typed.push_str(&canonical);
+    TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_str(&queued);
     Ok(())
 }
 
-/// Read what a canonical-mode terminal has ready without blocking: finished
-/// lines, and an empty read for each EOF (Ctrl-D), recorded as `TYPED_EOF`.
-/// Erase, kill and signals were already applied by the line discipline.
-/// Stops at the first EOF; a line flushed by Ctrl-D without a newline ends in
-/// EOF too.
-#[cfg(unix)]
-fn drain_canonical(fd: libc::c_int) -> String {
-    let mut drained = Vec::new();
-    loop {
-        let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut ready, 1, 0) } != 1 || ready.revents & libc::POLLIN == 0 {
-            break;
-        }
-        let mut chunk = [0u8; 1024];
-        let read = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
-        if read <= 0 {
-            if read == 0 {
-                drained.push(TYPED_EOF as u8);
-            }
-            break;
-        }
-        drained.extend_from_slice(&chunk[..read as usize]);
-        if !drained.ends_with(b"\n") {
-            drained.push(TYPED_EOF as u8);
-            break;
-        }
+/// Read the duplicate-account answer from input the picker did not buffer.
+///
+/// A terminal in canonical mode returns one record per read: a line ending in
+/// a newline, or the text before a Ctrl-D, or nothing for Ctrl-D on an empty
+/// line. Ctrl-D ends the answer unsent, so a record without a newline is EOF
+/// (`None`); waiting for more would make the reader press Ctrl-D twice. A
+/// canonical line never exceeds the kernel's line limit, far below the
+/// buffer. Pipes and files are streams, not records: a short chunk is not EOF,
+/// so they keep `read_line` semantics and only an empty read is EOF.
+pub(crate) fn read_answer(input: &mut impl std::io::BufRead, terminal: bool) -> std::io::Result<Option<String>> {
+    if !terminal {
+        let mut line = String::new();
+        return Ok((input.read_line(&mut line)? > 0).then_some(line));
     }
-    String::from_utf8_lossy(&drained).into_owned()
+    let record = loop {
+        match input.fill_buf() {
+            Ok(record) => break record,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let (line, used) = match record.iter().position(|&byte| byte == b'\n') {
+        Some(end) => (Some(String::from_utf8_lossy(&record[..=end]).into_owned()), end + 1),
+        None => (None, record.len()),
+    };
+    input.consume(used);
+    Ok(line)
 }
 
 /// Apply one queued key with the terminal line discipline's meaning.
@@ -1088,30 +1077,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn canonical_input_ready_at_the_handoff_keeps_lines_and_eof() {
-        // A real terminal pair in its default canonical mode: the line
-        // discipline applies erase, and Ctrl-D on an empty line is an empty
-        // read. Nothing typed after the email prompt may be swallowed.
+    fn answers_are_terminal_records_but_pipe_streams() {
+        use std::io::{BufReader, Read, Write};
+        use std::os::fd::FromRawFd;
+        // A real terminal pair in its default canonical mode.
         let (mut master, mut slave) = (0, 0);
         assert_eq!(
             unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) },
             0
         );
-        let write = |bytes: &[u8]| {
-            assert_eq!(unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) }, bytes.len() as isize);
+        let mut keyboard = unsafe { std::fs::File::from_raw_fd(master) };
+        let mut terminal = BufReader::new(unsafe { std::fs::File::from_raw_fd(slave) });
+        let mut type_keys = |keys: &[u8]| {
+            keyboard.write_all(keys).unwrap();
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
-        assert_eq!(drain_canonical(slave), "");
-        write(b"nx\x7f\x7fy\r\x04later\r");
-        assert_eq!(drain_canonical(slave), "y\n\u{4}");
-        assert_eq!(drain_canonical(slave), "later\n");
-        // A line flushed by Ctrl-D without Enter is EOF too, never an answer.
-        write(b"\x15y\x04");
-        assert_eq!(next_typed_line(&mut drain_canonical(slave)).as_deref(), Some(""));
-        unsafe {
-            libc::close(master);
-            libc::close(slave);
-        }
+        // Erase is the terminal's; each record is read once, in order.
+        type_keys(b"nx\x7f\x7fy\rn\r");
+        assert_eq!(read_answer(&mut terminal, true).unwrap().as_deref(), Some("y\n"));
+        assert_eq!(read_answer(&mut terminal, true).unwrap().as_deref(), Some("n\n"));
+        // Ctrl-D after an unfinished answer, and on an empty line, is EOF.
+        type_keys(b"y\x04");
+        assert_eq!(read_answer(&mut terminal, true).unwrap(), None);
+        type_keys(b"\x04");
+        assert_eq!(read_answer(&mut terminal, true).unwrap(), None);
+        // A pipe chunk without a newline is not EOF: the stream continues.
+        let stream = std::io::Cursor::new(b"y".to_vec()).chain(std::io::Cursor::new(b"es\n".to_vec()));
+        let mut pipe = BufReader::with_capacity(1, stream);
+        assert_eq!(read_answer(&mut pipe, false).unwrap().as_deref(), Some("yes\n"));
+        assert_eq!(read_answer(&mut pipe, false).unwrap(), None);
     }
 
     #[test]

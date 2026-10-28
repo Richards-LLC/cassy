@@ -604,8 +604,12 @@ impl LoginSignals {
         std::thread::Builder::new()
             .name("login-answer".into())
             .spawn(move || {
-                let mut answer = String::new();
-                let result = std::io::stdin().read_line(&mut answer).map(|_| answer);
+                use std::io::IsTerminal;
+                // EOF, including Ctrl-D after an unfinished answer, is empty.
+                let stdin = std::io::stdin();
+                let terminal = stdin.is_terminal();
+                let result = crate::cli::account_picker::read_answer(&mut stdin.lock(), terminal)
+                    .map(Option::unwrap_or_default);
                 let _ = send.send(result);
             })?;
         loop {

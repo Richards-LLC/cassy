@@ -72,6 +72,10 @@ impl UnixInternalEventSource {
 }
 
 impl EventSource for UnixInternalEventSource {
+    fn take_buffered(&mut self) -> Vec<InternalEvent> {
+        self.parser.internal_events.drain(..).collect()
+    }
+
     fn try_read(&mut self, timeout: Option<Duration>) -> Result<Option<InternalEvent>> {
         if let Some(event) = self.parser.next() {
             return Ok(Some(event));

@@ -51,6 +51,7 @@ pub fn note_blocks(notes: &str) -> Vec<&str> {
     for (offset, _) in notes.match_indices("\n\n") {
         let next = &notes[offset + 2..];
         if is_timestamped_note(next)
+            || next.starts_with("ARTIFACT_PROOF:")
             || PROVENANCE_BLOCKS.iter().any(|(begin, _)| next.starts_with(begin))
             || !is_timestamped_note(notes[start..offset].trim())
         {

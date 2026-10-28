@@ -202,17 +202,25 @@ fn trusted_artifact_note_upgrades_its_exact_raw_copy_without_losing_history() {
     let (_temp, store) = create_test_store();
     let raw = "[2026-10-27 19:52] 🧪 PLATFORM_PROOF Epic flow walk\n\nLedger totals: PASS=10";
     let enriched = format!("{raw}\nARTIFACT_PROOF: canonical ledger");
+    let longer = format!("{raw}\n\nextra paragraph belonging to this timestamp");
     let history = "[2026-10-27 19:00] unrelated\nARTIFACT_PROOF: prior ledger";
-    for (index, seed) in [raw.to_string(), format!("{enriched}\n\n{raw}")].iter().enumerate() {
+    for (index, (seed, preserve_longer)) in [
+        (raw.to_string(), false),
+        (format!("{enriched}\n\n{raw}"), false),
+        (format!("{enriched}\n\n{longer}"), true),
+    ].iter().enumerate() {
         let task = Task::new(format!("task-proof-upgrade-{index}"), "Canonical note".into());
         store.add(&task).unwrap();
         store.append_trusted_note(&task.id, history).unwrap();
         store.append_trusted_note(&task.id, seed).unwrap();
-        store.append_note(&task.id, "later unrelated note").unwrap();
+        store.append_note(&task.id, "[2026-10-27 20:00] later unrelated note").unwrap();
 
         let at = store.append_trusted_note(&task.id, &enriched).unwrap();
         let notes = store.get(&task.id).unwrap().notes;
-        assert_eq!(notes.matches("Epic flow walk").count(), 1, "{notes}");
+        assert_eq!(notes.matches("Epic flow walk").count(), if *preserve_longer { 2 } else { 1 }, "{notes}");
+        if *preserve_longer {
+            assert!(notes.contains(&longer), "longer entry lost its timestamp/body: {notes}");
+        }
         assert!(notes.contains(&enriched));
         assert!(notes.contains(history));
         assert!(notes.contains("later unrelated note"));

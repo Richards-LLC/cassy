@@ -172,6 +172,8 @@ fn deliverable_pairs_excludes_one_sided_and_tampered_captures() {
 #[test]
 #[cfg(unix)]
 fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
+    use std::os::unix::fs::PermissionsExt;
+
     let project = TempDir::new().unwrap();
     let root = project.path();
     fs::create_dir_all(root.join("docs/qa")).unwrap();
@@ -183,14 +185,20 @@ fn deliverable_capture_timeout_reaps_servers_and_private_checkouts() {
     fs::write(root.join("source.txt"), "delivered source").unwrap();
     fs::create_dir(root.join("node_modules")).unwrap();
     fs::write(root.join("serve.py"), "import os,time,pathlib,subprocess\nassert not subprocess.check_output(['git','status','--porcelain','--','node_modules'])\npathlib.Path('source.txt').write_text('private mutation')\nchild=subprocess.Popen(['sleep','60'])\npathlib.Path(os.environ['CAPTURE_TEST_PID']).write_text(str(os.getpid())+' '+str(child.pid))\ntime.sleep(60)\n").unwrap();
+    fs::write(
+        root.join("serve-wrapper.sh"),
+        "#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$CAPTURE_TEST_PID\"\nexec python3 serve.py \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(root.join("serve-wrapper.sh"), fs::Permissions::from_mode(0o755)).unwrap();
     git(root, &["init", "-q", "-b", "main"]);
-    git(root, &["add", "docs", "source.txt", "serve.py"]);
+    git(root, &["add", "docs", "source.txt", "serve.py", "serve-wrapper.sh"]);
     git(root, &["commit", "-q", "-m", "capture fixture"]);
     let cas_root = root.join(".cas");
     fs::create_dir_all(&cas_root).unwrap();
     fs::write(
         cas_root.join("config.toml"),
-        "[qa.capture]\nserve = 'python3 serve.py {port}'\ntimeout_secs = 2\n",
+        "[qa.capture]\nserve = './serve-wrapper.sh {port}'\ntimeout_secs = 2\n",
     )
     .unwrap();
     let pid_file = root.join("started.pids");

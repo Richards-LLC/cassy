@@ -349,12 +349,25 @@ fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
         assert!(prompts.iter().all(|prompt| !prompt.is_merge_ready()),
             "a test-first checkpoint is not a completed delivery: {prompts:?}");
     }
+    // Passing a selected compile/test does not complete the delivery. A later
+    // ordinary receipt must not lift an earlier incomplete checkpoint.
+    for receipt in [
+        format!("check: PASS {checkpoint} packages=cas"),
+        format!("test: PASS {checkpoint} cas test(existing_test) 1"),
+        format!("PASS {checkpoint}: selected test passed"),
+        format!("Example completion contract, not submitted:\nstatus: ready\ntip: {checkpoint}"),
+    ] {
+        task.notes = format!("[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint {checkpoint}.\n\n[2026-10-28 12:01] 📝 PROGRESS {receipt}\nNew regression still pending.");
+        store.update(&task).unwrap();
+        let prompts = f.relay();
+        assert!(prompts.iter().all(|prompt| !prompt.is_merge_ready()));
+    }
     task.notes.push_str(&format!("\n\n[2026-10-28 12:00] 📝 PROGRESS\nstatus: ready\ntip: {tip} on factory/merge-w\nproof: comparing with {checkpoint}"));
     store.update(&task).unwrap();
     assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
     // Completion may be recorded before park. It must invalidate the settled
     // negative read and produce one immediate signal without a new commit.
-    task.notes.push_str(&format!("\n\n[2026-10-28 12:01] 📝 PROGRESS PASS {checkpoint}: completed test-only correction; regression green."));
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:01] 📝 PROGRESS status: ready\ntip: {checkpoint} on factory/merge-w\nproof: completed test-only correction; regression green."));
     store.update(&task).unwrap();
     let mut ready = f.relay().into_iter().find(|prompt| prompt.is_merge_ready())
         .expect("worker completion enables the pre-park signal");
@@ -887,6 +900,32 @@ fn cas_9efb_missing_ci_has_one_bounded_unknown_decision() {
     assert!(f.relay().is_empty());
     f.ci(Some("success"));
     assert_eq!(f.relay().len(), 1, "later settled CI is a new decision");
+
+    // A supervisor hold wins even over a previously admitted READY receipt.
+    let store = crate::store::open_task_store_local(&f.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.notes.push_str("\n[2026-10-28 17:00] ✅ DECISION Merge held pending review.\n");
+    store.update(&task).unwrap();
+    let (ready, wait) = merge_alert::read_delivery(
+        &std::sync::Arc::new(merge_alert::Probes::default()),
+        &f.event,
+        &f.app.director_data,
+        f.repo.path(),
+        now + chrono::Duration::minutes(11),
+    );
+    assert!(ready.is_none() && wait.is_none(), "held delivery must not reuse READY");
+
+    drop(f);
+    let mut no_code = Fixture::new();
+    let store = crate::store::open_task_store_local(&no_code.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = Some("no-code".into());
+    store.update(&task).unwrap();
+    std::fs::write(no_code.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+    no_code.app.merge_alert_retries.now = Some(now);
+    assert!(no_code.relay().is_empty());
+    no_code.app.merge_alert_retries.now = Some(now + chrono::Duration::minutes(10));
+    assert!(no_code.relay().is_empty(), "declared no-code work has no missing-CI decision");
 }
 
 #[test]
@@ -944,6 +983,12 @@ fn cas_9efb_docs_only_and_cancelled_ci_have_terminal_decisions() {
     git(f.repo.path(), &["add", "README.md"]);
     git(f.repo.path(), &["commit", "-qm", "docs delivery"]);
     git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
+    let docs_now = Utc::now();
+    std::fs::write(f.app.cas_dir.join("ci.json"), "{\"check_runs\":[]}").unwrap();
+    f.app.merge_alert_retries.now = Some(docs_now);
+    assert!(f.relay().is_empty());
+    f.app.merge_alert_retries.now = Some(docs_now + chrono::Duration::minutes(10));
+    assert!(f.relay().is_empty(), "docs-only work has no missing-CI decision");
     std::fs::write(
         f.app.cas_dir.join("ci.json"),
         serde_json::json!({"check_runs": [{

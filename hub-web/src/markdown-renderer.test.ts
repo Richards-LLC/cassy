@@ -54,9 +54,11 @@ describe("supervisor markdown subset", () => {
       "```sh",
       "cargo check -p cas",
       "```",
+      "",
+      "> [!NOTE]\r\n> ```sh\r\n> \tkeep();  \r\n> \r\n> end();\r\n> ```",
     ].join("\n")));
 
-    expect(root.querySelector(".markdown-heading strong")?.textContent).toBe("Ship result");
+    expect(root.querySelector("h1.markdown-heading strong")?.textContent).toBe("Ship result");
     expect(root.querySelector("p:not(.markdown-heading) strong")?.textContent).toBe("Ready");
     expect(root.querySelector("p:not(.markdown-heading) em")?.textContent).toBe("care");
     expect(root.querySelector(".markdown-inline-code")?.textContent).toBe("cargo check");
@@ -68,6 +70,7 @@ describe("supervisor markdown subset", () => {
     expect(root.querySelector("ol")?.textContent).toContain("first");
     expect(root.querySelector(".markdown-code code")?.textContent).toBe("cargo check -p cas");
     expect(root.querySelector(".code-frame-label")?.textContent).toBe("sh");
+    expect(root.querySelector(".markdown-callout code")?.textContent).toBe("\tkeep();  \r\n\r\nend();");
     expect(root.textContent).not.toContain("**");
     expect(root.textContent).not.toContain("```sh");
   });

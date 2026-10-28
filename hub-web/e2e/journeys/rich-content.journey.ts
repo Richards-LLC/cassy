@@ -11,6 +11,62 @@ const variants = [
   { name: "phone dark", width: 390, height: 844, scheme: "dark" },
 ] as const;
 
+test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const log = page.getByRole("log");
+  const preview = log.locator('a[data-artifact-id="art-cached-image"] .rich-media');
+  let attempts = 0;
+  let recover = false;
+  let beforeReconnect = 0;
+  await page.route(`**/v1/sessions/${PELICAN}/artifacts/art-cached-image/ticket`, async route => {
+    attempts++;
+    if (!recover) await route.fulfill({ status: 503, json: { error: "temporarily_unavailable" } });
+    else await route.fallback();
+  });
+  await page.route(`**/v1/sessions/${PELICAN}/artifacts/art-cached-image/content?*`, route => route.fulfill({
+    contentType: "image/png", body: readFileSync(new URL("../media/evidence.png", import.meta.url)),
+  }));
+  await journey.stage("A failed image collapses into its own card", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    hub.supervisorSays(PELICAN, "Keep this image while reading later updates.", { attachments: [file("art-cached-image", "Cached image.png", "image/png")] });
+    await expect(preview).toHaveAttribute("data-preview-state", "waiting");
+    await expect(preview).toBeHidden();
+    await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toHaveText("Preview unavailable");
+  });
+  const cached = (await preview.elementHandle())!;
+  await journey.stage("Scroll the failed card out of the DOM, then reconnect the machine", async () => {
+    // More than twenty groups makes the real thread window cache the first
+    // card; fewer than sixty keeps that same node available for restoration.
+    for (let i = 0; i < 84; i++) hub.supervisorSays(PELICAN, `Later update ${i + 1}: the operator is reading the latest work.`);
+    const thread = page.locator(".conversation-reading.thread");
+    await thread.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event("scroll")); });
+    await expect(preview).toHaveCount(0);
+    expect(await cached.evaluate(node => node.isConnected)).toBe(false);
+    beforeReconnect = attempts;
+    expect(beforeReconnect).toBeGreaterThan(0);
+    hub.hold(PELICAN); hub.drop(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
+    hub.release(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
+    expect(attempts).toBe(beforeReconnect);
+  });
+  await journey.stage("Scroll back to the same cached card and decode its recovered image", async () => {
+    // Keep the failure real until the machine has reconnected offscreen.
+    // Initial catalog paints may reattach the card before it leaves the DOM.
+    recover = true;
+    await page.locator(".conversation-reading.thread").evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
+    await expect(preview).toHaveCount(1);
+    expect(await cached.evaluate(node => node.isConnected)).toBe(true);
+    const image = preview.getByRole("img", { name: "Cached image.png", exact: true });
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
+    await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toHaveCount(0);
+    expect(attempts).toBe(beforeReconnect + 1);
+  });
+});
+
 for (const [index, variant] of variants.entries()) {
   test.describe(variant.name, () => {
     test.use({ viewport: { width: variant.width, height: variant.height }, colorScheme: variant.scheme });

@@ -560,7 +560,7 @@ pub fn handle_session_start(
         });
     if is_codex {
         assembler.append_protected(
-            "Codex skills: if the `finish` skill is installed, type `$finish` or say `finish` to wrap up the session.",
+            "Codex skills: if the `finish` skill is installed, type `$finish` or say `finish` to wrap up the session.".to_string(),
         );
     }
 

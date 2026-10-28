@@ -1,18 +1,23 @@
 # Brief: Commander rich content
 
 ## Single idea
+
 A supervisor can show the evidence directly in its conversation, with readable source and the original file one action away.
 
 ## Hero form
+
 Annotated flow: the diagram sits inside its existing reply bubble, and Diagram source unfolds directly beneath it; attachment previews sit above the dog-eared file sheet.
 
 ## Emotional register
+
 Calm and inspectable: existing Glass reading surfaces, house type, restrained diff backgrounds and visible source controls.
 
 ## Distinctive move
+
 The existing dog-eared attachment sheet becomes the caption to a reserved media viewport, preserving the file's name and Open action.
 
 ## Deliberately omitted
+
 No extra toolbar or syntax-highlighter palette: the conversation stays the reading surface and the renderer loads only for rich content.
 
 ## Critique

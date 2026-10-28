@@ -52,7 +52,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 9. The operator invokes the builtin `finish` skill (`/finish` in Claude Code) to clean up session work and save a handoff and learnings; updates distribute it across harnesses while preserving personal overrides.
 10. In Commander the operator turns on Show work to see the supervisor's thinking, tool calls and task moves between its replies, collapsed until opened, and opens a worker's live timeline from Tasks & progress instead of watching its terminal (HUB-J25). The daemon reads these from existing transcripts and the task DB with zero model tokens, and pushes a contentless change notice to clients that read a page.
 
-10. In Commander the operator reads safe Mermaid diagrams, expands unified diffs, and inspects inline image, video, audio and PDF first-page attachments. Source and original files remain reachable; previews reserve their space and rich renderers load on demand.
+11. In Commander the operator reads safe Mermaid diagrams, expands unified diffs, and inspects inline image, video, audio and PDF first-page attachments. Source and original files remain reachable; previews reserve their space and rich renderers load on demand.
 
 ## Authoritative Sources
 

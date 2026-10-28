@@ -735,6 +735,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Invalid diagram syntax remains readable source.
 - Missing or local-only artifacts show Preview unavailable beside their original Open link.
 - SVG from the renderer is sanitized before DOM node insertion; the unit boundary regression supplies script, event-handler and foreignObject payloads.
+
 ### HUB-J25 · See the whole picture of the work
 
 - **Entry:** `/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a thread with work between two replies, and one worker on a task

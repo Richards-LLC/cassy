@@ -53,6 +53,9 @@ pub struct HubState<R: SessionReadModel> {
     usage: Option<super::usage::UsageStore>,
     #[cfg(test)]
     artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
+    /// Visual reply page tickets and the artifact fetch behind them (cas-3aff).
+    pages: super::visual_pages::PageTickets,
+    page_fetch: super::visual_pages::PageFetch,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -79,7 +82,16 @@ impl<R: SessionReadModel> HubState<R> {
             usage: None,
             #[cfg(test)]
             artifact_cloud_client: None,
+            pages: super::visual_pages::PageTickets::default(),
+            page_fetch: super::visual_pages::default_page_fetch(),
         }
+    }
+
+    /// Replace where visual reply pages come from (tests use a fixed store).
+    #[cfg(test)]
+    pub(crate) fn with_page_fetch(mut self, fetch: super::visual_pages::PageFetch) -> Self {
+        self.page_fetch = fetch;
+        self
     }
 
     pub fn with_auth(mut self, auth: AuthStore) -> Self {
@@ -224,6 +236,11 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/sessions/{session}/artifacts/{artifact}/content",
             get(crate::hub::artifact_proxy::content::<R>).options(crate::hub::artifact_proxy::preflight::<R>),
         )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/page",
+            post(visual_page_ticket::<R>).options(preflight::<R>),
+        )
+        .route("/v1/pages/{ticket}/{artifact}", get(visual_page::<R>))
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
         .layer(middleware::from_fn_with_state(recovery, connection_evidence))
@@ -414,8 +431,12 @@ async fn security_headers(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    // A visual reply page carries its own sandbox policy (cas-3aff); every
+    // other response, and any page-route answer without one, gets Commander's.
+    let page_route = request.uri().path().starts_with("/v1/pages/");
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
+    let page_policy = page_route && headers.contains_key("content-security-policy");
     if matches!(
         transport,
         TransportSecurity::Tls13 | TransportSecurity::TrustedLoopbackTlsProxy
@@ -430,6 +451,9 @@ async fn security_headers(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    if page_policy {
+        return response;
+    }
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     // connect-src: `https:`/`wss:` reach the paired machines the operator
     // chose (arbitrary hub hosts) and the loopback hub. Two cloud services are
@@ -437,11 +461,14 @@ async fn security_headers(
     // OPERATOR_INBOX_CSP_SOURCE, the production cloud operator inbox API
     // (`/api/operator/` only, no wildcard, nothing for non-production). They
     // are the embedded page's only external origins (`h4_csp_03`).
+    // frame-src: Commander frames visual reply pages from the same paired
+    // machines (cas-3aff); each page carries its own sandbox policy.
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
+            "; frame-src 'self' https: http://127.0.0.1:*",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
         )),
     );
@@ -2501,6 +2528,99 @@ async fn artifact_view_url<R: SessionReadModel>(
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Mint a ticket that opens one HTML page the session published, framed only
+/// by the calling Commander origin (cas-3aff). The page itself is served by
+/// [`visual_page`]; an iframe or tab can't send DPoP, so the ticket is the
+/// capability. Nothing is fetched here: an unknown or non-HTML artifact is
+/// refused when the page is opened.
+async fn visual_page_ticket<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((session, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/page");
+    if let Err(error) = authorize(
+        &state,
+        HubAction::SessionRead,
+        Scope::SessionRead,
+        &headers,
+        "POST",
+        &uri,
+    ) {
+        return with_cors(unauthorized_for(&error), &headers);
+    }
+    // authorize() has already required an exact Origin for a POST.
+    let Some(origin) = origin(&headers) else {
+        return unauthorized();
+    };
+    if !valid_session_name(&session) {
+        return with_cors(generic_not_found(), &headers);
+    }
+    let (ticket, expires) = state
+        .pages
+        .issue(&session, &artifact, &origin, Instant::now());
+    let expires_at = chrono::Utc::now()
+        + chrono::Duration::from_std(expires.saturating_duration_since(Instant::now()))
+            .unwrap_or_default();
+    let url = format!("/v1/pages/{ticket}/{}", urlencoding::encode(&artifact));
+    let mut response = with_cors(
+        Json(serde_json::json!({
+            "artifact_id": artifact,
+            "url": url,
+            "expires_at": expires_at.to_rfc3339(),
+            "mime": "text/html",
+        }))
+        .into_response(),
+        &headers,
+    );
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Serve a visual reply page, or a passive asset it references by artifact
+/// id, under the sandbox policy (cas-3aff). Every refusal is the same plain
+/// 404, so a ticket says nothing about artifacts it doesn't open.
+async fn visual_page<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((ticket, artifact)): Path<(String, String)>,
+) -> Response {
+    use super::visual_pages::{is_page, page_csp, sub_asset_allowed};
+    let Some(held) = state.pages.resolve(&ticket, Instant::now()) else {
+        return generic_not_found();
+    };
+    let fetch = state.page_fetch.clone();
+    let session = held.session.clone();
+    let wanted = artifact.clone();
+    let Ok(Some(found)) = tokio::task::spawn_blocking(move || fetch(&session, &wanted)).await
+    else {
+        return generic_not_found();
+    };
+    let allowed = if artifact == held.page {
+        is_page(&found.mime)
+    } else {
+        sub_asset_allowed(&found.mime)
+    };
+    let (Ok(content_type), Ok(policy)) = (
+        HeaderValue::from_str(&found.mime),
+        HeaderValue::from_str(&page_csp(&held.origin)),
+    ) else {
+        return generic_not_found();
+    };
+    if !allowed {
+        return generic_not_found();
+    }
+    let mut response = Response::new(Body::from(found.bytes));
+    let headers = response.headers_mut();
+    headers.insert("content-type", content_type);
+    headers.insert("content-security-policy", policy);
+    headers.insert("content-disposition", HeaderValue::from_static("inline"));
+    // The ticket is a capability in the URL: keep it out of every cache.
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
     response
 }
 

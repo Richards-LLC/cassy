@@ -1589,6 +1589,8 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         "worker-src 'self'",
         "media-src 'self'",
         "img-src 'self' data:",
+        // cas-3aff: Commander may frame a paired machine's sandboxed page.
+        "frame-src 'self' https: http://127.0.0.1:*;",
     ] {
         assert!(csp.contains(required), "missing CSP directive {required}");
     }
@@ -1655,6 +1657,100 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         StatusCode::METHOD_NOT_ALLOWED,
         "the controller hub must not grow a pairing relay or control proxy"
     );
+}
+
+/// cas-3aff: a visual reply page opens only through a DPoP-minted ticket,
+/// under a sandbox policy framed by the minting origin alone, and serves only
+/// the page and passive sibling assets.
+#[tokio::test]
+async fn visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets() {
+    use super::visual_pages::PageBytes;
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    let temp = private_tempdir();
+    let auth = AuthStore::open(&temp.path().join("hub"), "machine-test").unwrap();
+    let signing = SigningKey::random(&mut OsRng);
+    let now = Utc::now();
+    let origin = "https://controller.example";
+    let invitation = auth.mint_pairing(origin, Scope::default_read_only(), now).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", origin, Scope::default_read_only());
+    exchange.public_key_jwk = public_jwk(&signing);
+    let credential = auth.exchange_pairing(exchange, now).unwrap();
+    let store: HashMap<&str, (&str, &[u8])> = HashMap::from([
+        ("art-page", ("text/html", b"<h1>Report</h1>" as &[u8])),
+        ("art-chart", ("image/png", b"png")),
+        ("art-other-page", ("text/html", b"<h1>Other</h1>")),
+        ("art-data", ("application/json", b"{}")),
+        ("art-text", ("text/plain", b"not a page")),
+    ]);
+    let fetch: super::visual_pages::PageFetch = Arc::new(move |session, artifact| {
+        assert_eq!(session, "factory-a", "a ticket reads only its own session");
+        store.get(artifact).map(|(mime, bytes)| PageBytes { mime: (*mime).into(), bytes: bytes.to_vec() })
+    });
+    let events = MachineEventBus::new(4);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![fixture_session("factory-a")])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(4), events.clone()), events,
+    ).with_auth(auth).with_page_fetch(fetch));
+    let mint = |artifact: &str, signed: bool| {
+        let path = format!("/v1/sessions/factory-a/artifacts/{artifact}/page");
+        let request = Request::post(&path).header("origin", origin);
+        let request = if signed {
+            request
+                .header("authorization", format!("DPoP {}", credential.credential))
+                .header("dpop", sign_dpop(&signing, &credential.credential, "POST", &path, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+        } else {
+            request
+        };
+        app.clone().oneshot(request.body(Body::empty()).unwrap())
+    };
+    let get = |path: String| app.clone().oneshot(Request::get(path).body(Body::empty()).unwrap());
+
+    assert_eq!(mint("art-page", false).await.unwrap().status(), StatusCode::UNAUTHORIZED, "minting needs DPoP");
+    let minted = mint("art-page", true).await.unwrap();
+    assert_eq!(minted.status(), StatusCode::OK);
+    assert_eq!(minted.headers()["access-control-allow-origin"], origin);
+    assert_eq!(minted.headers()["cache-control"], "no-store");
+    let minted: serde_json::Value = serde_json::from_slice(&to_bytes(minted.into_body(), 4096).await.unwrap()).unwrap();
+    let page_url = minted["url"].as_str().unwrap().to_owned();
+    let ticket_root = page_url.strip_suffix("art-page").unwrap().to_owned();
+    assert!(ticket_root.starts_with("/v1/pages/") && ticket_root.len() > "/v1/pages/".len() + 40, "{page_url}");
+
+    let expected_csp = format!(
+        "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors {origin}"
+    );
+    for (path, mime, body) in [(page_url.clone(), "text/html", "<h1>Report</h1>"), (format!("{ticket_root}art-chart"), "image/png", "png")] {
+        let response = get(path.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let headers = response.headers();
+        assert_eq!(headers["content-security-policy"], expected_csp.as_str(), "{path}");
+        assert_eq!(headers.get_all("content-security-policy").iter().count(), 1);
+        assert_eq!(headers["content-type"], mime);
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers["cache-control"], "no-store");
+        assert!(!headers.contains_key("x-frame-options"), "frame-ancestors replaces DENY for the minting origin");
+        assert!(!headers.contains_key("access-control-allow-origin"));
+        assert_eq!(to_bytes(response.into_body(), 4096).await.unwrap(), body.as_bytes());
+    }
+
+    // A second page, JSON, a missing artifact and an unknown ticket all get the
+    // same 404 under Commander's own strict policy.
+    let text_ticket: serde_json::Value = serde_json::from_slice(&to_bytes(mint("art-text", true).await.unwrap().into_body(), 4096).await.unwrap()).unwrap();
+    for path in [
+        format!("{ticket_root}art-other-page"),
+        format!("{ticket_root}art-data"),
+        format!("{ticket_root}art-missing"),
+        "/v1/pages/not-a-ticket/art-page".to_owned(),
+        text_ticket["url"].as_str().unwrap().to_owned(),
+    ] {
+        let response = get(path.clone()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(response.headers()["x-frame-options"], "DENY", "{path}");
+        assert!(response.headers()["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"), "{path}");
+    }
 }
 
 #[tokio::test]

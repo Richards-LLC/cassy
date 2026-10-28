@@ -10577,6 +10577,28 @@ mod tests {
     }
 
     #[test]
+    fn started_digest_is_withdrawn_when_a_later_task_transition_supersedes_it() {
+        let (temp, store) = create_test_store();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-started-digest".into(), "relay target".into());
+        task.status = TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let started = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"13952\" occurrence=\"{}\">started</task-lifecycle>", task.id, Utc::now().to_rfc3339());
+        let old = store.enqueue_idempotent("lifecycle:13952", "supervisor", &started, Some("session"), Some("task_started"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
+        let EnqueueIdempotentResult::Created(old) = old else { panic!("new relay") };
+        task.status = TaskStatus::AwaitingMerge;
+        tasks.update(&task).unwrap();
+        let merge = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" new=\"awaiting_merge\" notification_id=\"13956\" occurrence=\"{}\">merge required</task-lifecycle>", task.id, Utc::now().to_rfc3339());
+        let current = store.enqueue_idempotent("lifecycle-wake:13956", "supervisor", &merge, Some("session"), Some("task_awaiting_merge"), None, "merge-13956", Some(&QueueOrigin::Daemon)).unwrap();
+        let EnqueueIdempotentResult::Created(current) = current else { panic!("new relay") };
+        assert!(store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows.is_empty(), "stale started digest must not reach next turn");
+        assert_eq!(store.message_delivery_report(old).unwrap().unwrap().pending_reason, Some(PendingReason::SupersededStale));
+        assert_eq!(store.recipient_receipt(old, "supervisor").unwrap(), None);
+        assert_eq!(store.surface_unseen_for_recipient("supervisor", Some("session"), 10).unwrap().iter().map(|row| row.id).collect::<Vec<_>>(), vec![current]);
+    }
+
+    #[test]
     fn cas_1485_current_terminal_reports_and_uncertain_payloads_still_surface() {
         for (source, current, announced, missing_task, malformed) in [
             ("lifecycle-wake:17717", TaskStatus::AwaitingMerge, "awaiting_merge", false, false),

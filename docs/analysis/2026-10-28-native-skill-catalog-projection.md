@@ -85,7 +85,7 @@ must be included in an eventual launch acceptance capture.
 The current Cassy launch seam binds a Claude account and independent secure
 storage selector in `crates/cas-mux/src/backend/claude.rs:47` and
 `crates/cas-pty/src/pty.rs:669`; it records workspace trust in the selected
-profile in `crates/cas-mux/src/backend/claude.rs:76`. Codex similarly binds its
+profile in `crates/cas-mux/src/backend/claude.rs:85`. Codex similarly binds its
 account home before trust and hook preparation in
 `crates/cas-mux/src/backend/codex.rs:53`. Substituting a new profile directory
 is therefore broader than projecting the skill catalog. A native fixture with

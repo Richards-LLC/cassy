@@ -27191,7 +27191,6 @@ mod merge_state_gate_tests {
         }
     }
 
-
     fn advance_recorded_epic(
         repo: &std::path::Path,
         id: &str,
@@ -27254,6 +27253,7 @@ mod merge_state_gate_tests {
         git(p, &["fetch", "-q", "--prune", "origin"]);
         let retained_tip = resolve_branch_sha(p, "epic/clean");
         commit_file_at(p, "later.rs", "// later\n", "2026-08-15T02:01:00Z");
+        git(p, &["push", "-q", "origin", "main"]);
         let note = advance_recorded_epic(p, "cas-epic", "epic/clean", "main").unwrap();
         assert!(note.contains("REFUSED"), "{note}");
         assert_eq!(resolve_branch_sha(p, "epic/clean"), retained_tip);

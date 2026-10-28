@@ -593,7 +593,9 @@ pub(crate) fn task_epic_base(
     };
 
     let branch = crate::mcp::tools::core::task::repo_context::effective_epic_branch(&epic)
-        .unwrap_or_default().to_string();
+        .filter(|_| epic.branch.as_deref().is_some_and(|branch| !branch.trim().is_empty()))
+        .unwrap_or_default()
+        .to_string();
     let branch_is_title_slug_fallback = false;
     let branch_exists = !branch.is_empty() && ref_exists(repo_root, &branch);
     if !branch_exists {

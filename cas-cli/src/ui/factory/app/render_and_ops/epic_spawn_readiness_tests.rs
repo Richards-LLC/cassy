@@ -106,6 +106,8 @@ pub(super) fn with_fixture(check: impl FnOnce(&mut Fixture)) {
     let mut epic = cas_types::Task::new("cas-round2-epic".into(), "Round 2".into());
     epic.task_type = cas_types::TaskType::Epic;
     epic.branch = Some("epic/round2".into());
+    epic.deliverables.epic_branch_origin =
+        crate::mcp::tools::core::task::lifecycle::epic_lane::branch_origin("epic/round2");
     epic.deliverables.work_target = Some(cas_types::WorkTarget {
         repo_selector: "project:bfa1-round2".into(),
         target_branch: "main".into(),

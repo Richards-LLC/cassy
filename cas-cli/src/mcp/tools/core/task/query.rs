@@ -169,12 +169,22 @@ pub(super) fn render_task_read(
 }
 
 pub(super) fn task_scope(task: &Task) -> String {
+    let risk = task
+        .risk
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "Execution Note: {}\nDescription: {}\nAcceptance Criteria: {}\nProof Targets: {}\n",
+        "Execution Note: {}\nDescription: {}\nAcceptance Criteria: {}\nProof Targets: {}\nRisk: {}\nDoor: {} (recorded only)\n",
         excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 40),
         excerpt(&task.description, 100),
         excerpt(&task.acceptance_criteria, 80),
-        excerpt(&task.proof_targets.join(", "), 40)
+        excerpt(&task.proof_targets.join(", "), 40),
+        excerpt(&risk, 40),
+        task.door
+            .map(|door| door.to_string())
+            .unwrap_or_else(|| "undeclared".into())
     )
 }
 

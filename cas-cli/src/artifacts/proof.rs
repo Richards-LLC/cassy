@@ -9,15 +9,21 @@ const MARKER: &str = "ARTIFACT_PROOF: ";
 
 /// A missing local pointer says nothing about whether Cloud has the bytes.
 #[derive(Debug, thiserror::Error)]
-#[error("artifact_metadata_unavailable: {artifact_id}\nThis machine lacks synced metadata; Cloud bytes have not been checked.\nRun `cas cloud sync`, then retry.")]
+#[error(
+    "artifact_metadata_unavailable: {artifact_id}\n{reason}\nCloud bytes have not been checked."
+)]
 pub struct MetadataUnavailable {
     pub artifact_id: String,
     pub task_id: Option<String>,
+    pub reason: &'static str,
 }
 
 /// Share every successful publication through the existing trusted task-note
 /// transport, including publications that did not request a prose proof note.
-pub(crate) fn record_published(cas_root: &Path, artifact: &PublishedArtifact) -> anyhow::Result<()> {
+pub(crate) fn record_published(
+    cas_root: &Path,
+    artifact: &PublishedArtifact,
+) -> anyhow::Result<()> {
     validate(artifact, &artifact.task_id)?;
     let tasks = crate::store::open_task_store(cas_root)?;
     let note = format!(
@@ -65,7 +71,11 @@ pub fn lookup_metadata(
     } else {
         // Match task-reader visibility, including accepted project proposals.
         let scope = crate::mcp::tools::core::task::ProjectScope::current(cas_root);
-        for task in tasks.list(None)?.into_iter().filter(|task| scope.shows(task)) {
+        for task in tasks
+            .list(None)?
+            .into_iter()
+            .filter(|task| scope.shows(task))
+        {
             if let Some(reference) = from_notes(&task.notes, id, &task.id)? {
                 if let Some(previous) = &found {
                     anyhow::ensure!(
@@ -81,6 +91,7 @@ pub fn lookup_metadata(
         MetadataUnavailable {
             artifact_id: id.to_string(),
             task_id: task_id.map(str::to_string),
+            reason: "This machine lacks synced metadata; run `cas cloud sync`, then retry.",
         }
         .into()
     })
@@ -146,22 +157,39 @@ pub(crate) fn take_published_proof_notes(notes: &mut String, task_id: &str) -> V
     let mut trusted = Vec::new();
     let mut ordinary = Vec::new();
     for block in cas_store::task_note_markers::note_blocks(notes) {
-        let proofs = block.lines().filter(|line| {
-            line.strip_prefix(MARKER)
-                .and_then(|json| serde_json::from_str::<PublishedArtifact>(json).ok())
-                .is_some_and(|record| validate(&record, task_id).is_ok())
-        }).collect::<Vec<_>>();
+        let proofs = block
+            .lines()
+            .filter(|line| {
+                line.strip_prefix(MARKER)
+                    .and_then(|json| serde_json::from_str::<PublishedArtifact>(json).ok())
+                    .is_some_and(|record| validate(&record, task_id).is_ok())
+            })
+            .collect::<Vec<_>>();
         if !proofs.is_empty() {
             // Trust only the records validated above, never other marker lines
             // that happen to share the same incoming note.
-            trusted.push(cas_store::task_note_markers::neutralize_new_markers(
-                block, Some(&proofs.join("\n")),
-            ).into_owned());
+            trusted.push(
+                cas_store::task_note_markers::neutralize_new_markers(
+                    block,
+                    Some(&proofs.join("\n")),
+                )
+                .into_owned(),
+            );
         }
-        ordinary.push(block.lines().filter(|line| !proofs.contains(line)).collect::<Vec<_>>().join("\n"));
+        ordinary.push(
+            block
+                .lines()
+                .filter(|line| !proofs.contains(line))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
     }
     if !trusted.is_empty() {
-        *notes = ordinary.into_iter().filter(|block| !block.is_empty()).collect::<Vec<_>>().join("\n\n");
+        *notes = ordinary
+            .into_iter()
+            .filter(|block| !block.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
     }
     trusted
 }
@@ -236,7 +264,11 @@ pub fn prepare_note(
 
 /// A receiving host needs only the synced note, never the publisher's path
 /// or SQLite file. Reject conflicting records rather than choosing one.
-pub(crate) fn from_notes(notes: &str, id: &str, task_id: &str) -> anyhow::Result<Option<PublishedArtifact>> {
+pub(crate) fn from_notes(
+    notes: &str,
+    id: &str,
+    task_id: &str,
+) -> anyhow::Result<Option<PublishedArtifact>> {
     let mut found = None;
     for line in notes.lines().filter_map(|line| line.strip_prefix(MARKER)) {
         let record: PublishedArtifact = match serde_json::from_str(line) {
@@ -332,17 +364,48 @@ pub fn fetch_task(
     id: &str,
 ) -> anyhow::Result<(PublishedArtifact, PathBuf)> {
     let store = SqliteArtifactStore::open(cas_root)?;
-    let artifact = lookup_metadata(cas_root, Some(task_id), id)?;
+    let cloud = super::cloud_client(cas_root);
+    let artifact = match lookup_metadata(cas_root, Some(task_id), id) {
+        Ok(artifact) => artifact,
+        Err(error)
+            if error.downcast_ref::<MetadataUnavailable>().is_some()
+                || matches!(
+                    error.downcast_ref::<cas_store::StoreError>(),
+                    Some(cas_store::StoreError::TaskNotFound(_))
+                ) =>
+        {
+            let unavailable = || MetadataUnavailable {
+                artifact_id: id.to_string(),
+                task_id: Some(task_id.to_string()),
+                reason: "The local task or proof is missing and the authenticated Cloud scope lookup is unavailable or incomplete.",
+            };
+            let client = cloud.as_ref().ok_or_else(unavailable)?;
+            let scoped_tasks = client
+                .visible_task_notes(task_id)
+                .map_err(|_| unavailable())?;
+            let mut selected = None;
+            for scoped in scoped_tasks {
+                if let Some(proof) = from_notes(&scoped.notes, id, task_id)? {
+                    anyhow::ensure!(
+                        selected.is_none(),
+                        "conflicting proof artifact references for {id} across visible Cloud scopes"
+                    );
+                    // Retain the authenticated owner scope with the proof until
+                    // every scope has been checked for conflicting matches.
+                    selected = Some((scoped.team_id, scoped.project_id, proof));
+                }
+            }
+            selected
+                .map(|(_, _, proof)| proof)
+                .ok_or_else(unavailable)?
+        }
+        Err(error) => return Err(error),
+    };
     validate(&artifact, task_id)?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let roots = PublishRoots::new(cas_root, &base, task_id);
-    let path = fetch(
-        &store,
-        super::cloud_client(cas_root).as_ref(),
-        &roots,
-        artifact.clone(),
-    )?;
+    let path = fetch(&store, cloud.as_ref(), &roots, artifact.clone())?;
     Ok((artifact, path))
 }

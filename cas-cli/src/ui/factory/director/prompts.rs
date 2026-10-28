@@ -432,7 +432,20 @@ pub fn revalidate_event_for_delivery_with_context(
                 .agents
                 .iter()
                 .find(|agent| agent.name == *worker)
-                .and_then(|agent| agent.active_lease.clone());
+                .and_then(|agent| agent.active_lease.clone())
+                .or_else(|| {
+                    unfiltered_data.ready_tasks.iter()
+                        .chain(unfiltered_data.in_progress_tasks.iter())
+                        .find(|task| task.status == TaskStatus::Blocked
+                            && task_assigned_to_worker(unfiltered_data, task, worker))
+                        .map(|task| cas_factory::ActiveLeaseSummary {
+                            task_id: task.id.clone(),
+                            task_title: task.title.clone(),
+                            task_status: task.status,
+                            close_rejected_reason: None,
+                            pending_qa: None,
+                        })
+                });
 
             let supervisor_already_contacted = idle_since
                 .and_then(|idle_since| {
@@ -1891,7 +1904,13 @@ pub fn generate_prompt_at(
                 // to an actionable merge-queue prompt (task, factory branch,
                 // epic target, next steps). Other close-rejection reasons
                 // keep the informational wording.
-                let text = if is_merge_required_idle(task) {
+                let text = if task.task_status == TaskStatus::Blocked {
+                    format!(
+                        "Worker {worker} is blocked on task {} ({}).\n\
+                         Check the live blocker and respond: `{supervisor_prefix}task action=show id={}`",
+                        task.task_id, task.task_title, task.task_id
+                    )
+                } else if is_merge_required_idle(task) {
                     merge_required_idle_prompt_text(
                         worker,
                         task,
@@ -5481,9 +5500,16 @@ mod tests {
             worker: "swift-fox".to_string(),
             active_task: None,
         };
+        let rechecked = revalidate_event_for_delivery_with_focus(&event, &data, "supervisor", None)
+            .expect("blocked assignment remains an actionable WorkerIdle signal");
+        let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &rechecked else {
+            panic!("delivery must name the blocked task after its lease is released");
+        };
+        assert_eq!(active.task_id, "task-blocked");
+        assert_eq!(active.task_status, TaskStatus::Blocked);
         let config = default_config();
         let prompt = generate_prompt(
-            &event,
+            &rechecked,
             &data,
             &data,
             "supervisor",
@@ -5493,11 +5519,11 @@ mod tests {
             &HashSet::new(),
             None,
         );
-        assert!(
-            prompt.is_some(),
-            "cas-dbbb P2: WorkerIdle must NOT be suppressed when worker has only a Blocked task \
-             (blocked ≠ busy). Got: None"
-        );
+        let prompt = prompt.expect("blocked task must notify the supervisor");
+        // pin: blocker guidance must name the assigned task.
+        assert!(prompt.text.contains("blocked on task task-blocked"), "{}", prompt.text);
+        // pin: a blocked assignment cannot be described as no assigned work.
+        assert!(!prompt.text.contains("no assigned tasks"), "{}", prompt.text);
     }
 
     /// cas-dbbb P2: WorkerIdle must be suppressed when the worker has a session-ID

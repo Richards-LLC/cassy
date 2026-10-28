@@ -7195,6 +7195,10 @@ async fn immutable_qa_assignment_does_not_follow_the_moving_epic() {
         std::fs::write(repo.join("file"), format!("epic advance {n}")).unwrap();
         git(&repo, &["commit", "-qam", "advance epic"]);
     }
+    // Real factory worktrees share the supervisor's local epic refs. Mirror
+    // that layout explicitly: clone only creates a local main branch.
+    git(&checkout, &["fetch", "-q", "origin"]);
+    git(&checkout, &["branch", "-f", "epic/moving", "origin/epic/moving"]);
     let mut reviewer = Agent::new("reviewer-session".into(), "reviewer".into());
     reviewer.role = AgentRole::Worker;
     reviewer.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());

@@ -20549,7 +20549,7 @@ mod cas_bf890_notice_digest_tests {
     fn supervisor_noise_routine_episode_replay_uses_one_digest() {
         let (_temp, store) = store();
         register(&store, "lead-sup", "supervisor", "active", SESSION);
-        let at = Utc::now().to_rfc3339();
+        let at = chrono::DateTime::UNIX_EPOCH.to_rfc3339();
         let fixtures = [
             ("lifecycle:1", format!("<task-lifecycle transition=\"task_started\" task_id=\"cas-fixture\" old=\"open\" new=\"in_progress\" actor=\"w\" notification_id=\"1\" occurrence=\"{at}\">started, no action</task-lifecycle>")),
             ("lifecycle:2", format!("<task-lifecycle transition=\"task_closed\" task_id=\"cas-fixture\" old=\"in_progress\" new=\"closed\" actor=\"w\" notification_id=\"2\" occurrence=\"{at}\">closed</task-lifecycle>")),
@@ -20597,11 +20597,33 @@ mod cas_bf890_notice_digest_tests {
             )
             .unwrap();
         ids.push(peer.supervisor_copy_id);
-        let action = store.enqueue_idempotent("lifecycle-wake:5", "supervisor", "<task-lifecycle transition=\"task_blocked\" task_id=\"cas-fixture\">blocker</task-lifecycle>", Some(SESSION), None, None, "action", Some(&QueueOrigin::Daemon)).unwrap();
+        let action = store.enqueue_idempotent("lifecycle-wake:5", "supervisor", &format!("<task-lifecycle transition=\"task_blocked\" task_id=\"cas-fixture\" old=\"in_progress\" new=\"blocked\" actor=\"w\" notification_id=\"5\" occurrence=\"{at}\">blocker</task-lifecycle>"), Some(SESSION), None, None, "action", Some(&QueueOrigin::Daemon)).unwrap();
         let action = match action {
             EnqueueIdempotentResult::Created(id) => id,
             _ => unreachable!(),
         };
+        // Export transport payloads and daemon wake eligibility from this
+        // exact replay. This is queue evidence, not model token accounting.
+        let replay_rows = store.peek_for_targets(&["supervisor", "lead-sup"], Some(SESSION), 50).unwrap();
+        let daemon_wakes = replay_rows.iter().filter(|row| {
+            row.origin == Some(QueueOrigin::Daemon) && row.source.starts_with("lifecycle-wake:")
+                && (cas_types::parse_lifecycle_envelope(&row.prompt).is_some_and(|event|
+                    matches!(event.transition.as_deref(), Some("task_blocked" | "task_awaiting_merge" | "task_close_rejected")))
+                    || cas_types::parse_worker_attention_envelope(&row.prompt).is_some())
+        }).count();
+        let replay = serde_json::json!({
+            "transport_rows": replay_rows.len(),
+            "transport_body_bytes": replay_rows.iter().map(|row| row.prompt.len()).sum::<usize>(),
+            "daemon_wake_eligible_rows": daemon_wakes,
+            "required_blocker_preserved": replay_rows.iter().any(|row| row.id == action),
+        });
+        if let Ok(cwd) = std::env::current_dir()
+            && let Some(root) = cwd.ancestors().find(|path| path.join("cas-cli").is_dir() && path.join("crates").is_dir()) {
+            std::fs::create_dir_all(root.join("target")).unwrap();
+            std::fs::write(root.join("target/noise-replay.json"), serde_json::to_string_pretty(&replay).unwrap()).unwrap();
+        } else {
+            eprintln!("SKIP optional replay export: checkout root unavailable");
+        }
         assert_eq!(
             selected(&store),
             vec![action],

@@ -424,7 +424,7 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         if cli == cas_mux::SupervisorCli::Codex {
             // Codex receives this policy in its resident developer contract,
             // checked above; its visible launch trigger must not duplicate it.
-            assert!(!intro[0].prompt.contains(peer_policy), "Codex duplicates resident policy");
+            assert!(!intro[0].prompt.contains(peer_policy));
         } else {
             assert!(
                 intro[0].prompt.contains(peer_policy),

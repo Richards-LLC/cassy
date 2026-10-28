@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
 <title>Release report card</title>
 <style>
   body { margin: 0; padding: 22px 24px; font: 15px/1.5 system-ui, sans-serif; color: #1b1d24; background: #fff; }
@@ -11,6 +12,11 @@
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #e3e5ea; }
   td.num { text-align: right; font-variant-numeric: tabular-nums; }
   figure { margin: 18px 0 0; }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e9e6e0; background: #1f232d; }
+    p { color: #a3a7b4; }
+    th, td { border-bottom-color: #343a48; }
+  }
 </style>
 </head>
 <body>

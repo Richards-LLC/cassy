@@ -584,7 +584,7 @@ journeys:
     the file card in a frame with every sandbox permission withheld, on the machine's own origin through a short-lived
     ticket; its diagram, images and video load; a hostile page runs no script, leaves Commander's storage untouched,
     can't move the top window, open a window, submit a form or reach another host, and another site can't frame it;
-    the card opens the same page in its own tab, still sandboxed, never the raw stored file (cas-3aff)"
+    in dark mode the frame follows the theme and a page that supports dark renders dark (cas-2326); the card opens the same page in its own tab, still sandboxed, never the raw stored file (cas-3aff)"
   owner_groups:
   - commander_runtime
   - commander_dependencies

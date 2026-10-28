@@ -1804,8 +1804,16 @@ fn format_assigned_task_info(
                     && parked_merge_already_integrated)
                     || status == cas_types::TaskStatus::Blocked) =>
         {
+            // A merged delivery is closed or returned by its verdict. A worker
+            // in the Blocked wait is not: a PASS queues its close retry, and
+            // nothing is promised for a FAIL.
+            let outcome = if status == cas_types::TaskStatus::Blocked {
+                "a PASS queues the assigned worker's close retry"
+            } else {
+                "a PASS closes it and a FAIL returns it to the worker"
+            };
             format!(
-                "\n    task: {id} (awaiting verification) — {} → WAITING ON VERIFIER: {}; a PASS closes it and a FAIL returns it to the worker. Do not message the worker to close.",
+                "\n    task: {id} (awaiting verification) — {} → WAITING ON VERIFIER: {}; {outcome}. Do not message the worker to close.",
                 truncate(title),
                 pending_verification.unwrap_or_default()
             )
@@ -17081,9 +17089,11 @@ effort = "high"
     #[test]
     fn merged_delivery_with_pending_verification_waits_on_verifier_cas_7fc3() {
         let dispatch = "dispatch vdispatch-38f0 owned by bright-otter-99, deadline 2026-10-27 15:10 UTC";
-        for (status, merged) in [
-            (cas_types::TaskStatus::AwaitingMerge, true),
-            (cas_types::TaskStatus::Blocked, false),
+        for (status, merged, outcome) in [
+            (cas_types::TaskStatus::AwaitingMerge, true, "a PASS closes it and a FAIL returns it to the worker"),
+            // A Blocked no-code wait is not returned by a FAIL; only the
+            // queued close retry is promised.
+            (cas_types::TaskStatus::Blocked, false, "a PASS queues the assigned worker's close retry"),
         ] {
             let out = format_assigned_task_info(
                 None,
@@ -17095,6 +17105,8 @@ effort = "high"
             assert!(out.contains("awaiting verification"), "{out}");
             assert!(out.contains("WAITING ON VERIFIER"), "{out}");
             assert!(out.contains(dispatch), "{out}");
+            // pin: the outcome sentence is the next-owner promise under test.
+            assert!(out.contains(outcome), "{out}");
             assert!(!out.contains("WAITING ON WORKER"), "{out}");
             assert!(!out.contains("re-close"), "{out}");
         }

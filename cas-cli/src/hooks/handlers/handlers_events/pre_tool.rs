@@ -7726,6 +7726,7 @@ mod workspace_contract_tests {
                 format!("cat <<COMMAND | pbcopy\n$({mutation})\nCOMMAND"),
                 format!("cat <<COMMAND | wl-copy\n`{mutation}`\nCOMMAND"),
                 format!("cat <<COMMAND\n$({mutation})\nCOMMAND"),
+                format!("cat <<'COM'MAND | pbcopy\nliteral clipboard text\nCOMMAND\n{mutation}"),
             ] {
                 let (status, reason) = decision(&invocation);
                 assert_eq!(

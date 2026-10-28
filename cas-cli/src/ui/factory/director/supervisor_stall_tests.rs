@@ -356,14 +356,16 @@ fn an_unanswered_idle_page_keeps_asking_for_the_operator_until_delivered_gh1302(
             })
             .collect::<Vec<_>>()
     };
-    let first = pages(&mut tracker, 0, 10..=140);
+    // Assignment cooldown changes wake cadence, not the rule that every
+    // actual wake retries a possibly dropped operator page.
+    let first = pages(&mut tracker, 0, 10..=160);
     assert_eq!(
         first,
-        vec![(120, start), (130, start), (140, start)],
+        vec![(130, start), (160, start)],
         "every wake of the silence asks, so a dropped first page is asked again"
     );
-    let second = pages(&mut tracker, 400, 410..=520);
-    assert_eq!(second, vec![(520, start + Duration::minutes(400))], "a new silence is a new episode");
+    let second = pages(&mut tracker, 400, 410..=530);
+    assert_eq!(second, vec![(530, start + Duration::minutes(400))], "a new silence is a new episode");
 }
 
 #[test]

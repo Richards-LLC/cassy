@@ -1172,11 +1172,11 @@ fn cas_afe0_settled_broadcast_member_retires_without_fabricating_a_handoff() {
     let row = enqueue(&cas_dir, "all_workers", "Shared work");
     let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
     queue.acknowledge_for_recipients(row, &["worker-a".into()], None).unwrap();
-    let settled = run_claim_for_inject(&cas_dir, "session", row, "worker-a", "all_workers", 1);
+    let settled = run_claim_for_inject(&cas_dir, "s", row, "worker-a", "all_workers", 1);
     assert_eq!(settled.outcome, ClaimOutcome::HandedOff);
     assert_eq!(queue.recipient_receipt(row, "worker-a").unwrap(), None);
     assert!(!queue.recipient_handed_off(row, "worker-a").unwrap());
-    let peer = run_claim_for_inject(&cas_dir, "session", row, "worker-b", "all_workers", 1);
+    let peer = run_claim_for_inject(&cas_dir, "s", row, "worker-b", "all_workers", 1);
     assert!(matches!(peer.outcome, ClaimOutcome::Claimed(_)));
     assert!(queue.queued_prompt(row).unwrap().unwrap().acked_at.is_none());
 }

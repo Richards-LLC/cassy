@@ -184,6 +184,11 @@ pub(crate) fn file_pointer(work: &PointerWork) -> bool {
     let Ok(Some(delivery)) = queue.recipient_delivery(row.id, &work.recipient) else {
         return false;
     };
+    // An ACK can retire one broadcast member after the fallback claim. There
+    // is no remaining copy to write; releasing the claim preserves peer state.
+    if matches!(delivery, cas_store::RecipientDelivery::Settled(_)) {
+        return false;
+    }
     let row = delivery.into_prompt();
     let pane = &work.inbox_target;
     let view = work.primary.view_for_config_dir(work.config_dir.as_deref());

@@ -158,6 +158,20 @@ mod tests {
         EventSource, InternalEvent, InternalEventReader,
     };
 
+    /// A real waker for the fake sources (Cassy patch, replacing a
+    /// placeholder); none of these tests wakes it.
+    #[cfg(feature = "event-stream")]
+    fn test_waker() -> super::super::sys::Waker {
+        #[cfg(unix)]
+        let waker = super::super::sys::Waker::new(
+            mio::Poll::new().expect("mio poll").registry(),
+            mio::Token(0),
+        );
+        #[cfg(windows)]
+        let waker = super::super::sys::Waker::new();
+        waker.expect("test waker")
+    }
+
     #[test]
     fn test_poll_fails_without_event_source() {
         let mut reader = InternalEventReader {
@@ -421,7 +435,7 @@ mod tests {
 
             #[cfg(feature = "event-stream")]
             fn waker(&self) -> super::super::sys::Waker {
-                unimplemented!();
+                test_waker()
             }
         }
         let cursor = InternalEvent::CursorPosition(3, 4);
@@ -502,7 +516,7 @@ mod tests {
 
         #[cfg(feature = "event-stream")]
         fn waker(&self) -> super::super::sys::Waker {
-            unimplemented!();
+            test_waker()
         }
     }
 }

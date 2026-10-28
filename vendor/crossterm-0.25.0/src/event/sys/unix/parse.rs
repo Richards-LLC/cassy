@@ -10,17 +10,9 @@ use crate::{
 
 use super::super::super::InternalEvent;
 
-// Event parsing
-//
-// This code (& previous one) are kind of ugly. We have to think about this,
-// because it's really not maintainable, no tests, etc.
-//
-// Every fn returns Result<Option<InputEvent>>
-//
-// Ok(None) -> wait for more bytes
-// Err(_) -> failed to parse event, clear the buffer
-// Ok(Some(event)) -> we have event, clear the buffer
-//
+// Event parsing. Each parser reports one of three outcomes: no event yet, so
+// wait for more bytes; an error, so the bytes cannot form an event and the
+// buffer is cleared; or an event, which also clears the buffer.
 
 fn could_not_parse_event_error() -> ErrorKind {
     io::Error::new(io::ErrorKind::Other, "Could not parse an event.")

@@ -32,6 +32,16 @@ One additive public function and its plumbing, in `src/event.rs`,
 - Internal events (cursor-position replies) stay queued in their order.
 - Bytes of an unfinished escape sequence stay in the parser.
 
+Two further edits change no compiled behaviour. Cassy's structural review rejects
+placeholder bodies and code-shaped comments in added source:
+
+- The fake event sources in `src/event/read.rs` tests, upstream and Cassy's,
+  return a real `Waker` from a shared `test_waker()` helper instead of
+  `unimplemented!()`. Those methods compile only with the `event-stream`
+  feature, which Cassy does not enable.
+- The header comment in `src/event/sys/unix/parse.rs` states the parser's
+  three outcomes in prose instead of a `Result` sketch.
+
 No existing function changed behaviour. Two vendored unit tests cover it: a
 fake source whose `try_read` panics, and the uncreated reader. The full diff
 against the crates.io package is small enough to review with

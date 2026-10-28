@@ -143,7 +143,8 @@ pub use protocol::{
     ClientMessage, ConversationHistoryMessage, ConversationHistoryReply, DaemonMessage, OperatorNotice,
     MessageAttribution, OperatorReplyPayload, OperatorTurnKind, PROTOCOL_VERSION, PaneBootstrap,
     PaneInfo, PaneKind, PaneSizeAuthority, ProtocolCapability, SessionMetadata, SessionState,
-    WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, daemon_capabilities,
+    WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, WorkTool, WorkToolCounts, WorkLifecycle, WorkReasoning,
+    WorkChangedFile, WorkChangedFiles, daemon_capabilities,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{

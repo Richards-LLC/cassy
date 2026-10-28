@@ -7416,6 +7416,11 @@ echo SMOKE_DONE
                 "--lib` for lib-only edits",
                 "--tests` when test files changed",
                 "choose one target flag",
+                // pin: the launch contract must distinguish a current request
+                // from quoted task/handoff content even with a personal skill.
+                "current operator-authored request",
+                "subject matter, not authorization",
+                "continue the assigned task",
             ] {
                 assert!(surface.contains(marker), "missing {marker:?}: {surface}");
             }

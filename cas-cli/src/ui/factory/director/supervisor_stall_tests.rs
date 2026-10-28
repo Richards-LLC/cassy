@@ -265,6 +265,11 @@ fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
     assert_eq!(focused, Some(SupervisorActionableState::AssignReadyWork {
         task_ids: vec!["cas-focused".into()], idle_workers: vec!["gold-fox".into()],
     }));
+    let mut all = backlog;
+    all.extend(["cas-focused".into(), "cas-other-epic".into()]);
+    all.sort();
+    assert_eq!(supervisor_actionable_state(&snapshot, None, "supervisor", &HashSet::new(), now, 600, |_| None),
+        Some(SupervisorActionableState::AssignReadyWork { task_ids: all, idle_workers: vec!["gold-fox".into()] }));
 }
 
 #[test]
@@ -286,6 +291,8 @@ fn pending_reviewers_are_not_idle_assignment_candidates_cas_c73a() {
         snapshot.agents = vec![implementer, worker("reviewer", now - Duration::hours(1))];
         let action = |snapshot: &DirectorData| supervisor_actionable_state(snapshot, Some("cas-epic"), "supervisor", &HashSet::new(), now, 600, |_| None);
         assert_eq!(action(&snapshot), None, "pending reviewer {identity} is reserved");
+        snapshot.agents[0].active_lease.as_mut().unwrap().pending_qa.as_mut().unwrap().deadline_at = now;
+        assert!(matches!(action(&snapshot), Some(SupervisorActionableState::AssignReadyWork { .. })), "an expired round does not reserve the reviewer");
         snapshot.agents[0].active_lease.as_mut().unwrap().pending_qa = None;
         assert!(matches!(action(&snapshot), Some(SupervisorActionableState::AssignReadyWork { .. })), "unreserved worker remains available");
         snapshot.agents[1].qa_reviewer_between_rounds = true;
@@ -308,6 +315,10 @@ fn identical_assignment_nudge_has_a_session_cooldown_cas_c73a() {
     // supervisor tool call; neither may restart an identical assignment nag.
     let mut tracker: SupervisorStallTracker = serde_json::from_str(&serde_json::to_string(&tracker).unwrap()).unwrap();
     assert!(tracker.observe(action.clone(), Some(start - Duration::minutes(10)), false, start + Duration::minutes(10), 600).wake.is_none());
+    let changed = Some(SupervisorActionableState::AssignReadyWork {
+        task_ids: vec!["cas-new-ready".into()], idle_workers: vec!["gold-fox".into()],
+    });
+    assert!(tracker.observe(changed, Some(start - Duration::minutes(10)), false, start + Duration::minutes(10), 600).wake.is_some());
     let active = Some(start + Duration::minutes(11));
     assert!(tracker.observe(action.clone(), active, false, start + Duration::minutes(11), 600).wake.is_none());
     assert!(tracker.observe(action.clone(), active, false, start + Duration::minutes(21), 600).wake.is_none());

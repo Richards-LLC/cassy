@@ -223,11 +223,10 @@ pub struct SupervisorStallTracker {
     /// delivery must not refire the same close demand every ten minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
-    /// Last delivered assignment text and time, retained across supervisor
-    /// activity and session metadata reloads. Other stall actions keep their
-    /// existing cadence.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_assignment_wake: Option<(String, DateTime<Utc>)>,
+    /// Recent delivered assignment texts, retained across supervisor activity
+    /// and metadata reloads. Pruned at the assignment cooldown boundary.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub recent_assignment_wakes: HashMap<String, DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -293,16 +292,16 @@ impl SupervisorStallTracker {
             matches!(action, SupervisorActionableState::AssignReadyWork { .. })
                 .then(|| action.next_step_text())
         });
-        let assignment_recent = assignment_key.as_ref().is_some_and(|key| {
-            self.last_assignment_wake.as_ref().is_some_and(|(previous, at)| {
-                previous == key && (now - *at).num_seconds() < ASSIGN_READY_WORK_COOLDOWN_SECS
-            })
+        self.recent_assignment_wakes.retain(|_, at| {
+            (now - *at).num_seconds() < ASSIGN_READY_WORK_COOLDOWN_SECS
         });
+        let assignment_recent = assignment_key.as_ref()
+            .is_some_and(|key| self.recent_assignment_wakes.contains_key(key));
         let wake = if condition_true && refire_due && !merged_state_repeated && !assignment_recent {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
             if let Some(key) = assignment_key {
-                self.last_assignment_wake = Some((key, now));
+                self.recent_assignment_wakes.insert(key, now);
             }
             actionable
         } else {

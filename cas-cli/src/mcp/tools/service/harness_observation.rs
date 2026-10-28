@@ -629,6 +629,22 @@ fn codex_matching_user_turn<'a>(
 
 fn text_matches_queued_prompt(text: &str, prompt: &str, notification_id: Option<i64>) -> bool {
     let mut text = text.trim();
+    // Native pasted-content records may repeat the id attribute on the
+    // closing tag (see ambient-supervisor-replay.json). Keep the entire body
+    // intact and reject an incomplete wrapper rather than matching a fragment.
+    if text.starts_with("<pasted_content ") {
+        let Some((opening, body)) = text.split_once('>') else {
+            return false;
+        };
+        let closing = format!("</{}>", &opening[1..]);
+        let Some(body) = body
+            .strip_suffix(&closing)
+            .or_else(|| body.strip_suffix("</pasted_content>"))
+        else {
+            return false;
+        };
+        text = body.trim();
+    }
     if text.starts_with("Message from ") {
         let Some((_, body)) = text.split_once(": ") else {
             return false;

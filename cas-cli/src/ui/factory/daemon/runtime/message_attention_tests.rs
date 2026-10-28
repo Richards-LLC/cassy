@@ -1422,7 +1422,7 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
         assert_eq!(
             report.recipient_receipt,
             Some(cas_store::SurfacingSource::ObservedWake),
-            "{cli}: consumed wire must get a durable receipt"
+            "{cli}/claimed={claimed}/pasted={pasted}: consumed wire must get a durable receipt"
         );
         assert!(
             report.confirmed_at.is_none(),

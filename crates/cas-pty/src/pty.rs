@@ -1080,7 +1080,7 @@ impl PtyConfig {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
                 .or_else(|| std::env::var(name).ok());
-            if let Some(value) = value {
+            if let Some(value) = value.filter(|value| name != "CODEX_HOME" || !value.is_empty()) {
                 let value = serde_json::to_string(&value)
                     .expect("serializing an MCP environment path string cannot fail");
                 self.args.extend([

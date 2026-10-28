@@ -64,7 +64,7 @@ fn account_dir_supported(cli: cas_mux::SupervisorCli) -> bool {
 fn requester_account_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
     match cli {
         cas_mux::SupervisorCli::Claude => std::env::var("CLAUDE_CONFIG_DIR").ok(),
-        cas_mux::SupervisorCli::Codex => std::env::var("CODEX_HOME").ok(),
+        cas_mux::SupervisorCli::Codex => std::env::var("CODEX_HOME").ok().filter(|value| !value.is_empty()),
         _ => None,
     }
 }

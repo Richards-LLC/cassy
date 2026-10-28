@@ -93,7 +93,8 @@ for (const [index, variant] of variants.entries()) {
           await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
           abortTicket();
           const preview = log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"]) .rich-media');
-          await expect(preview).toContainText("Preview unavailable");
+          await expect(log.locator('a[data-artifact-id="art-inline-image"] .preview-note')).toHaveText("Preview unavailable");
+          await expect(preview).toBeHidden();
           hub.release(PELICAN);
           await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
           await expect(image).toBeAttached(); await image.scrollIntoViewIfNeeded();
@@ -160,7 +161,8 @@ for (const [index, variant] of variants.entries()) {
         expect(videoRanges.some((range) => range.startsWith("bytes="))).toBe(true);
         const unavailable = log.locator('.rich-attachment:has(a[data-artifact-id="art-local-preview"])');
         await unavailable.scrollIntoViewIfNeeded();
-        await expect(unavailable).toContainText("Preview unavailable. Open the file below.");
+        await expect(unavailable.locator('a.sheet .preview-note')).toHaveText("Preview unavailable");
+        await expect(unavailable.locator('.rich-media')).toBeHidden();
         await expect(unavailable.getByRole("link")).toBeVisible();
         // Read back the transport: exactly one renewal, for the expired video only.
         for (const id of ["art-inline-image", "art-inline-pdf", "art-inline-video", "art-inline-audio", "art-local-preview"]) expect(hub.previewTicketRequests.filter((value) => value === id)).toHaveLength(id === "art-inline-video" ? 2 : 1);

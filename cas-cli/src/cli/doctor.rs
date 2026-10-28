@@ -1746,11 +1746,25 @@ fn shipped_issues_check(
             );
         }
     };
+    let default_ref_prefix = format!("{repo}#");
+    let default_lookup_failed = report.unchecked.iter().any(|reference| {
+        reference
+            .get(..default_ref_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&default_ref_prefix))
+    });
     let mut check = if report.shipped.is_empty() {
+        // An empty shipped list only proves absence in repositories whose
+        // lookups succeeded; don't attribute it to an unchecked default repo.
+        let message = if default_lookup_failed {
+            "no open issue in the checked repositories has all of its referencing tasks shipped"
+                .to_string()
+        } else {
+            format!("no open {repo} issue has all of its referencing tasks shipped")
+        };
         Check::new(
             NAME,
             CheckStatus::Ok,
-            format!("no open {repo} issue has all of its referencing tasks shipped"),
+            message,
         )
     } else {
         Check::new(

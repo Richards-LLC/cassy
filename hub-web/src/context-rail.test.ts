@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationHistory } from "./conversation-history";
 import { conversationShellMarkup } from "./conversation-shell";
 import { ConversationView } from "./conversation-view";
@@ -117,8 +117,16 @@ describe("desktop context rail (P10)", () => {
     expect(jumps.map((jump) => jump.querySelector(".context-hint")?.textContent ?? null)).toEqual([PINNED_MARK, BLOCKER_HINT, null]);
     expect(jumps.map((jump) => jump.dataset.pinned ?? null)).toEqual(["true", null, null]);
     expect(BLOCKER_HINT).toBe("Reply to unblock");
+    // Separate machines can use the same queue ids. Only this history owns the rail jump.
+    const otherHistory = new ConversationHistory();
+    otherHistory.reply(reply(10, "blocker", "Another machine"), at(9, 57));
+    const otherView = new ConversationView(document, otherHistory, "other");
+    document.body.prepend(otherView.element); otherView.update();
+    const otherUpdate = vi.spyOn(otherView, "update");
     jumps[1]!.click();
-    const turn = document.querySelector<HTMLElement>('.thread [data-key="reply:10"]')!;
+    expect(otherUpdate).not.toHaveBeenCalled();
+    expect(otherView.jump.hidden).toBe(true);
+    const turn = view.element.querySelector<HTMLElement>('[data-key="reply:10"]')!;
     expect(document.activeElement).toBe(turn);
     expect(turn.tabIndex).toBe(-1);
   });

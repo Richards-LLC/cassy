@@ -10663,6 +10663,70 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_digest_aba_uses_newer_same_session_occurrence_only() {
+        use crate::{AgentStore, NotifyIdempotentResult, SqliteSupervisorQueueStore, SupervisorQueueStore};
+        for newer_session in ["session", "other-session"] {
+            let (temp, store) = create_test_store();
+            let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+            agents.init().unwrap();
+            let mut supervisor = cas_types::Agent::new_with_role(
+                "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+            );
+            supervisor.factory_session = Some("session".into());
+            agents.register(&supervisor).unwrap();
+            let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+            tasks.init().unwrap();
+            let mut task = Task::new("cas-aba".into(), "relay target".into());
+            task.status = TaskStatus::InProgress;
+            tasks.add(&task).unwrap();
+            let task_id = task.id.clone();
+            let outbox = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
+            outbox.init().unwrap();
+            let first = Utc::now() - chrono::Duration::minutes(1);
+            let publish = |transition: &str, old: &str, new: &str, session: &str, occurrence: chrono::DateTime<Utc>| {
+                let occurrence = occurrence.to_rfc3339();
+                let key = format!("{task_id}:{old}:{new}:{session}:{transition}:{occurrence}");
+                let payload = serde_json::json!({
+                    "task_id": task_id, "old_status": old, "new_status": new,
+                    "factory_session": session, "occurrence_id": occurrence,
+                    "transition": transition, "recipient_target": "supervisor",
+                    "transition_key": key,
+                }).to_string();
+                match outbox.notify_idempotent("supervisor-id", "task_lifecycle", &payload, NotificationPriority::Normal, &key).unwrap() {
+                    NotifyIdempotentResult::Created(id) => id,
+                    other => panic!("new occurrence required: {other:?}"),
+                }
+            };
+            let old = publish("task_started", "open", "in_progress", "session", first);
+            let old_body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"{old}\" occurrence=\"{}\">started</task-lifecycle>", task.id, first.to_rfc3339());
+            let old_prompt = store.enqueue_idempotent(&format!("lifecycle:{old}"), "supervisor", &old_body, Some("session"), Some("first start"), None, &format!("lifecycle-outbox:{old}"), Some(&QueueOrigin::Daemon)).unwrap();
+            let EnqueueIdempotentResult::Created(old_prompt) = old_prompt else { panic!("old prompt") };
+            task.status = TaskStatus::Blocked;
+            tasks.update(&task).unwrap();
+            publish("task_blocked", "in_progress", "blocked", newer_session, first + chrono::Duration::seconds(1));
+            task.status = TaskStatus::Open;
+            tasks.update(&task).unwrap();
+            publish("task_ready", "blocked", "open", newer_session, first + chrono::Duration::seconds(2));
+            task.status = TaskStatus::InProgress;
+            tasks.update(&task).unwrap();
+            let latest = publish("task_started", "open", "in_progress", newer_session, first + chrono::Duration::seconds(3));
+            if newer_session == "session" {
+                let latest_at = (first + chrono::Duration::seconds(3)).to_rfc3339();
+                let latest_body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"{latest}\" occurrence=\"{latest_at}\">restarted</task-lifecycle>", task.id);
+                store.enqueue_idempotent(&format!("lifecycle:{latest}"), "supervisor", &latest_body, Some("session"), Some("latest start"), None, &format!("lifecycle-outbox:{latest}"), Some(&QueueOrigin::Daemon)).unwrap();
+            }
+            let shown = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+            if newer_session == "session" {
+                assert_eq!(shown.iter().map(|row| row.summary.as_deref()).collect::<Vec<_>>(), vec![Some("latest start")]);
+                assert_eq!(store.message_delivery_report(old_prompt).unwrap().unwrap().pending_reason, Some(PendingReason::SupersededStale));
+                assert_eq!(store.recipient_receipt(old_prompt, "supervisor").unwrap(), None);
+            } else {
+                assert_eq!(shown.iter().map(|row| row.id).collect::<Vec<_>>(), vec![old_prompt], "another session cannot prove supersession");
+            }
+        }
+    }
+
+    #[test]
     fn cas_1485_current_terminal_reports_and_uncertain_payloads_still_surface() {
         for (source, current, announced, missing_task, malformed) in [
             ("lifecycle-wake:17717", TaskStatus::AwaitingMerge, "awaiting_merge", false, false),

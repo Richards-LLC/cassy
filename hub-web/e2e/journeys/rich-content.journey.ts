@@ -113,6 +113,9 @@ for (const [index, variant] of variants.entries()) {
         hub.supervisorSays(PELICAN, "The screenshot is attached.", { attachments: [file("art-inline-image", "Evidence screenshot.png", "image/png")] });
         const image = log.getByRole("img", { name: "Evidence screenshot.png", exact: true });
         try {
+          // Preview tickets are visibility-driven; inspect the attachment before
+          // waiting for its request, even after a tall wrapped code block.
+          await log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"])').scrollIntoViewIfNeeded();
           await expect.poll(() => attempts).toBe(1);
           hub.hold(PELICAN); hub.drop(PELICAN);
           await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");

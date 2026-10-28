@@ -4204,6 +4204,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let prompt = &rows[0].prompt;
         assert!(
+            // pin: the old fallback marker must never enter the native launch prompt.
             !prompt.contains("[ambient recall") && !prompt.contains("<cas-queued-session-start>"),
             "Native Codex startup must not echo hook context into the pane: {prompt}"
         );

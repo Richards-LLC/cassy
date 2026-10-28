@@ -217,7 +217,9 @@ describe("binding Cassy Cloud browser invariants", () => {
   // The built J24 journey exercises the retry; this pins its status reset to the real submit path.
   it("clears an upload error after a successful retry", async () => {
     const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // pin: scope this source check to the real send handler exercised by J24.
     const submit = source.slice(source.indexOf("async function submitSupervisorMessage("), source.indexOf("function capturePairingDraft():"));
+    // pin: J24 proves the browser behavior; keep the submit path tied to its status reset.
     expect(submit).toMatch(/if \(sent && uploads && hasAttachments\) \{\s*uploads\.clear\(\);\s*if \(!messageStatus\?\.held\) clearComposerStatus\(\);/);
   });
 

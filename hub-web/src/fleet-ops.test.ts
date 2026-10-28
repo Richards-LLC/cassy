@@ -221,9 +221,10 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     // A close gate can keep an integrated delivery parked. Neither screen
     // size may offer another merge, even if its preview was already open.
     for (const phone of [false, true]) {
-      const merged = { ...parked, delivery_state: "merged" as const };
-      const controls = taskControls(document, { ...context(CONTROL, state), phone }, merged);
-      expect(controls?.querySelector("button")).toBeFalsy();
+      for (const evidence of [{ delivery_state: "merged" as const }, { merge_check_pending: true }]) {
+        const controls = taskControls(document, { ...context(CONTROL, state), phone }, { ...parked, ...evidence });
+        expect(controls?.querySelector("button")).toBeFalsy();
+      }
     }
   });
 

@@ -268,14 +268,17 @@ export function fitComposerPlaceholder(field: HTMLTextAreaElement): void {
   else if (field.placeholder !== chosen) field.placeholder = chosen;
 }
 
-const watchedComposerFields = new WeakSet<HTMLTextAreaElement>();
+const watchedComposerFields = new WeakMap<HTMLTextAreaElement, ResizeObserver | null>();
 
 /** Refit on every size change of the field (a rotation, a breakpoint, the rail opening) and once web fonts land. */
 function watchComposerPlaceholder(field: HTMLTextAreaElement): void {
   if (watchedComposerFields.has(field)) return;
-  watchedComposerFields.add(field);
-  const view = field.ownerDocument.defaultView as (Window & typeof globalThis) | null;
-  if (view && typeof view.ResizeObserver === "function") new view.ResizeObserver(() => fitComposerPlaceholder(field)).observe(field);
+  // A field built in a <template> has an inert ownerDocument until insertion.
+  const view = (field.ownerDocument.defaultView ?? (typeof window === "undefined" ? null : window)) as (Window & typeof globalThis) | null;
+  const observer = view && typeof view.ResizeObserver === "function"
+    ? new view.ResizeObserver(() => fitComposerPlaceholder(field)) : null;
+  watchedComposerFields.set(field, observer);
+  observer?.observe(field);
   void field.ownerDocument.fonts?.ready.then(() => fitComposerPlaceholder(field));
 }
 

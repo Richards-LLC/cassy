@@ -815,6 +815,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
 7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
 8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+9. Read typed work scope — reads, searches, commands and edits expose explicit v2 scope and retain their exact raw record; failed exit codes are named, unknown exec wrappers stay readable, routine turn notices collapse together, and an open row retains focus and expansion through a same-ID metadata update
 
 #### Expected experience
 

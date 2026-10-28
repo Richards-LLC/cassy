@@ -7,7 +7,7 @@
  * and output) is set as `textContent`. Nothing is parsed as markup.
  */
 import { clockLabel, type ThreadWork } from "./thread-model";
-import { rowText, taskChip, workSummary, type DetailState, type WorkEvent } from "./work-events";
+import { rowText, taskChip, turnNotice, workFailed, workSummary, type DetailState, type WorkEvent } from "./work-events";
 
 export interface WorkRowsContext {
   /** The loaded detail of one event, if it was asked for. */
@@ -30,11 +30,52 @@ export function workSignature(item: ThreadWork, context: WorkRowsContext): strin
   const open = context.isOpen(item.key);
   return JSON.stringify([
     open,
+    context.isOpen(`turns:${item.key}`),
     item.events.map((event) => [
-      event.id, event.label, event.error,
+      event.id, event.label, event.error, event.hasDetail, event.tool, event.lifecycle,
       open && context.isOpen(`row:${event.id}`) ? context.detail(event.id) ?? null : null,
     ]),
   ]);
+}
+
+/** Typed scope comes from protocol facts; the original detail is never reparsed. */
+function readyDetail(document: Document, detail: HTMLElement, event: WorkEvent, state: Extract<DetailState, { state: "ready" }>): void {
+  const tool = event.kind === "tool" ? event.tool : undefined;
+  const operation = tool && ["read", "search", "command", "edit"].includes(tool.operation) ? tool.operation : undefined;
+  const label = (text: string): void => {
+    const name = document.createElement("p"); name.className = "work-detail-label"; name.textContent = text;
+    detail.append(name);
+  };
+  if (tool && operation) {
+    detail.dataset.operation = operation;
+    if (operation === "command") {
+      if (tool.command !== undefined) {
+        label("Command");
+        const command = document.createElement("pre"); command.className = "work-command"; command.textContent = tool.command;
+        detail.append(command);
+      }
+      if (tool.cwd !== undefined) {
+        label("Working directory");
+        const cwd = document.createElement("p"); cwd.className = "work-path"; cwd.textContent = tool.cwd;
+        detail.append(cwd);
+      }
+      if (tool.exit_code !== undefined) label(`Exit ${tool.exit_code}`);
+    } else {
+      label(operation === "read" ? "Read targets" : operation === "edit" ? "Edit targets" : "Search scope");
+      if (tool.targets.length > 0) {
+        const targets = document.createElement("ul"); targets.className = "work-targets";
+        for (const path of tool.targets) { const file = document.createElement("li"); file.textContent = path; targets.append(file); }
+        detail.append(targets);
+      } else {
+        const unknown = document.createElement("p"); unknown.textContent = "No scope reported."; detail.append(unknown);
+      }
+      if (operation === "search" && tool.counts?.matches !== undefined) label(`${tool.counts.matches} match${tool.counts.matches === 1 ? "" : "es"}`);
+    }
+    label("Tool input and output");
+  }
+  const record = document.createElement("pre"); record.className = "work-record"; record.textContent = state.text;
+  detail.append(record);
+  if (state.truncated) { const cut = document.createElement("p"); cut.className = "work-detail-limit"; cut.textContent = "…cut at 16 KB"; detail.append(cut); }
 }
 
 /** The chips a block shows while collapsed: its task transitions. */
@@ -60,13 +101,13 @@ function chips(document: Document, events: readonly WorkEvent[]): HTMLElement | 
 export function workRow(document: Document, event: WorkEvent, context: WorkRowsContext, repaint: (focusKey: string) => void, options: { time?: boolean } = {}): HTMLElement {
   const row = document.createElement("li");
   row.className = `work-row work-row--${event.kind}`;
-  row.classList.toggle("is-failed", event.error);
+  row.classList.toggle("is-failed", workFailed(event));
   row.dataset.eventId = event.id;
   const key = `row:${event.id}`;
   const open = event.hasDetail && context.isOpen(key);
   const text = document.createElement("span"); text.className = "work-row-text"; text.textContent = rowText(event);
   const parts: HTMLElement[] = [text];
-  if (event.error) {
+  if (workFailed(event)) {
     const failed = document.createElement("span"); failed.className = "work-row-failed"; failed.textContent = "failed";
     parts.push(failed);
   }
@@ -93,19 +134,49 @@ export function workRow(document: Document, event: WorkEvent, context: WorkRowsC
   };
   row.append(toggle);
   if (open) {
-    const detail = document.createElement("pre");
+    const detail = document.createElement("div");
     detail.className = "work-detail";
     detail.id = `work-detail-${domId(event.id)}`;
     toggle.setAttribute("aria-controls", detail.id);
     detail.tabIndex = 0;
+    detail.dataset.focusKey = `detail:${event.id}`;
     const state = context.detail(event.id);
     if (!state || state.state === "loading") { detail.textContent = "Loading…"; detail.setAttribute("aria-busy", "true"); }
-    else if (state.state === "ready") detail.textContent = state.truncated ? `${state.text}\n…cut at 16 KB` : state.text;
+    else if (state.state === "ready") readyDetail(document, detail, event, state);
     else if (state.state === "gone") detail.textContent = "This detail is no longer on the machine.";
     else detail.textContent = `Could not load: ${state.reason}`;
     row.append(detail);
   }
   return row;
+}
+
+/** Both surfaces fold routine turn bookends into one optional disclosure. */
+export function workRows(document: Document, events: readonly WorkEvent[], context: WorkRowsContext, repaint: (focusKey: string) => void, options: { time?: boolean; noticesKey: string }): HTMLOListElement {
+  const rows = document.createElement("ol"); rows.className = "work-rows";
+  const notices = events.filter(turnNotice);
+  let placed = false;
+  for (const event of events) {
+    if (!turnNotice(event)) { rows.append(workRow(document, event, context, repaint, options)); continue; }
+    if (placed) continue;
+    placed = true;
+    const group = document.createElement("li"); group.className = "work-turn-notices";
+    const toggle = document.createElement("button"); toggle.type = "button"; toggle.className = "work-row-toggle";
+    toggle.dataset.focusKey = options.noticesKey;
+    const open = context.isOpen(options.noticesKey);
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.insertAdjacentHTML("afterbegin", CHEVRON);
+    toggle.append(`Turn activity · ${notices.length} event${notices.length === 1 ? "" : "s"}`);
+    toggle.onclick = () => { context.setOpen(options.noticesKey, !context.isOpen(options.noticesKey)); repaint(options.noticesKey); };
+    group.append(toggle);
+    if (open) {
+      const list = document.createElement("ol"); list.className = "work-rows"; list.id = `turn-notices-${domId(options.noticesKey)}`;
+      toggle.setAttribute("aria-controls", list.id);
+      for (const notice of notices) list.append(workRow(document, notice, context, repaint, options));
+      group.append(list);
+    }
+    rows.append(group);
+  }
+  return rows;
 }
 
 /** Hand focus back to the control a repaint replaced. */
@@ -147,11 +218,9 @@ export function renderWork(node: HTMLElement, item: ThreadWork, context: WorkRow
   const chipList = chips(document, item.events);
   if (chipList) children.push(chipList);
   if (open) {
-    const rows = document.createElement("ol");
-    rows.className = "work-rows";
+    const rows = workRows(document, item.events, context, repaint, { noticesKey: `turns:${item.key}` });
     rows.id = `work-rows-${domId(item.key)}`;
     summary.setAttribute("aria-controls", rows.id);
-    for (const event of item.events) rows.append(workRow(document, event, context, repaint));
     children.push(rows);
   }
   node.replaceChildren(...children);

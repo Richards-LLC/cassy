@@ -1417,10 +1417,10 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
             report.confirmed_at.is_none(),
             "consumption is not explicit acknowledgement"
         );
-        // pin: supervisor_unread names its oldest unread notification in this wire field.
         assert!(
             alarms
                 .iter()
+                // pin: supervisor_unread names the oldest unread notification here.
                 .any(|r| r.prompt.contains(&format!("message {unread},"))),
             "{cli}: the other transport-only message must still alarm"
         );

@@ -565,6 +565,10 @@ fn test_coordination_maps_target_cache_dry_run_to_factory_request() {
     let factory = req.to_factory_request();
     assert_eq!(factory.json, Some(true));
     assert_eq!(factory.full, Some(true));
+    let req: CoordinationRequest = serde_json::from_str(
+        r#"{"action":"worker_status","detail":"true"}"#,
+    ).unwrap();
+    assert_eq!(req.to_factory_request().detail, Some(true));
 }
 
 #[test]

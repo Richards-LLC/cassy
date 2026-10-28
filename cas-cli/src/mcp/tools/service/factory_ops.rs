@@ -1714,6 +1714,39 @@ const SPAWN_UNCONFIRMED_SECS: i64 = 90;
 /// Window of spawn history worth showing. Older terminal rows are noise.
 const SPAWN_HISTORY_WINDOW_SECS: i64 = 1800;
 
+/// cas-7fc3 (GH #1381): describe the live verification dispatch a parked
+/// task is waiting on, so `worker_status` names the verifier as the next
+/// action owner instead of the worker. A Blocked task counts only when the
+/// documented verification wait is its sole hold.
+fn pending_verification_summary(cas_root: &std::path::Path, task: &cas_types::Task) -> Option<String> {
+    use cas_types::VerificationDispatchState;
+    let dispatch = cas_store::get_latest_verification_dispatch(cas_root, &task.id).ok()??;
+    if !matches!(
+        dispatch.state,
+        VerificationDispatchState::Pending | VerificationDispatchState::Claimed
+    ) || dispatch.deadline_at <= chrono::Utc::now()
+    {
+        return None;
+    }
+    if task.status == cas_types::TaskStatus::Blocked
+        && !crate::mcp::tools::core::task::block_hold::blocked_only_by_verification_wait(
+            cas_root, &task.id, &dispatch.id,
+        )
+    {
+        return None;
+    }
+    let owner = crate::store::open_agent_store(cas_root)
+        .ok()
+        .and_then(|agents| agents.get(&dispatch.owner_agent_id).ok())
+        .map(|agent| agent.name)
+        .unwrap_or_else(|| dispatch.owner_agent_id.clone());
+    Some(format!(
+        "dispatch {} owned by {owner}, deadline {}",
+        dispatch.id,
+        dispatch.deadline_at.format("%Y-%m-%d %H:%M UTC")
+    ))
+}
+
 /// Render the task a worker is holding, for `worker_status` (GH #67).
 ///
 /// The roster already knew the assignment; it just never said so, and the
@@ -1728,6 +1761,7 @@ fn format_assigned_task_info(
     assigned_open: Option<(&str, &str, bool)>,
     parked: Option<(&str, &str, cas_types::TaskStatus)>,
     parked_merge_already_integrated: bool,
+    pending_verification: Option<&str>,
 ) -> String {
     const TITLE_CAP: usize = 60;
     let truncate = |title: &str| -> String {
@@ -1761,6 +1795,29 @@ fn format_assigned_task_info(
         // do — so the one state that genuinely needs supervisor action looked
         // like the one that needs none. It is also why the stall flag "missed
         // the real anomaly": there was nothing in the row to miss.
+        // cas-7fc3 (GH #1381): a merged delivery, or a worker in the
+        // documented verification wait, is waiting on its verifier. Cassy
+        // closes it on a PASS, so the worker is not the next action owner.
+        (None, None, Some((id, title, status)))
+            if pending_verification.is_some()
+                && ((status == cas_types::TaskStatus::AwaitingMerge
+                    && parked_merge_already_integrated)
+                    || status == cas_types::TaskStatus::Blocked) =>
+        {
+            // A merged delivery is closed or returned by its verdict. A worker
+            // in the Blocked wait is not: a PASS queues its close retry, and
+            // nothing is promised for a FAIL.
+            let outcome = if status == cas_types::TaskStatus::Blocked {
+                "a PASS queues the assigned worker's close retry"
+            } else {
+                "a PASS closes it and a FAIL returns it to the worker"
+            };
+            format!(
+                "\n    task: {id} (awaiting verification) — {} → WAITING ON VERIFIER: {}; {outcome}. Do not message the worker to close.",
+                truncate(title),
+                pending_verification.unwrap_or_default()
+            )
+        }
         (None, None, Some((id, title, status))) => {
             // Matched exhaustively on purpose: a catch-all would silently
             // relabel any status added to the parked set later.
@@ -1828,6 +1885,14 @@ fn format_undelivered_relay_section_at(
     rows: &[cas_store::UndeliveredLifecycleRelay],
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    format_undelivered_relay_detail_at(rows, now, false)
+}
+
+fn format_undelivered_relay_detail_at(
+    rows: &[cas_store::UndeliveredLifecycleRelay],
+    now: chrono::DateTime<chrono::Utc>,
+    detail: bool,
+) -> String {
     // cas-5871: a relay older than a day is counted with the action that
     // clears it; listing it on every call buried the live ones.
     let stale_before = now - chrono::Duration::hours(24);
@@ -1844,9 +1909,9 @@ fn format_undelivered_relay_section_at(
     }
     let (recent, stale): (Vec<_>, Vec<_>) = actionable
         .into_iter()
-        .partition(|row| row.created_at >= stale_before);
+        .partition(|row| detail || row.created_at >= stale_before);
     let total = recent.len() + stale.len();
-    let displayed = recent.len().min(10);
+    let displayed = if detail { recent.len() } else { recent.len().min(10) };
     let mut out = String::new();
     out.push_str(&format!(
         "🔴 UNDELIVERED SUPERVISOR RELAY ({total} total; displaying {displayed}) — these never reached you:\n",
@@ -1875,6 +1940,22 @@ fn format_undelivered_relay_section_at(
         ));
         if let Some(detail) = &row.detail {
             out.push_str(&format!("    {detail}\n"));
+        }
+        if detail {
+            let next = if row.processed_at.is_some() {
+                "reconcile the pending work and acknowledge this relay".to_string()
+            } else if let Some(at) = row.next_attempt_at {
+                format!("recheck {}", at.to_rfc3339())
+            } else {
+                "retry when the recipient is ready".to_string()
+            };
+            out.push_str(&format!(
+                "    age {}s; next: {next}\n",
+                (now - row.created_at).num_seconds().max(0),
+            ));
+            if let Some(alert_id) = row.operator_alert_id {
+                out.push_str(&format!("    operator alert #{alert_id} recorded\n"));
+            }
         }
     }
     if !stale.is_empty() {
@@ -4506,12 +4587,17 @@ impl CasService {
                 let _ = queue.reconcile_lifecycle_relays();
                 queue
                     .list_undelivered_lifecycle_relays(
-                        super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT,
+                        if req.detail.unwrap_or(false) { i64::MAX as usize }
+                        else { super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT },
                     )
                     .unwrap_or_default()
             })
             .unwrap_or_default();
-        let undelivered_section = format_undelivered_relay_section(&undelivered_relays);
+        let undelivered_section = if req.detail.unwrap_or(false) {
+            format_undelivered_relay_detail_at(&undelivered_relays, chrono::Utc::now(), true)
+        } else {
+            format_undelivered_relay_section(&undelivered_relays)
+        };
 
         // GH #699: `agents` is scoped to the caller's factory session, so a
         // second supervisor live on this same clone never appeared here — yet
@@ -5503,6 +5589,9 @@ impl CasService {
                             clone_path.as_deref(),
                         )
                     }),
+                    parked_task
+                        .and_then(|task| pending_verification_summary(&self.inner.cas_root, task))
+                        .as_deref(),
                 );
                 let execution = liveness_rows
                     .iter()
@@ -12864,6 +12953,8 @@ mod spawn_lifecycle_tests {
             factory_session: Some("cas-src-fast-pelican-83".to_string()),
             created_at: chrono::Utc::now(),
             processed_at: Some(chrono::Utc::now()),
+            next_attempt_at: None,
+            operator_alert_id: None,
         }
     }
 
@@ -13165,6 +13256,7 @@ mod spawn_lifecycle_tests {
             None,
             None,
             false,
+            None,
         );
         assert!(out.contains("cas-8b84"), "{out}");
         assert!(out.contains("in progress"), "{out}");
@@ -13181,6 +13273,7 @@ mod spawn_lifecycle_tests {
             Some(("cas-4242", "Fix the thing", false)),
             None,
             false,
+            None,
         );
         assert!(out.contains("cas-4242"), "{out}");
         assert!(out.contains("assigned, not started"), "{out}");
@@ -13190,7 +13283,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn rejected_review_reopen_is_waiting_on_supervisor() {
         let out =
-            format_assigned_task_info(None, Some(("cas-56f8", "Needs rework", true)), None, false);
+            format_assigned_task_info(None, Some(("cas-56f8", "Needs rework", true)), None, false, None);
         assert!(out.contains("WAITING ON YOU"), "{out}");
         assert!(
             out.contains("resume the existing worker or replace it"),
@@ -13207,6 +13300,7 @@ mod spawn_lifecycle_tests {
             Some(("cas-2222", "Also assigned", false)),
             None,
             false,
+            None,
         );
         assert!(out.contains("cas-1111"), "{out}");
         assert!(!out.contains("cas-2222"), "{out}");
@@ -13216,7 +13310,7 @@ mod spawn_lifecycle_tests {
     /// as missing data; "none assigned" is an answer.
     #[test]
     fn unassigned_worker_says_none_assigned() {
-        let out = format_assigned_task_info(None, None, None, false);
+        let out = format_assigned_task_info(None, None, None, false, None);
         assert!(out.contains("none assigned"), "{out}");
     }
 
@@ -13224,7 +13318,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn long_titles_are_truncated() {
         let long = "x".repeat(200);
-        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None, false);
+        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None, false, None);
         assert!(out.contains('…'), "{out}");
         assert!(
             out.len() < 140,
@@ -14217,6 +14311,54 @@ mod tests {
                 .all(|name| !workers.iter().any(|worker| worker_answers_to(worker, name))),
             "an unknown target must still fail to resolve"
         );
+    }
+
+    #[tokio::test]
+    async fn detailed_worker_status_lists_every_held_relay_with_age_and_next_action() {
+        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "draft-session");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "draft-supervisor".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("draft-session".into());
+        supervisor.pid = Some(std::process::id());
+        crate::store::open_agent_store(&root).unwrap().register(&supervisor).unwrap();
+        let next = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let conn = rusqlite::Connection::open(root.join("cas.db")).unwrap();
+        for index in 0..12 {
+            let label = format!("held-relay-{index:02}");
+            let id = match queue.enqueue_idempotent(
+                &format!("lifecycle-wake:{index}"), "supervisor", &label,
+                Some("draft-session"), Some(&label), None, &label,
+                Some(&cas_store::QueueOrigin::Daemon),
+            ).unwrap() {
+                cas_store::EnqueueIdempotentResult::Created(id) => id,
+                _ => panic!("fresh relay"),
+            };
+            queue.park_for_busy_recipient(id, Some("operator composer is dirty"), next).unwrap();
+            // Both a fresh protected draft and one older than the ordinary
+            // display window must remain inspectable in detail mode.
+            let age = if index == 0 { 0 } else { 2 * 24 * 60 * 60 };
+            conn.execute("UPDATE prompt_queue SET created_at=?1 WHERE id=?2",
+                rusqlite::params![(chrono::Utc::now() - chrono::Duration::seconds(age)).to_rfc3339(), id]).unwrap();
+        }
+        let core = CasCore::with_daemon(root, None, None);
+        #[cfg(feature = "mcp-proxy")]
+        let service = CasService::new(core, None);
+        #[cfg(not(feature = "mcp-proxy"))]
+        let service = CasService::new(core);
+        let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "detail":true})).unwrap();
+        let output = response_text(service.factory_worker_status(request).await.unwrap());
+        for index in 0..12 {
+            assert!(output.contains(&format!("held-relay-{index:02}")), "detail hides a deferred relay: {output}");
+        }
+        assert_eq!(output.lines().filter(|line| line.trim_start().starts_with("age ")).count(), 12,
+            "each deferred relay needs its age: {output}");
+        assert_eq!(output.matches("next: recheck ").count(), 12, "each deferred relay needs its next action: {output}");
+        assert!(output.contains(&next.to_rfc3339()), "next action uses the durable recheck time: {output}");
     }
 
     fn response_text(response: CallToolResult) -> String {
@@ -16932,11 +17074,51 @@ effort = "high"
             None,
             Some(("cas-block", "Stuck work", cas_types::TaskStatus::Blocked)),
             false,
+            None,
         );
         assert!(out.contains("cas-block"), "{out}");
         assert!(out.contains("blocked"), "{out}");
         assert!(out.contains("clear the blocker"), "{out}");
         assert!(!out.contains("none assigned"), "{out}");
+    }
+
+    /// cas-7fc3 (GH #1381): a merged delivery whose verification dispatch is
+    /// still pending, or a worker in the documented verification wait, is
+    /// waiting on its verifier. Cassy closes it on a PASS, so the row must
+    /// name the dispatch and never tell the supervisor to wake the worker.
+    #[test]
+    fn merged_delivery_with_pending_verification_waits_on_verifier_cas_7fc3() {
+        let dispatch = "dispatch vdispatch-38f0 owned by bright-otter-99, deadline 2026-10-27 15:10 UTC";
+        for (status, merged, outcome) in [
+            (cas_types::TaskStatus::AwaitingMerge, true, "a PASS closes it and a FAIL returns it to the worker"),
+            // A Blocked no-code wait is not returned by a FAIL; only the
+            // queued close retry is promised.
+            (cas_types::TaskStatus::Blocked, false, "a PASS queues the assigned worker's close retry"),
+        ] {
+            let out = format_assigned_task_info(
+                None,
+                None,
+                Some(("cas-68a9", "Docs-only delivery", status)),
+                merged,
+                Some(dispatch),
+            );
+            assert!(out.contains("awaiting verification"), "{out}");
+            assert!(out.contains("WAITING ON VERIFIER"), "{out}");
+            assert!(out.contains(dispatch), "{out}");
+            // pin: the outcome sentence is the next-owner promise under test.
+            assert!(out.contains(outcome), "{out}");
+            assert!(!out.contains("WAITING ON WORKER"), "{out}");
+            assert!(!out.contains("re-close"), "{out}");
+        }
+        // Without a live dispatch the merged delivery keeps its re-close row.
+        let legacy = format_assigned_task_info(
+            None,
+            None,
+            Some(("cas-68a9", "Docs-only delivery", cas_types::TaskStatus::AwaitingMerge)),
+            true,
+            None,
+        );
+        assert!(legacy.contains("awaiting worker re-close"), "{legacy}");
     }
 
     /// The actionable half: quiet WITH undelivered mail means the worker was
@@ -17330,6 +17512,7 @@ effort = "high"
                 cas_types::TaskStatus::AwaitingMerge,
             )),
             false,
+            None,
         );
         assert!(merge.contains("cas-1234"), "{merge}");
         assert!(merge.contains("awaiting merge"), "{merge}");
@@ -17350,6 +17533,7 @@ effort = "high"
                 cas_types::TaskStatus::AwaitingMerge,
             )),
             false,
+            None,
         );
         assert!(out.contains("cas-live"), "{out}");
         assert!(!out.contains("cas-parked"), "{out}");

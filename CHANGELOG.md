@@ -7,6 +7,108 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.85.0] - 2026-10-28
+
+### Changed — a Codex supervisor that acts on signals, answers and stays quiet
+
+- **Acts on the signal, never polls** — Was: the Codex supervisor contract
+  lacked the "do not poll" rule that the Claude and Grok contracts carry, so a
+  Codex supervisor slept and looped on `inbox_poll` inside one turn (7.6 polls
+  an hour against 0.2 for Claude). → Now: the Codex contract says to act on the
+  injected signal, end the turn when nothing is actionable because Cassy wakes
+  it, and never sleep, wait or loop on `inbox_poll`. A parity test requires
+  this rule in every supervisor launch shape.
+- **A resident core instead of re-reading skills** — Was: the Codex contract
+  told the supervisor to use two skills, and Codex keeps no skill text across
+  compaction, so after each compaction it re-read both skill files (8.1 skill
+  reads an hour against 0.8 for Claude). → Now: the Codex contract carries a
+  short signal → action core for merges, blockers, idle or dead workers, QA and
+  verification dispatches and operator questions, and says to continue from it
+  after a compaction. Codex keeps its developer instructions across compaction,
+  so the core survives. The startup checklist runs once at session start;
+  `cas-supervisor` references are for epic planning, releases, worker recovery
+  or an unfamiliar refusal. The contract stays under a tested byte budget.
+- **Replies only when a reply is needed** — Was: every supervisor contract said
+  to reply to each received update, and Codex answered nearly all of them (9.8
+  messages per merge against 2.6 for Claude), each reply inviting another wake.
+  → Now: the Codex, Claude and Grok contracts reply only when the sender needs
+  an answer, an action or a verdict, and never acknowledge a receipt or a status.
+- **No narration before tool calls** — Was: Codex's base prompt asks for a
+  commentary message before tool calls and when a skill is applied, and the
+  factory contract's "skip preamble" did not override it, so every Codex
+  supervisor session opened by announcing its skills. → Now: the Codex contract
+  keeps the commentary channel silent on triage turns, posts one line only
+  before a step that will take more than 2 minutes, never announces skill use,
+  and answers an operator status question with a final answer.
+- **The operator's own voice instructions apply** — Was: on Codex, the
+  operator's user-level `AGENTS.md` arrives below the developer-level factory
+  contract, so "write in facts, not narration" overrode any voice or style the
+  operator asked for. → Now: the Codex, Claude and Grok supervisor contracts
+  (OpenCode inherits Claude's) say the operator's user-level instructions
+  (`CLAUDE.md` or `AGENTS.md`) govern voice and style in operator-facing
+  replies, while the factory rules govern content and length. The
+  `cas-supervisor` routing reference says the same.
+
+### Fixed
+
+- **Grok 1.0.70 hooks (#1410)** — Was: Grok 1.0.70 sends both
+  `hook_event_name` and `hookEventName` in one hook payload, which Cassy
+  rejected as a duplicate field, so every Grok hook failed and no Cassy guard,
+  inbox or recall ran in Grok sessions. → Now: a payload carrying both spellings
+  of any of the 16 aliased hook fields parses and uses the snake_case value; a
+  repeated identical key is still refused. A captured Grok 1.0.70 payload is
+  kept as a test fixture.
+- **Relays held behind a draft are no longer dropped (#1400)** — Was: while the
+  operator had unsent text in a Codex supervisor's composer, each waiting relay
+  (stalled worker, expired verification dispatch) was retried until it was
+  abandoned after 15 minutes, leaving workers and verification idle for 90
+  minutes or more. → Now: such a relay is held, rechecked every 2 minutes
+  without touching the draft, and delivered once the composer is clear; the
+  operator is alerted once after 9 minutes. `worker_status detail=true` lists
+  every held relay with its age, next recheck and alert, and the `detail` flag
+  now reaches `worker_status` through the MCP request.
+- **`message_status` matches the delivery watchdog (#1383)** — Was:
+  `message_status` promised a re-wake every 60 seconds and an alert at the
+  configured threshold, and reported an alert as sent once enough time had
+  passed, while the watchdog recorded no such attempt and escalated earlier. →
+  Now: it shows the recorded attempt count and next retry time from the record
+  the watchdog uses, uses the watchdog's own escalation deadline (capped at 12
+  minutes, before the 15-minute retry window ends), cites the recorded alert
+  when further alerts are
+  paused, and treats a missing receipt as unconfirmed rather than proof that no
+  turn started. The watchdog now counts transport-claimed messages as
+  unconfirmed.
+- **Approved verification closes a no-code task (#1388)** — Was: when a
+  verifier approved an artifacts-only task whose worker was waiting on that
+  verification, Cassy did not queue the worker's close retry and reported that
+  no live worker was available. → Now: the approval queues the close retry and
+  the worker's unchanged close completes the task with no source commit. A wait
+  note left from an earlier, rejected verification no longer blocks the retry,
+  and every skipped retry names its real reason.
+- **`worker_status` names the verifier wait (#1381)** — Was: a merged delivery
+  with a pending verification read "awaiting worker re-close / WAITING ON
+  WORKER", although Cassy closes it on approval. → Now: it reads "awaiting
+  verification", names the dispatch, its owner and deadline, and says not to
+  message the worker. A no-code task in the verification wait says an approval
+  queues the worker's close retry.
+- **Codex supervisor account carried to spawns (#1390)** — Was: a Codex
+  supervisor started under a non-default `CODEX_HOME` could not spawn a worker
+  without `config_dir`, because the spawn check read the default
+  `~/.codex/auth.json`. → Now: the supervisor's effective `CODEX_HOME` is passed
+  to Cassy's MCP server, so spawns use that account; an explicit `config_dir`
+  still wins, and no credential contents are read or logged.
+- **Shared-file warnings name the real worker and task (#1405)** — Was: the
+  shared-file warning carried an internal implementation id that looked like a
+  task id and told workers in the same session to go through "the other
+  session's supervisor". → Now: within one session it names the other worker
+  and its task and routes through the worker's own supervisor; cross-session
+  wording is kept only when the holder really is in another session.
+- **How to run finish in Codex (#1402)** — Was: typing `/finish` in Codex did
+  nothing, because Codex slash commands cannot be extended, and no Codex surface
+  said what works instead. → Now: Codex session-start guidance says that, when
+  the `finish` skill is installed, you type `$finish` or say `finish` to wrap up
+  the session. Other harnesses do not get this line.
+
 ## [3.84.0] - 2026-10-27
 
 ### Added — every subscription named, listed and picked for you

@@ -408,6 +408,7 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // factory build probe deterministic in this process too.
     .env("CAS_FACTORY_BUILD_GUARD", "off")
     .env("HOME", home.path())
+    .env("CODEX_HOME", home.path().join(".codex"))
     .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
     .env("PATH", &bin_dir)
     .output()
@@ -474,6 +475,7 @@ fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
         json: None,
         full: None,
+        detail: None,
         action: action.to_string(),
         id: None,
         name: None,

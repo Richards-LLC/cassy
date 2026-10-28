@@ -663,6 +663,11 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub full: Option<bool>,
 
+    /// Inspect every deferred supervisor relay with its age and next action.
+    #[schemars(description = "worker_status: list every deferred supervisor relay, including its age, next readiness check and recorded operator escalation")]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub detail: Option<bool>,
+
     /// Generic id field used by entity-targeted actions. For
     /// `shutdown_workers`, this accepts either the worker's registered id or
     /// exact display name.
@@ -995,9 +1000,9 @@ pub struct CoordinationRequest {
     )]
     pub action: String,
 
-    /// Expand peer supervisors with their claims, workers and branches.
+    /// Expand peer supervisors, or inspect deferred supervisor relays.
     #[schemars(
-        description = "peers only: include task claims, live workers and branches (read-only)"
+        description = "peers: include task claims, live workers and branches. worker_status: list every deferred relay with its age and next action (read-only)"
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub detail: Option<bool>,
@@ -1635,6 +1640,7 @@ impl CoordinationRequest {
             action: self.action.clone(),
             json: self.json,
             full: self.full,
+            detail: self.detail,
             id: self.id.clone(),
             name: self.name.clone(),
             count: self.count,

@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 /// Instructions injected into Codex supervisor agents via `--config developer_instructions`.
-const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-codex-supervisor-checklist. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `mcp__cs__factory action=epic_status id=<epic-id>` (or `mcp__cs__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
+const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use cas-codex-supervisor-checklist once at session start; open cas-supervisor references only for epic planning, releases, worker recovery or an unfamiliar refusal. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `mcp__cs__factory action=epic_status id=<epic-id>` (or `mcp__cs__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. When nothing is actionable, end the turn: Cassy wakes you. Never sleep, wait or loop on inbox_poll inside a turn. Supervisor core (resident: it survives compaction, skill text does not): READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → confirm CI and QA gates, then `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`; on a refusal, act on the gate it names. blocker=true → read the task notes and answer, decide or reassign in this turn; ask the operator only for an operator-owned decision. worker idle or died → `mcp__cs__factory action=worker_status`, then assign ready work or recycle the worker. cas-qa-dispatch → assign or spawn the named QA task at the bound head; the merge waits for its verdict. verification dispatch → run the verifier it names and record the verdict. operator question → answer from the task board in a final answer; decide anything within supervisor authority yourself. After a compaction, continue from this core; do not re-read skills. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. Commentary channel: stay silent on triage turns; post one line only before a step that will take more than 2 minutes; never announce which skill you are using; answer an operator status question with a final answer, not commentary. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Codex worker agents via `--config developer_instructions`.
 
@@ -32,7 +32,7 @@ const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating Cassy worker startup n
 /// namespaces MCP tools as `cas__<tool>` (its own `search_tool`/`use_tool`
 /// dispatch, NOT `mcp__cas__`/`mcp__cs__`), so every tool reference here
 /// uses that prefix.
-const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor, running on Grok Build. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-supervisor-checklist. MCP tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination) — not mcp__cas__ or mcp__cs__. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then assign/answer/redirect/merge as appropriate and reply via `cas__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `cas__factory action=epic_status id=<epic-id>` (or `cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `cas__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `cas__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
+const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor, running on Grok Build. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-supervisor-checklist. MCP tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination) — not mcp__cas__ or mcp__cs__. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then assign/answer/redirect/merge as appropriate and reply via `cas__coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `cas__factory action=epic_status id=<epic-id>` (or `cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `cas__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `cas__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Grok Build worker agents via `--rules`
 /// (EPIC cas-8888, cas-6569 Phase 2). See `GROK_SUPERVISOR_INSTRUCTIONS`
@@ -137,6 +137,34 @@ pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
     ContractElement {
         id: "user-response-shape",
         markers: &["at a glance", "never trims evidence"],
+        all: true,
+    },
+    // cas-b748: Codex ranks this developer contract above the user-role
+    // AGENTS.md, so the contract itself must hand voice and style to the
+    // operator's user-level instructions, or "facts, not narration" overrides
+    // them and reads as "flat".
+    // cas-6e08: the Codex contract lacked this sentence while Claude and Grok
+    // carried it; Codex supervisors then looped on sleep + inbox_poll inside
+    // one turn (7.6 polls/h vs 0.2/h for Claude).
+    ContractElement {
+        id: "act-on-injected-signal",
+        markers: &["act on the injected signal", "do not poll"],
+        all: true,
+    },
+    // cas-752f: "reply via coordination message" read as "reply to every
+    // update"; Codex sent 9.8 messages per merge vs 2.6 for Claude, and each
+    // reply invites another wake.
+    ContractElement {
+        id: "reply-only-when-needed",
+        markers: &[
+            "only when the sender needs an answer, an action or a verdict",
+            "never acknowledge a receipt or a status",
+        ],
+        all: true,
+    },
+    ContractElement {
+        id: "user-instructions-voice",
+        markers: &["user-level instructions", "govern voice and style"],
         all: true,
     },
 ];
@@ -301,7 +329,7 @@ monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor
 cas-supervisor-checklist, and cas-codebase-design; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
 mcp__cas__coordination). Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then \
 assign/answer/redirect/merge and reply via `mcp__cas__coordination action=message \
-target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. \
+target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. \
 Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge \
 are additional merge triggers. Resolve the target with `mcp__cas__factory action=epic_status id=<epic-id>` \
 (or `mcp__cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` \
@@ -315,7 +343,7 @@ state, not a recap of what a worker just told you and not commentary on your own
 preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it \
 at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message \
 you just received, restate the board every turn, or close with a summary of what you just said. \
-Brevity never trims evidence: review findings, rejection \
+Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection \
 reasons, measurements and merge receipts stay in full. Finishing one round does not mean you \
 are done — remain available to coordinate the next message. Canonical current workers for this session: {worker_list}. First \
 steps: mcp__cas__coordination action=whoami; mcp__cas__task action=list task_type=epic; \
@@ -1034,11 +1062,12 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
-    /// Mirror only the effective pane values, after launch policy has removed
-    /// denied variables. Literal overrides leave operator `cs.env_vars` intact;
-    /// constructor-time snapshots could reintroduce values denied later by mux.
-    fn forward_codex_tool_caches(&mut self) {
-        for &name in TOOL_CACHE_ENV {
+    /// Mirror non-secret paths into Codex's curated CAS MCP environment after
+    /// launch policy. The effective account home must reach spawn_workers;
+    /// otherwise its availability check falls back to the default account.
+    /// Literal overrides preserve operator `cs.env_vars` and late pane overrides.
+    fn forward_codex_mcp_environment(&mut self) {
+        for name in std::iter::once("CODEX_HOME").chain(TOOL_CACHE_ENV.iter().copied()) {
             if self.env_remove.iter().any(|removed| removed == name) {
                 continue;
             }
@@ -1051,7 +1080,7 @@ impl PtyConfig {
                 .or_else(|| std::env::var(name).ok());
             if let Some(value) = value {
                 let value = serde_json::to_string(&value)
-                    .expect("serializing a cache path string cannot fail");
+                    .expect("serializing an MCP environment path string cannot fail");
                 self.args.extend([
                     "-c".to_string(),
                     format!("mcp_servers.cs.env.{name}={value}"),
@@ -2559,7 +2588,7 @@ impl Pty {
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
         if is_codex {
-            config.forward_codex_tool_caches();
+            config.forward_codex_mcp_environment();
         }
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
@@ -4627,6 +4656,67 @@ echo SMOKE_DONE
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn codex_supervisor_spawn_forwards_effective_account_home_to_cas() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let args_file = temp.path().join("args");
+        let codex = temp.path().join("codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" > {}\n",
+                shell_quote(&args_file.to_string_lossy())
+            ),
+        ).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(temp.path().join("cas"), "fixture preflight only").unwrap();
+        env.set("PATH", temp.path());
+        let inherited = temp.path().join("inherited Codex/\"account\"/λ");
+        let explicit = temp.path().join("explicit Codex/\"account\"/λ");
+        for home in [&inherited, &explicit] {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::write(home.join("auth.json"), "fixture-auth-never-log").unwrap();
+        }
+        assert!(!dirs::home_dir().unwrap().join(".codex/auth.json").exists());
+        env.set("CODEX_HOME", &inherited);
+
+        for selected in [None, Some(&explicit)] {
+            let mut config = PtyConfig::codex(
+                "account-probe", "supervisor", temp.path().to_path_buf(),
+                None, None, None, None, None, None,
+            );
+            if let Some(home) = selected {
+                config.env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+            }
+            let mut pty = Pty::spawn("account-probe", config).unwrap();
+            let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(code)) => {
+                        assert_eq!(code, Some(0));
+                        break;
+                    }
+                    Some(PtyEvent::Output(_)) => {}
+                    event => panic!("account launch did not complete: {event:?}"),
+                }
+            }
+            let bytes = std::fs::read(&args_file).unwrap();
+            let args = std::str::from_utf8(&bytes).unwrap();
+            let forwarded = args.split('\0')
+                .find(|arg| arg.starts_with("mcp_servers.cs.env.CODEX_HOME="))
+                .expect("the supervisor's CAS MCP child must inherit its effective CODEX_HOME");
+            let parsed: toml::Value = toml::from_str(forwarded).unwrap();
+            let actual = parsed["mcp_servers"]["cs"]["env"]["CODEX_HOME"].as_str().unwrap();
+            assert_eq!(PathBuf::from(actual), *selected.unwrap_or(&inherited));
+            assert!(PathBuf::from(actual).join("auth.json").is_file());
+            assert!(!args.contains("fixture-auth-never-log"));
+        }
+    }
+
+    #[tokio::test]
     async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {
         let _env = TestEnvGuard::new();
         let root = PathBuf::from("/tmp/cas root with spaces");
@@ -5066,6 +5156,42 @@ echo SMOKE_DONE
         assert!(
             all_args.contains("Cassy Factory Supervisor"),
             "Codex supervisor should have supervisor instructions"
+        );
+        // cas-ae046: Codex's base prompt mandates commentary before tool calls
+        // and skill announcements; "Skip preamble" never names that channel,
+        // so the developer contract must override it explicitly.
+        for required in [
+            "Commentary channel: stay silent on triage turns",
+            "never announce which skill you are using",
+            "a final answer, not commentary",
+        ] {
+            assert!(
+                all_args.contains(required),
+                "Codex supervisor contract must carry the commentary policy: {required}"
+            );
+        }
+        // cas-cbbb: Codex keeps developer_instructions across compaction but
+        // drops skill bodies read with `cat`, so supervisors re-read skills
+        // after every compaction (8.1 reads/h vs 0.8 for Claude). A resident
+        // signal → action core replaces that ritual, within a byte budget.
+        for required in [
+            "Supervisor core (resident",
+            "READY TO MERGE, MERGE REQUIRED or task_awaiting_merge →",
+            "blocker=true →",
+            "worker idle or died →",
+            "cas-qa-dispatch →",
+            "operator question →",
+            "After a compaction, continue from this core; do not re-read skills.",
+        ] {
+            assert!(
+                all_args.contains(required),
+                "Codex supervisor contract must carry the resident core: {required}"
+            );
+        }
+        assert!(
+            CODEX_SUPERVISOR_INSTRUCTIONS.len() <= 6_500,
+            "Codex supervisor contract is {} bytes; the resident core must keep it at or under 6,500",
+            CODEX_SUPERVISOR_INSTRUCTIONS.len()
         );
     }
 

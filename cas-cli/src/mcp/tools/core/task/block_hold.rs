@@ -109,7 +109,7 @@ pub(crate) fn owned_verification_wait(
     task_id: &str,
     recipient: &str,
 ) -> Option<String> {
-    use cas_types::{AgentRole, TaskStatus, VerificationDispatchState};
+    use cas_types::{AgentRole, VerificationDispatchState};
     let dispatch = cas_store::get_latest_verification_dispatch(cas_dir, task_id).ok()??;
     if !matches!(
         dispatch.state,
@@ -130,6 +130,27 @@ pub(crate) fn owned_verification_wait(
     if recipient.role != AgentRole::Supervisor || recipient.id != dispatch.owner_agent_id {
         return None;
     }
+    blocked_only_by_verification_wait(cas_dir, task_id, &dispatch.id).then_some(dispatch.id)
+}
+
+/// cas-7fc3: whether `task_id` is Blocked by nothing but the exact
+/// verification-wait note for `dispatch_id`. Dependency blockers, external
+/// dependencies, an independent hold or any other blocker note all mean a
+/// different gate holds the task.
+pub(crate) fn blocked_only_by_verification_wait(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    dispatch_id: &str,
+) -> bool {
+    blocked_only_by_verification_wait_inner(cas_dir, task_id, dispatch_id).unwrap_or(false)
+}
+
+fn blocked_only_by_verification_wait_inner(
+    cas_dir: &std::path::Path,
+    task_id: &str,
+    dispatch_id: &str,
+) -> Option<bool> {
+    use cas_types::TaskStatus;
     let tasks = crate::store::open_task_store_local(cas_dir).ok()?;
     let task = tasks.get(task_id).ok()?;
     if task.status != TaskStatus::Blocked
@@ -140,34 +161,48 @@ pub(crate) fn owned_verification_wait(
             .ok()?
             .is_empty()
     {
-        return None;
+        return Some(false);
     }
     // cas-16e1: a wait is the exact system-authored sentence for this
     // dispatch, never any text that merely mentions it.
-    let wait = verification_wait_note(&dispatch.id);
+    let wait = verification_wait_note(dispatch_id);
     let is_wait = |reason: &str| reason.trim() == wait;
     let hold = read(tasks.as_ref(), task_id).ok()?;
     if hold.as_ref().is_some_and(|hold| {
-        hold.reason != "Task explicitly set to status=blocked." && !is_wait(&hold.reason)
+        hold.reason != "Task explicitly set to status=blocked."
+            && !is_any_verification_wait_note(&hold.reason)
     }) {
-        return None;
+        return Some(false);
     }
     // A new park starts a delivery cycle; old blocker notes cannot hold it.
     let notes = task.notes.rsplit("Task parked as awaiting_merge").next()?;
-    let blockers = blocker_notes(notes);
-    if blockers.iter().any(|reason| !is_wait(reason))
-        || (!blockers.iter().any(|reason| is_wait(reason))
-            && !hold.as_ref().is_some_and(|hold| is_wait(&hold.reason)))
-    {
-        return None;
-    }
-    Some(dispatch.id)
+    // cas-7fc3: a wait note for an earlier dispatch (one a rejected verdict
+    // ended) belongs to a finished verification cycle, not to a live hold.
+    let blockers: Vec<String> = blocker_notes(notes)
+        .into_iter()
+        .filter(|reason| is_wait(reason) || !is_any_verification_wait_note(reason))
+        .collect();
+    Some(
+        !(blockers.iter().any(|reason| !is_wait(reason))
+            || (!blockers.iter().any(|reason| is_wait(reason))
+                && !hold.as_ref().is_some_and(|hold| is_wait(&hold.reason)))),
+    )
 }
 
 /// cas-16e1: the one note a worker records to wait, blocked, on a pending
 /// verification dispatch without waking its supervisor.
 pub(crate) fn verification_wait_note(dispatch_id: &str) -> String {
     format!("Verification required: exact dispatch {dispatch_id} must record a verdict before close.")
+}
+
+/// Whether `reason` is exactly a [`verification_wait_note`] for some single
+/// dispatch id, as opposed to free text that merely mentions one.
+fn is_any_verification_wait_note(reason: &str) -> bool {
+    reason
+        .trim()
+        .strip_prefix("Verification required: exact dispatch ")
+        .and_then(|rest| rest.strip_suffix(" must record a verdict before close."))
+        .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
 }
 
 /// The full text of every blocker note, across all of its lines. A note

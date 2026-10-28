@@ -2184,13 +2184,16 @@ fn prompt_queue_absent(cas_root: &Path) -> bool {
 /// Why the prompt queue couldn't be read, in the operator's words.
 fn prompt_queue_read_failure(error: &str) -> &'static str {
     let error = error.to_ascii_lowercase();
-    if error.contains("locked") || error.contains("busy") {
-        "the database is in use by another process; run cas doctor again in a moment"
-    } else if error.contains("no such table") || error.contains("no such column") {
+    // rusqlite appends ` in <SQL> at offset ...` to a preparation error.
+    // Query/column names (e.g. awaiting_busy_recipient) are not its diagnosis.
+    let diagnostic = error.split_once(" in ").map_or(error.as_str(), |(reason, _)| reason);
+    if diagnostic.contains("no such table") || diagnostic.contains("no such column") {
         "the prompt queue is from an older cas; run 'cas update --schema-only'"
-    } else if error.contains("not a database") || error.contains("malformed") {
+    } else if diagnostic.contains("locked") || diagnostic.contains("busy") {
+        "the database is in use by another process; run cas doctor again in a moment"
+    } else if diagnostic.contains("not a database") || diagnostic.contains("malformed") {
         "the database file looks damaged"
-    } else if error.contains("unable to open") {
+    } else if diagnostic.contains("unable to open") {
         "the database could not be opened"
     } else {
         "the prompt queue could not be read"
@@ -6623,6 +6626,11 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
         let root = crate::store::init_cas_dir(&project).unwrap();
         let db = root.join("cas.db");
+        for primary in ["database is locked", "database is busy"] {
+            let rendered = format!("{primary} in SELECT 'no such column: missing' FROM awaiting_busy_recipient at offset 0");
+            assert_eq!(prompt_queue_read_failure(&rendered), prompt_queue_read_failure(primary),
+                "query text must not replace the primary error diagnosis");
+        }
         // A complete numbered ledger must not conceal an old lazy queue.
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute_batch(

@@ -1,0 +1,4 @@
+title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
+tasks: [cas-abb7]
+invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
+journeys: [HUB-J22]

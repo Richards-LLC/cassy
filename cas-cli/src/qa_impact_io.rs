@@ -126,6 +126,18 @@ impl<'a> Snapshot<'a> {
             Err(error) => Err(error).with_context(|| format!("read {path}")),
         }
     }
+
+    fn registry(&self, path: &str) -> Result<Option<Registry>> {
+        if self.head.is_none() {
+            // Include new family files in working-tree previews, just like new
+            // registry content; committed snapshots use only their own inventory.
+            if !self.root.join(path).try_exists()? {
+                return Ok(None);
+            }
+            return crate::qa_registry::load(&self.root.join(path)).map(Some);
+        }
+        crate::qa_registry::load_with(path, &self.paths, |path| self.read(path))
+    }
 }
 
 pub(super) fn analyze(
@@ -139,22 +151,16 @@ pub(super) fn analyze(
     let before = base
         .map(|base| Snapshot::new(repo, Some(base)))
         .transpose()?;
-    let registry = tree
-        .read(&qa.registry.path)?
-        .map(|text| crate::qa_registry::parse(&text))
-        .transpose()?;
+    let registry = tree.registry(&qa.registry.path)?;
     let previous = before
         .as_ref()
-        .map(|tree| tree.read(&qa.registry.path))
-        .transpose()?
-        .flatten()
-        .and_then(|text| crate::qa_registry::parse(&text).ok());
+        .and_then(|tree| tree.registry(&qa.registry.path).ok().flatten());
     let codemap = tree.read(".claude/CODEMAP.md")?;
     let overview_present = tree.read("docs/PRODUCT_OVERVIEW.md")?.is_some();
     let needs_legacy_selector = registry.is_none()
-        || registry
-            .as_ref()
-            .is_some_and(|registry| registry.selection == crate::qa_registry::Selection::LegacyCatalog);
+        || registry.as_ref().is_some_and(|registry| {
+            registry.selection == crate::qa_registry::Selection::LegacyCatalog
+        });
     let selector_present = needs_legacy_selector
         && tree.paths.iter().any(|path| path == LEGACY_SELECTOR_PATH)
         && tree.read(LEGACY_SELECTOR_PATH)?.is_some();
@@ -211,7 +217,10 @@ pub(super) fn analyze(
                 .filter(|p| !old.problems.contains(p))
                 .cloned()
                 .collect();
-        } else if changes.iter().any(|c| c.file == qa.registry.path) {
+        } else if changes
+            .iter()
+            .any(|c| crate::qa_registry::is_registry_input(&qa.registry.path, &c.file))
+        {
             report.registry.errors_from_diff = validation.problems.clone();
         }
         if !validation.problems.is_empty() {

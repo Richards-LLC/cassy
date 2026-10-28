@@ -1,0 +1,4 @@
+title: A prose column must never consume its siblings' word widths or render inline markdown literally
+tasks: [cas-8bb3]
+invariants: [HUB-J4-READABLE-PROSE-TABLES]
+journeys: [HUB-J4]

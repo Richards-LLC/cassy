@@ -5393,6 +5393,23 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
             assert_eq!(bytes.as_ref(), if range.is_some() { &png[1..=4] } else { &png });
         }
     }
+    // Neither forged bytes nor symlink replacements become local preview access.
+    let image_path = std::path::Path::new(image["path"].as_str().unwrap());
+    std::fs::write(image_path, vec![b'x'; png.len()]).unwrap();
+    assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    std::fs::write(image_path, &png).unwrap();
+    #[cfg(unix)]
+    for directory in [false, true] {
+        let original = if directory { image_path.parent().unwrap() } else { image_path };
+        let moved = temp.path().join(if directory { "moved-directory" } else { "moved-image" });
+        std::fs::rename(original, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, original).unwrap();
+        assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+        let response = app.clone().oneshot(Request::get(format!("/v1/sessions/factory-a/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "an existing ticket must recheck storage");
+        std::fs::remove_file(original).unwrap();
+        std::fs::rename(moved, original).unwrap();
+    }
     // ISO-BMFF major and compatible brands, not the filename, identify phone media.
     for (brands, mime) in [
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),

@@ -652,18 +652,17 @@ pub(crate) fn wake_attempt_narrative(
         }
         (WakeAttempt::Fired, ObservationStatus::Unobserved) => {
             "wake evidence: Cassy DID nudge this recipient's pane, and no turn is recorded as \
-             having carried this message — the nudge landed but the harness surfaced nothing \
-             (GH #155 signature)."
+             having carried this message — harness surfacing remains unverified \
+             (possible GH #155 signature)."
         }
         (WakeAttempt::Failed, ObservationStatus::Unobserved) => {
-            "wake evidence: Cassy ATTEMPTED a wake and it FAILED (see wake_attempt_detail); no \
-             recorded turn carried this message, so treat it as NOT delivered to a turn."
+            "wake evidence: Cassy recorded a FAILED wake (see wake_attempt_detail); no \
+             message-specific turn receipt is recorded."
         }
         (WakeAttempt::NotAttempted, ObservationStatus::Unobserved) => {
-            "wake evidence: Cassy never attempted a wake for this message — the idle gate \
-             declined it, or the recipient is on PTY, where the typed payload is the wake. \
-             A PTY write is not a turn: if none starts, the delivery watchdog records its \
-             nudge or failure here (GH #1153)."
+            "wake evidence: no separate wake nudge is recorded for this message. On PTY, \
+             the typed payload can itself wake the recipient. A transport handoff proves \
+             neither a turn nor a scheduled repeat nudge (GH #1153)."
         }
     };
     format!("{line}\n")
@@ -711,14 +710,19 @@ pub(crate) fn recipient_verdict(
             report.target, report.stage
         );
     }
-    let escalation = if (waited as u64) < escalate_after_secs {
-        format!("you and the operator are told at {escalate_after_secs}s")
+    let threshold = crate::ui::factory::daemon::runtime::queue_and_events::delivery_stalled_threshold_before_abandonment(escalate_after_secs);
+    let escalation = if let Some(notice) = report.channel_stalled_notice_id {
+        format!("sender alert: notice {notice} recorded; further notices paused until the recipient reads or acknowledges a message")
+    } else if let Some(at) = report.delivery_stalled_notified_at {
+        format!("sender alert: recorded at {}; channel has since resumed", at.to_rfc3339())
     } else {
-        "you and the operator have been told".to_string()
+        let eligible_at = report.enqueued_at + chrono::Duration::seconds(threshold);
+        format!("sender alert: not recorded; eligible at {} (threshold {threshold}s); watchdog evaluates actionable messages", eligible_at.to_rfc3339())
     };
     format!(
-        "recipient: PENDING for {}: no turn has started with this message after {waited}s          (stage {}, last wake {}, declined wakes {}). Cassy keeps re-waking it every 60s; {escalation}.\n",
-        report.target, report.stage, report.wake_attempt, report.wake_gate_declines
+        "recipient: PENDING for {}: no message-specific recipient receipt is recorded after {waited}s \
+         (stage {}, last wake {}, declined wakes {}). {}; {escalation}.\n",
+        report.target, report.stage, report.wake_attempt, report.wake_gate_declines, report.retry.narrative()
     )
 }
 

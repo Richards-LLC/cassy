@@ -9780,6 +9780,7 @@ impl CasCore {
                             match crate::store::open_prompt_queue_store(&self.cas_root) {
                                 Ok(prompt_queue) => {
                                     match crate::mcp::tools::core::task::lifecycle::supervisor_push::emit_verification_dispatch_handoff(
+                                        &self.cas_root,
                                         prompt_queue.as_ref(),
                                         &dispatch.id,
                                         &req.id,

@@ -2422,8 +2422,20 @@ impl CasService {
                                 &branch_tip,
                                 &message,
                             );
+                            let full = format!("{message}\n\n{review}");
+                            let relay = match crate::review_body::relay_evidence_manifest(
+                                &self.inner.cas_root, &task.id, &full,
+                            ) {
+                                Ok(reference) => format!("{message}\n\n{reference}\n\n**Risk:** {}\n**Door:** {}",
+                                    crate::review_body::task_risk(&task),
+                                    task.door.map(|door| door.to_string()).unwrap_or_else(|| "—".into())),
+                                Err(error) => {
+                                    tracing::warn!(task_id=%task.id, %error, "relay manifest unavailable; retaining full review");
+                                    full
+                                },
+                            };
                             message = attach_merge_request_envelope(
-                                &format!("{message}\n\n{review}"),
+                                &relay,
                                 &MergeRequestEnvelope {
                                     task_id: task.id,
                                     // Live tip; the anchor rides along only

@@ -1166,6 +1166,7 @@ pub const VERIFICATION_DISPATCH_SOURCE_PREFIX: &str = "verification-dispatch:";
 /// of it. Idempotent on the dispatch id: a retried close for the same dispatch
 /// re-uses the row rather than queueing a second copy.
 pub fn emit_verification_dispatch_handoff(
+    cas_root: &Path,
     prompt_queue: &dyn PromptQueueStore,
     dispatch_id: &str,
     task_id: &str,
@@ -1176,13 +1177,22 @@ pub fn emit_verification_dispatch_handoff(
     bound_head: Option<&str>,
     approved_verdict_id: Option<&str>,
 ) -> Result<(), String> {
+    let reason_manifest = close_reason.filter(|reason| reason.len() > 400).and_then(|reason| {
+        match crate::review_body::relay_evidence_manifest(cas_root, task_id, reason) {
+            Ok(reference) => Some(reference),
+            Err(error) => {
+                tracing::warn!(%error, task_id, "dispatch manifest unavailable; retaining full reason");
+                None
+            },
+        }
+    });
     let body = crate::prompt_revalidation::verification_dispatch_envelope(
         dispatch_id,
         task_id,
         owner_agent_id,
         &deadline.to_rfc3339(),
         worker,
-        close_reason,
+        reason_manifest.as_deref().or(close_reason),
         bound_head,
         approved_verdict_id,
     );

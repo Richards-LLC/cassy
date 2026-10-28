@@ -3398,7 +3398,7 @@ impl CasCore {
             );
             task_store.append_note(&task.id, &note).map_err(|error| Self::error(
                 ErrorCode::INTERNAL_ERROR,
-                format!("Task {} started, but saving complete start instructions failed: {error}. Read task start full=true before acting.", task.id),
+                format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
             ))?;
             let saved = task_store.get(&task.id).map_err(|error| {
                 Self::error(

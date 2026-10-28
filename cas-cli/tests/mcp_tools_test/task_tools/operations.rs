@@ -295,7 +295,7 @@ async fn task_read_default_show_preserves_gate_inputs() {
 /// Complete start-only guidance must survive default reads and later full reads.
 #[tokio::test]
 async fn task_read_default_start_preserves_complete_advisories() {
-    for case in ["qa-blockers", "unanchored", "parked"] {
+    for case in ["qa-blockers", "qa-overflow", "unanchored", "parked"] {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
         let cas_dir = temp.path().join(".cas");
@@ -306,12 +306,16 @@ async fn task_read_default_start_preserves_complete_advisories() {
         );
         task.notes = "old evidence α".repeat(1000);
         let required: Vec<String>;
-        if case == "qa-blockers" {
+        if case.starts_with("qa-") {
             task.labels.push("qa-pass".into());
             store.add(&task).unwrap();
-            for id in ["cas-blocker-one", "cas-blocker-two"] {
+            let mut blockers = vec!["cas-blocker-one".to_string(), "cas-blocker-two".to_string()];
+            if case == "qa-overflow" {
+                blockers.extend((0..120).map(|i| format!("cas-long-blocker-{i:03}")));
+            }
+            for id in blockers {
                 store
-                    .add(&Task::new(id.into(), "Open blocker".into()))
+                    .add(&Task::new(id.clone(), "Open blocker".into()))
                     .unwrap();
                 store
                     .add_dependency(&cas::types::Dependency::new(
@@ -399,10 +403,30 @@ async fn task_read_default_start_preserves_complete_advisories() {
         let started = extract_text(service.task(request("start", false)).await.unwrap());
         assert!(started.len() <= 2_000, "{case}: {} bytes", started.len());
         let recovered = extract_text(service.task(request("notes", true)).await.unwrap());
+        let cursor = started.lines().find(|line| line.starts_with("Start advisories:")).expect("start context cursor");
+        let start_offset: usize = cursor.split("offset=").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        let mut offset = start_offset;
+        let mut paged = String::new();
+        loop {
+            let page = extract_text(service.task(Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+                serde_json::json!({"action": "notes", "id": task.id, "offset": offset, "limit": 1600})
+            ).unwrap())).await.unwrap());
+            assert!(page.len() <= 2_000, "{case}: oversized page");
+            let (header, body) = page.split_once("\n\n").unwrap();
+            paged.push_str(body);
+            let next = header.split("next=").nth(1).unwrap();
+            if next == "end" { break; }
+            offset = next.parse().unwrap();
+        }
+        assert_eq!(paged, &recovered[start_offset..], "{case}: start-context pages must be lossless");
+        if case == "qa-overflow" {
+            assert!(started.contains("Start advisories exceed"), "{started}");
+            assert!(paged.contains("cas-long-blocker-119"), "last blocker must remain reachable");
+        }
         for instruction in required {
             assert!(
                 recovered.contains(&instruction),
-                "{case}: start-only instruction unreachable: {instruction}\n{started}\n{recovered}"
+                "{case}: start-only instruction unreachable: {instruction}\n{started}"
             );
             assert!(
                 started.contains(&instruction) || started.contains("Start advisories exceed"),

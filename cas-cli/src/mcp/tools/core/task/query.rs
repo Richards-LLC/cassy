@@ -111,6 +111,9 @@ pub(super) fn excerpt(text: &str, budget: usize) -> String {
     if text.len() <= budget {
         return text.to_string();
     }
+    if budget < '…'.len_utf8() {
+        return String::new();
+    }
     let mut end = budget.saturating_sub(3).min(text.len());
     while !text.is_char_boundary(end) {
         end -= 1;

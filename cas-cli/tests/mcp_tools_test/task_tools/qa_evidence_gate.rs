@@ -261,9 +261,19 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
             }))).mount(&server).await;
     }
     for team in [false, true] {
-        let peer = tempfile::tempdir().unwrap();
-        let root = cas::store::init_cas_dir(peer.path()).unwrap();
-        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"qa-peer-project\"\n").unwrap();
+        let (peer, peer_core) = setup_cas(&mut env);
+        let root = peer.path().join(".cas");
+        std::fs::write(root.join("config.toml"), format!(
+            "[project]\ncanonical_id = \"qa-peer-project\"\n[verification]\nenabled = false\n[factory]\nartifacts_root = {:?}\n[qa]\nindependent_pass = true\n",
+            fx.artifacts.display().to_string()
+        )).unwrap();
+        git(peer.path(), &["init", "-q", "-b", "main"]);
+        git(peer.path(), &["fetch", "-q", fx.repo.to_str().unwrap(), "main"]);
+        git(peer.path(), &["reset", "-q", "--hard", "FETCH_HEAD"]);
+        git(peer.path(), &["fetch", "-q", fx.repo.to_str().unwrap(), "factory/test-agent"]);
+        git(peer.path(), &["branch", "factory/test-agent", "FETCH_HEAD"]);
+        git(peer.path(), &["merge", "-q", "--ff-only", "factory/test-agent"]);
+        std::fs::write(peer.path().join(".git/info/exclude"), "/.cas/\n").unwrap();
         let tasks = cas::store::open_task_store_local(&root).unwrap();
         let queue = std::sync::Arc::new(cas::cloud::SyncQueue::open(&root).unwrap());
         queue.init().unwrap();
@@ -284,14 +294,15 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
                 &*cas::store::open_commit_link_store(&root).unwrap())
         }.unwrap();
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        let received = tasks.get(TASK).unwrap();
+        let closed = close_text(&peer_core, TASK).await;
+        assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed,
+            "team={team}: the real close gate lost the peer verdict: {closed}");
         let rounds = cas_store::list_qa_passes(&root, TASK).unwrap();
-        let gate = cas::qa_pass::merge_gate(&received, &cas::config::QaConfig::default(), &rounds, &head);
-        assert!(gate.is_ok(), "team={team}: the real QA gate lost the peer verdict: {gate:?}");
         assert_eq!(rounds.len(), 1, "the peer must retain the existing round");
         assert_eq!(rounds[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
     }
 
+    env.set("CAS_ROOT", &cas_dir);
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);

@@ -513,7 +513,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
   // "Jump to latest" gets its own row above the pinned card and composer, so
   // it never floats over a turn in the thread (cas-97ea).
   if (composerSlot && conversation.jump.parentElement !== composerSlot) composerSlot.prepend(conversation.jump);
-  conversation.update();
+  conversation.requestUpdate();
 }
 
 /** The view key of a thread shown before its session's panes (cas-fc2c). */

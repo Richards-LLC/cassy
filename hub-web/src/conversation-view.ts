@@ -496,6 +496,7 @@ export class ConversationView {
   /** The thread's content height at the last scroll it saw (cas-acb4b). */
   private lastContentHeight?: number;
   private disposed = false;
+  private updateRequest?: object;
   private resize?: ResizeObserver;
 
   constructor(document: Document, private history: ConversationHistory, options: ConversationViewOptions | string, editMessage?: (text: string) => void) {
@@ -666,9 +667,22 @@ export class ConversationView {
     }
   }
 
+  /** Mount and session-state callbacks share one presentation before paint.
+   * Keeping layout out of the row's click lets its shell finish before the
+   * thread measures it; an intervening immediate update satisfies the request.
+   */
+  requestUpdate(): void {
+    if (this.disposed || this.updateRequest) return;
+    const request = this.updateRequest = {};
+    requestAnimationFrame(() => {
+      if (!this.disposed && this.updateRequest === request) this.update();
+    });
+  }
+
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
   update(): void {
     if (this.disposed) return;
+    this.updateRequest = undefined;
     this.noticeReset();
     this.restorePlace();
     // Turns added above the reader (Load earlier) must not move what they are

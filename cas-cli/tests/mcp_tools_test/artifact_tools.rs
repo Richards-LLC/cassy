@@ -778,6 +778,16 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     );
 
     drop(download);
+    // Scoped wiremock guards can clear the earlier view fixture when they
+    // leave scope; restore it for the existing checksum regression below.
+    Mock::given(method("GET"))
+        .and(path("/api/artifacts/cloud-proof/url"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "artifact_id": "cloud-proof", "url": format!("{}/download?signature=secret", server.uri())
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/download"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong bytes"))

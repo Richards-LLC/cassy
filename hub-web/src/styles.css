@@ -2247,13 +2247,13 @@ button.chip:disabled { cursor: default; }
 .thread .fsub { display: flex; align-items: center; gap: 6px; margin-top: 3px; font: var(--weight-regular) 12.5px/1.3 var(--font-ui); color: var(--ink-mid); }
 .thread .fsub:empty { display: none; }
 /* Visual reply (cas-3aff): the file's sheet, then the page itself in a
- * sandboxed frame laid on a white sheet, since an agent page paints its own
+ * sandboxed frame laid on light-scheme Canvas, paper in either theme, since a page paints its own
  * colours and assumes paper. A fixed height keeps the thread's scroll its own;
  * the page scrolls inside. Nothing the page draws can leave the frame. */
 .thread .visual-page { display: flex; flex-direction: column; gap: 10px; width: min(720px, 100%); max-width: 100%; margin: 0; }
-.thread .visual-frame { position: relative; overflow: hidden; height: 440px; border-radius: 18px 18px 18px 8px; background: #FFFFFF; box-shadow: var(--lift-strong); }
-.thread .visual-frame iframe { display: block; width: 100%; height: 100%; border: 0; background: #FFFFFF; }
-.thread .visual-status { margin: 0; padding: 18px 20px; font: var(--weight-regular) 13px/1.4 var(--font-ui); color: #5A5F6E; }
+.thread .visual-frame { position: relative; overflow: hidden; height: 440px; border-radius: 18px 18px 18px 8px; color-scheme: light; background: Canvas; box-shadow: var(--lift-strong); }
+.thread .visual-frame iframe { display: block; width: 100%; height: 100%; border: 0; background: Canvas; }
+.thread .visual-status { margin: 0; padding: 18px 20px; font: var(--weight-regular) 13px/1.4 var(--font-ui); color: GrayText; }
 /* Journey F6: why the file did not open, on the card that was pressed. */
 .thread .fnote { display: block; margin-top: 4px; font: var(--weight-medium) 12.5px/1.35 var(--font-ui); color: var(--state-warn); overflow-wrap: anywhere; text-wrap: pretty; }
 /* An attachment-only turn is its sheet alone; the bubble would be a blank pebble. */

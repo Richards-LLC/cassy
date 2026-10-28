@@ -1154,6 +1154,14 @@ explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
 Claude subscription OAuth; propagated supervisor settings retain existing API
 key inheritance.
 
+Explicit Claude profiles may omit `settings.json` (empty settings); an existing
+file must be readable JSON. Preflight checks macOS OAuth credentials by Keychain
+item existence, using Claude Code's `Claude Code-credentials-<8 hex>` service
+(first eight SHA-256 hex digits of the NFC-normalized config path). It uses the
+current user's default Keychain search list and never requests the password.
+Other platforms still require `.credentials.json`. Both paths require resolvable
+`agents` and `skills` directories before queueing a spawn.
+
 For CLI chores that need operator credentials, explicitly grant environment
 names in the project's `.cas/config.toml`:
 

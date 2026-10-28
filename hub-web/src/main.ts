@@ -184,7 +184,7 @@ installAttachmentSheet((sheet, file, context) => {
   const thread = threadOf(context);
   if (!thread) return sheet;
   const available = () => connectionStates.get(thread.machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available, openPreview: context.turn.event.kind === "send" });
+  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;

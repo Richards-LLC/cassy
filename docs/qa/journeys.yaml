@@ -269,6 +269,10 @@ invariants:
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
+  HUB-J22-CACHED-PREVIEW-RECOVERY:
+    statement: A transiently failed image keeps a compact note and recovers when its cached card scrolls back into the live conversation after an offscreen reconnect.
+    check: Run the HUB-J22 cached failed thumbnail Chromium regression; prove the same node leaves the DOM during reconnect, returns, decodes the image and removes its note, with exactly one renewed ticket.
+    bug: {task: cas-abb7}
   HUB-J24-SENT-ATTACHMENT:
     statement: Sent uploads show an image thumbnail or named file sheet without host paths, including after reload and on another paired device; the supervisor retains the exact resolvable artifact reference.
     check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history.
@@ -277,6 +281,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  hidden-cached-preview-retry:
+    title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
+    tasks: [cas-abb7]
+    invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
+    journeys: [HUB-J22]
   prose-table-column-collapse:
     title: A prose column must never consume its siblings' word widths or render inline markdown literally
     tasks: [cas-8bb3]

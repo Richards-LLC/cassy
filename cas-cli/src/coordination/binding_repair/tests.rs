@@ -539,4 +539,8 @@ fn cas_9021_uncertain_attempt_is_settled_by_a_later_definite_refusal() {
     assert_eq!(refused.error.as_deref(), Some("Pending activity would reach no supervisor of this project. Start one, then retry; nothing was settled."));
     assert!(matches!(journal.read().unwrap().policies[0].disposition, ChannelDisposition::Paused { .. }));
     assert!(!journal.read().unwrap().legacy_claims_allowed(), "pending rows cannot be reopened to legacy claims");
+    let failed_retry = client.repair(&root, &scope).unwrap();
+    assert!(matches!(failed_retry.outcome, RepairOutcome::Blocked));
+    assert!(matches!(journal.read().unwrap().policies[0].disposition, ChannelDisposition::Paused { .. }));
+    assert!(!journal.read().unwrap().legacy_claims_allowed(), "failed retry must retain the pending-row pause");
 }

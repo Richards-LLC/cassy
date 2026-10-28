@@ -14639,33 +14639,6 @@ mod tests {
         }
     }
 
-    // Temporary live platform proof, removed before final delivery.
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn c8abb_platform_proof() {
-        let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
-        // Supervisor #547920 permits this read using the default search list.
-        env.set("HOME", "/Users/pippenz");
-        let real = std::path::Path::new("/Users/pippenz/.claude-hello@gabber.studio");
-        assert!(!real.join(".credentials.json").exists());
-        preflight_claude_config_dir(real.to_str().unwrap()).unwrap();
-        let fixture = tempfile::tempdir().unwrap();
-        valid_claude_config(fixture.path());
-        std::fs::remove_file(fixture.path().join(".credentials.json")).unwrap();
-        std::fs::remove_file(fixture.path().join("settings.json")).unwrap();
-        let error = preflight_claude_config_dir(fixture.path().to_str().unwrap()).unwrap_err();
-        assert!(error.contains("Keychain credentials"), "{error}");
-        let report = format!(
-            "macOS native preflight; real HOME/default search list; metadata only\n{}: PASS (no credentials file)\n{}: REFUSED (no credentials file/settings/Keychain item)\n",
-            claude_profile_keychain_service(real.to_str().unwrap()),
-            claude_profile_keychain_service(fixture.path().to_str().unwrap()),
-        );
-        std::fs::write(
-            "/Users/pippenz/.cas/artifacts/cassy-ee10031b42e3c2024023c076dfb2edd8118e39b8baee6f0832367b9e8ef4c205/cas-c8abb/platform-results.txt",
-            report,
-        ).unwrap();
-    }
-
     #[test]
     fn claude_config_dir_preflight_optional_settings() {
         for state in ["missing", "invalid", "unreadable"] {

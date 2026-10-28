@@ -19,7 +19,7 @@ const work = (): WorkWorld => ({
     event("t:sup:1:0", "thinking", "Checking the lane", -170_000),
     event("t:sup:2:0", "tool", "Bash: Run the tests", -160_000, { error: true }),
     event("q:7", "task", "cas-42 parked for merge: Ship the stream", -150_000, { agent: WORKER }),
-    event("t:w:1:0", "tool", "Read: src/limits.rs", -140_000, { agent: WORKER }),
+    event("t:w:1:0", "tool", "Read: src/limits.rs", -400, { agent: WORKER }),
   ],
   // Agent text is data: the markup in this detail must read as text.
   details: { "t:sup:2:0": "Bash\n\nInput:\ncargo test <b>-p cas</b>\n\nResult (error):\n1 failed" },
@@ -110,17 +110,18 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
 
       await journey.stage("Read typed operation scope and exact evidence without lifecycle noise", async () => {
         const typed = [
-          event("typed-start", "notice", "Turn started", -145_000, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
-          event("typed-read", "tool", "Read files", -144_000, { tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
-          event("typed-search", "tool", "Find the renderer", -143_000, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
-          event("typed-command", "tool", "Check the build", -142_000, { tool: { name: "Bash", operation: "command", targets: [], command: "npm run check", cwd: "/project", exit_code: 2 }, lifecycle: { id: "check", stage: "end", outcome: "error" } }),
-          event("typed-edit", "tool", "Update the renderer", -141_000, { tool: { name: "Edit", operation: "edit", targets: ["src/a.ts", "src/b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
-          event("typed-other", "tool", "functions.exec: inspect the work", -140_000, { tool: { name: "functions.exec", operation: "other", targets: [] } }),
-          event("typed-end", "notice", "Turn completed", -139_000, { has_detail: false, lifecycle: { id: "typed-turn", stage: "end", outcome: "unknown" } }),
+          event("typed-start", "notice", "Turn started", -900, { has_detail: false, lifecycle: { id: "typed-turn", stage: "start" } }),
+          event("typed-read", "tool", "Read files", -800, { tool: { name: "Read", operation: "read", targets: ["src/a.ts", "src/b.ts", "src/c.ts"], counts: { files: 3 } } }),
+          event("typed-search", "tool", "Find the renderer", -700, { tool: { name: "Grep", operation: "search", targets: ["src"], counts: { matches: 7 } } }),
+          event("typed-command", "tool", "Check the build", -600, { tool: { name: "Bash", operation: "command", targets: [], command: "npm run check", cwd: "/project", exit_code: 2 }, lifecycle: { id: "check", stage: "end", outcome: "error" } }),
+          event("typed-edit", "tool", "Update the renderer", -500, { tool: { name: "Edit", operation: "edit", targets: ["src/a.ts", "src/b.ts"], counts: { files: 2 } }, lifecycle: { id: "edit", stage: "end", outcome: "success" } }),
+          event("typed-other", "tool", "functions.exec: inspect the work", -400, { tool: { name: "functions.exec", operation: "other", targets: [] } }),
+          event("typed-end", "notice", "Turn completed", -300, { has_detail: false, lifecycle: { id: "typed-turn", stage: "end", outcome: "unknown" } }),
         ];
         const exact = "Read\n\nInput:\n{\"file\":\"src/a.ts\"}\n\nResult:\nexport const literal = '<script>neverRun()</script>';";
         for (const row of typed) hub.appendWork(PELICAN, row, row.id === "typed-read" ? exact : `${row.label}\n\nInput:\nraw arguments\n\nResult:\nexact ${row.id} output`);
-        const block = blocks.first();
+        const block = blocks.last();
+        await block.locator(".work-summary").click();
         await expect(block.getByRole("button", { name: "Read · 3 files", exact: true })).toBeVisible();
         await expect(block.getByRole("button", { name: "Search · 7 matches", exact: true })).toBeVisible();
         await expect(block.getByRole("button", { name: "Ran command · exit 2 failed", exact: true })).toBeVisible();

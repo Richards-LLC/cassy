@@ -299,6 +299,9 @@ async fn task_read_default_start_preserves_complete_advisories() {
         let mut env = TestEnvGuard::temp_home();
         let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
         let cas_dir = temp.path().join(".cas");
+        std::fs::write(cas_dir.join("config.toml"), r#"[project]
+canonical_id = "start-read-fixture"
+"#).unwrap();
         let store = open_task_store(&cas_dir).unwrap();
         let mut task = Task::new(
             "cas-start-read".into(),
@@ -382,13 +385,6 @@ async fn task_read_default_start_preserves_complete_advisories() {
             parked.assignee = Some("test-agent".into());
             parked.deliverables.factory_branch_anchor = Some(tip.clone());
             store.add(&parked).unwrap();
-            std::fs::write(
-                cas_dir.join("config.toml"),
-                r#"[project]
-canonical_id = "start-read-fixture"
-"#,
-            )
-            .unwrap();
             task.deliverables.work_target = Some(cas::types::WorkTarget {
                 repo_selector: "project:start-read-fixture".into(),
                 target_branch: "main".into(),

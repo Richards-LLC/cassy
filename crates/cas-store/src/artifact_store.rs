@@ -282,6 +282,25 @@ impl SqliteArtifactStore {
         Ok(row)
     }
 
+    /// A published record is viewable in a thread only when that session's
+    /// operator lane actually carries its URL-free attachment reference.
+    pub fn get_for_session(&self, id: &str, session: &str) -> Result<Option<PublishedArtifact>> {
+        let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, task_id, name, mime, size_bytes, sha256, cloud_artifact_id,
+                    status, cloud_url, slack_permalink, created_at
+             FROM artifacts WHERE id = ?1
+               AND EXISTS (
+                   SELECT 1 FROM prompt_queue q,
+                       json_each(CASE WHEN json_valid(q.attachments) THEN q.attachments ELSE '[]' END) ref
+                   WHERE q.factory_session = ?2 AND lower(q.target) = 'operator'
+                     AND json_extract(ref.value, '$.artifact_id') = ?1
+               )",
+        )?;
+        let row = stmt.query_row(params![id, session], row_to_artifact).optional()?;
+        Ok(row)
+    }
+
     /// Newest first, so `cas artifact list` leads with what was just published.
     pub fn list_for_task(&self, task_id: &str) -> Result<Vec<PublishedArtifact>> {
         let conn = crate::shared_db::lock_connection_recovering(&self.conn)?;

@@ -1586,9 +1586,18 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         "base-uri 'none'",
         "frame-ancestors 'none'",
         "form-action 'none'",
-        "worker-src 'none'",
+        "worker-src 'self'",
+        "media-src 'self'",
+        "img-src 'self' data:",
     ] {
         assert!(csp.contains(required), "missing CSP directive {required}");
+    }
+    // pin: Native media and workers receive only these exact CSP sources.
+    for (directive, expected) in [("img-src", "img-src 'self' data:"),
+        ("media-src", "media-src 'self'"), ("worker-src", "worker-src 'self'")] {
+        let value = csp.split(';').map(str::trim)
+            .find(|value| value.starts_with(&format!("{directive} "))).unwrap();
+        assert_eq!(value, expected);
     }
     assert!(!csp.contains("'unsafe-inline'"));
     assert!(!csp.contains("'unsafe-eval'"));
@@ -4173,6 +4182,7 @@ const OPS_TIP: &str = "0123456789abcdef0123456789abcdef01234567";
 struct OpsFixture {
     _temp: tempfile::TempDir,
     hub_root: std::path::PathBuf,
+    auth: AuthStore,
     cas_dir: std::path::PathBuf,
     app: axum::Router,
     events: MachineEventBus,
@@ -4232,6 +4242,7 @@ fn ops_fixture(scopes: std::collections::BTreeSet<Scope>) -> OpsFixture {
     OpsFixture {
         _temp: temp,
         hub_root,
+        auth,
         cas_dir,
         app,
         events,
@@ -5257,4 +5268,219 @@ async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_
         listed(&session_reader).await,
         vec![(folder.canonicalize().unwrap().to_string_lossy().into_owned(), Some("factory-a".to_owned()))],
     );
+}
+
+
+/// Media elements need reusable, narrowly scoped capabilities instead of a
+/// pairing credential in a URL (cas-1b35). One table drives the public router.
+#[tokio::test]
+async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
+    use cas_store::{NewArtifact, SqliteArtifactStore};
+    let mut f = ops_fixture([Scope::SessionRead].into_iter().collect());
+    let upstream = wiremock::MockServer::start().await;
+    let artifacts = SqliteArtifactStore::open(&f.cas_dir).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&f.cas_dir).unwrap();
+    for (id, mime, session, size) in [
+        ("art-image", "image/png", OPS_SESSION, 6),
+        ("art-video", "video/mp4", OPS_SESSION, 6),
+        ("art-pdf", "application/pdf", OPS_SESSION, 6),
+        ("art-html", "text/html", OPS_SESSION, 6),
+        ("art-large", "image/png", OPS_SESSION, cas_types::ARTIFACT_MAX_BYTES + 1),
+        ("art-foreign", "image/png", "another-session", 6),
+    ] {
+        artifacts.record_local(&NewArtifact {
+            id: id.into(), task_id: OPS_TASK.into(), name: id.into(),
+            mime: mime.into(), size_bytes: size, sha256: "a".repeat(64),
+        }).unwrap();
+        artifacts.mark_uploaded(id, &format!("cloud-{id}")).unwrap();
+        artifacts.mark_committed(id, None).unwrap();
+        let row = queue.enqueue_with_session("supervisor", "operator", "media", session).unwrap();
+        queue.stamp_operator_reply(row, "status", &[cas_types::ArtifactRef {
+            artifact_id: id.into(), name: id.into(), mime: mime.into(),
+            size_bytes: size, sha256: "a".repeat(64),
+        }]).unwrap();
+    }
+    let mut candidate = fixture_session(OPS_SESSION);
+    candidate.project_dir = Some(f.cas_dir.parent().unwrap().display().to_string());
+    let events = MachineEventBus::new(4);
+    let media_state = HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![candidate])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(4), events.clone()), events,
+    ).with_auth(f.auth.clone()).with_artifact_cloud_client(
+        crate::artifacts::cloud::ArtifactUploadClient::new(&upstream.uri(), "fixture-cloud-token")
+    );
+    f.app = router(media_state.clone());
+    let origin = upstream.uri();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex("^/api/artifacts/"))
+        .respond_with(move |request: &wiremock::Request| {
+            let id = request.url.path().split('/').nth(3).unwrap();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": id, "url": format!("{origin}/blob/{id}"),
+                "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            }))
+        }).mount(&upstream).await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex("^/blob/"))
+        .respond_with(|request: &wiremock::Request| {
+            assert!(request.headers.get("authorization").is_none(), "cloud bearer must stay at Cloud");
+            match request.headers.get("range").and_then(|value| value.to_str().ok()) {
+                Some("bytes=2-4") => wiremock::ResponseTemplate::new(206)
+                    .insert_header("Content-Range", "bytes 2-4/6").set_body_bytes(b"cde"),
+                Some("bytes=0-0") => wiremock::ResponseTemplate::new(206)
+                    .insert_header("Content-Range", "bytes 0-0/6").set_body_bytes(b"a"),
+                None => wiremock::ResponseTemplate::new(200).set_body_bytes(b"abcdef"),
+                range => panic!("unexpected fixture Range {range:?}"),
+            }
+        }).mount(&upstream).await;
+    let mut tickets = std::collections::BTreeMap::new();
+    for (session, artifact, expected) in [
+        (OPS_SESSION, "art-image", StatusCode::OK),
+        (OPS_SESSION, "art-video", StatusCode::OK),
+        (OPS_SESSION, "art-pdf", StatusCode::OK),
+        (OPS_SESSION, "art-html", StatusCode::NOT_FOUND),
+        (OPS_SESSION, "art-large", StatusCode::NOT_FOUND),
+        (OPS_SESSION, "art-missing", StatusCode::NOT_FOUND),
+        (OPS_SESSION, "art-foreign", StatusCode::NOT_FOUND),
+        ("another-session", "art-image", StatusCode::NOT_FOUND),
+    ] {
+        let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/ticket");
+        let (status, body) = f.call("POST", &uri, None).await;
+        assert_eq!(status, expected, "{uri}");
+        if expected == StatusCode::OK {
+            assert!(!body["ticket"].as_str().unwrap().is_empty());
+            tickets.insert(artifact, body["ticket"].as_str().unwrap().to_owned());
+            assert!(body.get("url").is_none());
+            let expires = chrono::DateTime::parse_from_rfc3339(body["expires_at"].as_str().unwrap()).unwrap();
+            assert!(expires > chrono::Utc::now());
+            assert!(expires <= chrono::Utc::now() + chrono::Duration::minutes(5));
+        }
+        assert!(upstream.received_requests().await.unwrap().is_empty(), "ticket issuance never fetches upstream");
+    }
+    // Same paired origin, independently authenticated device, insufficient scope.
+    let denied_key = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let denied_scopes = [Scope::MachineRead].into_iter().collect();
+    let now = chrono::Utc::now();
+    let invitation = f.auth.mint_pairing("https://controller.example", denied_scopes, now).unwrap();
+    let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test",
+        "https://controller.example", [Scope::MachineRead].into_iter().collect());
+    exchange.public_key_jwk = public_jwk(&denied_key);
+    let denied = f.auth.exchange_pairing(exchange, now).unwrap();
+    let uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
+    let response = f.app.clone().oneshot(Request::post(&uri).header("origin", "https://controller.example")
+        .header("authorization", format!("DPoP {}", denied.credential))
+        .header("dpop", sign_dpop(&denied_key, &denied.credential, "POST", &uri, now, &uuid::Uuid::new_v4().to_string()))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+    let post_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
+    let now = chrono::Utc::now();
+    let context = f.auth.authenticate_dpop(&format!("DPoP {}", f.credential),
+        &sign_dpop(&f.signing, &f.credential, "POST", &post_uri, now, &uuid::Uuid::new_v4().to_string()),
+        "https://controller.example", "POST", &post_uri, now).unwrap();
+    const HTML_MIME_ALLOWLIST: &[&str] = &["text/html"];
+    let html = crate::hub::artifact_proxy::issue_session_artifact_ticket(
+        &media_state, &context, OPS_SESSION, "art-html", HTML_MIME_ALLOWLIST,
+    ).await.unwrap();
+    let (bound, principal) = crate::hub::artifact_proxy::authenticate_session_artifact_ticket(
+        &media_state, &html.ticket, "art-html",
+    ).unwrap();
+    assert_eq!(bound, OPS_SESSION);
+    let page_bytes = crate::hub::artifact_proxy::fetch_session_artifact(
+        &media_state, principal, &bound, "art-html", &axum::http::HeaderMap::new(), HTML_MIME_ALLOWLIST,
+    ).await;
+    assert_eq!(page_bytes.status(), StatusCode::OK);
+    assert_eq!(page_bytes.headers()["content-type"], "text/html");
+    assert_eq!(to_bytes(page_bytes.into_body(), 64).await.unwrap(), &b"abcdef"[..]);
+    tickets.insert("art-html", html.ticket);
+    for (id, requested, expected, mime, bytes) in [
+        ("art-image", None, StatusCode::OK, "image/png", &b"abcdef"[..]),
+        ("art-video", Some("bytes=2-4"), StatusCode::PARTIAL_CONTENT, "video/mp4", &b"cde"[..]),
+        ("art-video", Some("bytes=0-0"), StatusCode::PARTIAL_CONTENT, "video/mp4", &b"a"[..]),
+        ("art-pdf", None, StatusCode::OK, "application/pdf", &b"abcdef"[..]),
+        // A valid HTML page capability never widens the media facade's fixed MIME list.
+        ("art-html", None, StatusCode::NOT_FOUND, "text/html", &b""[..]),
+    ] {
+        let uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/{id}/content?t={}", tickets[id]);
+        let mut request = Request::get(&uri).header("origin", "https://controller.example");
+        if let Some(range) = requested { request = request.header("range", range); }
+        let before = upstream.received_requests().await.unwrap().len();
+        let response = f.app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), expected, "{id}");
+        if expected == StatusCode::NOT_FOUND {
+            assert_eq!(upstream.received_requests().await.unwrap().len(), before, "HTML media facade fetched upstream");
+            continue;
+        }
+        assert_eq!(response.headers()["content-type"], mime);
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(response.headers()["cache-control"], "private, no-store");
+        assert!(response.headers()["access-control-expose-headers"].to_str().unwrap().contains("Content-Range"));
+        if requested.is_some() {
+            assert_eq!(response.headers()["content-range"], if bytes.len() == 1 { "bytes 0-0/6" } else { "bytes 2-4/6" });
+        }
+        assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), bytes);
+    }
+    for (id, expected) in [("art-image", StatusCode::OK), ("art-foreign", StatusCode::NOT_FOUND),
+        ("art-missing", StatusCode::NOT_FOUND), ("art-html", StatusCode::NOT_FOUND),
+        ("art-large", StatusCode::NOT_FOUND)] {
+        let before = upstream.received_requests().await.unwrap().len();
+        let uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/{id}/content");
+        let (status, _) = f.call("GET", &uri, None).await;
+        assert_eq!(status, expected, "DPoP {id}");
+        if expected != StatusCode::OK {
+            assert_eq!(upstream.received_requests().await.unwrap().len(), before, "{id} fetched upstream");
+        }
+    }
+    let range_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-video/content?t={}", tickets["art-video"]);
+    let before = upstream.received_requests().await.unwrap().len();
+    let response = f.app.clone().oneshot(Request::get(range_uri).header("range", "bytes=99-")
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(response.headers()["content-range"], "bytes */6");
+    assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+    let auth_path = f.hub_root.join("auth.json");
+    let saved = std::fs::read(&auth_path).unwrap();
+    std::fs::write(&auth_path, b"not-json").unwrap();
+    let before = upstream.received_requests().await.unwrap().len();
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-image/content?t={}", tickets["art-image"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    std::fs::write(auth_path, saved).unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
+    assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-image", now - chrono::Duration::minutes(6)).unwrap().ticket;
+    let valid = tickets["art-image"].clone();
+    let mut tampered = valid.clone();
+    tampered.replace_range(3..4, if &tampered[3..4] == "A" { "B" } else { "A" });
+    for (case, session, artifact, mut ticket) in [
+        ("missing", OPS_SESSION, "art-image", String::new()),
+        ("expired", OPS_SESSION, "art-image", expired),
+        ("tampered", OPS_SESSION, "art-image", tampered),
+        ("wrong artifact", OPS_SESSION, "art-pdf", valid.clone()),
+        ("wrong session", "another-session", "art-image", valid.clone()),
+        ("epoch", OPS_SESSION, "art-image", valid.clone()),
+        ("revoked", OPS_SESSION, "art-image", valid),
+    ] {
+        if case == "epoch" {
+            let uri = "/v1/auth/refresh";
+            f.auth.refresh_device_credential(&format!("DPoP {}", f.credential),
+                &sign_dpop(&f.signing, &f.credential, "POST", uri, now, &uuid::Uuid::new_v4().to_string()),
+                "https://controller.example", "POST", uri, now).unwrap();
+        }
+        if case == "revoked" {
+            // Use a freshly issued capability in the new epoch, so this row
+            // proves revocation instead of merely repeating the epoch case.
+            let fresh = f.auth.list_devices().unwrap().into_iter().find(|device| device.device_id == f.device_id).unwrap();
+            let fresh_context = AuthContext { credential_id: fresh.credential_id, ..context.clone() };
+            ticket = f.auth.issue_media_ticket(&fresh_context, OPS_SESSION, "art-image", now).unwrap().ticket;
+            f.auth.revoke_device(&f.device_id, now).unwrap();
+        }
+        let before = upstream.received_requests().await.unwrap().len();
+        let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/content?t={ticket}");
+        let response = f.app.clone().oneshot(Request::get(&uri).header("range", "bytes=0-0")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
+        assert_eq!(upstream.received_requests().await.unwrap().len(), before, "{case} fetched upstream");
+    }
 }

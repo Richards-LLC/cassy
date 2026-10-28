@@ -14,6 +14,8 @@ import { syncContextRail } from '../src/context-rail';
 import { installAttentionObjects, renderAskObject, renderBlockerObject } from '../src/attention-objects';
 import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
+import { inlineAttachment } from '../src/rich-attachment';
+import evidenceImage from '../e2e/media/evidence.png?url';
 import { WorkEventStream, workEventsPage } from '../src/work-events';
 import type { WorkRowsContext } from '../src/work-rows-view';
 import { renderWorkerTimeline, workerTimelineDialog } from '../src/worker-timeline';
@@ -289,6 +291,15 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(62, 61, ['## Pass two is green', '', '**All 14 targets passed** with *one recorded flake*.', '', '- `cargo check` stayed green', '- Review the [receipt](https://example.com/reports/pass-two).', '  - No retry was needed', '', '1. Tagged gabber-studio v2.4.1', '2. Pushed the release branch.', '', 'Every pack:', '', '| pack | cases | result |', '| --- | --- | --- |', '| core | 412 | pass |', '| ui | 388 | pass |', '| net | 211 | pass |', '| store | 174 | pass |', '| hooks | 96 | pass |', '| mcp | 143 | pass |', '| hub | 260 | pass |', '| cli | 318 | 1 flake |'].join('\n'), 'answer', at(9, 30));
     reply(63, 61, 'Tagged gabber-studio v2.4.1 and pushed.', 'receipt', at(9, 31));
     working = true;
+  } else if (state === 'conversation-rich-content') {
+    // Visual fixture only: transport, decode and unavailable states are HUB-J22.
+    installAttachmentSheet((sheet, file) => {
+      const root = inlineAttachment(sheet, file, () => new Promise(() => {}));
+      const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;
+      root.querySelector('.rich-media')!.replaceChildren(image);
+      return root;
+    });
+    reply(91, null, '# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```diff\n--- a/launch.ts\n+++ b/launch.ts\n@@ -1,25 +1,25 @@\n-launch()\n+launchWithEvidence()\n' + Array.from({ length: 24 }, (_, index) => ` context ${index}`).join('\n') + '\n```', 'answer', at(9, 44), [{ artifact_id: 'rich-visual-image', name: 'Evidence screenshot.png', mime: 'image/png', size_bytes: 1024, sha256: '9f'.repeat(32) }]);
   } else if (state === 'conversation-attachment') {
     // The report-card case: a receipt with prose, then its two artifacts laid on the thread as sheets.
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));
@@ -297,7 +308,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   } else if (state === 'conversation-visual-page') {
     // cas-3aff: the report card's page shows inline beneath its sheet, in the
     // sandboxed frame; the fixture serves the page itself.
-    installAttachmentSheet(async () => '/visual-page.html');
+    installAttachmentSheet(undefined, async () => '/visual-page.html');
     history.submit('report', supervisor, 'Send me the release report card.', at(9, 40));
     history.acknowledge({ client_ref: 'report', notification_id: 70, target: supervisor, stamped: true });
     reply(71, 70, 'Here is the report card.', 'receipt', at(9, 52), [REPORT_CARD_ATTACHMENTS[1]!]);

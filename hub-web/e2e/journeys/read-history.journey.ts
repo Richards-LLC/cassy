@@ -143,13 +143,17 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     await page.context().route("https://store.test/**", (route) => route.fulfill({ contentType: "text/html", body: "<h1>Release report card</h1>" }));
     const report = log.locator('a[data-artifact-id="art-report"]');
     await report.scrollIntoViewIfNeeded();
+    // Inline PDF previews also resolve their signed URLs. Wait for this
+    // fixture's deliberately non-PDF store response before counting Open.
+    await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-report"]) .rich-media')).toContainText("Preview unavailable");
+    const reportRequests = hub.artifactRequests.filter((id) => id === "art-report").length;
     const opened = page.waitForEvent("popup");
     await report.click();
     const tab = await opened;
     await tab.waitForURL(/^https:\/\/store\.test\/view\/art-report\?sig=journey$/);
     await expect(tab.getByRole("heading", { name: "Release report card" })).toBeVisible();
     await tab.close();
-    expect(hub.artifactRequests).toEqual(["art-report"]);
+    expect(hub.artifactRequests.filter((id) => id === "art-report")).toHaveLength(reportRequests + 1);
     expect(page.url()).not.toContain("#artifact:");
 
     // Journey F6: every failure is said on the card that was pressed, not in
@@ -157,16 +161,19 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     const toast = page.locator("#toast.visible");
     const note = (id: string) => log.locator(`a[data-artifact-id="${id}"] .fnote`);
     const local = log.locator('a[data-artifact-id="art-local-draft"]');
+    await local.scrollIntoViewIfNeeded();
+    await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-local-draft"]) .rich-media')).toContainText("Preview unavailable");
+    const localRequests = hub.artifactRequests.filter((id) => id === "art-local-draft").length;
     await local.click();
     await expect(note("art-local-draft")).toHaveText("This file was only saved on Atlas · Linux. It was never uploaded to Cloud, so it can't open here.");
     await expect(local).toHaveAccessibleName(/never uploaded to Cloud/);
-    expect(hub.artifactRequests).toEqual(["art-report", "art-local-draft"]);
+    expect(hub.artifactRequests.filter((id) => id === "art-local-draft")).toHaveLength(localRequests + 1);
     // Known now: opening it again opens no tab at all.
     let popups = 0;
     const countPopup = () => { popups += 1; };
     page.on("popup", countPopup);
     await local.click();
-    await expect.poll(() => hub.artifactRequests.length).toBe(3);
+    await expect.poll(() => hub.artifactRequests.filter((id) => id === "art-local-draft").length).toBe(localRequests + 2);
     await expect(note("art-local-draft")).toContainText("only saved on Atlas · Linux");
     expect(popups, "no tab for a file known to be only on the machine").toBe(0);
     page.off("popup", countPopup);

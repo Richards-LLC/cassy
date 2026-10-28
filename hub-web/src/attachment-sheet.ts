@@ -190,7 +190,7 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
  * machine that published it mints a short-lived ticket URL on its own origin.
  * Undefined means the page can't be shown here right now.
  */
-export type VisualPageSource = (artifactId: string) => Promise<string | undefined>;
+export type VisualPageSource = (artifactId: string, context: TurnRenderContext) => Promise<string | undefined>;
 
 let visualPageSource: VisualPageSource | undefined;
 
@@ -208,7 +208,7 @@ export function isVisualPage(attachment: Pick<ArtifactRef, "mime">): boolean {
  * paired machine's origin. Threat model:
  * docs/design/hub-web/visual-replies-threat-model.md.
  */
-export function renderVisualPage(document: Document, attachment: ArtifactRef, sheet: HTMLAnchorElement, source: VisualPageSource): HTMLElement {
+export function renderVisualPage(document: Document, attachment: ArtifactRef, sheet: HTMLAnchorElement, pageUrl: () => Promise<string | undefined>): HTMLElement {
   const figure = document.createElement("figure");
   figure.className = "visual-page";
   figure.dataset.artifactId = attachment.artifact_id;
@@ -223,7 +223,7 @@ export function renderVisualPage(document: Document, attachment: ArtifactRef, sh
   const load = () => {
     if (started) return;
     started = true;
-    void source(attachment.artifact_id).then((url) => {
+    void pageUrl().then((url) => {
       if (!url) { status.textContent = "This page can't be shown here. Open the file above to try it in a tab."; return; }
       const iframe = document.createElement("iframe");
       iframe.setAttribute("sandbox", "");
@@ -255,15 +255,22 @@ export const attachmentSheetRenderer = (_reply: OperatorReply, context: TurnRend
   if (!attachment) throw new Error("attachment renderer called without an attachment");
   // cas-d8a5 (journey F32): "from the cas-src supervisor" when the project is known.
   const sheet = renderAttachmentSheet(context.document, attachment, context.spokenSupervisor ? `the ${context.spokenSupervisor}` : context.supervisor);
-  return visualPageSource && isVisualPage(attachment) ? renderVisualPage(context.document, attachment, sheet, visualPageSource) : sheet;
+  const pages = visualPageSource;
+  return pages && isVisualPage(attachment) ? renderVisualPage(context.document, attachment, sheet, () => pages(attachment.artifact_id, context)) : sheet;
 };
 
 /**
- * Register the sheet with the thread; returns the unregister function. With
- * a page source, HTML attachments also show their page inline (cas-3aff).
+ * Register the sheet with the thread; returns the unregister function.
+ * `preview` may wrap a media sheet in its inline preview (cas-9c66). With a
+ * page source, HTML attachments also show their page inline (cas-3aff).
  */
-export function installAttachmentSheet(pages?: VisualPageSource): () => void {
+export function installAttachmentSheet(preview?: (sheet: HTMLElement, file: ArtifactRef, context: TurnRenderContext) => HTMLElement, pages?: VisualPageSource): () => void {
   visualPageSource = pages;
-  const unregister = registerTurnRenderer("attachment", attachmentSheetRenderer);
+  const unregister = registerTurnRenderer("attachment", (reply, context) => {
+    const sheet = attachmentSheetRenderer(reply, context);
+    const node = preview ? preview(sheet, context.attachment!, context) : sheet;
+    node.dataset.attachmentSignature = JSON.stringify(context.attachment);
+    return node;
+  });
   return () => { unregister(); if (visualPageSource === pages) visualPageSource = undefined; };
 }

@@ -21,12 +21,13 @@ import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSend
 import { HeldSendFlushes } from "./held-send-flush";
 import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
-import { ConversationView, emptyActivityText } from "./conversation-view";
+import { ConversationView, emptyActivityText, type TurnRenderContext } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
+import { inlineAttachment } from "./rich-attachment";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
@@ -169,9 +170,24 @@ const mountedThreads = new Set<string>();
 installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
 // Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
-// cas-3aff: an HTML attachment also shows its page inline, in a sandboxed frame
-// on the publishing machine's own origin.
-installAttachmentSheet((artifactId) => visualPageUrl(artifactId));
+/** The machine and session whose thread a rendered turn belongs to. */
+function threadOf(context: TurnRenderContext): { machineId: string; session: string } | undefined {
+  const entry = [...conversationHistories].find(([, history]) => history === context.history);
+  if (!entry) return undefined;
+  const separator = entry[0].indexOf(":");
+  return { machineId: entry[0].slice(0, separator), session: entry[0].slice(separator + 1) };
+}
+// cas-9c66: media attachments preview inline. cas-3aff: an HTML attachment
+// shows its page inline, in a sandboxed frame on the publishing machine's
+// own origin.
+installAttachmentSheet((sheet, file, context) => {
+  const thread = threadOf(context);
+  if (!thread) return sheet;
+  return inlineAttachment(sheet, file, async () => connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id));
+}, async (artifactId, context) => {
+  const thread = threadOf(context);
+  return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
+});
 const conversationHistories = new Map<string, ConversationHistory>();
 /**
  * Show work (cas-ff22): what work-event pages to read and when. A repaint
@@ -5513,6 +5529,12 @@ app.addEventListener("focusout", () => {
 // cas-2a26: following Explorer from the app switcher closes the menu here.
 app.addEventListener("click", (event) => { if (closeAppSwitcherAfterFollow(event.target)) countUsage("app-switch.explorer"); });
 
+// Count an explicit inspection, rather than every async diagram paint.
+app.addEventListener("toggle", (event) => {
+  const detail = event.target;
+  if (detail instanceof HTMLDetailsElement && detail.open && detail.closest(".rich-diagram, .rich-diff")) countUsage("rich-content.inspect");
+}, true);
+
 // A tap on any artifact (the thread's sheet, the context rail, the operator
 // thread) opens the hosted copy through a signed view URL (cassy issue 910).
 app.addEventListener("click", (event) => {
@@ -5585,13 +5607,6 @@ function visualPageView(machineId: string, session: string, artifactId: string):
   return minted;
 }
 
-/** The page URL for an HTML attachment of the open conversation. */
-async function visualPageUrl(artifactId: string): Promise<string | undefined> {
-  const machineId = selectedMachineId;
-  const session = selectedSession;
-  if (!machineId || !session) return undefined;
-  return (await visualPageView(machineId, session, artifactId))?.url;
-}
 
 window.addEventListener("keydown", globalShortcut, true);
 // The conversation header's machine · codename line is fitted to its room

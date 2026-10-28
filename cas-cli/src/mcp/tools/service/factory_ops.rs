@@ -1938,8 +1938,8 @@ fn format_undelivered_relay_detail_at(
             row.source,
             row.stage
         ));
-        if let Some(detail) = &row.detail {
-            out.push_str(&format!("    {detail}\n"));
+        if let Some(hold_detail) = &row.detail {
+            out.push_str(&format!("    {hold_detail}\n"));
         }
         if detail {
             let next = if row.processed_at.is_some() {
@@ -4585,12 +4585,11 @@ impl CasService {
                 // can no longer be acted on by anyone it was for either. One
                 // call; it takes the write lock only when a relay is due.
                 let _ = queue.reconcile_lifecycle_relays();
-                queue
-                    .list_undelivered_lifecycle_relays(
-                        if req.detail.unwrap_or(false) { i64::MAX as usize }
-                        else { super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT },
-                    )
-                    .unwrap_or_default()
+                if req.detail.unwrap_or(false) {
+                    queue.list_undelivered_lifecycle_relays_with_holds(i64::MAX as usize)
+                } else {
+                    queue.list_undelivered_lifecycle_relays(super::orphan_recovery::WORKER_DEATH_COALESCE_SCAN_LIMIT)
+                }.unwrap_or_default()
             })
             .unwrap_or_default();
         let undelivered_section = if req.detail.unwrap_or(false) {
@@ -14350,6 +14349,9 @@ mod tests {
         let service = CasService::new(core, None);
         #[cfg(not(feature = "mcp-proxy"))]
         let service = CasService::new(core);
+        let ordinary = serde_json::from_value(serde_json::json!({"action":"worker_status"})).unwrap();
+        let ordinary = response_text(service.factory_worker_status(ordinary).await.unwrap());
+        assert!(!ordinary.contains("held-relay-00"), "fresh busy holds keep the diagnostic grace: {ordinary}");
         let request = serde_json::from_value(serde_json::json!({"action":"worker_status", "detail":true})).unwrap();
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         for index in 0..12 {

@@ -200,6 +200,91 @@ pub(crate) fn wait_for_supervisor_ack(
 mod focused_epic_tests {
     use super::*;
 
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf, crate::ui::factory::SessionInfo) {
+        let project = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let metadata = crate::ui::factory::create_metadata(
+            "selected-session", std::process::id(), "supervisor", &["worker-a".into()],
+            None, Some(project.path().to_str().unwrap()), None,
+        );
+        let session = crate::ui::factory::SessionInfo {
+            name: "selected-session".into(), metadata, is_running: true, socket_exists: false,
+        };
+        (project, root, session)
+    }
+
+    #[test]
+    fn status_projects_selected_session_worker_from_worker_status_evidence() {
+        use cas_store::AgentStore;
+        use cas_types::{Agent, AgentRole, Task, TaskStatus};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, session) = fixture();
+        let mut worker = Agent::new_with_role("worker-id".into(), "worker-a".into(), AgentRole::Worker);
+        worker.factory_session = Some(session.name.clone());
+        // A real exited PID yields the same deterministic verdict in the hub
+        // and worker_status. A fresh registry heartbeat cannot hide death.
+        worker.pid = Some(i32::MAX as u32);
+        crate::store::open_agent_store(&root).unwrap().register(&worker).unwrap();
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut task = Task::new("cas-current".into(), "Current worker task".into());
+        task.status = TaskStatus::InProgress;
+        task.assignee = Some(worker.id.clone());
+        store.add(&task).unwrap();
+        let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        let projected = status["agents"].as_array().unwrap().iter()
+            .find(|agent| agent["name"] == "worker-a").expect("selected worker must be reported");
+        assert_eq!(projected["current_task"], task.id);
+        let expected = crate::mcp::tools::service::factory_ops::worker_liveness_for_agent(
+            &root, &worker, chrono::Utc::now(), 300,
+        );
+        assert_eq!(projected["liveness"], expected.state.as_str());
+        assert_eq!(projected["liveness"], "dead");
+    }
+
+    #[test]
+    fn status_delivery_and_epic_progress_use_epic_status_containment() {
+        use cas_types::{Task, TaskStatus, TaskType, Dependency, DependencyType};
+        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (project, root, session) = fixture();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").args(args).current_dir(project.path()).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "fixture@example.test"]);
+        git(&["config", "user.name", "Fixture"]);
+        std::fs::write(project.path().join("file"), "delivered\n").unwrap();
+        git(&["add", "file"]); git(&["commit", "-m", "delivery"]);
+        let anchor = git(&["rev-parse", "HEAD"]);
+        let store = crate::store::open_task_store(&root).unwrap();
+        let mut epic = Task::new("cas-epic".into(), "Epic".into());
+        epic.task_type = TaskType::Epic; epic.branch = Some("main".into());
+        store.add(&epic).unwrap();
+        for (id, status, delivered) in [("cas-landed", TaskStatus::AwaitingMerge, true),
+            ("cas-open", TaskStatus::Open, false), ("cas-cancel", TaskStatus::Cancelled, false)] {
+            let mut child = Task::new(id.into(), id.into()); child.status = status;
+            if delivered {
+                child.deliverables.factory_branch_anchor = Some(anchor.clone());
+                child.deliverables.merge_commit = Some(anchor.clone());
+            }
+            store.add(&child).unwrap();
+            store.add_dependency(&Dependency { from_id: id.into(), to_id: epic.id.clone(),
+                dep_type: DependencyType::ParentChild, created_at: chrono::Utc::now(), created_by: None }).unwrap();
+        }
+        let status = serde_json::to_value(build_status_json(&session, &root, 20).unwrap()).unwrap();
+        let landed = status["tasks_in_progress"].as_array().unwrap().iter().find(|task| task["id"] == "cas-landed").unwrap();
+        assert_eq!(landed["epic_id"], epic.id);
+        assert_eq!(landed["delivery_state"], "merged");
+        let progress = &status["epics"][0]["progress"];
+        assert_eq!(progress["total"], 2);
+        assert_eq!(progress["merged"], 1);
+        assert_eq!(progress["merges_per_hour"], 1);
+        assert!(chrono::DateTime::parse_from_rfc3339(progress["last_merged_at"].as_str().unwrap()).is_ok());
+        assert!(status["tasks_ready"].as_array().unwrap().iter()
+            .all(|task| task.get("delivery_state").is_none()));
+    }
+
     /// cas-9b08: status names the session's pinned epic (null when
     /// unpinned), so Commander can state it as focus_epic's precondition.
     #[test]

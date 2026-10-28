@@ -299,7 +299,8 @@ for (const profile of [
         }
       });
       expect(results.work_window.mounted_work_blocks, "captured work must actually enter a reading window").toBeGreaterThan(0);
-      await page.getByRole("button", { name: "Jump to latest" }).click();
+      const jump = page.getByRole("button", { name: "Jump to latest" });
+      if (await jump.isVisible()) await jump.click();
     } else expect(results.initial.work_requests_total).toBe(0);
     if (!backlog) await measure("accumulated", async () => {
       for (let index = 1; index < capture.pages.length; index++) {

@@ -1367,11 +1367,15 @@ fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
 #[test]
 fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
     let _env = env();
-    for (cli, claimed) in [
-        ("codex", false),
-        ("codex", true),
-        ("claude", false),
-        ("claude", true),
+    for (cli, claimed, pasted) in [
+        ("codex", false, false),
+        ("codex", true, false),
+        ("claude", false, false),
+        ("claude", true, false),
+        ("codex", false, true),
+        ("codex", true, true),
+        ("claude", false, true),
+        ("claude", true, true),
     ] {
         let mut f = Fixture::new();
         let id = f.aged(
@@ -1404,6 +1408,13 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
             )
         } else {
             format!("<teammate-message teammate_id=\"worker\">\n{wire}\n</teammate-message>")
+        };
+        // Captured native paste wrapper, including its attributed closing tag:
+        // tests/data/ambient-supervisor-replay.json (UserPromptSubmit).
+        let wire = if pasted {
+            format!("\n\n<pasted_content id=\"d36a\">\n{wire}\n</pasted_content id=\"d36a\">\n")
+        } else {
+            wire
         };
         f.supervisor_turn(cli, &wire);
         let alarms = f.scan();

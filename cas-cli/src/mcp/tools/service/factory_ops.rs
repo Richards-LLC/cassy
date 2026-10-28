@@ -11269,19 +11269,34 @@ const STATUS_ROLLOUT_ENTRIES: usize = 256;
 const STATUS_ROLLOUT_FILES: usize = 8;
 fn status_codex_rollout_entries(root: &std::path::Path) -> impl Iterator<Item = std::io::Result<std::fs::DirEntry>> {
     // Codex uses sessions/YYYY/MM/DD/rollout-*.jsonl. Prefer new calendar
-    // folders. Bound read_dir itself before sorting, including errors and
-    // directory entries; sorting WalkDir would eagerly enumerate whole folders.
+    // folders and sort each day's filenames newest-first before applying the
+    // unchanged 256-entry sample cap. Only one day's entries are materialized
+    // for sorting; errors and non-file entries still count toward the cap.
     let mut pending = vec![(root.join("sessions"), 0)];
     let mut entries = Vec::new();
     while let Some((dir, depth)) = pending.pop() {
+        let remaining = STATUS_ROLLOUT_ENTRIES - entries.len();
+        if remaining == 0 { break; }
         let Ok(children) = std::fs::read_dir(dir) else { continue };
-        for entry in children.take(STATUS_ROLLOUT_ENTRIES - entries.len()) {
-            if let Ok(entry) = &entry {
-                if depth < 3 && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    pending.push((entry.path(), depth + 1));
+
+        if depth == 3 {
+            let mut day_entries = children.collect::<Vec<_>>();
+            day_entries.sort_unstable_by(|left, right| match (left, right) {
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+                (Ok(left), Ok(right)) => right.file_name().cmp(&left.file_name()),
+            });
+            entries.extend(day_entries.into_iter().take(remaining));
+        } else {
+            for entry in children.take(remaining) {
+                if let Ok(entry) = &entry {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        pending.push((entry.path(), depth + 1));
+                    }
                 }
+                entries.push(entry);
             }
-            entries.push(entry);
         }
         if entries.len() == STATUS_ROLLOUT_ENTRIES { break; }
         pending.sort_unstable_by(|a, b| a.0.cmp(&b.0));

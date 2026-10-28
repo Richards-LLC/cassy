@@ -462,7 +462,7 @@ mod tests {
         let task = task(
             "cas-8284",
             TaskStatus::Closed,
-            "Fixed cas-397b/GH#188 and cas-cdb0/gh#195; see cas-397b/actual#7",
+            "Fixed cas-397b/GH#188 and cas-cdb0/gh#195, cas-90541/GH#188; see cas-397b/actual#7",
         );
         let refs = task_issue_refs(&task, Some(REPO));
         assert_eq!(

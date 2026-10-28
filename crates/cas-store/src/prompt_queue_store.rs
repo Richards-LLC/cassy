@@ -1673,9 +1673,66 @@ impl SqlitePromptQueueStore {
         } else { None })
     }
 
+    /// A current status can be a second visit to the same state. Suppress an
+    /// older relay only when its own durable outbox row and a distinct later
+    /// occurrence agree on task, owner and factory session. The transition-key
+    /// range bounds this lookup to one task's indexed outbox history.
+    fn newer_lifecycle_occurrence(
+        tx: &ImmediateTx<'_>,
+        prompt: &QueuedPrompt,
+        envelope: &cas_types::LifecycleEnvelope,
+    ) -> Result<Option<i64>> {
+        let Some(notification_id) = prompt.source
+            .strip_prefix("lifecycle:")
+            .or_else(|| prompt.source.strip_prefix("lifecycle-wake:"))
+            .and_then(|id| id.parse::<i64>().ok())
+        else { return Ok(None); };
+        let old: Option<(String, String, String)> = tx.query_row(
+            "SELECT supervisor_id, payload, transition_key FROM supervisor_queue
+             WHERE id = ?1 AND event_type = 'task_lifecycle' AND transition_key IS NOT NULL",
+            params![notification_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        let Some((supervisor_id, old_payload, old_key)) = old else { return Ok(None); };
+        let Ok(old_payload) = serde_json::from_str::<serde_json::Value>(&old_payload) else {
+            return Ok(None);
+        };
+        let occurrence_id = old_payload.get("occurrence_id").and_then(|value| value.as_str());
+        let occurrence_matches = occurrence_id
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+            .is_some_and(|value| value.with_timezone(&Utc) == envelope.occurrence);
+        if old_payload.get("task_id").and_then(|value| value.as_str()) != Some(envelope.task_id.as_str())
+            || old_payload.get("new_status").and_then(|value| value.as_str()) != Some(envelope.new_status.to_string().as_str())
+            || old_payload.get("factory_session").and_then(|value| value.as_str()) != prompt.factory_session.as_deref()
+            || old_payload.get("transition").and_then(|value| value.as_str()) != envelope.transition.as_deref()
+            || old_payload.get("transition_key").and_then(|value| value.as_str()) != Some(old_key.as_str())
+            || !occurrence_matches
+        {
+            return Ok(None);
+        }
+        let prefix = format!("{}:", envelope.task_id);
+        if !old_key.starts_with(&prefix) { return Ok(None); }
+        let upper = format!("{};", envelope.task_id);
+        let newer = tx.query_row(
+            "SELECT id FROM supervisor_queue INDEXED BY idx_supervisor_queue_transition_key
+             WHERE transition_key IS NOT NULL AND transition_key >= ?1 AND transition_key < ?2
+               AND id > ?3 AND supervisor_id = ?4 AND event_type = 'task_lifecycle'
+               AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.task_id') = ?5
+               AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.factory_session') IS ?6
+               AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.occurrence_id') IS NOT NULL
+               AND json_extract(CASE WHEN json_valid(payload) THEN payload ELSE '{}' END, '$.occurrence_id') <> ?7
+             LIMIT 1",
+            params![prefix, upper, notification_id, supervisor_id, &envelope.task_id,
+                prompt.factory_session.as_deref(), occurrence_id],
+            |row| row.get(0),
+        ).optional()?;
+        Ok(newer)
+    }
+
     fn supervisor_relay_expiry_reason(
         tx: &ImmediateTx<'_>,
         has_tasks: bool,
+        has_lifecycle_outbox_index: bool,
         prompt: &QueuedPrompt,
         now: DateTime<Utc>,
     ) -> Result<Option<String>> {
@@ -1705,9 +1762,16 @@ impl SqlitePromptQueueStore {
                 "SELECT status FROM tasks WHERE id = ?1",
                 params![&envelope.task_id], |row| row.get(0),
             ).optional()?;
-            return Ok(status
-                .filter(|status| status != &envelope.new_status.to_string())
-                .map(|status| format!("relay for {} superseded by later task state {status} at recipient drain", envelope.task_id)));
+            let Some(status) = status else { return Ok(None); };
+            if status != envelope.new_status.to_string() {
+                return Ok(Some(format!("relay for {} superseded by later task state {status} at recipient drain", envelope.task_id)));
+            }
+            if has_lifecycle_outbox_index
+                && let Some(newer_id) = Self::newer_lifecycle_occurrence(tx, prompt, &envelope)?
+            {
+                return Ok(Some(format!("relay for {} superseded by newer lifecycle occurrence {newer_id} at recipient drain", envelope.task_id)));
+            }
+            return Ok(None);
         }
         let point_in_time = if prompt.source.starts_with("lifecycle-wake:ci-red-run:") {
             if let Some(envelope) = cas_types::parse_ci_red_run_envelope(&prompt.prompt) {
@@ -1751,10 +1815,15 @@ impl SqlitePromptQueueStore {
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks')",
             [], |row| row.get(0),
         )?;
+        let has_lifecycle_outbox_index: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index'
+                AND name = 'idx_supervisor_queue_transition_key')",
+            [], |row| row.get(0),
+        )?;
         let now = Utc::now();
         let mut current = Vec::with_capacity(prompts.len());
         for mut prompt in prompts {
-            if let Some(detail) = Self::supervisor_relay_expiry_reason(tx, has_tasks, &prompt, now)? {
+            if let Some(detail) = Self::supervisor_relay_expiry_reason(tx, has_tasks, has_lifecycle_outbox_index, &prompt, now)? {
                 // Preserve forensic transport history on a previously polled
                 // row. Early stages can advance to Suppressed; acknowledgement
                 // retires replay without fabricating a recipient-seen receipt.
@@ -10665,7 +10734,11 @@ mod tests {
     #[test]
     fn lifecycle_digest_aba_uses_newer_same_session_occurrence_only() {
         use crate::{AgentStore, NotifyIdempotentResult, SqliteSupervisorQueueStore, SupervisorQueueStore};
-        for newer_session in ["session", "other-session"] {
+        for (newer_session, newer_owner) in [
+            ("session", "supervisor-id"),
+            ("other-session", "supervisor-id"),
+            ("session", "other-supervisor-id"),
+        ] {
             let (temp, store) = create_test_store();
             let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
             agents.init().unwrap();
@@ -10683,45 +10756,45 @@ mod tests {
             let outbox = SqliteSupervisorQueueStore::open(temp.path()).unwrap();
             outbox.init().unwrap();
             let first = Utc::now() - chrono::Duration::minutes(1);
-            let publish = |transition: &str, old: &str, new: &str, session: &str, occurrence: chrono::DateTime<Utc>| {
+            let publish = |transition: &str, old: &str, new: &str, session: &str, owner: &str, occurrence: chrono::DateTime<Utc>| {
                 let occurrence = occurrence.to_rfc3339();
                 let key = format!("{task_id}:{old}:{new}:{session}:{transition}:{occurrence}");
                 let payload = serde_json::json!({
-                    "task_id": task_id, "old_status": old, "new_status": new,
+                    "task_id": task_id.as_str(), "old_status": old, "new_status": new,
                     "factory_session": session, "occurrence_id": occurrence,
                     "transition": transition, "recipient_target": "supervisor",
-                    "transition_key": key,
+                    "transition_key": key.as_str(),
                 }).to_string();
-                match outbox.notify_idempotent("supervisor-id", "task_lifecycle", &payload, NotificationPriority::Normal, &key).unwrap() {
+                match outbox.notify_idempotent(owner, "task_lifecycle", &payload, NotificationPriority::Normal, &key).unwrap() {
                     NotifyIdempotentResult::Created(id) => id,
                     other => panic!("new occurrence required: {other:?}"),
                 }
             };
-            let old = publish("task_started", "open", "in_progress", "session", first);
+            let old = publish("task_started", "open", "in_progress", "session", "supervisor-id", first);
             let old_body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"{old}\" occurrence=\"{}\">started</task-lifecycle>", task.id, first.to_rfc3339());
             let old_prompt = store.enqueue_idempotent(&format!("lifecycle:{old}"), "supervisor", &old_body, Some("session"), Some("first start"), None, &format!("lifecycle-outbox:{old}"), Some(&QueueOrigin::Daemon)).unwrap();
             let EnqueueIdempotentResult::Created(old_prompt) = old_prompt else { panic!("old prompt") };
             task.status = TaskStatus::Blocked;
             tasks.update(&task).unwrap();
-            publish("task_blocked", "in_progress", "blocked", newer_session, first + chrono::Duration::seconds(1));
+            publish("task_blocked", "in_progress", "blocked", newer_session, newer_owner, first + chrono::Duration::seconds(1));
             task.status = TaskStatus::Open;
             tasks.update(&task).unwrap();
-            publish("task_ready", "blocked", "open", newer_session, first + chrono::Duration::seconds(2));
+            publish("task_ready", "blocked", "open", newer_session, newer_owner, first + chrono::Duration::seconds(2));
             task.status = TaskStatus::InProgress;
             tasks.update(&task).unwrap();
-            let latest = publish("task_started", "open", "in_progress", newer_session, first + chrono::Duration::seconds(3));
-            if newer_session == "session" {
+            let latest = publish("task_started", "open", "in_progress", newer_session, newer_owner, first + chrono::Duration::seconds(3));
+            if newer_session == "session" && newer_owner == "supervisor-id" {
                 let latest_at = (first + chrono::Duration::seconds(3)).to_rfc3339();
                 let latest_body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"{latest}\" occurrence=\"{latest_at}\">restarted</task-lifecycle>", task.id);
                 store.enqueue_idempotent(&format!("lifecycle:{latest}"), "supervisor", &latest_body, Some("session"), Some("latest start"), None, &format!("lifecycle-outbox:{latest}"), Some(&QueueOrigin::Daemon)).unwrap();
             }
             let shown = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
-            if newer_session == "session" {
+            if newer_session == "session" && newer_owner == "supervisor-id" {
                 assert_eq!(shown.iter().map(|row| row.summary.as_deref()).collect::<Vec<_>>(), vec![Some("latest start")]);
                 assert_eq!(store.message_delivery_report(old_prompt).unwrap().unwrap().pending_reason, Some(PendingReason::SupersededStale));
                 assert_eq!(store.recipient_receipt(old_prompt, "supervisor").unwrap(), None);
             } else {
-                assert_eq!(shown.iter().map(|row| row.id).collect::<Vec<_>>(), vec![old_prompt], "another session cannot prove supersession");
+                assert_eq!(shown.iter().map(|row| row.id).collect::<Vec<_>>(), vec![old_prompt], "another session or owner cannot prove supersession");
             }
         }
     }

@@ -19,7 +19,7 @@ metadata:
 
 0. **Preflight.** From a connected CAS MCP session, call `system action=preflight`; otherwise run `cas --json factory preflight`. Follow [preflight.md](../cas-supervisor/references/preflight.md), using `factory_blocked` and the finding codes rather than `binary.state` alone. A healthy MCP connection with `factory_blocked=false` and `binary.source_evidence_missing` can continue startup while gathering source comparison evidence; it does not require a rebuild or reconnect.
 
-   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control (or open a fresh supervisor session). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
+   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control, which keeps every worker running. A supervisor restart stops every worker in this factory; take that route only after [checkpointing them](../cas-supervisor/references/worker-recovery.md#supervisor-restart). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
 
 1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:
@@ -72,7 +72,7 @@ Run the [intake gate](../cas-supervisor/references/intake.md) on every request; 
 
 ## During Coordination
 
-Read `cas-supervisor` for authoritative task acceptance and the inbox/typed-wake policy.
+The supervisor core in your developer instructions covers signal triage and survives compaction, so after a compaction continue from it; do not re-read this checklist or `cas-supervisor`. Open a `cas-supervisor` reference only for epic planning, releases, worker recovery or an unfamiliar refusal.
 
 Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporting-and-routing.md).
 

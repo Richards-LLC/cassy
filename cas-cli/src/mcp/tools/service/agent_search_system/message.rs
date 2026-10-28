@@ -652,18 +652,17 @@ pub(crate) fn wake_attempt_narrative(
         }
         (WakeAttempt::Fired, ObservationStatus::Unobserved) => {
             "wake evidence: Cassy DID nudge this recipient's pane, and no turn is recorded as \
-             having carried this message — the nudge landed but the harness surfaced nothing \
-             (GH #155 signature)."
+             having carried this message — harness surfacing remains unverified \
+             (possible GH #155 signature)."
         }
         (WakeAttempt::Failed, ObservationStatus::Unobserved) => {
-            "wake evidence: Cassy ATTEMPTED a wake and it FAILED (see wake_attempt_detail); no \
-             recorded turn carried this message, so treat it as NOT delivered to a turn."
+            "wake evidence: Cassy recorded a FAILED wake (see wake_attempt_detail); no \
+             message-specific turn receipt is recorded."
         }
         (WakeAttempt::NotAttempted, ObservationStatus::Unobserved) => {
-            "wake evidence: Cassy never attempted a wake for this message — the idle gate \
-             declined it, or the recipient is on PTY, where the typed payload is the wake. \
-             A PTY write is not a turn: if none starts, the delivery watchdog records its \
-             nudge or failure here (GH #1153)."
+            "wake evidence: no separate wake nudge is recorded for this message. On PTY, \
+             the typed payload can itself wake the recipient. A transport handoff proves \
+             neither a turn nor a scheduled repeat nudge (GH #1153)."
         }
     };
     format!("{line}\n")
@@ -711,14 +710,19 @@ pub(crate) fn recipient_verdict(
             report.target, report.stage
         );
     }
-    let escalation = if (waited as u64) < escalate_after_secs {
-        format!("you and the operator are told at {escalate_after_secs}s")
+    let threshold = crate::ui::factory::daemon::runtime::queue_and_events::delivery_stalled_threshold_before_abandonment(escalate_after_secs);
+    let escalation = if let Some(notice) = report.channel_stalled_notice_id {
+        format!("sender alert: notice {notice} recorded; further notices paused until the recipient reads or acknowledges a message")
+    } else if let Some(at) = report.delivery_stalled_notified_at {
+        format!("sender alert: recorded at {}; channel has since resumed", at.to_rfc3339())
     } else {
-        "you and the operator have been told".to_string()
+        let eligible_at = report.enqueued_at + chrono::Duration::seconds(threshold);
+        format!("sender alert: not recorded; eligible at {} (threshold {threshold}s); watchdog evaluates actionable messages", eligible_at.to_rfc3339())
     };
     format!(
-        "recipient: PENDING for {}: no turn has started with this message after {waited}s          (stage {}, last wake {}, declined wakes {}). Cassy keeps re-waking it every 60s; {escalation}.\n",
-        report.target, report.stage, report.wake_attempt, report.wake_gate_declines
+        "recipient: PENDING for {}: no message-specific recipient receipt is recorded after {waited}s \
+         (stage {}, last wake {}, declined wakes {}). {}; {escalation}.\n",
+        report.target, report.stage, report.wake_attempt, report.wake_gate_declines, report.retry.narrative()
     )
 }
 
@@ -4858,24 +4862,47 @@ mod inbox_poll_identity_tests {
     fn message_status_tells_the_sender_received_or_pending_cas_badb() {
         use cas_store::{PromptQueueStore, SurfacingSource};
         let temp = tempfile::tempdir().unwrap();
+        let agents = crate::store::open_agent_store(temp.path()).unwrap();
+        let mut sender = crate::types::Agent::new("sender".into(), "worker-a".into());
+        sender.factory_session = Some("session".into());
+        agents.register(&sender).unwrap();
         let queue = cas_store::SqlitePromptQueueStore::open(temp.path()).unwrap();
         queue.init().unwrap();
         let id = queue.enqueue_with_session("worker-a", "zen-hound", "please review", "session").unwrap();
         let verdict = |now| {
             let report = queue.message_delivery_report(id).unwrap().unwrap();
-            super::recipient_verdict(&report, now, 300)
+            super::recipient_verdict(&report, now, 1800)
         };
-        let now = chrono::Utc::now();
+        let now = queue.message_delivery_report(id).unwrap().unwrap().enqueued_at;
         let pending = verdict(now);
         assert!(pending.starts_with("recipient: PENDING for zen-hound"), "{pending}");
-        assert!(pending.contains("told at 300s"), "{pending}");
+        // pin: diagnostic deadlines must use the watchdog's capped policy, never promise unrecorded wakes/alerts.
+        assert!(pending.contains("threshold 720s") && !pending.contains("every 60s"), "{pending}");
+        let before_alert = verdict(now + chrono::Duration::seconds(776));
+        assert!(!before_alert.contains("have been told"), "age is not proof of escalation: {before_alert}");
+
+        let cas_store::PromptRetryDisposition::Scheduled { retry_at, attempts } = queue
+            .record_retry(id, cas_store::PendingReason::AdapterRetryable, Some("transport unavailable"))
+            .unwrap() else { panic!("first failure must retain recovery"); };
+        let retry = verdict(now);
+        // pin: expose the durable attempt count and exact next deadline, not an invented fixed cadence.
+        assert!(retry.contains(&format!("delivery_attempts: {attempts}")) && retry.contains(&retry_at.to_rfc3339()), "{retry}");
+        queue.mark_transport_delivered(id).unwrap();
+        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportClaimed).unwrap();
+        let claimed = verdict(now + chrono::Duration::seconds(776));
+        // pin: a completed PTY handoff has no scheduled transport retry, and missing receipt is not proof of no turn.
+        assert!(claimed.contains("next_attempt_at: none recorded") && !claimed.contains("no turn has started"), "{claimed}");
+        let notice = queue.enqueue_delivery_stalled_bounce(id, "session", "delivery stalled", "delivery stalled")
+            .unwrap().expect("an actionable failure must still alert its sender");
+        let paused = verdict(now + chrono::Duration::seconds(776));
+        // pin: paused escalation must cite the watchdog's persisted notice, not elapsed-time inference.
         assert!(
-            verdict(now + chrono::Duration::seconds(600)).contains("have been told"),
-            "after the escalation threshold the sender knows the alert went out"
+            paused.contains(&format!("notice {notice}")) && paused.contains("further notices paused"),
+            "{paused}"
         );
         queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportDelivered).unwrap();
         assert!(verdict(now).starts_with("recipient: PENDING"), "a pane handoff is not a read");
-        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::HookSurfaced).unwrap();
+        queue.ack(id).unwrap();
         let received = verdict(now);
         assert!(received.starts_with("recipient: RECEIVED by zen-hound"), "{received}");
     }
@@ -6537,30 +6564,85 @@ mod cas_89e1_post_merge_message_type_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn folded_worker_acknowledgements_remain_inbox_only_cas_6920() {
         let _env = TestEnvGuard::temp_home();
-        let root = tempfile::tempdir().unwrap();
-        let cas_root = root.path().join(".cas");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        let worker = register_gh_1171_fleet(&core, false);
-        let agents = core.open_agent_store().unwrap();
-        let mut supervisor = agents.get("supervisor-a-id").unwrap();
-        supervisor.factory_session = worker.factory_session.clone();
-        agents.update(&supervisor).unwrap();
-        core.set_agent_id_for_testing(worker.id.clone());
-        let service = gh_1171_service(&core);
-        for body in ["ok", "thanks"] {
-            let mut request = message_request_to("supervisor");
-            request.kind = Some("status".into());
-            request.message = Some(body.into());
-            service.message_send(request).await.unwrap();
+        let mut failures = Vec::new();
+        for (case, messages, quiet) in [
+            ("acknowledgements", [("ok", None), ("thanks", None)], true),
+            (
+                "quiet then action",
+                [("ok", None), ("Choose the release scope", None)],
+                false,
+            ),
+            (
+                "action then quiet",
+                [("Choose the release scope", None), ("thanks", None)],
+                false,
+            ),
+            (
+                "identical quiet resend",
+                [
+                    ("Choose the release scope", None),
+                    ("Choose the release scope", Some(false)),
+                ],
+                false,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let cas_root = root.path().join(".cas");
+            std::fs::create_dir_all(&cas_root).unwrap();
+            let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            let worker = register_gh_1171_fleet(&core, false);
+            let agents = core.open_agent_store().unwrap();
+            let mut supervisor = agents.get("supervisor-a-id").unwrap();
+            supervisor.factory_session = worker.factory_session.clone();
+            agents.update(&supervisor).unwrap();
+            core.set_agent_id_for_testing(worker.id.clone());
+            let service = gh_1171_service(&core);
+            for (body, wake) in messages {
+                let mut request = message_request_to("supervisor");
+                request.kind = Some("status".into());
+                request.message = Some(body.into());
+                request.wake = wake;
+                service.message_send(request).await.unwrap();
+            }
+            let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+            let rows = queue.peek_all(10).unwrap();
+            let row = rows.last().expect("the latest message remains readable");
+            let transports = queue
+                .peek_for_targets(&[&supervisor.name], worker.factory_session.as_deref(), 10)
+                .unwrap();
+            let recipient_core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+            recipient_core.set_agent_id_for_testing(supervisor.id.clone());
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "inbox_poll", "notification_id": row.id,
+            }))
+            .unwrap();
+            let full = response_text(
+                gh_1171_service(&recipient_core)
+                    .inbox_poll(request)
+                    .await
+                    .unwrap(),
+            );
+            if rows.len() != 1
+                || crate::supervisor_message_wakes::quiet(&row.prompt) != quiet
+                || transports.len() != usize::from(!quiet)
+                || messages
+                    .iter()
+                    .any(|(body, _)| !row.prompt.contains(body) || !full.contains(body))
+            {
+                failures.push(format!(
+                    "{case}: pending={}, transports={}, quiet={}, prompt={}, full={full}",
+                    rows.len(),
+                    transports.len(),
+                    crate::supervisor_message_wakes::quiet(&row.prompt),
+                    row.prompt
+                ));
+            }
         }
-        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "acknowledgements still coalesce");
-        let prompt = &rows[0].prompt;
-        assert!(prompt.contains("ok") && prompt.contains("thanks"), "{prompt}");
-        assert!(crate::supervisor_message_wakes::quiet(prompt),
-            "folded acknowledgements must wait for the next turn: {prompt}");
+        assert!(
+            failures.is_empty(),
+            "folded message delivery lost bodies or wake intent:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve

@@ -21,6 +21,10 @@ compile_error!(
 );
 
 // Core modules
+pub(crate) mod account_lifecycle;
+pub(crate) mod account_links;
+pub mod account_registry;
+pub mod account_selection;
 pub mod accounts;
 pub mod agent_id;
 pub(crate) mod ai_enrichment;
@@ -33,6 +37,7 @@ pub mod builtins;
 pub mod cli;
 pub mod cloud;
 pub mod capability;
+mod claude_credentials;
 pub mod config;
 pub mod consolidation;
 pub mod coordination;

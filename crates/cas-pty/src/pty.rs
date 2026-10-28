@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 
 /// Instructions injected into Codex supervisor agents via `--config developer_instructions`.
-const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-codex-supervisor-checklist. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `mcp__cs__factory action=epic_status id=<epic-id>` (or `mcp__cs__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
+const CODEX_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use cas-codex-supervisor-checklist once at session start; open cas-supervisor references only for epic planning, releases, worker recovery or an unfamiliar refusal. Use MCP tools explicitly. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup: read it, then assign/answer/redirect/merge as appropriate and reply via `mcp__cs__coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `mcp__cs__factory action=epic_status id=<epic-id>` (or `mcp__cs__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. When nothing is actionable, end the turn: Cassy wakes you. Never sleep, wait or loop on inbox_poll inside a turn. Supervisor core (resident: it survives compaction, skill text does not): READY TO MERGE, MERGE REQUIRED or task_awaiting_merge → confirm CI and QA gates, then `mcp__cs__factory action=worktree_merge id=<worker> task_id=<task-id>`; on a refusal, act on the gate it names. blocker=true → read the task notes and answer, decide or reassign in this turn; ask the operator only for an operator-owned decision. worker idle or died → `mcp__cs__factory action=worker_status`, then assign ready work or recycle the worker. cas-qa-dispatch → assign or spawn the named QA task at the bound head; the merge waits for its verdict. verification dispatch → run the verifier it names and record the verdict. operator question → answer from the task board in a final answer; decide anything within supervisor authority yourself. After a compaction, continue from this core; do not re-read skills. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `mcp__cs__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. Commentary channel: stay silent on triage turns; post one line only before a step that will take more than 2 minutes; never announce which skill you are using; answer an operator status question with a final answer, not commentary. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Codex worker agents via `--config developer_instructions`.
 
@@ -32,7 +32,7 @@ const CODEX_WORKER_STARTUP_PREFIX: &str = "I'm initiating Cassy worker startup n
 /// namespaces MCP tools as `cas__<tool>` (its own `search_tool`/`use_tool`
 /// dispatch, NOT `mcp__cas__`/`mcp__cs__`), so every tool reference here
 /// uses that prefix.
-const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor, running on Grok Build. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-supervisor-checklist. MCP tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination) — not mcp__cas__ or mcp__cs__. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then assign/answer/redirect/merge as appropriate and reply via `cas__coordination action=message target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `cas__factory action=epic_status id=<epic-id>` (or `cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `cas__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `cas__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
+const GROK_SUPERVISOR_INSTRUCTIONS: &str = "You are the Cassy Factory Supervisor, running on Grok Build. Coordinate only: plan epics, assign tasks, monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor and cas-supervisor-checklist. MCP tools are namespaced cas__<tool> (e.g. cas__task, cas__coordination) — not mcp__cas__ or mcp__cs__. Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then assign/answer/redirect/merge as appropriate and reply via `cas__coordination action=message target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge are additional merge triggers. Resolve the target with `cas__factory action=epic_status id=<epic-id>` (or `cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` using `cas__factory action=worktree_merge id=<worker> task_id=<task-id>`. Keep existing CI and QA gates; pending/red CI needs existing override authority and reason. Run the merge verification dispatch; re-close only if the receipt names another held gate. Act on the injected signal; do not poll. Recovery: to unblock a worker wedged by an urgent-stop/halt or a rejected close, assign it a fresh task or tell it to re-close after the merge — its legitimate `cas__task action=start` clears the urgent-stop halt. Write in facts, not narration: assignments, verdicts and merge state, not a recap of what a worker just told you and not commentary on your own process. Skip preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message you just received, restate the board every turn, or close with a summary of what you just said. Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection reasons, measurements and merge receipts stay in full. Finishing one round does not mean you are done — remain available to coordinate the next message.";
 
 /// Instructions injected into Grok Build worker agents via `--rules`
 /// (EPIC cas-8888, cas-6569 Phase 2). See `GROK_SUPERVISOR_INSTRUCTIONS`
@@ -137,6 +137,34 @@ pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
     ContractElement {
         id: "user-response-shape",
         markers: &["at a glance", "never trims evidence"],
+        all: true,
+    },
+    // cas-b748: Codex ranks this developer contract above the user-role
+    // AGENTS.md, so the contract itself must hand voice and style to the
+    // operator's user-level instructions, or "facts, not narration" overrides
+    // them and reads as "flat".
+    // cas-6e08: the Codex contract lacked this sentence while Claude and Grok
+    // carried it; Codex supervisors then looped on sleep + inbox_poll inside
+    // one turn (7.6 polls/h vs 0.2/h for Claude).
+    ContractElement {
+        id: "act-on-injected-signal",
+        markers: &["act on the injected signal", "do not poll"],
+        all: true,
+    },
+    // cas-752f: "reply via coordination message" read as "reply to every
+    // update"; Codex sent 9.8 messages per merge vs 2.6 for Claude, and each
+    // reply invites another wake.
+    ContractElement {
+        id: "reply-only-when-needed",
+        markers: &[
+            "only when the sender needs an answer, an action or a verdict",
+            "never acknowledge a receipt or a status",
+        ],
+        all: true,
+    },
+    ContractElement {
+        id: "user-instructions-voice",
+        markers: &["user-level instructions", "govern voice and style"],
         all: true,
     },
 ];
@@ -301,7 +329,7 @@ monitor progress, review/merge. Never implement tasks. Use skills cas-supervisor
 cas-supervisor-checklist, and cas-codebase-design; MCP tools are namespaced mcp__cas__<tool> (e.g. mcp__cas__task, \
 mcp__cas__coordination). Successful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority. Received updates may be framed 'Message from <sender>: …'. Each received update is a triage trigger, not a fresh startup — read it, then \
 assign/answer/redirect/merge and reply via `mcp__cas__coordination action=message \
-target=<worker> summary=\"...\" message=\"...\"`. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. \
+target=<worker> summary=\"...\" message=\"...\"` only when the sender needs an answer, an action or a verdict; never acknowledge a receipt or a status. READY TO MERGE or any evidence of a pushed lane tip with green required CI is top priority. \
 Never wait for park or a merge request; merging needs no worker action. MERGE REQUIRED / awaiting_merge \
 are additional merge triggers. Resolve the target with `mcp__cas__factory action=epic_status id=<epic-id>` \
 (or `mcp__cas__task action=list status=awaiting_merge` for parked deliveries), then merge `factory/<worker>` \
@@ -315,7 +343,7 @@ state, not a recap of what a worker just told you and not commentary on your own
 preamble and self-congratulation. In the pane, answer first, then bullets or a small table — the reader must absorb it \
 at a glance, and a short dense paragraph fails that as badly as a long one. Do not recap the message \
 you just received, restate the board every turn, or close with a summary of what you just said. \
-Brevity never trims evidence: review findings, rejection \
+Voice: the operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in every operator-facing reply, from the first one; these rules govern content and length, and both apply, so a terse, factual reply still uses that voice. Brevity never trims evidence: review findings, rejection \
 reasons, measurements and merge receipts stay in full. Finishing one round does not mean you \
 are done — remain available to coordinate the next message. Canonical current workers for this session: {worker_list}. First \
 steps: mcp__cas__coordination action=whoami; mcp__cas__task action=list task_type=epic; \
@@ -327,7 +355,11 @@ mcp__cas__task action=ready."
 /// launch-time intro prompt CAS queues for the worker (see
 /// `queue_codex_worker_intro_prompt`). Uses Claude's `mcp__cas__` tool prefix.
 pub fn claude_worker_contract(worker_name: &str) -> String {
-    worker_contract("mcp__cas__", Some(worker_name), WorkerContractHarness::Claude)
+    worker_contract(
+        "mcp__cas__",
+        Some(worker_name),
+        WorkerContractHarness::Claude,
+    )
 }
 
 /// The Codex worker contract, delivered as `--config developer_instructions`.
@@ -367,7 +399,9 @@ pub fn worker_contract(
     worker_name: Option<&str>,
     harness: WorkerContractHarness,
 ) -> String {
-    let named = worker_name.map(|name| format!(" ({name})")).unwrap_or_default();
+    let named = worker_name
+        .map(|name| format!(" ({name})"))
+        .unwrap_or_default();
     let identity = match harness {
         WorkerContractHarness::Grok => {
             format!("You are a Cassy Factory Worker{named}, running on Grok Build.")
@@ -1028,11 +1062,12 @@ fn push_codex_machine_credential_env(args: &mut Vec<String>) {
 }
 
 impl PtyConfig {
-    /// Mirror only the effective pane values, after launch policy has removed
-    /// denied variables. Literal overrides leave operator `cs.env_vars` intact;
-    /// constructor-time snapshots could reintroduce values denied later by mux.
-    fn forward_codex_tool_caches(&mut self) {
-        for &name in TOOL_CACHE_ENV {
+    /// Mirror non-secret paths into Codex's curated CAS MCP environment after
+    /// launch policy. The effective account home must reach spawn_workers;
+    /// otherwise its availability check falls back to the default account.
+    /// Literal overrides preserve operator `cs.env_vars` and late pane overrides.
+    fn forward_codex_mcp_environment(&mut self) {
+        for name in std::iter::once("CODEX_HOME").chain(TOOL_CACHE_ENV.iter().copied()) {
             if self.env_remove.iter().any(|removed| removed == name) {
                 continue;
             }
@@ -1045,7 +1080,7 @@ impl PtyConfig {
                 .or_else(|| std::env::var(name).ok());
             if let Some(value) = value {
                 let value = serde_json::to_string(&value)
-                    .expect("serializing a cache path string cannot fail");
+                    .expect("serializing an MCP environment path string cannot fail");
                 self.args.extend([
                     "-c".to_string(),
                     format!("mcp_servers.cs.env.{name}={value}"),
@@ -1314,6 +1349,47 @@ impl PtyConfig {
     ///   so workers in clones can access the main repo's CAS state.
     /// * `supervisor_name` - For workers, the name of their supervisor (enables `target: supervisor`)
     #[allow(clippy::too_many_arguments)]
+    /// Continue a copied worker transcript while retaining the launch recipe.
+    pub fn resume_worker_session(&mut self, backend: &str, id: &str) -> Result<()> {
+        match backend {
+            "claude" => {
+                let index = self
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--session-id")
+                    .ok_or_else(|| Error::pty("Claude worker launch has no session selector"))?;
+                self.args[index] = "--resume".into();
+                self.args[index + 1] = id.to_owned();
+                for (key, value) in &mut self.env {
+                    if key == "CAS_SESSION_ID" {
+                        *value = id.to_owned();
+                    }
+                }
+            }
+            "codex" => {
+                // The startup prompt stays the final positional argument.
+                let prompt = self
+                    .args
+                    .pop()
+                    .ok_or_else(|| Error::pty("Codex worker prompt missing"))?;
+                let index = if self.command == "codex" {
+                    0
+                } else {
+                    self.args
+                        .iter()
+                        .position(|arg| arg == "codex")
+                        .map(|i| i + 1)
+                        .ok_or_else(|| Error::pty("Codex executable missing"))?
+                };
+                self.args.insert(index, "resume".into());
+                self.args.push(id.to_owned());
+                self.args.push(prompt);
+            }
+            _ => return Err(Error::pty("Harness does not support worker continuation")),
+        }
+        Ok(())
+    }
+
     pub fn claude(
         name: &str,
         role: &str,
@@ -2146,16 +2222,21 @@ pub fn claude_supports_flag(flag: &str) -> bool {
         return claude_help_options(&flags).contains(flag);
     }
     static OPTIONS: OnceLock<BTreeSet<String>> = OnceLock::new();
-    OPTIONS.get_or_init(|| {
-        let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
-            return BTreeSet::new();
-        };
-        if !output.status.success() {
-            return BTreeSet::new();
-        }
-        claude_help_options(&format!("{}\n{}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)))
-    }).contains(flag)
+    OPTIONS
+        .get_or_init(|| {
+            let Ok(output) = std::process::Command::new("claude").arg("--help").output() else {
+                return BTreeSet::new();
+            };
+            if !output.status.success() {
+                return BTreeSet::new();
+            }
+            claude_help_options(&format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        })
+        .contains(flag)
 }
 
 fn claude_help_options(help: &str) -> std::collections::BTreeSet<String> {
@@ -2495,7 +2576,11 @@ fn worker_spawn_audit(
 impl Pty {
     /// Spawn a new PTY with the given configuration
     pub fn spawn(id: impl Into<String>, mut config: PtyConfig) -> Result<Self> {
-        if let Some((_, reason)) = config.env.iter().find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR") {
+        if let Some((_, reason)) = config
+            .env
+            .iter()
+            .find(|(key, _)| key == "CAS_FACTORY_WORKER_LAUNCH_ERROR")
+        {
             return Err(Error::pty(reason.clone()));
         }
         config.apply_worker_credential_policy();
@@ -2503,7 +2588,7 @@ impl Pty {
         let id = id.into();
         let is_codex = config.effective_command() == "codex";
         if is_codex {
-            config.forward_codex_tool_caches();
+            config.forward_codex_mcp_environment();
         }
 
         // cas-bbc2 preflight: a Codex agent's CAS MCP server is spawn-injected as
@@ -2523,7 +2608,12 @@ impl Pty {
             ));
         }
 
-        if is_codex && config.env.iter().any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker") {
+        if is_codex
+            && config
+                .env
+                .iter()
+                .any(|(key, value)| key == "CAS_AGENT_ROLE" && value == "worker")
+        {
             crate::codex_hook_warning::warn_at_launch(&config);
         }
 
@@ -2611,8 +2701,12 @@ impl Pty {
 
         if let Some(audit) = worker_spawn_audit(&config, |key| std::env::var(key).ok()) {
             if let Some(warning) = audit.credential_warning {
-                tracing::warn!(worker = audit.worker, cli = audit.cli, credentials = warning,
-                    "factory worker credential warning; review factory.worker_credential_env");
+                tracing::warn!(
+                    worker = audit.worker,
+                    cli = audit.cli,
+                    credentials = warning,
+                    "factory worker credential warning; review factory.worker_credential_env"
+                );
             }
             tracing::info!(
                 worker = audit.worker,
@@ -3376,16 +3470,82 @@ mod tests {
         .expect("the wrapped shell must spawn");
         let is_codex = pty.is_codex;
         pty.child.wait().expect("the probe must exit");
-        assert!(!is_codex, "a model argument must not select Codex prompt timing");
+        assert!(
+            !is_codex,
+            "a model argument must not select Codex prompt timing"
+        );
+    }
+
+    #[test]
+    fn copied_worker_sessions_use_resume_selectors_and_keep_startup_prompt() {
+        for (command, args) in [
+            ("codex", vec!["--yolo", "-c", "x=y", "startup"]),
+            ("nice", vec!["-n", "10", "codex", "--yolo", "startup"]),
+            (
+                "claude",
+                vec!["--session-id", "new-session", "--model", "opus"],
+            ),
+        ] {
+            let mut config = PtyConfig {
+                command: command.into(),
+                args: args.into_iter().map(str::to_owned).collect(),
+                cwd: None,
+                env: vec![("CAS_SESSION_ID".into(), "new-session".into())],
+                env_remove: vec![],
+                rows: 24,
+                cols: 80,
+            };
+            let backend = if command == "claude" {
+                "claude"
+            } else {
+                "codex"
+            };
+            config
+                .resume_worker_session(backend, "old-session")
+                .unwrap();
+            if backend == "codex" {
+                assert_eq!(config.args.last().map(String::as_str), Some("startup"));
+                assert_eq!(config.args[config.args.len() - 2], "old-session");
+                let index = if command == "nice" { 3 } else { 0 };
+                assert_eq!(config.args[index], "resume");
+            } else {
+                assert!(!config.args.iter().any(|a| a == "--session-id"));
+                assert_eq!(&config.args[..2], &["--resume", "old-session"]);
+                assert_eq!(config.env[0].1, "old-session");
+            }
+        }
     }
 
     #[test]
     fn nice_harness_classification_and_audit_ignore_model_values_cas_046c() {
         for (args, cli, account_env) in [
-            (vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"], "claude", "CLAUDE_CONFIG_DIR"),
-            (vec!["--adjustment=10", "codex", "--effort", "high", "--model", "large"], "codex", "CODEX_HOME"),
-            (vec!["-n10", "claude", "--effort", "high", "--model", "codex"], "claude", "CLAUDE_CONFIG_DIR"),
-            (vec!["--", "codex", "--model", "large"], "codex", "CODEX_HOME"),
+            (
+                vec!["-n", "10", "claude", "--model", "codex", "--effort", "high"],
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                vec![
+                    "--adjustment=10",
+                    "codex",
+                    "--effort",
+                    "high",
+                    "--model",
+                    "large",
+                ],
+                "codex",
+                "CODEX_HOME",
+            ),
+            (
+                vec!["-n10", "claude", "--effort", "high", "--model", "codex"],
+                "claude",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (
+                vec!["--", "codex", "--model", "large"],
+                "codex",
+                "CODEX_HOME",
+            ),
         ] {
             let config = PtyConfig {
                 command: "nice".into(),
@@ -3393,7 +3553,12 @@ mod tests {
                 env: vec![("CAS_AGENT_ROLE".into(), "worker".into())],
                 ..PtyConfig::default()
             };
-            assert_eq!(config.effective_command() == "codex", cli == "codex", "{:?}", config.args);
+            assert_eq!(
+                config.effective_command() == "codex",
+                cli == "codex",
+                "{:?}",
+                config.args
+            );
             let audit = worker_spawn_audit(&config, |_| Some("/selected-account".into())).unwrap();
             assert_eq!(audit.cli, cli);
             assert_eq!(audit.account_env, account_env);
@@ -3900,10 +4065,21 @@ mod tests {
         let data_home = fixture.path().join("data");
         std::fs::create_dir_all(config_home.join("neonctl")).unwrap();
         std::fs::create_dir_all(data_home.join("com.vercel.cli")).unwrap();
-        std::fs::write(config_home.join("neonctl/credentials.json"), "MOCK_NEON_CANARY").unwrap();
-        std::fs::write(data_home.join("com.vercel.cli/auth.json"), "MOCK_VERCEL_CANARY").unwrap();
+        std::fs::write(
+            config_home.join("neonctl/credentials.json"),
+            "MOCK_NEON_CANARY",
+        )
+        .unwrap();
+        std::fs::write(
+            data_home.join("com.vercel.cli/auth.json"),
+            "MOCK_VERCEL_CANARY",
+        )
+        .unwrap();
         let env = vec![
-            ("XDG_CONFIG_HOME".to_string(), config_home.display().to_string()),
+            (
+                "XDG_CONFIG_HOME".to_string(),
+                config_home.display().to_string(),
+            ),
             ("XDG_DATA_HOME".to_string(), data_home.display().to_string()),
         ];
         let script = r#"
@@ -3927,7 +4103,10 @@ echo SMOKE_DONE
             // No namespace here (e.g. already inside a masked worker): the
             // worker must be refused, never started with the store visible.
             let error = probe_output("worker", script, &env).await.unwrap_err();
-            assert!(error.to_string().contains("CAS_WORKER_STORE_ISOLATION"), "{error}");
+            assert!(
+                error.to_string().contains("CAS_WORKER_STORE_ISOLATION"),
+                "{error}"
+            );
             return;
         }
 
@@ -3938,16 +4117,25 @@ echo SMOKE_DONE
                 "supervisor {probe} probe must read the fixture store:\n{supervisor}"
             );
         }
-        assert!(supervisor.contains("vercel=MOCK_VERCEL_CANARY"), "{supervisor}");
+        assert!(
+            supervisor.contains("vercel=MOCK_VERCEL_CANARY"),
+            "{supervisor}"
+        );
         assert!(
             supervisor.contains("SMOKE_DONE") && !supervisor.contains("BROKEN_"),
             "host tooling is broken before masking:\n{supervisor}"
         );
 
         let worker = probe_output("worker", script, &env).await.unwrap();
-        assert!(!worker.contains("MOCK_"), "worker read a masked store:\n{worker}");
+        assert!(
+            !worker.contains("MOCK_"),
+            "worker read a masked store:\n{worker}"
+        );
         for probe in ["python", "perl", "pipe", "indirect", "proc", "vercel"] {
-            assert!(worker.contains(&format!("{probe}=")), "{probe} did not run:\n{worker}");
+            assert!(
+                worker.contains(&format!("{probe}=")),
+                "{probe} did not run:\n{worker}"
+            );
         }
         assert!(
             worker.contains("SMOKE_DONE") && !worker.contains("BROKEN_"),
@@ -3981,15 +4169,19 @@ echo SMOKE_DONE
                 command: cli.into(),
                 env: vec![
                     ("CAS_AGENT_ROLE".into(), "worker".into()),
-                    (WORKER_CREDENTIAL_WARNING_ENV.into(),
-                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into()),
+                    (
+                        WORKER_CREDENTIAL_WARNING_ENV.into(),
+                        "missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN".into(),
+                    ),
                 ],
                 ..Default::default()
             };
             let audit = worker_spawn_audit(&config, |_| None).unwrap();
             assert_eq!(audit.cli, cli);
-            assert_eq!(audit.credential_warning,
-                Some("missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN"));
+            assert_eq!(
+                audit.credential_warning,
+                Some("missing=GITHUB_TOKEN; supervisor_only=VERCEL_TOKEN")
+            );
         }
     }
 
@@ -4464,6 +4656,67 @@ echo SMOKE_DONE
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn codex_supervisor_spawn_forwards_effective_account_home_to_cas() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let args_file = temp.path().join("args");
+        let codex = temp.path().join("codex");
+        std::fs::write(
+            &codex,
+            format!(
+                "#!/bin/sh\nprintf '%s\\0' \"$@\" > {}\n",
+                shell_quote(&args_file.to_string_lossy())
+            ),
+        ).unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(temp.path().join("cas"), "fixture preflight only").unwrap();
+        env.set("PATH", temp.path());
+        let inherited = temp.path().join("inherited Codex/\"account\"/λ");
+        let explicit = temp.path().join("explicit Codex/\"account\"/λ");
+        for home in [&inherited, &explicit] {
+            std::fs::create_dir_all(home).unwrap();
+            std::fs::write(home.join("auth.json"), "fixture-auth-never-log").unwrap();
+        }
+        assert!(!dirs::home_dir().unwrap().join(".codex/auth.json").exists());
+        env.set("CODEX_HOME", &inherited);
+
+        for selected in [None, Some(&explicit)] {
+            let mut config = PtyConfig::codex(
+                "account-probe", "supervisor", temp.path().to_path_buf(),
+                None, None, None, None, None, None,
+            );
+            if let Some(home) = selected {
+                config.env.push(("CODEX_HOME".into(), home.to_string_lossy().into_owned()));
+            }
+            let mut pty = Pty::spawn("account-probe", config).unwrap();
+            let deadline = tokio::time::Instant::now() + PTY_CONTROL_EVENT_TIMEOUT;
+            loop {
+                match next_pty_event_until(&mut pty, deadline).await {
+                    Some(PtyEvent::Exited(code)) => {
+                        assert_eq!(code, Some(0));
+                        break;
+                    }
+                    Some(PtyEvent::Output(_)) => {}
+                    event => panic!("account launch did not complete: {event:?}"),
+                }
+            }
+            let bytes = std::fs::read(&args_file).unwrap();
+            let args = std::str::from_utf8(&bytes).unwrap();
+            let forwarded = args.split('\0')
+                .find(|arg| arg.starts_with("mcp_servers.cs.env.CODEX_HOME="))
+                .expect("the supervisor's CAS MCP child must inherit its effective CODEX_HOME");
+            let parsed: toml::Value = toml::from_str(forwarded).unwrap();
+            let actual = parsed["mcp_servers"]["cs"]["env"]["CODEX_HOME"].as_str().unwrap();
+            assert_eq!(PathBuf::from(actual), *selected.unwrap_or(&inherited));
+            assert!(PathBuf::from(actual).join("auth.json").is_file());
+            assert!(!args.contains("fixture-auth-never-log"));
+        }
+    }
+
+    #[tokio::test]
     async fn test_pty_config_codex_pins_cas_mcp_server_to_factory_root() {
         let _env = TestEnvGuard::new();
         let root = PathBuf::from("/tmp/cas root with spaces");
@@ -4903,6 +5156,42 @@ echo SMOKE_DONE
         assert!(
             all_args.contains("Cassy Factory Supervisor"),
             "Codex supervisor should have supervisor instructions"
+        );
+        // cas-ae046: Codex's base prompt mandates commentary before tool calls
+        // and skill announcements; "Skip preamble" never names that channel,
+        // so the developer contract must override it explicitly.
+        for required in [
+            "Commentary channel: stay silent on triage turns",
+            "never announce which skill you are using",
+            "a final answer, not commentary",
+        ] {
+            assert!(
+                all_args.contains(required),
+                "Codex supervisor contract must carry the commentary policy: {required}"
+            );
+        }
+        // cas-cbbb: Codex keeps developer_instructions across compaction but
+        // drops skill bodies read with `cat`, so supervisors re-read skills
+        // after every compaction (8.1 reads/h vs 0.8 for Claude). A resident
+        // signal → action core replaces that ritual, within a byte budget.
+        for required in [
+            "Supervisor core (resident",
+            "READY TO MERGE, MERGE REQUIRED or task_awaiting_merge →",
+            "blocker=true →",
+            "worker idle or died →",
+            "cas-qa-dispatch →",
+            "operator question →",
+            "After a compaction, continue from this core; do not re-read skills.",
+        ] {
+            assert!(
+                all_args.contains(required),
+                "Codex supervisor contract must carry the resident core: {required}"
+            );
+        }
+        assert!(
+            CODEX_SUPERVISOR_INSTRUCTIONS.len() <= 6_500,
+            "Codex supervisor contract is {} bytes; the resident core must keep it at or under 6,500",
+            CODEX_SUPERVISOR_INSTRUCTIONS.len()
         );
     }
 
@@ -6231,7 +6520,8 @@ echo SMOKE_DONE
                     args: vec!["-n".into(), "10".into(), "claude".into()],
                     ..PtyConfig::default()
                 }
-                .effective_command() != "codex",
+                .effective_command()
+                    != "codex",
                 "the wrapper test must not classify every niced harness as Codex"
             );
         }
@@ -6488,7 +6778,10 @@ echo SMOKE_DONE
     fn opencode_hosted_lanes_pin_endpoint_and_key_environment_without_values() {
         let mut env = TestEnvGuard::new();
         let canaries = [
-            ("QWENCLOUD_TOKEN_PLAN_API_KEY", "sk-cas273e-token-plan-canary"),
+            (
+                "QWENCLOUD_TOKEN_PLAN_API_KEY",
+                "sk-cas273e-token-plan-canary",
+            ),
             ("DASHSCOPE_API_KEY", "sk-cas273e-payg-canary"),
         ];
         for (key, value) in canaries {
@@ -6958,7 +7251,12 @@ echo SMOKE_DONE
             None,
             None,
         );
-        assert_eq!(last(&supervisor).as_deref(), Some("codex"), "{:?}", supervisor.env);
+        assert_eq!(
+            last(&supervisor).as_deref(),
+            Some("codex"),
+            "{:?}",
+            supervisor.env
+        );
     }
 
     /// The supervisor path passes `factory_worker_cli = Some(<workers' cli>)`
@@ -7169,7 +7467,10 @@ echo SMOKE_DONE
             let surface = rendered_contract_surface(harness, ContractRole::Supervisor);
             let expected = format!("{tool_prefix}factory action=epic_status id=<epic-id>");
             let bare_call = format!("{tool_prefix}factory action=epic_status`");
-            assert!(surface.contains(&expected), "{harness} is missing {expected}");
+            assert!(
+                surface.contains(&expected),
+                "{harness} is missing {expected}"
+            );
             assert!(
                 !surface.contains(&bare_call),
                 "{harness} still includes an epic_status call without its required id"

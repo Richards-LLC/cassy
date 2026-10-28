@@ -937,3 +937,35 @@ fn builtin_contract_phrase_registry_holds_in_every_embedded_catalog() {
         failures.join("\n")
     );
 }
+
+/// cas-1c1f: a supervisor's pane exit shuts its whole factory down, so no
+/// shipped text may present a supervisor restart as one its workers outlive.
+#[test]
+fn no_builtin_presents_a_supervisor_restart_as_sparing_its_workers() {
+    let unsafe_claim = regex::RegexBuilder::new(
+        r"fresh supervisor session|restart (?:the|each|your)(?: affected)? supervisor session|recycle affected sessions|workers? keeps? running in (?:their|its) own panes?|workers? survives? (?:a|the|your) supervisor restart",
+    )
+    .case_insensitive(true)
+    .build()
+    .unwrap();
+    let mut violations = Vec::new();
+    let mut inspect = |source: &str, path: &str, content: &str| {
+        for hit in unsafe_claim.find_iter(content) {
+            violations.push(format!("{source} {path}: {:?}", hit.as_str()));
+        }
+    };
+    for (catalog_name, catalog) in shipped_catalogs() {
+        for file in catalog {
+            inspect(catalog_name, file.path, file.content);
+        }
+    }
+    for job in MAINTENANCE_JOBS {
+        inspect("MAINTENANCE_JOBS", job.name, job.body);
+    }
+    assert!(
+        violations.is_empty(),
+        "a supervisor restart stops every worker; name that cost and the MCP reconnect \
+         route instead:\n{}",
+        violations.join("\n")
+    );
+}

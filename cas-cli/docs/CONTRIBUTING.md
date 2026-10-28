@@ -216,6 +216,14 @@ notes name the unread message id and summary; the next eligible turn or tool
 boundary retries bodies that did not fit. `message_status` reports
 `recipient_receipt` separately for transport handoff and rendered context.
 
+Delivery status and watchdog notices share the recorded `delivery_attempts`
+and `next_attempt_at`; a completed handoff has no pending transport retry.
+Status uses the watchdog's capped escalation threshold and cites the persisted
+`channel_stalled_notice_id` when further notices are paused. Elapsed time alone
+does not prove that an alert was sent. Missing message-specific receipt remains
+unconfirmed, even when other worker activity is visible; it does not establish
+that no turn started or justify recovery on its own.
+
 Abandoned queue messages report `undelivered` in the `message_status` header
 and JSON `legacy_status`, even though their queue rows are processed. A sender
 notice preserves the wake-gate refusal when one was recorded. Authenticated
@@ -1154,6 +1162,14 @@ explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
 Claude subscription OAuth; propagated supervisor settings retain existing API
 key inheritance.
 
+Explicit Claude profiles may omit `settings.json` (empty settings); an existing
+file must be readable JSON. Preflight checks macOS OAuth credentials by Keychain
+item existence, using Claude Code's `Claude Code-credentials-<8 hex>` service
+(first eight SHA-256 hex digits of the NFC-normalized config path). It uses the
+current user's default Keychain search list and never requests the password.
+Other platforms still require `.credentials.json`. Both paths require resolvable
+`agents` and `skills` directories before queueing a spawn.
+
 For CLI chores that need operator credentials, explicitly grant environment
 names in the project's `.cas/config.toml`:
 
@@ -1175,6 +1191,22 @@ the worker still starts. A name also listed in `supervisor_only_env` stays
 denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
+
+With no explicit `config_dir` and no captured requester account, Claude/Codex
+workers use the shared recommendation. The receipt names the account and reason;
+an explicit directory or requester account wins. `cas claude` / `cas codex`
+and Commander's New-session sheet highlight the recommendation but still ask.
+
+`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
+weekly reset group, within 24 hours of the earliest eligible reset, then the
+most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
+`accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
+above that usage in either window. Disabled, logged-out/stale and unknown or
+stale usage accounts are excluded. No eligible account preserves the existing
+default/inherited behavior, with each exclusion explained. Project selection/threshold
+override global policy; Commander uses global policy. `accounts.disabled` retains
+the absolute folder list managed by `cas accounts disable` / `enable` in
+`global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
 ### Operator credential stores are masked from workers
 
@@ -3217,7 +3249,8 @@ slots. Without enough identity to derive a slot, registration falls back to
 `task show` (including `get`), `task notes` reads and `task start` default to
 responses of at most 2,000 UTF-8 bytes. Show/start include the current scope;
 large note histories keep the latest decision, proof and checkpoint with cursors.
-An ellipsis marks a clipped field: read its complete instructions before acting.
+A clipping notice marks shortened fields; literal ellipses in task text do not
+trigger it. Read clipped instructions before acting.
 
 For show/notes, `full=true` returns complete text. `offset=0 limit=1600`
 starts a byte page of that same text; follow its `next=` cursor until `end`.
@@ -3226,7 +3259,9 @@ the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
 boundaries. Note summary cursors address the full `task notes` response.
 For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
 context. Start's default still performs the same claim and epic lifecycle work.
-Complete start advisories are saved as a START CONTEXT task note before budgeting.
+Complete start advisories, including worktree directory instructions, are saved
+as a START CONTEXT task note before budgeting. An unchanged latest context reuses
+its note and cursor; transient claim/lease text stays in the start response.
 Warnings take precedence over scope, notes and recall; an oversized warning block
 is replaced by an explicit instruction to read its saved note before acting.
 The start response gives a byte cursor into `task notes` and a full-notes path.

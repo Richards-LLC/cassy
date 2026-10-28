@@ -1,0 +1,31 @@
+[WARN] 5 accounts, 3 flagged
+claude
+  ACCOUNT                            PLAN         LOGIN
+  operator@example.com               unknown      logged in
+    folder: ~/.claude-alt
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+    duplicate of: .claude-operator@example.com
+  never                              unknown      never logged in
+    folder: ~/.claude-never
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+    flag: never logged in
+  operator@example.com               unknown      logged in
+    folder: ~/.claude-operator@example.com
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+  stale@example.com                  unknown      stale login
+    folder: ~/.claude-stale
+        5h: usage unknown  resets unknown
+    weekly: usage unknown  resets unknown
+    flag: credential rejected
+
+codex
+  ACCOUNT                            PLAN         LOGIN
+  team@example.com                   pro          logged in
+    folder: ~/.codex-team
+        5h:           12%  resets 2026-10-27 13:30 UTC
+    weekly:           34%  resets 2026-11-02 13:30 UTC
+
+Full values: cas accounts list --json

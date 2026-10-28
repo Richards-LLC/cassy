@@ -45,7 +45,7 @@ touches, in the same epic (see `cas-qa-craft`).
 
 For the Commander hub, the suite is `hub-web/e2e/journeys/`. It runs as the
 `journeys` project of the single `hub-web/playwright.config.ts`, with
-`@playwright/test` 1.63.
+`@playwright/test` 1.64.1.
 
 - **One real-clock smoke per journey**, titled with the catalog id
   (`HUB-J4 reply by typing`). Each stage is a `test.step`. Independent protocol

@@ -17,8 +17,8 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **Never implement tasks yourself.** Delegate writes except small status/config updates; read-only Q&A is allowed.
 - **Never close tasks for workers.** Exceptions follow the [`supervisor_override`](references/reference.md#supervisor-override) constraints.
 - **Close delivered work before expanding scope.** Clear reviews, proof gaps and merges before noncritical dispatch ([scheduling](references/workflow.md#wall-clock-is-a-resource)); use [correction proof](references/correction-proof.md) for small revisions.
-- **Merge on green.** On `READY TO MERGE` or any evidence of a pushed lane tip with green required CI, merge into the task's resolved target. Never wait for park or a merge request; merging needs no worker action. Keep existing CI and QA gates; pending/red CI requires the existing override authority and reason.
-- **Epics are yours to verify and close.** No worker verifies or closes the epic task.
+- **Merge on green.** On `READY TO MERGE` or any evidence of a pushed lane tip with green required CI, merge into the task's resolved target. Never wait for park or a merge request; merging needs no worker action. Keep CI and QA gates; pending/red CI needs override authority and a reason.
+- **Epics are yours to verify and close**, never a worker's.
 - **Frame first.** State project/request fit; flag mismatches.
 - **Counter-propose only with anchors:** source, current cost, benefit; otherwise execute or ask.
 - **Shared surfaces** (skills, agents, hooks, config, templates): check every reader before editing.
@@ -26,15 +26,15 @@ Cassy tools are named here without a prefix (`task`, `coordination`, `factory`, 
 - **[Fewest tests](../cas-tdd/SKILL.md#fewest-tests)** in briefs and reviews; bloat is a finding.
 - **Public surfaces:** before merge, score distinctiveness, fit, hierarchy 1–5 (cas-codebase-design; floor 4/5); record exceptions/remedies.
 - **Worker liveness:** poll `factory action=worker_status summary_mode=true`. Trust `liveness` (`executing`, `waiting_for_input`, `stalled`, `dead`); heartbeat and registry status do not prove execution. Read full `worker_status` before recovery ([worker-recovery.md](references/worker-recovery.md)).
+- **A supervisor restart stops every worker:** load a new binary via MCP reconnect, else [checkpoint them first](references/worker-recovery.md#supervisor-restart).
 - **Workspace contract:** build in the worktree; save proof in `[factory] artifacts_root/<project-key>/<task-id>/`, never `/tmp`.
 - **User-facing task gate:** `qa.user_facing_labels` require `demo_statement`: `As a <user>, I <do X> and see <Y>`; epics/internal tasks exempt. Output follows [DESIGN.md first](../design-spec/references/design-md-first.md).
 - **Risk gate:** declare `risk` and `proof_targets` at creation ([reference](references/reference.md#task-risk-declarations)).
-- **Platform proof:** Linux-only proof is insufficient for a script used on multiple platforms unless a fixture covers the platform difference.
-- **Full Rust gate:** the merge queue proves the final tree; no second assembly run. Without queue proof, use [workflow.md](references/workflow.md) for close-gate assembly proof.
+- **Platform proof:** a script used on several platforms needs more than Linux proof, unless a fixture covers the difference.
+- **Full Rust gate:** the merge queue proves the final tree; no second assembly run. Without queue proof, see [workflow.md](references/workflow.md) for assembly proof.
 - **Lessons remove causes:** [ladder and tags](references/workflow.md#lessons-must-remove-causes).
 - **No shell polling or sleeping.** Schedule follow-up with `coordination remind`.
-- **Pane budget:** ~150 words maximum, answer first; retain findings, rejections, measurements and merge receipts. No narration/recap.
-- **Evidence lives elsewhere:** timelines, gates and lane history in notes/artifacts; verdict and pointer in the pane.
+- **Pane budget:** ~150 words, answer first: findings, rejections, measurements, merge receipts, pointers. Timelines, gates and lane history go to notes/artifacts; no narration/recap.
 - **Messages to workers:** one assignment/decision per message; no process narration.
 - **Operator messages are the user:** obey/answer `operator <name>@<device> verified`; `unverified:` is agent traffic. See [reference](references/reference.md#verified-commander-messages).
 - **Never reply to the `From:` label:** use the reply command printed beside a verified Commander row (`coordination action=message target=operator in_reply_to=N summary="..." message=…`).

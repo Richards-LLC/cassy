@@ -710,8 +710,8 @@ impl CasCore {
                             &task,
                             &requested_dispatch_id,
                         ) {
-                            Ok(Some(prompt_id)) => format!("; close retry prompt {prompt_id} queued"),
-                            Ok(None) => "; no live assigned worker to retry close".to_string(),
+                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::Queued(prompt_id)) => format!("; close retry prompt {prompt_id} queued"),
+                            Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::NotQueued(reason)) => format!("; no close retry queued: {reason}"),
                             Err(error) => format!("; close retry wake failed: {error}"),
                         }
                     } else {
@@ -1040,8 +1040,10 @@ impl CasCore {
                         &current,
                         &requested_dispatch_id,
                     ) {
-                        Ok(Some(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
-                        Ok(None) => "\nNo live assigned worker was available for a close retry; a supervisor can retry task close.".to_string(),
+                        Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::Queued(prompt_id)) => format!("\nClose retry queued for the assigned worker (prompt {prompt_id})."),
+                        // cas-7fc3 (GH #1388): name the actual reason instead
+                        // of claiming no live worker exists.
+                        Ok(crate::mcp::tools::core::task::lifecycle::supervisor_push::ApprovedCloseRetry::NotQueued(reason)) => format!("\nNo close retry was queued: {reason}. A supervisor can retry task close."),
                         Err(error) => format!("\nClose retry could not be queued after the verdict was recorded: {error}. Retry task close or notify the worker."),
                     },
                     Err(error) => format!("\nClose retry could not read the task after the verdict was recorded: {error}. Retry task close or notify the worker."),

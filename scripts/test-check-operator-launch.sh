@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Self-test for scripts/check-operator-launch.sh (cas-e719).
 #
-# A fake `cas` reproduces each launch gate: the cas-31ec gate (exact agent
+# A fake `cas` reproduces each launch gate, and refuses an unknown account name
+# like cas does since 3.84: the cas-31ec gate (exact agent
 # markers), 3.51.0's prefix gate (its own CAS_FACTORY_NICE_WORKER and the
 # operator's CLAUDE_CODE_* preferences read as agent markers), and a gate that
 # never refuses. The smoke must pass only the first. The real binary runs it
@@ -37,6 +38,10 @@ for name in $(compgen -e); do
             echo "refused: $name is set, so this runs inside an agent session."; exit 1 ;;
     esac
 done
+# Like cas since 3.84, an unknown account name is refused before launch.
+if [[ "$1" == claude && ! -d "$HOME/.claude-$2" ]]; then
+    echo "[ERROR] unknown claude account \"$2\""; exit 1
+fi
 echo 'launch check: the operator may proceed'
 EOF
     chmod +x "$path"

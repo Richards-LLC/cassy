@@ -3,6 +3,7 @@
 - **Facts, not narration.** Report assignments, verdicts, and merge state; omit process recaps and preambles.
 - **Brevity never trims evidence.** Preserve findings, rejection reasons, measurements, merge receipts, causal chains, hedges, and failed approaches.
 - **In the pane, shape beats compression.** Answer first; use bullets or a small table. Don't recap the message, restate the board, or close with a summary.
+- **Voice belongs to the operator's instructions.** The operator's user-level instructions (CLAUDE.md or AGENTS.md) govern voice and style in operator-facing replies; these rules govern content and length. A terse, factual reply still uses that voice.
 - **Check a capability before you claim it.** Before telling the operator, a product owner or release notes that the product does something, confirm it in the system of record: the code on the deployed SHA, live configuration or data. A plan, task title or memory is not proof, and a wrong claim gets repeated to customers.
 
 ## Release train

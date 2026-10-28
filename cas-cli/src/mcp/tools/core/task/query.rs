@@ -35,10 +35,23 @@ fn append_list_filter_report(
     }
 }
 
+/// Records actual excerpt operations, including nested summary fields.
+#[derive(Default)]
+pub(super) struct ReadClipping {
+    pub(super) clipped: bool,
+}
+
+impl ReadClipping {
+    pub(super) fn excerpt(&mut self, text: &str, budget: usize) -> String {
+        self.clipped |= text.len() > budget;
+        excerpt(text, budget)
+    }
+}
+
 /// Keep short history intact; for a large timeline retain the latest decision,
 /// proof and checkpoint, each with a byte cursor into the original notes.
 /// Full reads remain the source of truth, including attached artifact receipts.
-pub(super) fn task_show_notes(notes: &str, task_id: &str) -> String {
+pub(super) fn task_show_notes(notes: &str, task_id: &str, clipping: &mut ReadClipping) -> String {
     if notes.len() <= 700 {
         return notes.to_string();
     }
@@ -80,7 +93,7 @@ pub(super) fn task_show_notes(notes: &str, task_id: &str) -> String {
         result.push_str(&format!(
             "[notes offset={}] {}\n",
             header_bytes + offset,
-            excerpt(text, 100)
+            clipping.excerpt(text, 100)
         ));
     }
     if let Some(id) = notes
@@ -98,7 +111,7 @@ pub(super) fn task_show_notes(notes: &str, task_id: &str) -> String {
                 })
         })
     {
-        result.push_str(&format!("Latest artifact: {}\n", excerpt(&id, 80)));
+        result.push_str(&format!("Latest artifact: {}\n", clipping.excerpt(&id, 80)));
     }
     result.push_str(&format!(
         "History: {} bytes; task notes id={task_id} full=true",
@@ -139,6 +152,7 @@ pub(super) fn render_task_read(
     summary: &str,
     id: &str,
     action: &str,
+    clipped: bool,
     read: &TaskReadOptions,
 ) -> Result<String, McpError> {
     if read.full {
@@ -170,11 +184,7 @@ pub(super) fn render_task_read(
     }
     // Reserve the longer warning before deciding whether the final budget clips.
     let reserve = read_hint(id, action, true).len();
-    let hint = read_hint(
-        id,
-        action,
-        summary.contains('…') || summary.len() > 2000 - reserve,
-    );
+    let hint = read_hint(id, action, clipped || summary.len() > 2000 - reserve);
     Ok(format!(
         "{}{}",
         excerpt(summary, 2000usize.saturating_sub(hint.len())),
@@ -182,7 +192,7 @@ pub(super) fn render_task_read(
     ))
 }
 
-pub(super) fn task_scope(task: &Task) -> String {
+pub(super) fn task_scope(task: &Task, clipping: &mut ReadClipping) -> String {
     let risk = task
         .risk
         .iter()
@@ -191,11 +201,11 @@ pub(super) fn task_scope(task: &Task) -> String {
         .join(", ");
     format!(
         "Execution Note: {}\nDescription: {}\nAcceptance Criteria: {}\nProof Targets: {}\nRisk: {}\nDoor: {} (recorded only)\n",
-        excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 40),
-        excerpt(&task.description, 100),
-        excerpt(&task.acceptance_criteria, 80),
-        excerpt(&task.proof_targets.join(", "), 40),
-        excerpt(&risk, 40),
+        clipping.excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 40),
+        clipping.excerpt(&task.description, 100),
+        clipping.excerpt(&task.acceptance_criteria, 80),
+        clipping.excerpt(&task.proof_targets.join(", "), 40),
+        clipping.excerpt(&risk, 40),
         task.door
             .map(|door| door.to_string())
             .unwrap_or_else(|| "undeclared".into())
@@ -215,6 +225,7 @@ impl CasCore {
             data: None,
         })?;
 
+        let mut clipping = ReadClipping::default();
         let mut read_status = String::new();
         let mut batch_summary = String::new();
 
@@ -284,7 +295,7 @@ impl CasCore {
             })?;
             read_status.push_str(&format!(
                 "Structured execution state: {}\n",
-                excerpt(&encoded, 180)
+                clipping.excerpt(&encoded, 180)
             ));
             output.push_str("\nStructured execution state:\n");
             output.push_str(&encoded);
@@ -392,7 +403,10 @@ impl CasCore {
                 );
             }
             if let Some(ref branch) = task.deliverables.parked_branch {
-                read_status.insert_str(0, &format!("Parked branch: {}\n", excerpt(branch, 100)));
+                read_status.insert_str(
+                    0,
+                    &format!("Parked branch: {}\n", clipping.excerpt(branch, 100)),
+                );
                 output.push_str(&format!("Parked branch: {branch}\n"));
             }
         }
@@ -405,7 +419,7 @@ impl CasCore {
                 } else {
                     "Integration batch receipt"
                 },
-                excerpt(&batch.branch, 60),
+                clipping.excerpt(&batch.branch, 60),
                 batch.tip
             );
 
@@ -746,37 +760,42 @@ impl CasCore {
         let origin_summary = if foreign_origin {
             format!(
                 "{} — this task is owned elsewhere",
-                excerpt(task.origin_project.as_deref().unwrap_or(""), 40)
+                clipping.excerpt(task.origin_project.as_deref().unwrap_or(""), 40)
             )
         } else {
-            excerpt(&origin, 40)
+            clipping.excerpt(&origin, 40)
         };
         let header = format!(
             "Task: {} - {}\nStatus: {:?}\nAssignee: {}\nOrigin project: {}\nPriority: P{}; Depth: {}; Delivery mode: {}\nTarget: {}\n",
             task.id,
-            excerpt(&task.title, 60),
+            clipping.excerpt(&task.title, 60),
             task.status,
-            excerpt(task.assignee.as_deref().unwrap_or("(unassigned)"), 40),
+            clipping.excerpt(task.assignee.as_deref().unwrap_or("(unassigned)"), 40),
             origin_summary,
             task.priority.0,
             task.depth,
             task.delivery_mode,
-            excerpt(&target, 80),
+            clipping.excerpt(&target, 80),
         );
         // Builtin verifier/epic flows consume Type and Demo from bare show.
         // Name full-only sections so callers cannot silently infer absence.
         let summary = format!(
             "Type: {}\nDemo: {}\nOmitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}\nNotes:\n{}",
             task.task_type,
-            excerpt(&task.demo_statement, 160),
-            excerpt(&header, 400),
-            task_scope(&task),
-            excerpt(&read_status, 200),
+            clipping.excerpt(&task.demo_statement, 160),
+            clipping.excerpt(&header, 400),
+            task_scope(&task, &mut clipping),
+            clipping.excerpt(&read_status, 200),
             batch_summary,
-            task_show_notes(&task.notes, &task.id)
+            task_show_notes(&task.notes, &task.id, &mut clipping)
         );
         Ok(Self::success(render_task_read(
-            &output, &summary, &task.id, "show", &req.read,
+            &output,
+            &summary,
+            &task.id,
+            "show",
+            clipping.clipped,
+            &req.read,
         )?))
     }
 
@@ -1288,7 +1307,7 @@ mod tests {
 
     #[test]
     fn task_show_notes_leaves_short_history_without_paging_line() {
-        let rendered = task_show_notes("first\n\nsecond", "cas-9568");
+        let rendered = task_show_notes("first\n\nsecond", "cas-9568", &mut ReadClipping::default());
         assert_eq!(rendered, "first\n\nsecond");
     }
 
@@ -1296,7 +1315,7 @@ mod tests {
     fn task_show_notes_preserves_blank_lines_inside_a_note() {
         let notes = "[2026-09-10 12:00] 📝 PROGRESS first paragraph\n\nsecond paragraph\n\n\
 [2026-09-10 12:01] 📝 PROGRESS latest";
-        let rendered = task_show_notes(notes, "cas-9568");
+        let rendered = task_show_notes(notes, "cas-9568", &mut ReadClipping::default());
         assert!(rendered.contains("first paragraph\n\nsecond paragraph"));
         assert!(rendered.contains("latest"));
     }

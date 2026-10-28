@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { attentionContent, attentionTimeLabel, createAttentionItem } from "./attention";
 import { conversationAttentionBadge } from "./conversation-shell";
-import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
+import { NoticePersistence, isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import type { OperatorReply } from "./types";
 
 // cas-e829: the operator's 2026-10-01 Accounting screenshot, row 3196301.
@@ -84,5 +84,37 @@ describe("delivery notice copy", () => {
     const legacy = createAttentionItem({ id: "old", machineId: "atlas", machineLabel: "Atlas", session: "s", kind: NOTICE_KIND, createdAt: "2026-09-30T17:49:00Z" }, { headline: raw.summary!, detail: raw.message, severity: "warning", action: "view_pane" });
     expect(attentionContent(legacy).headline).toBe(plan.content.headline);
     expect(attentionContent(legacy).detail).not.toMatch(/9m|9 minutes ago|worker died/);
+  });
+});
+
+// Storage completion and the active installation, rather than receipt arrival,
+// authorize a notice ACK. Calls for one session serialize live/history races.
+describe("notice application receipts", () => {
+  it("waits for durable storage, repairs a failed replay and fences stale installations", async () => {
+    const persistence = new NoticePersistence();
+    const reply = watchdog({ source: "relay-watchdog", subject: 7 });
+    let release!: () => void;
+    let writes = 0;
+    let current = true;
+    const acknowledgements: number[] = [];
+    const ack = () => { acknowledgements.push(reply.notification_id); };
+    const first = persistence.keep("atlas:s", reply, async () => {
+      writes += 1;
+      await new Promise<void>(resolve => { release = resolve; });
+    }, async () => current, ack);
+    // A history repeat cannot bypass the live frame's uncommitted write.
+    const repeat = persistence.keep("atlas:s", reply, async () => { writes += 1; }, async () => current, ack);
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    expect(writes).toBe(1); expect(acknowledgements).toEqual([]);
+    current = false; release();
+    await Promise.all([first, repeat]);
+    expect(acknowledgements).toEqual([]);
+    current = true;
+    await persistence.keep("atlas:s", reply, async () => { throw new Error("quota"); }, async () => current, ack);
+    expect(acknowledgements).toEqual([]);
+    await persistence.keep("atlas:s", reply, async () => { writes += 1; }, async () => current, ack);
+    expect(acknowledgements).toEqual([reply.notification_id]);
+    await persistence.keep("atlas:s", watchdog(undefined), async () => { throw new Error("reply misrouted"); }, async () => true, ack);
+    expect(acknowledgements).toEqual([reply.notification_id]);
   });
 });

@@ -432,6 +432,14 @@ fn remove_with(
 }
 
 pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
+    rename_with_platform(target, home, name, cfg!(target_os = "macos"))
+}
+
+fn rename_with_platform(target: &Target, home: &Path, name: &str, macos: bool) -> Result<()> {
+    // Claude keys secure storage by profile path. Keep the existing login in
+    // place instead of reading and rewriting its secret under another key.
+    anyhow::ensure!(!(macos && target.provider == Provider::Claude),
+        "Cannot rename a Claude account on macOS without moving its login.\nRun: cas claude login {name}");
     ensure_idle(target, home)?;
     read_policy(home)?;
     anyhow::ensure!(
@@ -452,13 +460,6 @@ pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
         set_disabled(home, &target.folder, true)?;
     }
     std::fs::rename(&target.folder, &to)?;
-    if cfg!(target_os = "macos") && target.provider == Provider::Claude {
-        if let Err(error) = keychain_rekey(&target.folder, &to, &mut security) {
-            std::fs::rename(&to, &target.folder)
-                .context("Keychain migration failed and folder rollback failed")?;
-            return Err(error);
-        }
-    }
     if was_disabled && old_canonical != to.canonicalize()? {
         set_disabled(home, &to, true)?;
         set_disabled(home, &target.folder, false)?;
@@ -519,62 +520,6 @@ fn keychain_delete(
         "{remedy}"
     );
     Ok(())
-}
-fn keychain_account() -> String {
-    // Claude Code 2.1.311 uses USER (or the OS username), restricted to this alphabet.
-    let user = std::env::var("USER")
-        .ok()
-        .filter(|user| !user.is_empty())
-        .or_else(|| {
-            let output = Command::new("/usr/bin/id").arg("-un").output().ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        })
-        .unwrap_or_else(|| "claude-code-user".into());
-    if !user.is_empty()
-        && user
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-    {
-        user
-    } else {
-        "claude-code-user".into()
-    }
-}
-fn keychain_rekey(
-    from: &Path,
-    to: &Path,
-    run: &mut impl FnMut(&[String], Option<&str>) -> Result<Output>,
-) -> Result<()> {
-    let out = run(
-        &[
-            "find-generic-password".into(),
-            "-s".into(),
-            service(from),
-            "-w".into(),
-        ],
-        None,
-    )?;
-    if out.status.code() == Some(44) {
-        return Ok(());
-    }
-    anyhow::ensure!(out.status.success(), "Cannot read account Keychain item");
-    let secret = String::from_utf8(out.stdout).context("Keychain item is not UTF-8")?;
-    // Match Claude's stdin protocol so the secret is never visible in argv.
-    let input = format!(
-        "add-generic-password -U -a \"{}\" -s \"{}\" -X \"{}\"\n",
-        keychain_account(),
-        service(to),
-        hex::encode(secret.trim_end_matches('\n').as_bytes())
-    );
-    let out = run(&["-i".into()], Some(&input))?;
-    anyhow::ensure!(
-        out.status.success(),
-        "Cannot write renamed account Keychain item"
-    );
-    keychain_delete(from, run)
 }
 
 #[cfg(unix)]
@@ -789,6 +734,8 @@ pub(crate) struct NewLogin {
     home: PathBuf,
     provider: Provider,
     dir: tempfile::TempDir,
+    stable_path: bool,
+    committed: bool,
     #[cfg(unix)]
     _lease: std::fs::File,
     // Fields drop in declaration order: restore signals only after dir cleanup.
@@ -796,6 +743,10 @@ pub(crate) struct NewLogin {
 }
 impl NewLogin {
     pub(crate) fn begin(home: &Path, provider: Provider, typed: &str) -> Result<Self> {
+        Self::begin_with_platform(home, provider, typed, cfg!(target_os = "macos"))
+    }
+
+    fn begin_with_platform(home: &Path, provider: Provider, typed: &str, macos: bool) -> Result<Self> {
         anyhow::ensure!(
             typed == typed.trim(),
             "Account name cannot contain whitespace"
@@ -803,9 +754,18 @@ impl NewLogin {
         crate::cli::account_picker::validate_new_profile_name(typed, "main")
             .map_err(anyhow::Error::msg)?;
         let signals = LoginSignals::enter()?;
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("{}login.tmp.", provider.prefix()))
-            .tempdir_in(home)?;
+        let stable_path = macos && provider == Provider::Claude;
+        let mut builder = tempfile::Builder::new();
+        let prefix = if stable_path {
+            format!("{}{typed}", provider.prefix())
+        } else {
+            format!("{}login.tmp.", provider.prefix())
+        };
+        builder.prefix(&prefix);
+        if stable_path { builder.rand_bytes(0); }
+        // tempfile creates the final path atomically with private permissions;
+        // failure/cancellation still removes it through the existing RAII guard.
+        let dir = builder.tempdir_in(home)?;
         #[cfg(unix)]
         let lease = {
             let file = open_login_dir(dir.path())?;
@@ -816,6 +776,8 @@ impl NewLogin {
             home: home.into(),
             provider,
             dir,
+            stable_path,
+            committed: false,
             #[cfg(unix)]
             _lease: lease,
             signals,
@@ -844,10 +806,10 @@ impl NewLogin {
         }
         result
     }
-    pub(crate) fn finish(self, typed: &str) -> Result<String> {
+    pub(crate) fn finish(mut self, typed: &str) -> Result<String> {
         self.signals.check()?;
         let email = self.provider.login_email(&self.home, self.path());
-        let name = email.as_deref().unwrap_or(typed);
+        let name = if self.stable_path { typed } else { email.as_deref().unwrap_or(typed) };
         crate::cli::account_picker::validate_new_profile_name(name, "main")
             .map_err(anyhow::Error::msg)?;
         let pending =
@@ -858,6 +820,7 @@ impl NewLogin {
             })?
             .into_iter()
             .find(|account| {
+                if account.folder == self.path() { return false; }
                 let strong = |a: &crate::account_registry::Account| {
                     a.identity
                         .as_ref()
@@ -890,6 +853,13 @@ impl NewLogin {
             }
             bail!("Login cancelled; existing account kept");
         }
+        if self.stable_path {
+            self.signals.check()?;
+            self.dir.disable_cleanup(true);
+            self.committed = true;
+            eprintln!("[OK] Added {} account {}", self.provider.name(), name);
+            return Ok(name.to_owned());
+        }
         let mut final_name = name.to_owned();
         let mut to = self
             .home
@@ -911,20 +881,13 @@ impl NewLogin {
         }
         self.signals.check()?;
         std::fs::rename(self.path(), &to)?;
-        if cfg!(target_os = "macos") && self.provider == Provider::Claude {
-            if let Err(error) = keychain_rekey(self.path(), &to, &mut security) {
-                std::fs::rename(&to, self.path())
-                    .context("Keychain migration failed and login rollback failed")?;
-                return Err(error);
-            }
-        }
         eprintln!("[OK] Added {} account {}", self.provider.name(), final_name);
         Ok(final_name)
     }
 }
 impl Drop for NewLogin {
     fn drop(&mut self) {
-        if cfg!(target_os = "macos") && self.provider == Provider::Claude {
+        if !self.committed && cfg!(target_os = "macos") && self.provider == Provider::Claude {
             let _ = keychain_delete(self.path(), &mut security);
         }
     }
@@ -1123,14 +1086,34 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn keychain_migration_refuses_before_reading_any_secret() {
-        let result = keychain_rekey(Path::new("/fixture/.claude-old"),
-            Path::new("/fixture/.claude-new"), &mut |_, _| {
-                panic!("Cassy must never read or rewrite Claude Keychain secrets")
-            });
-        assert!(result.is_err());
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(".claude-old");
+        std::fs::create_dir(&folder).unwrap();
+        let target = Target { provider: Provider::Claude, name: "old".into(), folder: folder.clone(), email: None };
+        let error = rename_with_platform(&target, home.path(), "new", true).unwrap_err();
+        assert!(error.to_string().contains("cas claude login new"));
+        assert!(folder.exists(), "refused rename leaves the login in place");
+        assert!(!home.path().join(".claude-new").exists());
+    }
+
+    #[test]
+    fn macos_claude_login_keeps_the_path_used_by_the_official_binary() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home();
+        let dir = home.join(".claude-typed");
+        {
+            let login = NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).unwrap();
+            assert_eq!(login.path(), dir);
+            assert!(NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).is_err());
+            std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"different@example.com"}}"#).unwrap();
+            assert_eq!(login.finish("typed").unwrap(), "typed");
+        }
+        assert!(dir.is_dir(), "successful login remains at the original selector");
+        let cancelled = home.join(".claude-cancelled");
+        drop(NewLogin::begin_with_platform(home, Provider::Claude, "cancelled", true).unwrap());
+        assert!(!cancelled.exists(), "cancelled login is removed");
     }
 
     #[test]

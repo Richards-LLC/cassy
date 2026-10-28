@@ -22,7 +22,14 @@ export class ThreadWindow {
     this.items = items;
     this.offsets = [0];
     for (const item of items) {
-      const estimate = item.type === "group" ? item.turns.length * 180 : item.type === "coalesce" ? 100 : 40;
+      // Before layout, paragraph-sized replies need more room than a status
+      // line. A fixed per-bubble guess mounted many screens of Markdown on
+      // the first frame, only to remove them after measuring that giant layout.
+      const estimate = item.type === "group" ? item.turns.reduce((height, turn) => {
+        const text = turn.event.kind === "send" ? turn.event.value.text : turn.event.value.message;
+        const lines = Math.max(text.split("\n").length, Math.ceil(text.length / 60));
+        return height + 80 + lines * 24;
+      }, 0) : item.type === "coalesce" ? 100 : 40;
       this.offsets.push(this.offsets.at(-1)! + (this.heights.get(item.key) ?? estimate));
     }
     const total = this.offsets.at(-1)!;

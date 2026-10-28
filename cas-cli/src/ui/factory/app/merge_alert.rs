@@ -121,6 +121,24 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
     Some((task.id, tip.unwrap_or_default(), refs, marked_ready))
 }
 
+/// Missing CI is not an actionable merge decision for a no-code or
+/// documentation-only delivery. Unknown Git evidence stays eligible so a
+/// failed path read cannot silently hide a code delivery.
+fn suppress_unknown_ci(repo: &Path, data: &DirectorData, task_id: &str, tip: &str) -> bool {
+    let Some(task) = crate::store::open_task_store_local(&repo.join(".cas"))
+        .ok().and_then(|store| store.get(task_id).ok()) else { return false; };
+    if task.execution_note.as_deref() == Some("no-code") { return true; }
+    let (_, target, _) = crate::ui::factory::director::resolve_merge_target_for_task(data, task_id);
+    let Some(target) = target else { return false; };
+    let base = format!("origin/{target}");
+    let Some(paths) = crate::git_evidence::git_text(repo, &["diff", "--name-only", &base, tip, "--"])
+    else { return false; };
+    !paths.is_empty() && paths.lines().all(|path| {
+        let path = path.to_ascii_lowercase();
+        path.ends_with(".md") || path.starts_with("docs/") || path.contains("/docs/")
+    })
+}
+
 /// One observation supplies both readiness and worker waits. Settled results
 /// are reused until refs change; failed CI is revisited slowly for same-SHA
 /// reruns, while pending/unknown retains the existing retry cadence.
@@ -132,6 +150,12 @@ pub(super) fn read_delivery(
     // Check live task evidence before reusing either an in-memory read or a
     // durable READY receipt: a same-tip checkpoint note can withdraw readiness.
     if !marked_ready { return (None, None); }
+    if crate::store::open_task_store_local(&cas_dir).ok()
+        .and_then(|store| store.get(&task).ok())
+        .is_some_and(|task| crate::ui::factory::director::hold_decision_after_park(&task.notes))
+    {
+        return (None, None);
+    }
     if let Some(ready) = prior_ready(&cas_dir, &task, &tip) {
         return (Some(ready), None);
     }
@@ -152,6 +176,11 @@ pub(super) fn read_delivery(
     let wait = read_worker_wait(event, data, &cas_dir, repo);
     let mut ci = wait.as_ref().map(|(_, wait)| wait.ci).unwrap_or("unknown");
     let ready = read(event, data, repo, wait.as_ref().map(|(_, wait)| wait), &mut ci);
+    if (ci == "unknown" || ready.as_ref().is_some_and(|ready| ready.ci == "unknown"))
+        && suppress_unknown_ci(repo, data, &task, &tip)
+    {
+        return (None, None);
+    }
     let refs = fingerprint(event, data, repo).map(|(_, _, refs, _)| refs).unwrap_or(refs);
     let mut reads = cache.reads.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // An older in-flight observation cannot overwrite a newer request's read.

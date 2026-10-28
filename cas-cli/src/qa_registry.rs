@@ -1177,19 +1177,6 @@ impl Registry {
             }
         }
         report
-                    .single_reference_owner_groups
-                    .insert(name.clone(), journey.id.clone());
-                report.debt(
-                    "single_reference_owner_group",
-                    &format!("owner_groups.{name}"),
-                    &format!(
-                        "referenced only by journey {}; review shared ownership membership",
-                        journey.id
-                    ),
-                );
-            }
-        }
-        report
     }
 }
 

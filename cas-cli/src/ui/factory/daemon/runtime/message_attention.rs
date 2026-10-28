@@ -7,6 +7,8 @@ use std::collections::HashSet;
 pub(crate) enum MessageAttention {
     Needed,
     Satisfied,
+    /// A transcript correlated the durable id and full body; persist on Write.
+    Consumed,
 }
 
 fn close_instruction_tasks(prompt: &str) -> Vec<String> {
@@ -107,7 +109,10 @@ impl AttentionInputs {
             // cas-0cdaa: explicit work after the handoff retires the alarm
             // even when a Codex transcript cannot be bound. Keep this separate
             // from per-message read/ack evidence; transport alone is insufficient.
-            if queue.recipient_action_satisfies_alarm(row.id).unwrap_or(false) {
+            if queue
+                .recipient_action_satisfies_alarm(row.id)
+                .unwrap_or(false)
+            {
                 decisions.insert(row.id, MessageAttention::Satisfied);
                 continue;
             }
@@ -170,6 +175,13 @@ impl AttentionInputs {
                     cli,
                     cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex
                 ) {
+                    let consumed = crate::mcp::tools::service::harness_observation::observations_for_queued_message(
+                        path, *cli, row.created_at, row.id, &row.prompt,
+                    );
+                    if consumed.wake.is_some() {
+                        decisions.insert(row.id, MessageAttention::Consumed);
+                        continue;
+                    }
                     let observed = crate::mcp::tools::service::harness_observation::observations_after_delivery(
                         path, *cli, row.created_at, &row.prompt,
                     );

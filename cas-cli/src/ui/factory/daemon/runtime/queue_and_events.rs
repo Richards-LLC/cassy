@@ -4684,7 +4684,7 @@ impl FactoryDaemon {
         names.insert(self.app.supervisor_name().to_string());
         self.queue_jobs.poison_jobs.prune_epochs(&names);
         let supervisor = self.app.supervisor_name().to_string();
-        let unread: Vec<_> = rows.iter().filter(|candidate| candidate.row.target.eq_ignore_ascii_case(&supervisor)
+        let unread: Vec<_> = rows.iter().filter(|candidate| !candidate.consumed && candidate.row.target.eq_ignore_ascii_case(&supervisor)
             && !crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&candidate.row.source))
             .map(|candidate| candidate.row.clone()).collect();
         if !unread.is_empty() {

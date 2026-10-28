@@ -219,6 +219,7 @@ pub(crate) fn release_pointer(work: &PointerWork) -> bool {
 pub(crate) struct BounceCandidate {
     pub(crate) row: cas_store::QueuedPrompt,
     pub(crate) notice: String,
+    pub(crate) consumed: bool,
 }
 pub(crate) fn read_bounces(
     context: &AttentionInputs,
@@ -244,13 +245,15 @@ pub(crate) fn read_bounces(
         }
     };
     let decisions = context.decisions(queue.as_ref(), &rows);
-    rows.into_iter().filter(|row| decisions.get(&row.id) == Some(&MessageAttention::Needed))
+    rows.into_iter()
+        .filter(|row| matches!(decisions.get(&row.id), Some(MessageAttention::Needed | MessageAttention::Consumed)))
         .map(|row| {
             let report = queue.message_delivery_report(row.id).unwrap_or_else(|error| {
                 tracing::warn!(%error, message_id = row.id, "failed to read delivery state for sender bounce"); None
             });
             let notice = delivery_stalled_notice(&row, harnesses.get(&row.target).copied().unwrap_or(default_harness), report.as_ref());
-            BounceCandidate { row, notice }
+            let consumed = decisions.get(&row.id) == Some(&MessageAttention::Consumed);
+            BounceCandidate { row, notice, consumed }
         }).collect()
 }
 pub(crate) fn write_bounce(
@@ -264,6 +267,24 @@ pub(crate) fn write_bounce(
     let Ok(queue) = crate::store::open_prompt_queue_store(&context.cas_dir) else {
         return;
     };
+    if candidate.consumed {
+        // The read job supplied message-specific transcript evidence. Recheck
+        // identity before writing; a replaced row must not inherit the read.
+        if queue
+            .queued_prompt(candidate.row.id)
+            .ok()
+            .flatten()
+            .is_some_and(|row| same_message(&row, &candidate.row))
+            && let Err(error) = queue.record_recipient_surfaced(
+                candidate.row.id,
+                &candidate.row.target,
+                cas_store::SurfacingSource::ObservedWake,
+            )
+        {
+            tracing::warn!(%error, message_id = candidate.row.id, "could not persist transcript-correlated consumption");
+        }
+        return;
+    }
     if still_unread(queue.as_ref(), &candidate.row) != Some(true) {
         return;
     }

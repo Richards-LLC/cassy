@@ -1009,6 +1009,8 @@ pub struct MachinePaths {
     pub codex_config: Option<PathBuf>,
     /// Remaining registered Codex configurations; empty with explicit CODEX_HOME.
     pub codex_profiles: Vec<PathBuf>,
+    /// Account config paths before known shared-base links are resolved for writes.
+    pub codex_account_configs: Vec<PathBuf>,
     /// The only file allowed to contain the two plaintext onboarding values.
     pub credentials_file: PathBuf,
     /// The login-shell profile that must source the credentials file.
@@ -1056,21 +1058,22 @@ impl MachinePaths {
         let shared_codex_config = crate::accounts::Provider::Codex
             .base_dir(&home_for_credentials)
             .join("config.toml");
-        let mut codex_configs =
+        let codex_account_configs =
             crate::accounts::codex_homes(&home_for_credentials, selected_codex.as_deref())
                 .context("could not inspect registered Codex homes")?
                 .into_iter()
-                .map(|dir| {
-                    let config = dir.join("config.toml");
-                    // Only follow the exact config link installed by accounts link.
-                    // The regular-file guards still refuse a symlinked base file
-                    // or any other account-config symlink.
-                    if fs::read_link(&config).is_ok_and(|target| target == shared_codex_config) {
-                        shared_codex_config.clone()
-                    } else {
-                        config
-                    }
-                });
+                .map(|dir| dir.join("config.toml"))
+                .collect::<Vec<_>>();
+        let mut codex_configs = codex_account_configs.iter().cloned().map(|config| {
+            // Only follow the exact config link installed by accounts link.
+            // The regular-file guards still refuse a symlinked base file
+            // or any other account-config symlink.
+            if fs::read_link(&config).is_ok_and(|target| target == shared_codex_config) {
+                shared_codex_config.clone()
+            } else {
+                config
+            }
+        });
         let codex_config = codex_configs.next();
         let codex_profiles = codex_configs.collect();
         let credentials_file = env
@@ -1106,6 +1109,7 @@ impl MachinePaths {
             claude_profiles,
             codex_config,
             codex_profiles,
+            codex_account_configs,
             credentials_file,
             login_profile,
         })
@@ -2249,20 +2253,43 @@ fn run_with_credentials(
     };
 
     let mut harnesses = if args.no_harness {
-        vec![
-            HarnessEntry {
-                harness: "claude-code".to_string(),
-                path: paths.claude_json.clone(),
-                state: WriteState::Skipped,
-                note: Some("--no-harness".to_string()),
-            },
-            HarnessEntry {
+        let mut harnesses = vec![HarnessEntry {
+            harness: "claude-code".to_string(),
+            path: paths.claude_json.clone(),
+            state: WriteState::Skipped,
+            note: Some("--no-harness".to_string()),
+        }];
+        let codex_configs = if paths.codex_account_configs.is_empty() {
+            paths
+                .codex_config
+                .iter()
+                .chain(&paths.codex_profiles)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            paths.codex_account_configs.clone()
+        };
+        if codex_configs.is_empty() {
+            harnesses.push(HarnessEntry {
                 harness: "codex".to_string(),
-                path: paths.codex_config.clone(),
+                path: None,
                 state: WriteState::Skipped,
                 note: Some("--no-harness".to_string()),
-            },
-        ]
+            });
+        }
+        for (index, path) in codex_configs.into_iter().enumerate() {
+            harnesses.push(annotate_codex_account(
+                HarnessEntry {
+                    harness: "codex".to_string(),
+                    path: Some(path),
+                    state: WriteState::Skipped,
+                    note: Some("--no-harness".to_string()),
+                },
+                paths.codex_account_configs.get(index).map(PathBuf::as_path),
+                false,
+            ));
+        }
+        harnesses
     } else {
         let mut harnesses = vec![register_claude(
             paths.claude_json.as_deref(),
@@ -2277,16 +2304,26 @@ fn run_with_credentials(
         harnesses.extend(paths.claude_profiles.iter().filter_map(|profile| {
             reconcile_claude_profile(profile, &args.url, &token_env, &bypass_env, args.dry_run)
         }));
-        harnesses.push(register_codex(
-            paths.codex_config.as_deref(),
-            &args.url,
-            &token_env,
-            &bypass_env,
-            args.dry_run,
-        ));
-        harnesses.extend(paths.codex_profiles.iter().map(|profile| register_codex(
-            Some(profile), &args.url, &token_env, &bypass_env, args.dry_run,
-        )));
+        let mut named_targets = std::collections::HashSet::new();
+        let codex_configs = paths.codex_config.iter().chain(&paths.codex_profiles);
+        if paths.codex_config.is_none() {
+            harnesses.push(register_codex(
+                None,
+                &args.url,
+                &token_env,
+                &bypass_env,
+                args.dry_run,
+            ));
+        }
+        for (index, path) in codex_configs.enumerate() {
+            let entry =
+                register_codex(Some(path), &args.url, &token_env, &bypass_env, args.dry_run);
+            harnesses.push(annotate_codex_account(
+                entry,
+                paths.codex_account_configs.get(index).map(PathBuf::as_path),
+                named_targets.insert(path),
+            ));
+        }
         harnesses
     };
 
@@ -2751,6 +2788,38 @@ fn register_codex(
     }
 }
 
+fn annotate_codex_account(
+    mut entry: HarnessEntry,
+    account_config: Option<&Path>,
+    show_shared_target: bool,
+) -> HarnessEntry {
+    let Some(account_config) = account_config else {
+        return entry;
+    };
+    let account = account_config
+        .parent()
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| account_config.display().to_string());
+    let mut note = format!("account {account}");
+    if show_shared_target
+        && let Some(path) = entry.path.as_deref()
+        && path != account_config
+    {
+        note.push_str(&format!("; shared config {}", path.display()));
+    }
+    if let Some(reason) = entry.note.take() {
+        if entry.state == WriteState::Skipped && reason != "--no-harness" {
+            note.push_str("; warning: ");
+        } else {
+            note.push_str("; ");
+        }
+        note.push_str(&reason);
+    }
+    entry.note = Some(note);
+    entry
+}
+
 fn apply_codex(
     path: &Path,
     url: &str,
@@ -3070,10 +3139,18 @@ fn registered_machine_env_names(
             }
         }
     }
-    for path in paths.codex_config.iter().chain(&paths.codex_profiles)
+    for path in paths
+        .codex_config
+        .iter()
+        .chain(&paths.codex_profiles)
         .filter(|path| ifs::is_regular_file(path))
     {
-        let mut doc: toml_edit::DocumentMut = ifs::read_capped(path)?.parse()?;
+        let raw = ifs::read_capped(path)?;
+        // Registration reports a malformed account as skipped with its name;
+        // credential discovery must not stop before healthy accounts are visited.
+        let Ok(mut doc) = raw.parse::<toml_edit::DocumentMut>() else {
+            continue;
+        };
         super::violet_retirement::retire_codex_entry(&mut doc);
         if let Some(entry) = doc
             .get("mcp_servers")
@@ -3260,8 +3337,10 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
         ));
     }
     for harness in &report.harnesses {
-        if harness.harness == "codex" && harness.path.is_none()
-            && harness.note.as_deref() == Some("no account") {
+        if harness.harness == "codex"
+            && harness.path.is_none()
+            && harness.note.as_deref() == Some("no account")
+        {
             outcome.summary.push("codex: no account".to_string());
             continue;
         }
@@ -3445,7 +3524,11 @@ mod tests {
         ] {
             env.remove(name);
         }
-        let original = format!("export {}='$(pass show secret)'\nexport {}='static-profile-fixture'\n", legacy_token("EXPRESSION"), legacy_token("EXTERNAL"));
+        let original = format!(
+            "export {}='$(pass show secret)'\nexport {}='static-profile-fixture'\n",
+            legacy_token("EXPRESSION"),
+            legacy_token("EXTERNAL")
+        );
         fs::write(home.join(".profile"), &original).unwrap();
         let values = update_machine_credentials().unwrap();
         assert!(!values.contains_key("VIOLET_SLACK_TOKEN_EXPRESSION"));
@@ -3909,6 +3992,7 @@ mod tests {
             claude_profiles: Vec::new(),
             codex_config: Some(dir.join("home").join(".codex").join("config.toml")),
             codex_profiles: Vec::new(),
+            codex_account_configs: Vec::new(),
             credentials_file: dir
                 .join("home")
                 .join(".config")
@@ -4911,7 +4995,7 @@ auth = "env:{token}"
         let original = "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-mcp\"\n";
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture_root = env.home().to_path_buf();
-        for mode in ["foreign", "registered", "explicit", "none"] {
+        for mode in ["foreign", "registered", "explicit", "none", "malformed"] {
             let home = fixture_root.join(mode);
             fs::create_dir_all(&home).unwrap();
             env.set("HOME", &home);
@@ -4931,7 +5015,19 @@ auth = "env:{token}"
                     let account = home.join(name);
                     fs::create_dir_all(&account).unwrap();
                     fs::write(account.join("auth.json"), "{}").unwrap();
-                    symlink(&base, account.join("config.toml")).unwrap();
+                    if mode == "malformed" {
+                        fs::write(
+                            account.join("config.toml"),
+                            if name == ".codex-a@example.com" {
+                                "[broken\n"
+                            } else {
+                                original
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        symlink(&base, account.join("config.toml")).unwrap();
+                    }
                     expected.push(account.join("config.toml"));
                 }
             }
@@ -4954,6 +5050,42 @@ auth = "env:{token}"
                 ..test_args()
             };
             let paths = MachinePaths::from_env(&ProcessEnv).unwrap();
+            if mode == "malformed" {
+                assert!(
+                    existing_machine_env_names(&paths, &args.url).is_ok(),
+                    "one malformed account must not abort credential lookup"
+                );
+            }
+            if mode == "registered" {
+                let no_harness = run(
+                    &VioletArgs {
+                        no_harness: true,
+                        ..args.clone()
+                    },
+                    None,
+                    &paths,
+                    &ProcessEnv,
+                    &FakeProbe(live_tools()),
+                )
+                .unwrap();
+                let skipped: Vec<_> = no_harness
+                    .harnesses
+                    .iter()
+                    .filter(|entry| entry.harness == "codex")
+                    .collect();
+                assert_eq!(skipped.len(), 2, "{skipped:?}");
+                for ((entry, account), config) in skipped.iter().zip(["a", "b"]).zip(&expected) {
+                    assert_eq!(entry.state, WriteState::Skipped);
+                    assert_eq!(entry.path.as_deref(), Some(config.as_path()));
+                    let note = entry.note.as_deref().unwrap_or_default();
+                    assert!(note.contains("--no-harness"), "{entry:?}");
+                    assert!(
+                        note.contains(&format!(".codex-{account}@example.com")),
+                        "{entry:?}"
+                    );
+                }
+                assert_eq!(fs::read_to_string(&base).unwrap(), original);
+            }
             let report = run(&args, None, &paths, &ProcessEnv, &FakeProbe(live_tools())).unwrap();
             assert!(
                 !home.join(".codex").exists(),
@@ -4995,6 +5127,60 @@ auth = "env:{token}"
                 );
                 continue;
             }
+            if mode == "malformed" {
+                let bad = &expected[0];
+                let healthy = &expected[1];
+                // pin: a skipped malformed account config must remain byte-for-byte untouched.
+                assert_eq!(fs::read_to_string(bad).unwrap(), "[broken\n");
+                // pin: healthy accounts must receive Codex's named Violet table.
+                assert!(
+                    fs::read_to_string(healthy)
+                        .unwrap()
+                        .contains("[mcp_servers.violet]")
+                );
+                let skipped = report
+                    .harnesses
+                    .iter()
+                    .find(|entry| {
+                        entry.harness == "codex" && entry.path.as_deref() == Some(bad.as_path())
+                    })
+                    .unwrap();
+                assert_eq!(skipped.state, WriteState::Skipped);
+                let note = skipped.note.as_deref().unwrap_or_default();
+                assert!(note.contains("warning"), "{skipped:?}");
+                assert!(note.contains(".codex-a@example.com"), "{skipped:?}");
+                continue;
+            }
+            if mode == "registered" {
+                let codex: Vec<_> = report
+                    .harnesses
+                    .iter()
+                    .filter(|entry| entry.harness == "codex")
+                    .collect();
+                assert_eq!(codex.len(), 2, "{codex:?}");
+                for (entry, account) in codex.iter().zip(["a", "b"]) {
+                    assert_eq!(entry.path.as_deref(), Some(base.as_path()));
+                    let note = entry.note.as_deref().unwrap_or_default();
+                    assert!(
+                        note.contains(&format!(".codex-{account}@example.com")),
+                        "{entry:?}"
+                    );
+                }
+                assert!(
+                    codex[0]
+                        .note
+                        .as_deref()
+                        .unwrap()
+                        .contains(&base.display().to_string())
+                );
+                assert!(
+                    !codex[1]
+                        .note
+                        .as_deref()
+                        .unwrap()
+                        .contains(&base.display().to_string())
+                );
+            }
             for config in expected {
                 let written = fs::read_to_string(&config).unwrap();
                 assert!(
@@ -5009,7 +5195,8 @@ auth = "env:{token}"
                     "{mode}: {written}"
                 );
                 assert_eq!(
-                    parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER].as_str(),
+                    parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER]
+                        .as_str(),
                     Some(VIOLET_DEFAULT_BYPASS_ENV)
                 );
                 assert!(!written.contains(FAKE_TOKEN));
@@ -5242,10 +5429,7 @@ auth = "env:{token}"
         assert!(!report.is_green(), "{report:?}");
         let remedy = report.remedy.as_deref().unwrap();
         assert!(!remedy.contains("cas integrate violet"), "{remedy}");
-        assert!(
-            remedy.contains(&project.display().to_string()),
-            "{remedy}"
-        );
+        assert!(remedy.contains(&project.display().to_string()), "{remedy}");
         assert!(remedy.contains("violet.violet_broadcast"), "{remedy}");
     }
 

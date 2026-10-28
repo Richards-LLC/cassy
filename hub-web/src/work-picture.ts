@@ -85,10 +85,16 @@ export class WorkPicture {
     return this.stream(machineId, session).events;
   }
 
-  /** The open thread changed; read its newest work once when Show work is on. */
+  /**
+   * The open thread, on every render. Coming to a thread (first time or
+   * back from another) reads its newest work: notices that arrived while it
+   * was not on screen were not acted on, and an idle supervisor sends no more.
+   */
   watchThread(machineId: string | undefined, session: string | undefined): void {
+    const previous = this.thread;
     this.thread = machineId && session ? { machineId, session } : undefined;
-    if (this.thread && this.show && !this.stream(machineId!, session!).loaded) this.readNewest(this.thread);
+    const arrived = this.thread !== undefined && (previous?.machineId !== machineId || previous?.session !== session);
+    if (this.thread && this.show && (arrived || !this.stream(machineId!, session!).loaded)) this.readNewest(this.thread);
     this.syncPoll();
   }
 

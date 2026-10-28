@@ -90,7 +90,12 @@ export function renderWorkerTimeline(dialog: HTMLDialogElement, subject: WorkerT
   }
   if (handlers.rawOutput) {
     const fallback = document.createElement("button"); fallback.type = "button"; fallback.className = "worker-timeline-raw"; fallback.dataset.focusKey = "raw";
+    // Commander attaches only the supervisor's pane (DESIGN.md D5); a worker's
+    // own terminal is on its machine. Say so instead of implying otherwise.
     fallback.textContent = "Open the supervisor's raw output";
+    const limit = document.createElement("p"); limit.className = "worker-timeline-note";
+    limit.textContent = `Commander shows the supervisor's terminal only. ${subject.worker}'s own terminal is on its machine.`;
+    children.push(limit);
     fallback.onclick = () => { dialog.close(); handlers.rawOutput?.(); };
     children.push(fallback);
   }

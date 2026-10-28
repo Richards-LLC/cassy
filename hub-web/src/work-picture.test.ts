@@ -48,6 +48,23 @@ describe("work events (cas-ff22)", () => {
     expect(setInterval).toHaveBeenCalledTimes(1);
   });
 
+  it("re-reads a thread's newest work when the operator comes back to it", () => {
+    const transport: WorkEventTransport = { workEvents: () => "live", requestWorkEvents: vi.fn((session: string) => `${session}-${Math.random()}`), requestWorkEventDetail: vi.fn(() => undefined) };
+    const picture = new WorkPicture({ transport: () => transport, repaintThread: vi.fn(), repaintTimeline: vi.fn(), storage: { getItem: () => "1", setItem: () => {} }, setInterval: vi.fn(() => 1), clearInterval: vi.fn() });
+    picture.watchThread("m", "a");
+    const [first] = (transport.requestWorkEvents as ReturnType<typeof vi.fn>).mock.results.map((result) => result.value as string);
+    picture.page("m", "a", workEventsPage({ request_id: first!, events: [wire("a1", 1)], has_earlier: false })!);
+    picture.watchThread("m", "b");
+    // A's supervisor works while the operator reads B; its notice is not acted on there.
+    picture.appended("m", "a");
+    const forA = () => (transport.requestWorkEvents as ReturnType<typeof vi.fn>).mock.calls.filter(([session]) => session === "a").length;
+    expect(forA()).toBe(1);
+    picture.watchThread("m", "a");
+    expect(forA(), "coming back reads A's newest page").toBe(2);
+    picture.watchThread("m", "a");
+    expect(forA(), "a repaint of the same thread reads nothing").toBe(2);
+  });
+
   it("sets agent text as text and loads a row's detail only when it opens", () => {
     const open = new Set<string>();
     const requested: string[] = [];

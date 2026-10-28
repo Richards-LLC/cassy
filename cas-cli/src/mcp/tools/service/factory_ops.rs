@@ -85,6 +85,27 @@ fn requester_secure_storage_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
 /// cannot load Cassy' worker contract, then fails sixty seconds later with no
 /// actionable cause (GH #270).
 fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
+    preflight_claude_config_dir_with(raw, cfg!(target_os = "macos"), |service| {
+        let budget = std::time::Duration::from_secs(2);
+        let mut command = std::process::Command::new("/usr/bin/security");
+        // Metadata only: never request, expose or copy the stored password.
+        command.args(["find-generic-password", "-s", service]);
+        crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(budget),
+            budget,
+        )
+        .is_ok_and(|output| output.status.success())
+    })
+}
+
+// The platform credential store is the external boundary; temp-dir tests never
+// consult a developer's Keychain, even when run on macOS.
+fn preflight_claude_config_dir_with(
+    raw: &str,
+    macos: bool,
+    keychain_item_exists: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("config_dir is empty; expected a Claude configuration directory".to_string());
@@ -97,13 +118,27 @@ fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
                 .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
         },
     );
-    let required_files = [
-        ("settings.json", path.join("settings.json")),
-        (".credentials.json", path.join(".credentials.json")),
-    ];
-    for (name, candidate) in required_files {
-        std::fs::File::open(&candidate).map_err(|error| {
-            format!("config_dir preflight failed: missing or unreadable {name}: {error}")
+    let settings_error = |error: &dyn std::fmt::Display| {
+        format!("config_dir preflight failed: missing or unreadable settings.json: {error}")
+    };
+    match std::fs::read_to_string(path.join("settings.json")) {
+        Ok(contents) => {
+            serde_json::from_str::<serde_json::Value>(&contents)
+                .map_err(|error| settings_error(&error))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(settings_error(&error)),
+    }
+    if macos {
+        let service = claude_profile_keychain_service(&path.to_string_lossy());
+        if !keychain_item_exists(&service) {
+            return Err(format!(
+                "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service {service})"
+            ));
+        }
+    } else {
+        std::fs::File::open(path.join(".credentials.json")).map_err(|error| {
+            format!("config_dir preflight failed: missing or unreadable .credentials.json: {error}")
         })?;
     }
     for name in ["agents", "skills"] {
@@ -118,6 +153,20 @@ fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Claude Code 2.1.312's HW(): an explicit config selector scopes the
+/// credentials service by the first eight SHA-256 hex digits of its NFC text.
+/// Do not canonicalize: symlink spellings select distinct credential stores.
+/// This gate only receives explicit config_dir values; unscoped accounts do
+/// not enter it. cas-pty binds explicit profiles to the same storage selector.
+fn claude_profile_keychain_service(config_dir: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use unicode_normalization::UnicodeNormalization;
+
+    let normalized: String = config_dir.nfc().collect();
+    let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+    format!("Claude Code-credentials-{}", &hash[..8])
 }
 
 /// Resolve and validate an explicit Codex account directory (a `CODEX_HOME`
@@ -1473,23 +1522,29 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
 }
 
 /// Fill only unresolved worker accounts. The queue persists the selected directory;
-/// the receipt explains the choice even when no account is eligible.
+/// the receipt explains the choice even when no account is eligible. A Codex
+/// lane keeps its requester's account; unscoped slots use the shared policy.
 fn recommend_spawn_accounts(
-    specs: &mut [cas_mux::WorkerSpec], policy: &crate::config::AccountsConfig,
+    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, policy: &crate::config::AccountsConfig,
     now: chrono::DateTime<chrono::Utc>,
     mut collect: impl FnMut(crate::accounts::Provider) -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> String {
     let mut notices = Vec::new();
+    let unresolved = |spec: &cas_mux::WorkerSpec| {
+        spec.config_dir.is_none()
+            && !(lane_request && spec.cli == cas_mux::SupervisorCli::Codex
+                && spec.requester_config_dir.as_deref().is_some_and(|dir| !dir.trim().is_empty()))
+    };
     for (provider, cli) in [(crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
         (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex)] {
-        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none()) { continue }
+        if !specs.iter().any(|s| s.cli == cli && unresolved(s)) { continue }
         let accounts = match collect(provider) {
             Ok(rows) => rows,
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
         if let Some(recommended) = selection.recommended {
-            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none()) {
+            for spec in specs.iter_mut().filter(|s| s.cli == cli && unresolved(s)) {
                 if let Some(inherited) = spec.requester_config_dir.as_deref() {
                     notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
                 }
@@ -2941,7 +2996,7 @@ impl CasService {
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
-        let account_selection_notice = recommend_spawn_accounts(&mut specs, &account_policy, chrono::Utc::now(), |provider| {
+        let account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &account_policy, chrono::Utc::now(), |provider| {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
@@ -14887,7 +14942,6 @@ mod tests {
     fn config_dir_preflight_names_each_missing_requirement() {
         let temp = tempfile::tempdir().unwrap();
         let cases = [
-            ("settings.json", "settings.json"),
             (".credentials.json", ".credentials.json"),
             ("agents", "agents"),
             ("skills", "skills"),
@@ -14902,8 +14956,78 @@ mod tests {
             } else {
                 std::fs::remove_file(target).unwrap();
             }
-            let error = preflight_claude_config_dir(profile.to_str().unwrap()).unwrap_err();
+            let error = preflight_claude_config_dir_with(profile.to_str().unwrap(), false, |_| {
+                panic!("Linux must use the credentials file")
+            })
+            .unwrap_err();
             assert!(error.contains(expected), "expected {expected} in {error}");
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_optional_settings() {
+        for state in ["missing", "invalid", "unreadable"] {
+            let profile = tempfile::tempdir().unwrap();
+            valid_claude_config(profile.path());
+            let settings = profile.path().join("settings.json");
+            match state {
+                "missing" => std::fs::remove_file(&settings).unwrap(),
+                "invalid" => std::fs::write(&settings, "{broken").unwrap(),
+                // A directory is reliably unreadable as settings, including root CI.
+                _ => {
+                    std::fs::remove_file(&settings).unwrap();
+                    std::fs::create_dir(&settings).unwrap();
+                }
+            }
+            let result =
+                preflight_claude_config_dir_with(profile.path().to_str().unwrap(), false, |_| {
+                    panic!("Linux must not consult Keychain")
+                });
+            if state == "missing" {
+                assert!(result.is_ok(), "absent settings are empty: {result:?}");
+            } else {
+                // pin: preserve the existing actionable settings error prefix.
+                assert!(
+                    result.unwrap_err().starts_with(
+                        "config_dir preflight failed: missing or unreadable settings.json:"
+                    ),
+                    "{state} settings must fail with the existing message"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_macos_keychain() {
+        // Independent vendor-contract vector: decomposed Unicode hashes as NFC.
+        assert_eq!(
+            claude_profile_keychain_service("/tmp/cafe\u{301}"),
+            "Claude Code-credentials-0873cca0"
+        );
+        for present in [true, false] {
+            let profile = tempfile::tempdir().unwrap();
+            valid_claude_config(profile.path());
+            std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+            let probed = std::cell::Cell::new(false);
+            let result = preflight_claude_config_dir_with(
+                profile.path().to_str().unwrap(),
+                true,
+                |service| {
+                    assert!(service.starts_with("Claude Code-credentials-"), "{service}");
+                    assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
+                    probed.set(true);
+                    present
+                },
+            );
+            assert_eq!(
+                result.is_ok(),
+                present,
+                "Keychain present={present}: {result:?}"
+            );
+            assert!(
+                probed.get(),
+                "darwin must probe the selected profile's Keychain item"
+            );
         }
     }
 
@@ -15523,7 +15647,7 @@ mod tests {
             let mut requester = base.clone(); requester.requester_config_dir = Some("/requester/account".into());
             specs.extend([base, explicit, requester]);
         }
-        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
             let mut idle = crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 0.0);
             idle.windows.remove(0);
             Ok(vec![idle, crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0)])
@@ -15542,7 +15666,7 @@ mod tests {
         assert!(preflight_codex_config_dir(specs[3].config_dir.as_deref().unwrap()).unwrap_err().contains("auth.json"));
         specs[0].config_dir = None;
         specs[0].requester_config_dir = Some("/fallback/account".into());
-        let fallback = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+        let fallback = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
             let mut row = crate::account_selection::tests::row(provider, "full", 6, 100.0, 100.0);
             row.login_state = crate::account_registry::LoginState::LoggedIn;
             Ok(vec![row])
@@ -15562,7 +15686,7 @@ mod tests {
         }
         specs[0].config_dir = None;
         specs[3].config_dir = None;
-        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
             let mut rows = crate::account_registry::discover_with(provider, home.path(), false,
                 |_, _| crate::account_registry::LoginState::LoggedIn)?;
             for row in &mut rows {
@@ -15581,6 +15705,24 @@ mod tests {
             assert!(receipt.contains(&format!("{} recommended account=later", provider.name())));
         }
         assert_eq!(specs[0].requester_config_dir.as_deref(), Some("/fallback/account"));
+
+        // Lane requests retain an inherited Codex account even when the
+        // shared recommender would prefer a different subscription.
+        let provider = crate::accounts::Provider::Codex;
+        let mut lane_specs = build_lane_spawn_specs(2, "standard", None, None,
+            &cas_factory::CapabilitySnapshot::default()).unwrap().0;
+        lane_specs[0].requester_config_dir = Some("/fixture/.codex-a-low".into());
+        let receipt = recommend_spawn_accounts(&mut lane_specs, true, &Default::default(), now, |p| {
+            assert_eq!(p, provider);
+            Ok(vec![crate::account_selection::tests::row(p, "a-low", 6, 84.0, 0.0),
+                crate::account_selection::tests::row(p, "z-headroom", 6, 34.0, 0.0)])
+        });
+        assert!(lane_specs[0].config_dir.is_none(), "a lane must not override the requester's account");
+        assert_eq!(lane_specs[0].requester_config_dir.as_deref(), Some("/fixture/.codex-a-low"));
+        assert_eq!(lane_specs[1].config_dir.as_deref(), Some("/fixture/.codex-z-headroom"),
+            "without a requester, use shared quota policy rather than path order");
+        assert!(receipt.contains("codex recommended account=z-headroom") && receipt.contains("66% left"),
+            "account substitution must name the recommended account and headroom: {receipt}");
     }
 
     #[test]

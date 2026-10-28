@@ -1162,6 +1162,14 @@ explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
 Claude subscription OAuth; propagated supervisor settings retain existing API
 key inheritance.
 
+Explicit Claude profiles may omit `settings.json` (empty settings); an existing
+file must be readable JSON. Preflight checks macOS OAuth credentials by Keychain
+item existence, using Claude Code's `Claude Code-credentials-<8 hex>` service
+(first eight SHA-256 hex digits of the NFC-normalized config path). It uses the
+current user's default Keychain search list and never requests the password.
+Other platforms still require `.credentials.json`. Both paths require resolvable
+`agents` and `skills` directories before queueing a spawn.
+
 For CLI chores that need operator credentials, explicitly grant environment
 names in the project's `.cas/config.toml`:
 
@@ -3250,6 +3258,30 @@ earlier registration, so concurrent supervisors should use the default session
 slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
+
+## Bounded MCP task reads
+
+`task show` (including `get`), `task notes` reads and `task start` default to
+responses of at most 2,000 UTF-8 bytes. Show/start include the current scope;
+large note histories keep the latest decision, proof and checkpoint with cursors.
+A clipping notice marks shortened fields; literal ellipses in task text do not
+trigger it. Read clipped instructions before acting.
+
+For show/notes, `full=true` returns complete text. `offset=0 limit=1600`
+starts a byte page of that same text; follow its `next=` cursor until `end`.
+The page header is separate from the body, and concatenated bodies reproduce
+the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
+boundaries. Note summary cursors address the full `task notes` response.
+For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
+context. Start's default still performs the same claim and epic lifecycle work.
+Complete start advisories, including worktree directory instructions, are saved
+as a START CONTEXT task note before budgeting. An unchanged latest context reuses
+its note and cursor; transient claim/lease text stays in the start response.
+Warnings take precedence over scope, notes and recall; an oversized warning block
+is replaced by an explicit instruction to read its saved note before acting.
+The start response gives a byte cursor into `task notes` and a full-notes path.
+Default show retains Type and Demo for builtin gates, and names full-only sections
+(including dependencies, design, deliverables and terminal outcomes) explicitly.
 
 ## Durable task artifacts
 

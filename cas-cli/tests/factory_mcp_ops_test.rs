@@ -369,11 +369,28 @@ enum IsolatedCodexState {
     Unavailable,
 }
 
+/// A real ChatGPT catalogue keeps model admission active in spawn fixtures.
+fn write_codex_account_fixture(account: &std::path::Path, models: &[&str]) {
+    std::fs::create_dir_all(account).expect("create synthetic Codex account");
+    std::fs::write(account.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#)
+        .expect("write synthetic Codex auth");
+    std::fs::write(
+        account.join("models_cache.json"),
+        serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "client_version": "0.0.0-test",
+            "models": models.iter().map(|slug| serde_json::json!({"slug": slug})).collect::<Vec<_>>(),
+        })
+        .to_string(),
+    )
+    .expect("write synthetic Codex model catalogue");
+}
+
 /// Run one availability-sensitive integration test in its own process.
 ///
-/// The production probe reads process HOME/PATH internally, so a per-Command
-/// environment can reach it only when the whole service call runs in this
-/// child. The parent test process never mutates PATH.
+/// The production probe reads HOME/PATH and the requesting account selectors,
+/// so the whole service call runs in a child with a synthetic account and
+/// model catalogue. The parent test process never mutates PATH.
 fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // libtest names include the suite module in a grouped integration harness.
     // Strip the binary crate name; keep standalone and nested-module support.
@@ -388,14 +405,15 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     });
     std::fs::create_dir(&bin_dir).expect("create isolated child PATH");
 
+    let account = home.path().join(".codex");
     if matches!(state, IsolatedCodexState::Available) {
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
 
-        let auth = home.path().join(".codex/auth.json");
-        std::fs::create_dir_all(auth.parent().expect("auth parent"))
-            .expect("create fake codex auth directory");
-        std::fs::write(auth, "{}").expect("write fake codex auth marker");
+        write_codex_account_fixture(
+            &account,
+            &[cas::config::STOCK_WORKER_MODEL, "o3", "o4-mini"],
+        );
     }
 
     let output = std::process::Command::new(
@@ -408,8 +426,10 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // factory build probe deterministic in this process too.
     .env("CAS_FACTORY_BUILD_GUARD", "off")
     .env("HOME", home.path())
-    .env("CODEX_HOME", home.path().join(".codex"))
+    .env("CODEX_HOME", &account)
+    .env("XDG_CONFIG_HOME", home.path().join(".config"))
     .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
+    .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
     .env("PATH", &bin_dir)
     .output()
     .expect("spawn isolated Codex integration test");
@@ -9888,6 +9908,10 @@ async fn test_coordination_interrupt_action_is_urgent() {
 /// caught at test time, not at factory-start time.
 #[test]
 fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
+    // An inherited account need not exist: the child owns its account fixture.
+    let account = TempDir::new().expect("ambient account parent");
+    let missing = account.path().join("absent-account");
+    let _guard = EnvGuard::set(&[("CODEX_HOME", missing.to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child",
         IsolatedCodexState::Available,
@@ -9949,6 +9973,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
         "cas-efc4 AC2: worker_spec must encode the effort override: {spec_json}"
     );
 
+    let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid Codex spec");
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert_eq!(spec.requester_config_dir.as_deref(), expected_account.to_str());
+
     // Second entry: omitted overrides now resolves to the safe Codex worker floor
     // instead of inheriting the supervisor/session defaults.
     let claude_entry = &entries[1];
@@ -9971,6 +9999,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
 /// break the other.
 #[test]
 fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness() {
+    // A valid but incompatible inherited account must not select the child's models.
+    let account = TempDir::new().expect("incompatible ambient Codex account");
+    write_codex_account_fixture(account.path(), &["unrelated-model"]);
+    let _guard = EnvGuard::set(&[("CODEX_HOME", account.path().to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child",
         IsolatedCodexState::Available,
@@ -10043,6 +10075,24 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
         claude_spec.contains("medium"),
         "claude effort in spec: {claude_spec}"
     );
+
+    // The fixture exercises catalogue admission, rather than bypassing it via
+    // API-key auth or a missing/stale cache. Refusal must not enqueue work.
+    let unlisted = "fixture-unlisted-model";
+    let mut rejected = factory_req("spawn_workers");
+    rejected.count = Some(1);
+    rejected.cli = Some("codex".into());
+    rejected.model = Some(unlisted.into());
+    let error = env.service.factory_request(Parameters(rejected)).await
+        .expect_err("an unlisted model must still be refused");
+    assert!(
+        error.message.contains(unlisted) && error.message.contains("models_cache.json"),
+        "{error}"
+    );
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert!(error.message.contains(expected_account.to_str().unwrap()), "{error}");
+    assert_eq!(env.spawn_queue().peek(10).expect("peek after refusal").len(), 2);
+
 }
 
 /// cas-efc4 AC4: `worker_status` must surface worktree/git metadata
@@ -10588,6 +10638,10 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         .service
         .inner
         .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            read: cas::mcp::tools::TaskReadOptions {
+                full: true,
+                ..Default::default()
+            },
             id: clean_id.clone(),
             with_deps: false,
         }))
@@ -10603,6 +10657,9 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         .service
         .inner
         .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            read: cas::mcp::tools::TaskReadOptions {
+                ..Default::default()
+            },
             id: conflict_id.clone(),
             with_deps: false,
         }))

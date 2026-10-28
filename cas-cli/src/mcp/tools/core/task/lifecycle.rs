@@ -2962,7 +2962,7 @@ impl CasCore {
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
-        let brief = req.brief.unwrap_or(false);
+        let brief = req.brief.unwrap_or(true);
         let mut parent_worktree_info: Option<String> = None;
         let mut epic_ownership_info: Option<String> = None;
         let mut sibling_notes_info: Option<String> = None;
@@ -3064,7 +3064,7 @@ impl CasCore {
                             }
 
                             // Look up the parent epic's worktree
-                            if !brief && let Some(ref worktree_id) = parent.worktree_id {
+                            if let Some(ref worktree_id) = parent.worktree_id {
                                 if let Ok(wt_store) = self.open_worktree_store() {
                                     if let Ok(worktree) = wt_store.get(worktree_id) {
                                         if worktree.path.exists() {
@@ -3272,12 +3272,6 @@ impl CasCore {
                 }
             }
         }
-        let claim_info = if peer_notes.is_empty() {
-            claim_info
-        } else {
-            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
-        };
-
         // cas-062d / cas-17e4: durable outbox push after successful start.
         let actor = agent_store
             .get(&agent_id)
@@ -3354,10 +3348,8 @@ impl CasCore {
             .unwrap_or_default();
 
         if brief {
-            // Bound the complete variable portion of the brief response. The
-            // fixed header/claim/warning/push text remains small, while own
-            // notes are capped to 4 KiB and sibling/epic/workflow payloads are
-            // omitted entirely.
+            // Keep scope, resume state and recent evidence within 2000 bytes.
+            // Complete fields remain available through show/notes full or pages.
             let execution_state = task_store
                 .get_execution_state(&task.id)
                 .map_err(|error| {
@@ -3382,36 +3374,120 @@ impl CasCore {
                     Ok::<String, McpError>(format!("\n\nStructured execution state:\n{encoded}"))
                 })
                 .transpose()?;
-            let own_notes = if task.notes.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n\n📋 TASK NOTES:\n{}",
-                    crate::mcp::tools::truncate_str(&task.notes, 4_093)
+            use super::query::{ReadClipping, read_hint, task_scope, task_show_notes};
+            let mut clipping = ReadClipping::default();
+            // Save start-only instructions before budgeting; full show cannot
+            // otherwise recover warnings computed only during this start.
+            let advisory = format!(
+                "{}{}{}{}{}{}",
+                peer_notes,
+                blocker_warning,
+                reused_factory_branch_reset.as_deref().unwrap_or_default(),
+                unanchored_warning.unwrap_or_default(),
+                wt_info,
+                start_guidance(&task),
+            );
+            let context = format!("{advisory}{related_context}{cited_issues}");
+            let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
+            let read_saved = || task_store.get(&task.id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Task {} started, but reading saved start instructions failed: {error}",
+                        task.id
+                    ),
                 )
+            });
+            let mut saved = read_saved()?;
+            // Only compare the most recent context, ignoring its timestamp and
+            // any later progress notes. Lease display is intentionally transient.
+            let previous = std::iter::once(0)
+                .chain(saved.notes.match_indices("\n\n[").map(|(i, _)| i + 2))
+                .filter_map(|offset| {
+                    let entry = &saved.notes[offset..];
+                    chrono::NaiveDateTime::parse_from_str(
+                        entry.get(..18)?,
+                        "[%Y-%m-%d %H:%M]",
+                    )
+                    .ok()?;
+                    Some((offset, entry.get(18..)?.strip_prefix(" START CONTEXT")?))
+                })
+                .last();
+            let existing = previous
+                .filter(|(_, body)| {
+                    body.strip_prefix(context.as_ref())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("\n\n["))
+                })
+                .map(|(offset, _)| offset);
+            let note_offset = if let Some(offset) = existing {
+                offset
+            } else {
+                let note = format!(
+                    "[{}] START CONTEXT{context}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                );
+                task_store.append_note(&task.id, &note).map_err(|error| Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
+                ))?;
+                saved = read_saved()?;
+                saved.notes.rfind(&note).ok_or_else(|| Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    "Task started, but its saved start instructions are unavailable; read task notes full=true before acting",
+                ))?
             };
-            let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
-                req.id,
-                crate::mcp::tools::truncate_str(&task.title, 509),
+            let offset = format!("Notes for task {}\n{}\n\n", task.id, "=".repeat(task.id.len() + 15)).len()
+                + note_offset;
+            let navigation = format!(
+                "\nStart advisories: task notes id={} offset={offset} limit=1600 (follow next=)\nAll start advisories: task notes id={} full=true",
+                task.id, task.id
+            );
+            let cited_pointer =
+                crate::github_issue_attach::cited_issue_lines(&self.cas_root, &task)
+                    .into_iter()
+                    .next()
+                    .map(|line| format!("Cited issue: {line}"))
+                    .unwrap_or_default();
+            let optional = format!(
+                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                clipping.excerpt(&related_context, 120),
+                task_scope(&task, &mut clipping),
+                task_show_notes(&task.notes, &task.id, &mut clipping),
+                clipping.excerpt(&execution_state.unwrap_or_default(), 120),
+                clipping.excerpt(&cited_pointer, 220),
+            );
+            let prefix = format!(
+                "Started task: {} - {}\nDelivery mode: {}{}",
+                task.id,
+                clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
-                reused_factory_branch_reset.as_deref().unwrap_or_default(),
-                blocker_warning,
-                crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
-                crate::mcp::tools::truncate_str(&cited_issues, 1_021),
-                related_context,
-                execution_state.unwrap_or_default(),
-                start_guidance(&task),
-                own_notes,
-                push_note,
             );
-            // `truncate_str` appends three bytes when it truncates, hence the
-            // 6_141 payload bound for a hard 6 KiB response ceiling.
-            return Ok(Self::success(crate::mcp::tools::truncate_str(
-                &response, 6_141,
+            let hint = read_hint(&task.id, "show", true);
+            let available = 2000usize.saturating_sub(prefix.len() + navigation.len() + hint.len());
+            // A warning is either complete or explicitly deferred to its saved
+            // note, never silently clipped to a misleading prefix.
+            let (advisory, available) = if advisory.len() <= available {
+                let remaining = available - advisory.len();
+                (advisory, remaining)
+            } else {
+                let overflow = "\nStart advisories exceed the response budget. Read the saved start advisories below BEFORE acting.".to_string();
+                let remaining = available.saturating_sub(overflow.len());
+                (overflow, remaining)
+            };
+            let clipped = clipping.clipped || optional.len() > available;
+            let hint = read_hint(&task.id, "show", clipped);
+            return Ok(Self::success(format!(
+                "{prefix}{advisory}{navigation}{}{hint}",
+                clipping.excerpt(&optional, available)
             )));
         }
+
+        let claim_info = if peer_notes.is_empty() {
+            claim_info
+        } else {
+            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
+        };
 
         Ok(Self::success(format!(
             "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}",
@@ -5176,12 +5252,14 @@ mod related_recall_response_tests {
             .expect("created task")
             .id;
         let started = text(
-            core.cas_task_start(Parameters(IdRequest { id: task_id }))
+            core.cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
                 .await
                 .expect("start qa task"),
         );
         assert!(started.contains("m-golden-set"), "{started}");
         assert!(started.contains("QA golden test data"), "{started}");
+        let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
+        assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
     }
 
     #[test]

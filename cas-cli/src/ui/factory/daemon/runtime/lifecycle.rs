@@ -4867,6 +4867,19 @@ impl FactoryDaemon {
         assignment: Option<crate::ui::factory::app::AssignmentRead>,
     ) {
         use crate::ui::factory::app::AssignmentRead;
+        // A green delivery has one durable reservation shared with later park
+        // and manual merge requests. Never bypass that queue via direct PTY or
+        // native inbox transport. Red/unknown decision prompts keep their lane.
+        if prompt.merge_alert.is_some() && prompt.text.starts_with("READY TO MERGE") {
+            let cas_dir = self.app.cas_dir().to_path_buf();
+            let session = self.session_name.clone();
+            store_worker.submit("director merge readiness", move || {
+                if let Err(error) = super::delivery::enqueue_merge_ready_prompt(&cas_dir, &session, &prompt) {
+                    tracing::warn!(%error, "director merge readiness enqueue failed");
+                }
+            });
+            return;
+        }
         // A routine nudge has one queryable row and uses the queue's
         // busy-recipient gate. Never write it directly into a Teams inbox.
         if let Some(task_id) = prompt.stall_nudge_task.clone() {

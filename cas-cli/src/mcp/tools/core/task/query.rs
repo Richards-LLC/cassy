@@ -1,7 +1,5 @@
 use crate::mcp::tools::core::imports::*;
 
-const TASK_SHOW_NOTES_LIMIT: usize = 5;
-
 fn retain_list_tasks(
     tasks: &mut Vec<Task>,
     filter: &str,
@@ -37,42 +35,181 @@ fn append_list_filter_report(
     }
 }
 
-fn task_show_notes(notes: &str, task_id: &str) -> String {
-    // Notes written by `task notes` begin with a timestamped `[... ]`
-    // heading. Split on the heading boundary so blank lines inside a note do
-    // not accidentally turn one note into several; retain the simpler split
-    // for legacy/plain note blobs without headings.
-    let entries: Vec<&str> = if notes.contains("\n\n[") {
-        let mut entries = Vec::new();
-        let mut start = 0;
-        for (offset, _) in notes.match_indices("\n\n[") {
-            let entry = &notes[start..offset];
-            if !entry.trim().is_empty() {
-                entries.push(entry);
-            }
-            start = offset + 2;
+/// Records actual excerpt operations, including nested summary fields.
+#[derive(Default)]
+pub(super) struct ReadClipping {
+    pub(super) clipped: bool,
+}
+
+impl ReadClipping {
+    pub(super) fn excerpt(&mut self, text: &str, budget: usize) -> String {
+        self.clipped |= text.len() > budget;
+        excerpt(text, budget)
+    }
+}
+
+/// Keep short history intact; for a large timeline retain the latest decision,
+/// proof and checkpoint, each with a byte cursor into the original notes.
+/// Full reads remain the source of truth, including attached artifact receipts.
+pub(super) fn task_show_notes(notes: &str, task_id: &str, clipping: &mut ReadClipping) -> String {
+    if notes.len() <= 700 {
+        return notes.to_string();
+    }
+    let mut starts = vec![0];
+    starts.extend(notes.match_indices("\n\n[").map(|(i, _)| i + 2));
+    let entries: Vec<_> = starts
+        .iter()
+        .enumerate()
+        .map(|(i, start)| {
+            (
+                *start,
+                notes[*start..starts.get(i + 1).copied().unwrap_or(notes.len())].trim_end(),
+            )
+        })
+        .collect();
+    let mut selected = Vec::new();
+    for marker in ["DECISION", "PROOF"] {
+        if let Some((offset, text)) = entries
+            .iter()
+            .rev()
+            .find(|(_, text)| text.lines().next().unwrap_or("").contains(marker))
+        {
+            selected.push((*offset, *text));
         }
-        let entry = &notes[start..];
-        if !entry.trim().is_empty() {
-            entries.push(entry);
-        }
-        entries
-    } else {
-        notes
-            .split("\n\n")
-            .filter(|entry| !entry.trim().is_empty())
-            .collect()
-    };
-    let earlier = entries.len().saturating_sub(TASK_SHOW_NOTES_LIMIT);
-    let visible = &entries[earlier..];
-    let mut rendered = String::new();
-    if earlier > 0 {
-        rendered.push_str(&format!(
-            "{earlier} earlier notes; `task notes id={task_id}` for all\n\n"
+    }
+    if let Some(last) = entries.last() {
+        selected.push(*last);
+    }
+    selected.sort_by_key(|(offset, _)| *offset);
+    selected.dedup_by_key(|(offset, _)| *offset);
+    let mut result = String::new();
+    let header_bytes = format!(
+        "Notes for task {}\n{}\n\n",
+        task_id,
+        "=".repeat(task_id.len() + 15)
+    )
+    .len();
+    for (offset, text) in selected {
+        result.push_str(&format!(
+            "[notes offset={}] {}\n",
+            header_bytes + offset,
+            clipping.excerpt(text, 100)
         ));
     }
-    rendered.push_str(&visible.join("\n\n"));
-    rendered
+    if let Some(id) = notes
+        .lines()
+        .rev()
+        .filter_map(|line| line.strip_prefix("ARTIFACT_PROOF: "))
+        .find_map(|json| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                })
+        })
+    {
+        result.push_str(&format!("Latest artifact: {}\n", clipping.excerpt(&id, 80)));
+    }
+    result.push_str(&format!(
+        "History: {} bytes; task notes id={task_id} full=true",
+        notes.len()
+    ));
+    result
+}
+
+pub(super) fn excerpt(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    if budget < '…'.len_utf8() {
+        return String::new();
+    }
+    let mut end = budget.saturating_sub(3).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+pub(super) fn read_hint(id: &str, action: &str, clipped: bool) -> String {
+    let warning = if clipped {
+        "\nRead clipped instructions before acting."
+    } else {
+        ""
+    };
+    format!(
+        "{warning}\nFull: task {action} id={id} full=true\nPage: task {action} id={id} offset=0 limit=1600"
+    )
+}
+
+/// The summary and navigation together fit the response budget. A page is a
+/// slice of the complete renderer, so following next= is lossless even in UTF-8.
+pub(super) fn render_task_read(
+    full: &str,
+    summary: &str,
+    id: &str,
+    action: &str,
+    clipped: bool,
+    read: &TaskReadOptions,
+) -> Result<String, McpError> {
+    if read.full {
+        return Ok(full.to_string());
+    }
+    if read.offset.is_some() || read.limit.is_some() {
+        let start = read.offset.unwrap_or(0);
+        if start > full.len() || !full.is_char_boundary(start) {
+            return Err(CasCore::error(
+                ErrorCode::INVALID_PARAMS,
+                "offset must be a UTF-8 boundary within the full text; follow next= from the previous page",
+            ));
+        }
+        let budget = read.limit.unwrap_or(1600).clamp(4, 1600);
+        let mut end = start.saturating_add(budget).min(full.len());
+        while !full.is_char_boundary(end) {
+            end -= 1;
+        }
+        let next = if end == full.len() {
+            "end".into()
+        } else {
+            end.to_string()
+        };
+        return Ok(format!(
+            "Task {action} bytes {start}..{end}/{} next={next}\n\n{}",
+            full.len(),
+            &full[start..end]
+        ));
+    }
+    // Reserve the longer warning before deciding whether the final budget clips.
+    let reserve = read_hint(id, action, true).len();
+    let hint = read_hint(id, action, clipped || summary.len() > 2000 - reserve);
+    Ok(format!(
+        "{}{}",
+        excerpt(summary, 2000usize.saturating_sub(hint.len())),
+        hint
+    ))
+}
+
+pub(super) fn task_scope(task: &Task, clipping: &mut ReadClipping) -> String {
+    let risk = task
+        .risk
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Execution Note: {}\nDescription: {}\nAcceptance Criteria: {}\nProof Targets: {}\nRisk: {}\nDoor: {} (recorded only)\n",
+        clipping.excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 40),
+        clipping.excerpt(&task.description, 100),
+        clipping.excerpt(&task.acceptance_criteria, 80),
+        clipping.excerpt(&task.proof_targets.join(", "), 40),
+        clipping.excerpt(&risk, 40),
+        task.door
+            .map(|door| door.to_string())
+            .unwrap_or_else(|| "undeclared".into())
+    )
 }
 
 impl CasCore {
@@ -87,6 +224,10 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        let mut clipping = ReadClipping::default();
+        let mut read_status = String::new();
+        let mut batch_summary = String::new();
 
         let parent_epic = task_store
             .get_parent_epic(&task.id)
@@ -103,10 +244,10 @@ impl CasCore {
             .origin_project
             .as_deref()
             .unwrap_or("unassigned legacy row");
-        let origin = if project_id.is_some()
+        let foreign_origin = project_id.is_some()
             && task.origin_project.is_some()
-            && !super::task_owned_by_project(&task, &self.cas_root, project_id.as_deref())
-        {
+            && !super::task_owned_by_project(&task, &self.cas_root, project_id.as_deref());
+        let origin = if foreign_origin {
             format!("{origin} — this task is owned elsewhere")
         } else {
             origin.to_string()
@@ -127,7 +268,9 @@ impl CasCore {
             target
         );
         // cas-ea9c (GH #1005): cited issues attached at assignment.
-        if let Some(section) = crate::github_issue_attach::cited_issue_section(&self.cas_root, &task) {
+        if let Some(section) =
+            crate::github_issue_attach::cited_issue_section(&self.cas_root, &task)
+        {
             output.push_str(&format!("\n{section}\n"));
         }
 
@@ -153,6 +296,10 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+            read_status.push_str(&format!(
+                "Structured execution state: {}\n",
+                clipping.excerpt(&encoded, 180)
+            ));
             output.push_str("\nStructured execution state:\n");
             output.push_str(&encoded);
             output.push('\n');
@@ -190,6 +337,13 @@ impl CasCore {
                         "worker revalidates repository/tips and submits a new receipt"
                     }
                 };
+                read_status.insert_str(
+                    0,
+                    &format!(
+                        "Transactional delivery: {}\nReceipt: {}\nCommit: {}\n",
+                        transaction.state, receipt.id, receipt.commit_sha
+                    ),
+                );
                 output.push_str(&format!(
                     "\nTransactional delivery: {}\n  Receipt: {}\n  Commit: {}\n  Next action: {}",
                     transaction.state, receipt.id, receipt.commit_sha, next_action
@@ -222,6 +376,7 @@ impl CasCore {
                     | cas_types::VerificationDispatchState::Claimed
             )
         {
+            read_status.insert_str(0, &format!("Verification dispatch: {}\n", dispatch.id));
             output.push_str(&format!(
                 "\nVerification dispatch: {} (deadline {})\n",
                 dispatch.id,
@@ -236,6 +391,7 @@ impl CasCore {
         // clean one queued for the supervisor.
         if task.status == TaskStatus::AwaitingMerge {
             if task.deliverables.merge_conflicted {
+                read_status.insert_str(0, "MERGE CONFLICT / REWORK REQUIRED\n");
                 output.push_str(
                     "⚠️  MERGE CONFLICT / REWORK REQUIRED — this task is NOT complete. \
                      The parked branch is conflicted or its conflict preflight could \
@@ -250,14 +406,38 @@ impl CasCore {
                 );
             }
             if let Some(ref branch) = task.deliverables.parked_branch {
+                read_status.insert_str(
+                    0,
+                    &format!("Parked branch: {}\n", clipping.excerpt(branch, 100)),
+                );
                 output.push_str(&format!("Parked branch: {branch}\n"));
             }
         }
 
         if let Some(batch) = task.deliverables.integration_batch.as_ref() {
+            batch_summary = format!(
+                "{}: {}@{}\n",
+                if task.status == TaskStatus::AwaitingMerge {
+                    "Staged in integration batch"
+                } else {
+                    "Integration batch receipt"
+                },
+                clipping.excerpt(&batch.branch, 60),
+                batch.tip
+            );
+
             output.push_str(&format!(
                 "{}: {}@{} (base {}, delivery {}, supervisor {})\n",
-                if task.status == TaskStatus::AwaitingMerge { "Staged in integration batch" } else { "Integration batch receipt" }, batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
+                if task.status == TaskStatus::AwaitingMerge {
+                    "Staged in integration batch"
+                } else {
+                    "Integration batch receipt"
+                },
+                batch.branch,
+                batch.tip,
+                batch.base,
+                batch.delivered_head,
+                batch.supervisor_id
             ));
         }
 
@@ -266,17 +446,14 @@ impl CasCore {
         }
 
         if !task.notes.is_empty() {
-            output.push_str(&format!(
-                "\nNotes:\n{}\n",
-                task_show_notes(&task.notes, &task.id)
-            ));
+            output.push_str(&format!("\nNotes:\n{}\n", task.notes));
         }
 
         // cas-7d54: surface web-authored comments (read-only mirror, contract
         // §2). Best-effort fetch off the async runtime via spawn_blocking;
         // degrades to nothing when not logged in / no team / offline so it
         // never blocks or fails `task show`.
-        {
+        if req.read.full || req.read.offset.is_some() || req.read.limit.is_some() {
             let cas_root = self.cas_root.clone();
             let comment_task_id = req.id.clone();
             let comments = tokio::task::spawn_blocking(move || {
@@ -316,7 +493,12 @@ impl CasCore {
         } else {
             output.push_str("\nRisk: undeclared\n");
         }
-        output.push_str(&format!("Door: {} (recorded only)\n", task.door.map(|door| door.to_string()).unwrap_or_else(|| "undeclared".into())));
+        output.push_str(&format!(
+            "Door: {} (recorded only)\n",
+            task.door
+                .map(|door| door.to_string())
+                .unwrap_or_else(|| "undeclared".into())
+        ));
         if !task.proof_targets.is_empty() {
             output.push_str(&format!(
                 "Proof Targets: {}\n",
@@ -349,7 +531,9 @@ impl CasCore {
                     output.push_str("\nOutcome: delivered");
                 }
                 cas_types::TaskTerminalOutcome::EvidenceOnly => {
-                    output.push_str("\nOutcome: successful evidence-only delivery (not for integration)");
+                    output.push_str(
+                        "\nOutcome: successful evidence-only delivery (not for integration)",
+                    );
                 }
                 cas_types::TaskTerminalOutcome::NegativeResult => {
                     output.push_str("\nOutcome: measured negative result (no delivery)");
@@ -384,13 +568,28 @@ impl CasCore {
             if let Some(ref commit) = task.deliverables.commit_hash {
                 output.push_str(&format!("\n  Commit: {commit}"));
             }
-            if let Some(merge) = task.deliverables.merge_commit.as_ref()
+            if let Some(merge) = task
+                .deliverables
+                .merge_commit
+                .as_ref()
                 .or(task.deliverables.green_merge_commit.as_ref())
             {
                 output.push_str(&format!("\n  Merge commit: {merge}"));
             }
-            if task.deliverables.green_merge_commit.is_some() || task.deliverables.merge_ci_admission.is_some() {
-                output.push_str(&format!("\n  CI admission: {}", task.deliverables.effective_merge_ci_admission().label()));
+            if task.deliverables.green_merge_commit.is_some()
+                || task.deliverables.merge_ci_admission.is_some()
+            {
+                read_status.insert_str(
+                    0,
+                    &format!(
+                        "CI admission: {}\n",
+                        task.deliverables.effective_merge_ci_admission().label()
+                    ),
+                );
+                output.push_str(&format!(
+                    "\n  CI admission: {}",
+                    task.deliverables.effective_merge_ci_admission().label()
+                ));
             }
         }
 
@@ -561,7 +760,46 @@ impl CasCore {
             }
         }
 
-        Ok(Self::success(output))
+        let origin_summary = if foreign_origin {
+            format!(
+                "{} — this task is owned elsewhere",
+                clipping.excerpt(task.origin_project.as_deref().unwrap_or(""), 40)
+            )
+        } else {
+            clipping.excerpt(&origin, 40)
+        };
+        let header = format!(
+            "Task: {} - {}\nStatus: {:?}\nAssignee: {}\nOrigin project: {}\nPriority: P{}; Depth: {}; Delivery mode: {}\nTarget: {}\n",
+            task.id,
+            clipping.excerpt(&task.title, 60),
+            task.status,
+            clipping.excerpt(task.assignee.as_deref().unwrap_or("(unassigned)"), 40),
+            origin_summary,
+            task.priority.0,
+            task.depth,
+            task.delivery_mode,
+            clipping.excerpt(&target, 80),
+        );
+        // Builtin verifier/epic flows consume Type and Demo from bare show.
+        // Name full-only sections so callers cannot silently infer absence.
+        let summary = format!(
+            "Type: {}\nDemo: {}\nOmitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}\nNotes:\n{}",
+            task.task_type,
+            clipping.excerpt(&task.demo_statement, 160),
+            clipping.excerpt(&header, 400),
+            task_scope(&task, &mut clipping),
+            clipping.excerpt(&read_status, 200),
+            batch_summary,
+            task_show_notes(&task.notes, &task.id, &mut clipping)
+        );
+        Ok(Self::success(render_task_read(
+            &output,
+            &summary,
+            &task.id,
+            "show",
+            clipping.clipped,
+            &req.read,
+        )?))
     }
 
     /// List blocked tasks
@@ -1071,25 +1309,8 @@ mod tests {
     }
 
     #[test]
-    fn task_show_notes_pages_old_entries_but_keeps_newest_five() {
-        let notes = (1..=7)
-            .map(|index| format!("[2026-09-10T12:00:0{index}Z] PROGRESS note-{index}"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let rendered = task_show_notes(&notes, "cas-9568");
-
-        assert!(rendered.starts_with("2 earlier notes; `task notes id=cas-9568` for all"));
-        assert!(!rendered.contains("note-1"));
-        assert!(!rendered.contains("note-2"));
-        for index in 3..=7 {
-            assert!(rendered.contains(&format!("note-{index}")), "{rendered}");
-        }
-    }
-
-    #[test]
     fn task_show_notes_leaves_short_history_without_paging_line() {
-        let rendered = task_show_notes("first\n\nsecond", "cas-9568");
+        let rendered = task_show_notes("first\n\nsecond", "cas-9568", &mut ReadClipping::default());
         assert_eq!(rendered, "first\n\nsecond");
     }
 
@@ -1097,7 +1318,7 @@ mod tests {
     fn task_show_notes_preserves_blank_lines_inside_a_note() {
         let notes = "[2026-09-10 12:00] 📝 PROGRESS first paragraph\n\nsecond paragraph\n\n\
 [2026-09-10 12:01] 📝 PROGRESS latest";
-        let rendered = task_show_notes(notes, "cas-9568");
+        let rendered = task_show_notes(notes, "cas-9568", &mut ReadClipping::default());
         assert!(rendered.contains("first paragraph\n\nsecond paragraph"));
         assert!(rendered.contains("latest"));
     }

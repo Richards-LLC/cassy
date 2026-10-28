@@ -115,6 +115,10 @@ async fn assignment_attaches_the_cited_issue_and_the_worker_reads_it_from_disk_c
     let shown = text_of(
         worker
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id: task.id.clone(),
                 with_deps: false,
             }))

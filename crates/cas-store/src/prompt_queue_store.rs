@@ -12154,6 +12154,7 @@ mod tests {
             };
             {
                 let conn = crate::shared_db::lock_connection(&store.conn).unwrap();
+                // pin: terminal-history is the accepted terminal lane; Commander targets the supervisor.
                 conn.execute("INSERT INTO prompt_queue(source,target,prompt,factory_session,operator_verified,processed_at)
                     VALUES (?1,?2,?3,?4,?5,?6)", params![source, if source == "terminal" { "terminal-history" } else { "supervisor" },
                     message, session, verified, processed.then(|| Utc::now().to_rfc3339())]).unwrap();

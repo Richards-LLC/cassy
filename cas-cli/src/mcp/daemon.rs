@@ -73,13 +73,41 @@ pub(crate) fn apply_factory_worker_metadata(agent: &mut Agent, clone_path: Optio
     // This is additive evidence for cross-process recipient rendering.
     if agent.role == AgentRole::Supervisor {
         if let Ok(cli) = std::env::var("CAS_FACTORY_SUPERVISOR_CLI") {
-            agent.metadata.insert("supervisor_cli".to_string(), cli);
-        }
-        if let Ok(account_dir) = std::env::var("CODEX_HOME") {
-            if !account_dir.trim().is_empty() {
-                agent
-                    .metadata
-                    .insert("supervisor_account_dir".to_string(), account_dir);
+            agent
+                .metadata
+                .insert("supervisor_cli".to_string(), cli.clone());
+            // Capture this process's selector while registering. A hub serves
+            // several accounts and must never substitute its own environment.
+            // Remove old provider evidence if a registered role changes CLI.
+            agent.metadata.remove("supervisor_account_dir");
+            agent.metadata.remove("supervisor_account_harness");
+            let selector = match crate::harness_policy::parse_harness(&cli) {
+                Some(cas_mux::SupervisorCli::Claude) => Some(("CLAUDE_CONFIG_DIR", ".claude")),
+                Some(cas_mux::SupervisorCli::Codex) => Some(("CODEX_HOME", ".codex")),
+                _ => None,
+            };
+            if let Some((variable, default)) = selector {
+                let home = dirs::home_dir();
+                let account_dir = std::env::var_os(variable)
+                    .filter(|value| !value.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| home.as_ref().map(|home| home.join(default)));
+                let account_dir = account_dir.and_then(|path| {
+                    if let Some(tail) = path.to_str().and_then(|path| path.strip_prefix("~/")) {
+                        home.as_ref().map(|home| home.join(tail))
+                    } else if path.is_absolute() {
+                        Some(path)
+                    } else {
+                        std::env::current_dir().ok().map(|cwd| cwd.join(path))
+                    }
+                });
+                if let Some(account_dir) = account_dir {
+                    agent.metadata.insert(
+                        "supervisor_account_dir".to_string(),
+                        account_dir.to_string_lossy().into_owned(),
+                    );
+                    agent.metadata.insert("supervisor_account_harness".into(), cli);
+                }
             }
         }
     }

@@ -150,7 +150,7 @@
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright and `scripts/journey-eval.sh` affected selection.
 - **Two-machine Commander rig:** `scripts/qa-rig/commander-two-machine/` (`rig.sh` start/stop/status/pair, `browser.mjs` saved paired profile, README) for real soundwave + prowl QA.
 - **Contributor policy / Rust proof:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`, and capped named `cargo nextest` / `cargo check` commands.
-- **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs` (ANSI capture parser and checks); **release records:** `docs/release-notes/` Slack drafts, `docs/release-reports/` per-version Markdown, brief, HTML, PDF and visual-QA reports.
+- **QA contracts:** `docs/qa/`, `scripts/terminal-qa.mjs` (ANSI capture parser and checks); **release records:** `docs/release-notes/` Slack drafts (including `2026-10-28-v3.86.0-slack.md`), `docs/release-reports/` per-version Markdown, brief, HTML, PDF and visual-QA reports.
 - **Design records:** `docs/design/` tokens and briefs; `docs/design/cli/` terminal briefs (e.g. `violet-channel-diagnostics.brief.md`), locale/width captures and `docs/design/cli/captures/`.
 - **Release tooling:** `scripts/release.sh`, `scripts/release-gate.sh`, `scripts/release-train-announce.py`, `scripts/find-release-prebuild.sh`, `scripts/release-report-post.py`, `cas-cli/src/cli/release_report.rs`, `cas-cli/src/deliverable/assets/check-pdf.py`.
 - **Proof tooling:** `scripts/qa-candidate-build.py`, `scripts/release_env.py`, `scripts/release_scratch.py`, `scripts/fast-rows-pre-push.sh`.

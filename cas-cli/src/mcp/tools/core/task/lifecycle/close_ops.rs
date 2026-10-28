@@ -33896,6 +33896,62 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
         }
     }
 
+    /// The final delivery may be only the bundle, or a source-only sync
+    /// merge. worktree_merge keeps target dist, then regenerates it separately.
+    #[test]
+    fn delivery_evolution_accepts_worktree_merge_regenerated_dist_cas_c765() {
+        for sync_tip in [false, true] {
+            let dir = init_factory_repo("worker");
+            let p = dir.path();
+            let source = "hub-web/src/main.ts";
+            let dist = "hub-web/dist/app.js";
+            std::fs::create_dir_all(p.join("hub-web/src")).unwrap();
+            std::fs::create_dir_all(p.join("hub-web/dist")).unwrap();
+            git(p, &["checkout", "main"]);
+            f2eb_commit(p, source, "base();\n", "seed source");
+            f2eb_commit(p, dist, "bundle(0);\n", "seed dist");
+            git(p, &["checkout", "-B", "factory/worker", "main"]);
+            f2eb_commit(p, source, "base();\ndelivered();\n", "feat(cas-test1): source");
+            let mut anchor = f2eb_commit(p, dist, "bundle(1);\n", "build(cas-test1): dist");
+            git(p, &["checkout", "main"]);
+            f2eb_commit(p, "sibling.txt", "sibling\n", "sibling delivery");
+            if sync_tip {
+                git(p, &["checkout", "factory/worker"]);
+                git(p, &["merge", "--no-ff", "main", "-m", "sync sources (cas-test1)"]);
+                anchor = head_sha(p);
+                git(p, &["checkout", "main"]);
+            }
+            // Model merge=cas-generated keeping the target bundle, while
+            // all task source is integrated in the merge's tree.
+            git(p, &["merge", "--no-ff", "--no-commit", "-s", "ours", "factory/worker"]);
+            std::fs::write(p.join(source), "base();\ndelivered();\n").unwrap();
+            git(p, &["add", source]);
+            git(p, &["commit", "-qm", "merge worker sources"]);
+            let merge = head_sha(p);
+            let mut task = worker_task("worker");
+            task.status = TaskStatus::AwaitingMerge;
+            task.deliverables.factory_branch_anchor = Some(anchor.clone());
+            let req = base_req(&task.id);
+            // A source-only integration without the rebuild still refuses.
+            assert!(matches!(run_factory_branch_merge_gate(&task, &req, "main", p), MergeStateGateOutcome::Reject(_)));
+            let regeneration = f2eb_commit(p, dist, "bundle(merged);\n", &format!(
+                "build(hub-web): regenerate dist from merged sources\n\nRebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-0c988).", &merge[..9]));
+            let outcome = run_factory_branch_merge_gate(&task, &req, "main", p);
+            assert!(matches!(&outcome, MergeStateGateOutcome::ProceedWithNote(note)
+                if note.contains(&regeneration) && note.contains(source)), "sync_tip={sync_tip}: {outcome:?}");
+            let row = collect_epic_branch_statuses(&[task.clone()], "main", p).remove(0);
+            assert!(!row.blocks_epic_close(), "{row:?}");
+            // A later deletion of the rebuilt output is not regeneration.
+            git(p, &["rm", dist]);
+            git(p, &["commit", "-qm", "remove dist"]);
+            assert!(matches!(run_factory_branch_merge_gate(&task, &req, "main", p), MergeStateGateOutcome::Reject(_)));
+            // Nor may a rebuild excuse lost source.
+            f2eb_commit(p, source, "base();\n", "revert: remove delivery source");
+            f2eb_commit(p, dist, "bundle(missingSource);\n", "build(hub-web): regenerate dist from merged sources");
+            assert!(matches!(run_factory_branch_merge_gate(&task, &req, "main", p), MergeStateGateOutcome::Reject(_)));
+        }
+    }
+
     fn f2eb_commit(p: &std::path::Path, path: &str, content: &str, message: &str) -> String {
         std::fs::write(p.join(path), content).unwrap();
         git(p, &["add", path]);

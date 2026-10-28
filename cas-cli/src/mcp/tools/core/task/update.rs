@@ -382,6 +382,57 @@ pub(crate) fn resolve_assignment_freshness_branch(
     None
 }
 
+/// QA assignment reserves an immutable delivery, not an implementation base.
+/// An idle checkout may still belong to a previous review; preserve it and
+/// identify the bound candidate instead of syncing it against a moving epic.
+fn immutable_qa_assignment_note(
+    cas_dir: &std::path::Path,
+    task: &Task,
+    worker: &cas_types::Agent,
+) -> Result<Option<String>, String> {
+    if !task.labels.iter().any(|label| label == crate::qa_pass::QA_PASS_LABEL) {
+        return Ok(None);
+    }
+    let reject = |error| format!("Cannot assign independent QA task {}: {error}", task.id);
+    // Both producer identity spellings are used by existing QA rounds.
+    cas_store::assert_may_review_qa_task(cas_dir, &task.id, &worker.id).map_err(reject)?;
+    let Some(pass) = cas_store::assert_may_review_qa_task(cas_dir, &task.id, &worker.name)
+        .map_err(reject)? else {
+        return Ok(None); // A label alone cannot bypass implementation policy.
+    };
+    let mut note = format!(
+        "Independent QA assignment is bound to immutable producer HEAD {} (round {}). ",
+        pass.bound_head, pass.id,
+    );
+    if let Some(clone_path) = worker.metadata.get("clone_path") {
+        let path = std::path::Path::new(clone_path);
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(path).output()
+            .map_err(|_| format!("Cannot assign QA task {}: cannot inspect reviewer checkout", task.id))?;
+        if !status.status.success() {
+            return Err(format!("Cannot assign QA task {}: cannot inspect reviewer checkout", task.id));
+        }
+        if !status.stdout.is_empty() {
+            return Err(format!(
+                "Cannot assign QA task {}: reviewer has tracked checkout changes; preserve them before reviewing immutable HEAD {}",
+                task.id, pass.bound_head,
+            ));
+        }
+        let head = crate::mcp::tools::worktree_head(path)
+            .ok_or_else(|| format!("Cannot assign QA task {}: reviewer checkout HEAD is unavailable", task.id))?;
+        if head == pass.bound_head {
+            note.push_str("Reviewer checkout matches the bound HEAD.");
+        } else {
+            note.push_str(&format!(
+                "Reviewer checkout is still at {head}; inspect the bound producer HEAD when starting this review."
+            ));
+        }
+    }
+    note.push_str(" Assignment leaves the checkout unchanged.");
+    Ok(Some(note))
+}
+
 /// GH #1006 item 3: a worker whose checkout sits on a delivery parked for
 /// merge reads as far behind any other epic, but rebasing it would destroy
 /// the tip under review. Assignment proceeds with this note instead; `task
@@ -561,6 +612,10 @@ impl CasCore {
                  `task mine` can find this task. \
                  Use '{worker_name}' directly to avoid this warning."
             ));
+        }
+        if let Some(note) = immutable_qa_assignment_note(&self.cas_root, task, worker)? {
+            warnings.push(note);
+            return Ok(worker_name.clone());
         }
         if let Some(note) = parked_assignment_note(task_store, worker) {
             warnings.push(note);

@@ -142,8 +142,8 @@ async fn cas_7806_stall_assignment_respects_peer_splits_and_live_claims() {
             stores.task_store.update(&task).unwrap();
         }
         app.unfiltered_director_data = DirectorData::load_fast(&cas).unwrap();
-        assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
-            "with no ready work in the focused epic, production evidence must cover fallback tasks and filter the live peer claim");
+        assert_eq!(classify(&mut app), None,
+            "with no ready children, a pinned epic must not wake for unrelated fallback tasks");
         app.current_epic_id = None;
         assert_eq!(classify(&mut app), expected(&["cas-loose-free"]),
             "without focus, production evidence must still cover ready tasks and filter the live peer claim");

@@ -421,10 +421,16 @@ fn cloud_peer_messages_wake_only_when_daemon_stamped() {
         );
         let intro = queue.peek_for_targets(&[harness], None, 10).unwrap();
         assert_eq!(intro.len(), 1, "{harness} intro");
-        assert!(
-            intro[0].prompt.contains(peer_policy),
-            "{harness} queued intro omits peer wake policy"
-        );
+        if cli == cas_mux::SupervisorCli::Codex {
+            // Codex receives this policy in its resident developer contract,
+            // checked above; its visible launch trigger must not duplicate it.
+            assert!(!intro[0].prompt.contains(peer_policy));
+        } else {
+            assert!(
+                intro[0].prompt.contains(peer_policy),
+                "{harness} queued intro omits peer wake policy"
+            );
+        }
     }
     for (name, surface) in [
         (

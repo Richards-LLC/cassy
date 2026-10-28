@@ -43,14 +43,23 @@ describe('conversation evidence', () => {
     });
     history.hydrateSend(row(1, 'Phone message', 'phone', 'Pixel 10'));
     history.hydrateSend(row(2, 'Computer message', 'computer', 'Desktop'));
-    history.hydrateSend(row(3, 'Terminal message', 'terminal', 'Terminal', false));
+    // Transcript capture can arrive after a later Commander send has a row
+    // ID. Its original input time still places it before that send.
+    history.hydrateSend({ ...row(4, 'Terminal message', 'terminal', 'Terminal', false), target: 'terminal-history', at: '2026-09-29T15:00:01.500Z' });
     const view = new ConversationView(document, history, 'supervisor');
     document.body.replaceChildren(view.element);
     view.update();
     expect([...view.element.querySelectorAll('.conversation-send-origin')].map(node => node.textContent))
-      .toEqual(['from Pixel 10', 'from Desktop', 'from Terminal']);
+      .toEqual(['from Pixel 10', 'from Terminal', 'from Desktop']);
     expect(history.events.map(event => event.kind === 'send' && event.value.text))
-      .toEqual(['Phone message', 'Computer message', 'Terminal message']);
+      .toEqual(['Phone message', 'Terminal message', 'Computer message']);
+    const terminal = { ...row(4, 'Terminal message', 'terminal', 'Terminal', false), target: 'terminal-history', at: '2026-09-29T15:00:01.500Z' };
+    const reloaded = new ConversationHistory();
+    for (const message of [terminal, row(2, 'Computer message', 'computer', 'Desktop'), row(1, 'Phone message', 'phone', 'Pixel 10')]) reloaded.hydrateSend(message);
+    reloaded.hydrateSend(terminal);
+    reloaded.hydrateSend(row(3, 'Later computer message', 'computer', 'Desktop'));
+    expect(reloaded.events.map(event => event.kind === 'send' && event.value.text))
+      .toEqual(['Phone message', 'Terminal message', 'Computer message', 'Later computer message']);
   });
   it('threads the supervisor answer under a terminal-typed question, once (cas-5c89)', () => {
     const history = new ConversationHistory();
@@ -560,6 +569,9 @@ describe('conversation evidence', () => {
     expect(connection).toBe('Waiting for supervisor');
     expect(conversationRowMarkup({ ...row, unreachable: dormant.unreachable, connection })).toContain('<span class="conversation-preview unreachable">Waiting for supervisor</span>');
     expect(pendingSessionLabel(dormant, false)).toBe(row.connection);
+    for (const state of ['Connecting', 'Reconnecting']) {
+      expect(pendingSessionLabel(dormant, false, state)).toBe(`${state} · message pending`);
+    }
     // A dropped connection names itself in place of the last turn, so the row agrees with the header (cas-a447).
     expect(conversationRowMarkup({ ...row, connection: 'Reconnecting', interrupted: true })).toContain('<span class="conversation-preview interrupted">Reconnecting</span>');
     expect(conversationRowMarkup({ ...row, connection: 'Live' })).toContain('<span class="conversation-preview">You: Keep this instruction visible.</span>');

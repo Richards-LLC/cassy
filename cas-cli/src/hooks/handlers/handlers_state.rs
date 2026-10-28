@@ -934,6 +934,14 @@ mod supervisor_handoff_tests {
         worker.role = AgentRole::Worker;
         worker.factory_session = ending.factory_session.clone();
         agents.register(&worker).unwrap();
+        // Short historical rows must not expand into a fleet-sized startup wall.
+        for i in 0..13 {
+            let mut retired = Agent::new(format!("retired-{i}"), format!("retired-worker-{i}"));
+            retired.role = AgentRole::Worker;
+            retired.factory_session = ending.factory_session.clone();
+            retired.status = cas_types::AgentStatus::Shutdown;
+            agents.register(&retired).unwrap();
+        }
         let mut live_task = Task::new("cas-live".into(), "Live lease".into());
         live_task.status = TaskStatus::InProgress;
         live_task.assignee = Some(worker.name.clone());
@@ -1026,18 +1034,30 @@ mod supervisor_handoff_tests {
         // Reopen through the real startup handler after the predecessor was deleted.
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_AGENT_NAME", "successor");
+        env.set("CAS_HOOK_HARNESS", "codex");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();
         let context = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        assert!(context.contains("\"id\":\"cas-leased\""), "supervisor lease ownership must survive even without an assignee: {context}");
+        assert!(context.contains("Supervisor lease without assignee (cas-leased)"), "supervisor lease ownership must survive even without an assignee: {context}");
         assert!(agents.get_lease(&leased.id).unwrap().is_none(), "normal SessionEnd releases the ending supervisor's lease");
         let handoff_start = context.find("Supervisor handoff").unwrap();
         let handoff_end = context.find("verify current liveness before recovery.").unwrap();
         assert!(handoff_end - handoff_start < 2800, "long history must stay in the full receipt, inside startup's context budget");
-        for expected in ["Supervisor handoff", "cas-owned-id", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "Previously delivered open ask: select branch", "compaction"] {
+        for expected in ["Supervisor handoff", "live-worker", "factory/live-worker-cas-parked", "pull/42", "Pending ask: approve delivery 42", "compaction"] {
             assert!(context.contains(expected), "startup lost {expected}: {context}");
         }
+        assert!(context[handoff_start..handoff_end].lines().count() <= 30, "handoff must bound short historical rows too: {context}");
+        assert!(!context.contains("{\""), "startup handoff must use readable rows: {context}");
+        let receipts = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap();
+        let receipt: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(receipts.into_iter().next().unwrap().unwrap().path()).unwrap(),
+        ).unwrap();
+        assert_eq!(receipt["workers"].as_array().unwrap().len(), 14);
+        for expected in ["cas-owned-id", "Previously delivered open ask: select branch"] {
+            assert!(receipt.to_string().contains(expected), "full handoff lost {expected}");
+        }
+        assert!(receipt["tasks"].as_array().unwrap().iter().any(|row| row["notes"].as_str().unwrap_or_default().contains("long prior task history")), "full task history stays in the durable receipt");
         assert!(agents.get(&worker.id).is_ok(), "live worker must survive succession");
         assert_eq!(agents.get_lease(&live_task.id).unwrap().unwrap().agent_id, worker.id);
         assert_eq!(tasks.get(&live_task.id).unwrap().status, TaskStatus::InProgress);
@@ -1049,8 +1069,9 @@ mod supervisor_handoff_tests {
         let third = handle_session_start(&HookInput { session_id: "third-id".into(), ..Default::default() }, Some(&root)).unwrap();
         let third = serde_json::to_value(third).unwrap();
         let context = third["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
-        assert!(context.contains("\"id\":\"cas-owned-id\""), "an unadopted inherited epic must survive another succession: {context}");
-        assert!(context.contains("\"name\":\"live-worker\""), "the inherited live worker must remain visible: {context}");
+        let receipts: Vec<_> = std::fs::read_dir(root.join("supervisor-handoffs")).unwrap().map(|r| std::fs::read_to_string(r.unwrap().path()).unwrap()).collect();
+        assert!(receipts.iter().any(|r| r.contains("cas-owned-id") && r.contains("inherited_handoff")), "unadopted inherited epics must remain retrievable");
+        assert!(context.contains("live-worker"), "the inherited live worker must remain visible: {context}");
 
 
     }

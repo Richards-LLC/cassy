@@ -4,6 +4,7 @@
  * The renderer builds every node itself. Body text is never assigned to
  * innerHTML, which keeps tags, entities, and unsupported link schemes literal.
  */
+import { createCodeFrame } from "./code-frame";
 
 interface ListMarker {
   indent: number;
@@ -11,8 +12,10 @@ interface ListMarker {
   content: string;
 }
 
-const FENCE = /^\s{0,3}`{3,}(?:[^`]*)$/;
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const HEADING = /^\s{0,3}#{1,6}(?:\s+|$)(.*)$/;
+const CALLOUT = /^\s{0,3}>[ \t]?\[!(NOTE|WARNING|CAUTION)\][ \t]*$/i;
+const QUOTE_LINE = /^\s{0,3}>[ \t]?/;
 const LIST = /^(\s*)([-+*]|\d+[.)])\s+(.*)$/;
 const LEGACY_NUMBER = /(?:\(\d+\)|\d+\))(?=[ \t]+)/g;
 const ALL_CAPS_LABEL = "[A-Z][A-Z0-9]*(?:[ \\t]+[A-Z][A-Z0-9]*)*";
@@ -26,11 +29,17 @@ function listMarker(line: string): ListMarker | undefined {
 }
 
 function isFence(line: string): boolean {
-  return FENCE.test(line);
+  const match = FENCE.exec(line);
+  return match !== null && !(match[1]![0] === "`" && match[2]!.includes("`"));
+}
+
+function closesFence(line: string, opening: string): boolean {
+  const match = FENCE.exec(line);
+  return match !== null && match[1]![0] === opening[0] && match[1]!.length >= opening.length && !match[2]!.trim();
 }
 
 function isBlockStart(line: string): boolean {
-  return isFence(line) || HEADING.test(line) || listMarker(line) !== undefined;
+  return isFence(line) || HEADING.test(line) || CALLOUT.test(line) || listMarker(line) !== undefined;
 }
 
 function leadingPlainText(source: string): string | undefined {
@@ -41,7 +50,7 @@ function leadingPlainText(source: string): string | undefined {
 function hasMarkdownMarkers(source: string): boolean {
   if (INLINE_MARKDOWN.test(source)) return true;
   return source.split("\n").some((line) => {
-    if (isFence(line) || HEADING.test(line)) return true;
+    if (isFence(line) || HEADING.test(line) || CALLOUT.test(line)) return true;
     const marker = listMarker(line);
     // A closing parenthesis is the legacy prose form handled below. A dot or
     // a bullet at line start remains the Markdown contract.
@@ -95,7 +104,7 @@ function normalizePlainText(source: string): string {
   return `# ${lead}${source.slice(lead.length)}`;
 }
 
-function appendInline(document: Document, parent: HTMLElement, source: string): void {
+export function appendInline(document: Document, parent: HTMLElement, source: string): void {
   let index = 0;
   let plainStart = 0;
   const flush = (end: number): void => {
@@ -253,7 +262,13 @@ function renderList(document: Document, lines: string[], start: number, baseInde
 
 /** Render the supported reply subset as safe DOM nodes. */
 export function renderMarkdown(document: Document, source: string): HTMLElement[] {
-  const lines = normalizePlainText(source).replace(/\r\n?/g, "\n").split("\n");
+  return renderBlocks(document, source, true);
+}
+
+function renderBlocks(document: Document, source: string, allowCallouts: boolean): HTMLElement[] {
+  // Keep original line separators for Copy; prose parsing still uses lines.
+  const parts = normalizePlainText(source).split(/(\r\n|\r|\n)/);
+  const lines = parts.filter((_, part) => part % 2 === 0);
   const nodes: HTMLElement[] = [];
   let index = 0;
   while (index < lines.length) {
@@ -261,14 +276,20 @@ export function renderMarkdown(document: Document, source: string): HTMLElement[
     if (!line.trim()) { index += 1; continue; }
 
     if (isFence(line)) {
+      const fence = FENCE.exec(line)!;
+      const info = fence[2]!.trim();
+      const [tag = "", ...metadata] = info.split(/\s+/);
+      const filename = metadata.join(" ").replace(/^(?:title|filename)=["']?(.*?)["']?$/, "$1") || undefined;
+      const language = tag.toLowerCase();
       index += 1;
-      const codeLines: string[] = [];
-      while (index < lines.length && !isFence(lines[index]!)) codeLines.push(lines[index++]!);
+      const start = index;
+      while (index < lines.length && !closesFence(lines[index]!, fence[1]!)) index += 1;
+      // The separator immediately before a closing fence is structural. All
+      // bytes inside the source, including CRLF, tabs and blank lines, survive.
+      const literal = index > start ? parts.slice(start * 2, (index - 1) * 2 + 1).join("") : "";
       if (index < lines.length) index += 1;
-      const pre = document.createElement("pre"); pre.className = "markdown-code";
-      const code = document.createElement("code"); code.textContent = codeLines.join("\n"); pre.append(code);
-      nodes.push(pre);
-      const language = line.trim().replace(/^`+/, "").trim().toLowerCase();
+      const { frame, pre } = createCodeFrame(document, { source: literal, language: tag, filename });
+      nodes.push(frame);
       if (["mermaid", "diff", "patch"].includes(language)) {
         void import("./rich-code").then(({ enhanceCode }) => enhanceCode(pre, language)).catch(() => { pre.dataset.richState = "fallback"; });
       }
@@ -277,9 +298,32 @@ export function renderMarkdown(document: Document, source: string): HTMLElement[
 
     const heading = HEADING.exec(line);
     if (heading) {
-      const lead = document.createElement("p"); lead.className = "markdown-heading";
+      // Keep the scale modest while preserving the message's semantic outline.
+      const level = Math.min(3, line.trimStart().match(/^#+/)![0].length);
+      const lead = document.createElement(`h${level}`); lead.className = "markdown-heading";
       const bold = document.createElement("strong"); appendInline(document, bold, heading[1]!); lead.append(bold);
       nodes.push(lead); index += 1; continue;
+    }
+
+    const callout = allowCallouts ? CALLOUT.exec(line) : null;
+    if (callout) {
+      const kind = callout[1]!.toLowerCase();
+      const label = kind[0]!.toUpperCase() + kind.slice(1);
+      const aside = document.createElement("aside");
+      aside.className = "markdown-callout"; aside.dataset.kind = kind;
+      aside.setAttribute("aria-label", label);
+      const title = document.createElement("p"); title.className = "markdown-callout-label";
+      const strong = document.createElement("strong"); strong.textContent = label;
+      title.append(strong); aside.append(title);
+      index += 1;
+      const body: string[] = [];
+      while (index < lines.length && QUOTE_LINE.test(lines[index]!)) {
+        body.push(lines[index]!.replace(QUOTE_LINE, "") + (parts[index * 2 + 1] ?? ""));
+        index += 1;
+      }
+      // Reuse safe blocks; nested callout markers stay literal, with bounded depth.
+      aside.append(...renderBlocks(document, body.join(""), false));
+      nodes.push(aside); continue;
     }
 
     const marker = listMarker(line);
@@ -304,8 +348,9 @@ export function plainTextMarkdown(source: string): string {
   while (index < lines.length) {
     const line = lines[index]!;
     if (isFence(line)) {
+      const opening = FENCE.exec(line)![1]!;
       index += 1;
-      while (index < lines.length && !isFence(lines[index]!)) output.push(lines[index++]!);
+      while (index < lines.length && !closesFence(lines[index]!, opening)) output.push(lines[index++]!);
       if (index < lines.length) index += 1;
       continue;
     }

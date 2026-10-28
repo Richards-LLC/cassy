@@ -139,10 +139,31 @@ pub(crate) fn enqueue_commander_message(
     in_reply_to: Option<i64>,
     attribution: &crate::ui::factory::MessageAttribution,
 ) -> anyhow::Result<cas_store::EnqueueOutcome> {
+    enqueue_commander_message_with_client_ref(
+        cas_dir, factory_session, target, text, summary, urgent, in_reply_to, None, attribution,
+    )
+}
+
+/// Retain the browser's send identity in the same transaction as its durable turn.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn enqueue_commander_message_with_client_ref(
+    cas_dir: &std::path::Path,
+    factory_session: &str,
+    target: &str,
+    text: &str,
+    summary: Option<&str>,
+    urgent: bool,
+    in_reply_to: Option<i64>,
+    client_ref: Option<&str>,
+    attribution: &crate::ui::factory::MessageAttribution,
+) -> anyhow::Result<cas_store::EnqueueOutcome> {
     use anyhow::Context as _;
 
     let queue = crate::store::open_prompt_queue_store(cas_dir)?;
-    let attribution_json = serde_json::to_value(attribution)?;
+    let mut attribution_json = serde_json::to_value(attribution)?;
+    if let Some(client_ref) = client_ref.filter(|value| !value.trim().is_empty()) {
+        attribution_json["client_ref"] = serde_json::Value::String(client_ref.to_string());
+    }
     let priority = urgent.then_some(cas_store::NotificationPriority::Critical);
     let operator = operator_stamp(attribution);
     let bound_text;

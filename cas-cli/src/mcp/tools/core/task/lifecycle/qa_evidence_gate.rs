@@ -341,7 +341,10 @@ pub(super) fn approved_receipt_bundle(
             .notes
             .lines()
             .filter(|line| line.contains("PLATFORM_PROOF"))
-            .filter_map(|line| line.split_once(crate::qa_evidence::BUNDLE_CITATION))
+            .filter_map(|line| {
+                line.split_once(crate::qa_evidence::REVIEW_BUNDLE_CITATION)
+                    .or_else(|| line.split_once(crate::qa_evidence::BUNDLE_CITATION))
+            })
             .filter_map(|(_, rest)| rest.split_whitespace().next())
             .any(|raw| {
                 let path = raw.trim_matches(|ch: char| "(),[]{}<>\"'`;*.".contains(ch));

@@ -430,6 +430,27 @@ impl CasCore {
         Some(report)
     }
 
+    /// Use the implementer's validated start range when one exists. Legacy
+    /// deliveries retain their existing receipt/target classification.
+    fn attributed_qa_paths(
+        &self,
+        task: &Task,
+        repo: &Path,
+        target: &str,
+        head: &str,
+    ) -> Option<Vec<String>> {
+        let history = self.open_agent_store().ok()?
+            .get_lease_history(&task.id, None).ok()?;
+        let identity = super::close_ops::task_commit_identity_in_repo(
+            repo, task, Some(head.to_owned()),
+        ).ok()?;
+        identity.start_base.as_ref()?;
+        let window = super::close_ops::resolve_task_commit_receipt_window(
+            task.created_at, &history, identity,
+        );
+        super::close_ops::task_attribution::qa_paths(repo, target, &window, Some(head))
+    }
+
     /// Open the independent QA round for a delivery that just parked (or
     /// re-parked) for merge. Returns the text to append to the MERGE
     /// REQUIRED refusal, or `None` when the delivery is not user-facing.
@@ -454,17 +475,18 @@ impl CasCore {
         if integrated_dispatch_boundary(task, repo, delivery_ref, &target).is_some() {
             return None;
         }
-        let changed = match changed_paths_for_delivery(
-            repo,
-            &target,
-            delivery_ref,
-        ) {
-            Ok(paths) => Some(paths),
-            Err(error) => {
-                tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
-                None
-            }
-        };
+        let changed = self.attributed_qa_paths(task, repo, parent_branch, delivery_ref)
+            .or_else(|| match changed_paths_for_delivery(
+                repo,
+                &target,
+                delivery_ref,
+            ) {
+                Ok(paths) => Some(paths),
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
+                    None
+                }
+            });
         self.independent_qa_for_paths(
             task,
             repo,
@@ -1294,6 +1316,9 @@ impl CasCore {
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
         let changed = head.as_deref().and_then(|head| {
+            if let Some(paths) = self.attributed_qa_paths(task, repo, target_branch, head) {
+                return Some(paths);
+            }
             // Match the close's durable task boundary: once a multi-commit
             // FF/rebase reaches the target, merge-base collapses onto its last
             // commit. A task-creation timestamp alone is not a delivery base;
@@ -1372,19 +1397,17 @@ impl CasCore {
             let supervisor = self
                 .get_agent_id()
                 .unwrap_or_else(|_| "supervisor".to_string());
-            return match cas_store::waive_qa_pass(
-                &self.cas_root,
+            return match self.waive_qa_round(
                 &task.id,
                 &supervisor,
                 implementer,
                 &branch,
                 head,
                 reason,
-                chrono::Utc::now(),
             ) {
-                Ok(pass) => QaCloseGate::Waived(format!(
+                Ok((pass, retired)) => QaCloseGate::Waived(format!(
                     "✅ DECISION Independent QA waived by supervisor {supervisor} at close for @{} \
-                     (pass {}), already merged into {target_branch}. Reason: {reason}",
+                     (pass {}), already merged into {target_branch}. Reason: {reason}{retired}",
                     pass.head8(),
                     pass.id,
                 )),
@@ -1729,6 +1752,54 @@ impl CasCore {
 }
 
 impl CasCore {
+    /// Both explicit waivers and close overrides retire the superseded work.
+    pub(crate) fn waive_qa_round(
+        &self, task_id: &str, supervisor: &str, implementer: &str,
+        branch: &str, head: &str, reason: &str,
+    ) -> cas_store::Result<(QaPass, String)> {
+        let (waived, retired) = cas_store::waive_qa_pass_reporting_superseded(
+            &self.cas_root, task_id, supervisor, implementer, branch, head, reason,
+            chrono::Utc::now(),
+        )?;
+        let mut status = String::new();
+        if let Some(retired) = retired {
+            let reason = format!("Independent QA round {} for {} superseded by supervisor {}'s logged waiver {}: {}",
+                retired.id, task_id, supervisor, waived.id, reason.trim());
+            status = self.cancel_qa_task_with_reason(&retired, &reason, Some(task_id.into()));
+            if let Some(reviewer) = retired.reviewer_agent_id.as_deref() {
+                status.push_str(&self.notify_superseded_reviewer(
+                    &retired, reviewer, &format!("logged supervisor waiver {}", waived.id),
+                ));
+            }
+        }
+        Ok((waived, status))
+    }
+
+    /// Explicit repair only; queue/status reads never call this bounded path.
+    pub(crate) fn reconcile_obsolete_qa_tasks(
+        &self, delivery: &str, limit: usize, supervisor: &str,
+    ) -> cas_store::Result<Vec<String>> {
+        let passes = cas_store::obsolete_qa_task_passes(&self.cas_root, delivery, limit)?;
+        let store = self.open_task_store().map_err(|error| cas_store::StoreError::Other(error.to_string()))?;
+        let mut cancelled = Vec::new();
+        for pass in passes {
+            let id = pass.qa_task_id.as_deref().expect("obsolete selection has a child");
+            let reason = format!("Supervisor {supervisor} reconciled obsolete independent QA pass {} ({}) for closed delivery {delivery}; existing findings and evidence retained.",
+                pass.id, pass.state);
+            let receipt = self.cancel_qa_task_with_reason(&pass, &reason, Some(delivery.into()));
+            if store.get(id)?.status != TaskStatus::Cancelled {
+                return Err(cas_store::StoreError::Other(format!(
+                    "QA reconciliation stopped after retiring {} child(ren): {receipt}; {id} was not retired. Re-read qa_status before retrying.", cancelled.len()
+                )));
+            }
+            cancelled.push(id.to_owned());
+            if let Some(reviewer) = pass.reviewer_agent_id.as_deref() {
+                self.notify_superseded_reviewer(&pass, reviewer, "the delivery's existing QA decision");
+            }
+        }
+        Ok(cancelled)
+    }
+
     /// Cancel the QA work item of a withdrawn round (cas-5c38) so no
     /// reviewer is spawned for a pass that no longer binds the delivery.
     pub(crate) fn cancel_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
@@ -1762,6 +1833,15 @@ impl CasCore {
         if qa_task.is_terminal() {
             return String::new();
         }
+        if !qa_task.labels.iter().any(|label| label == QA_PASS_LABEL) {
+            return format!(" QA task {qa_task_id} retained: it is not labeled as a QA work item.");
+        }
+        match cas_store::qa_task_has_current_round(&self.cas_root, qa_task_id) {
+            Ok(true) => return format!(" QA task {qa_task_id} retained: a current round still uses it."),
+            Ok(false) => {}
+            Err(error) => return format!(" QA task {qa_task_id} could not be cancelled: {error}"),
+        }
+        let expected = qa_task.clone();
         let now = chrono::Utc::now();
         qa_task.status = TaskStatus::Cancelled;
         qa_task.closed_at = Some(now);
@@ -1769,7 +1849,7 @@ impl CasCore {
             Some(cas_types::TaskTerminalOutcome::Cancelled { superseded_by });
         qa_task.close_reason = Some(close_reason.to_string());
         qa_task.pending_verification = false;
-        match store.update(&qa_task) {
+        match store.update_if_current(&qa_task, &expected) {
             Ok(_) => format!(" QA task {qa_task_id} cancelled."),
             Err(error) => format!(" QA task {qa_task_id} could not be cancelled: {error}"),
         }
@@ -2914,14 +2994,18 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let unnamed = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
-        for (branch, tip, expected) in [
-            (WORKER_TASK_BRANCH, &rebased, &rebased),
-            ("factory/worker", &rebased, &rebased),
-            ("factory/worker", &unnamed, &f.anchor),
+        for (parked_branch, branch, tip, expected) in [
+            (WORKER_TASK_BRANCH, WORKER_TASK_BRANCH, &rebased, &rebased),
+            ("factory/worker", "factory/worker", &rebased, &rebased),
+            ("factory/worker", "factory/worker", &unnamed, &f.anchor),
+            // A handoff retains the old branch's anchor for record_park.
+            (WORKER_TASK_BRANCH, "factory/worker", &rebased, &f.anchor),
         ] {
+            let mut task = f.task.clone();
+            task.deliverables.parked_branch = Some(parked_branch.into());
             let parking = f.core.advance_commit_time_anchor_before_park(
                 tasks.as_ref(),
-                &f.task,
+                &task,
                 repo,
                 "main",
                 Some(branch),

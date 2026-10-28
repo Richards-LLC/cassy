@@ -826,7 +826,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(callbacks.onState).toHaveBeenCalledWith(expect.objectContaining({ phase: "backoff" }));
     // A successful public probe does not classify an opaque fetch rejection.
     expect(fetchMock.mock.calls.map(([input]) => new URL(String(input)).pathname)).toEqual([
-      "/v1/health", "/v1/machine", "/v1/sessions",
+      "/v1/health", "/v1/machine",
     ]);
     const [main, connectionView] = await Promise.all([
       readSource("main.ts"),
@@ -918,7 +918,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       } satisfies HubCallbacks;
       const supervisor = new HubConnectionSupervisor(machine, callbacks);
       const internals = supervisor as unknown as { desired: boolean; attachRetryTimers: Map<string, number> };
-      internals.desired = true;
+      Object.assign(internals, { desired: true, lifecycle: { phase: "live", stage: "live" } });
 
       await supervisor.attach("factory-a");
 
@@ -1003,7 +1003,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       onSessionState: vi.fn(), onOutput: vi.fn(), onSocketError: vi.fn(),
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
-    (supervisor as unknown as { desired: boolean }).desired = true;
+    Object.assign(supervisor, { desired: true, lifecycle: { phase: "live", stage: "live" } });
 
     await supervisor.attach("factory-a");
     FakeWebSocket.instances[0].open();
@@ -1149,7 +1149,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     } satisfies HubCallbacks;
     const supervisor = new HubConnectionSupervisor(machine, callbacks);
     const internals = supervisor as unknown as { desired: boolean; machineMultiplex: boolean };
-    internals.desired = true;
+    Object.assign(internals, { desired: true, lifecycle: { phase: "live", stage: "live" } });
     internals.machineMultiplex = true;
 
     const firstAttach = supervisor.attach("factory-a");
@@ -1263,7 +1263,7 @@ describe("binding Cassy Cloud browser invariants", () => {
       attachRetryTimers: Map<string, number>;
       socketAttempts: Map<string, number>;
     };
-    internals.desired = true;
+    Object.assign(internals, { desired: true, lifecycle: { phase: "live", stage: "live" } });
     internals.scheduleAttach("factory-a");
     internals.scheduleAttach("factory-a");
 

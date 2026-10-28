@@ -48,6 +48,7 @@ pub struct PauseRecord {
 #[serde(rename_all = "snake_case")]
 pub enum PauseOrigin {
     LegacyIntakeActive,
+    NoEligibleReaders,
 }
 
 /// A missing classification never downgrades a positive managed observation.
@@ -415,6 +416,9 @@ impl IntakeJournal {
             (ReconciliationCode::Completed, _) | (_, Reason::ActivationOutcomeUnknown) => {
                 ChannelDisposition::Unknown
             }
+            (_, Reason::NoEligibleReaders) => ChannelDisposition::Paused {
+                origin: Some(PauseOrigin::NoEligibleReaders),
+            },
             _ if reports_managed => ChannelDisposition::Unknown,
             (_, Reason::LegacyIntakeActive) => ChannelDisposition::Paused {
                 origin: Some(PauseOrigin::LegacyIntakeActive),

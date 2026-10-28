@@ -26,6 +26,15 @@ pub(crate) fn started_delivery(
     repo: &Path,
     task: &Task,
 ) -> Result<Option<StartedDelivery>, String> {
+    Ok(validated_started_delivery(repo, task)?.filter(|delivery| !delivery.commits.is_empty()))
+}
+
+/// Keep a validated boundary after integration empties the off-target graph.
+/// QA still needs that baseline; absence checks use `started_delivery` above.
+pub(super) fn validated_started_delivery(
+    repo: &Path,
+    task: &Task,
+) -> Result<Option<StartedDelivery>, String> {
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
     };
@@ -181,7 +190,7 @@ pub(crate) fn started_delivery(
             commits.push(sha.to_string());
         }
     }
-    Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
+    Ok(Some(StartedDelivery { branch, commits }))
 }
 
 /// A legacy start may name the previous task's lane, before the worker
@@ -519,13 +528,19 @@ fn task_delivery_selection(
     let target = preferred_diff_target_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
-    let unmerged: std::collections::HashSet<String> = git_text(
-        repo,
-        &["rev-list", "--first-parent", &format!("{base}..{tip}")],
-    )?
-    .lines()
-    .map(str::to_owned)
-    .collect();
+    // GH #1382: an unmerged start base can carry the preceding task's UI.
+    // Only unowned commits after the validated start belong to this cycle;
+    // named/recorded earlier delivery commits keep their identity below.
+    let start_exclusion = window.identity.start_base.as_ref().map(|base| format!("^{base}"));
+    let unmerged_range = format!("{base}..{tip}");
+    let mut unmerged_args = vec!["rev-list", "--first-parent", &unmerged_range];
+    if let Some(exclusion) = start_exclusion.as_deref() {
+        unmerged_args.push(exclusion);
+    }
+    let unmerged: std::collections::HashSet<String> = git_text(repo, &unmerged_args)?
+        .lines()
+        .map(str::to_owned)
+        .collect();
     let mut history_args = vec![
         "log".to_string(),
         "--first-parent".into(),
@@ -792,7 +807,7 @@ fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<Stri
 
 /// Reviewable paths from selected task ranges. An empty result is meaningful
 /// when the task only merged history or changed whitespace/deletions.
-pub(super) fn qa_paths(
+pub(crate) fn qa_paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,
@@ -1407,6 +1422,32 @@ pub(super) fn merge_tip_content_presence(
                         append_unique(&mut dropped_paths, vec![path]);
                         continue;
                     }
+                    // GH #1404: an exact rename made inside this delivery's
+                    // anchor merge is absent from the ordinary rename walk.
+                    // Prove ownership up to its first parent before carrying
+                    // that content to the unchanged destination on target.
+                    if let Some((first, renamed)) = exact_anchor_rename(repo, merge_tip, &path)
+                        && git_commit_is_ancestor(repo, commit, &first)
+                        && git_diff_is_empty(repo, merge_tip, &target_ref, &renamed) == Some(true)
+                        && matches!(
+                            super::delivery_content_presence_in_parent_for_paths(
+                                repo, commit, &first, Some(std::slice::from_ref(&path)), false,
+                            ),
+                            DeliveryContentPresence::Present { .. }
+                                | DeliveryContentPresence::Superseded { .. }
+                        )
+                        && matches!(
+                            super::delivery_content_presence_in_parent_for_paths(
+                                repo, merge_tip, &target_ref, Some(std::slice::from_ref(&renamed)), false,
+                            ),
+                            DeliveryContentPresence::Present { .. }
+                                | DeliveryContentPresence::Superseded { .. }
+                        )
+                    {
+                        append_unique(&mut superseded_paths, vec![path]);
+                        append_unique(&mut superseding_commits, vec![merge_tip.to_string()]);
+                        continue;
+                    }
                     // cas-18aa: an earlier draft this delivery itself later
                     // replaced is judged by the delivery's own final tree,
                     // not by following each draft line through the target.
@@ -1539,6 +1580,29 @@ pub(super) fn merge_tip_content_presence(
             paths: present_paths,
         })
     }
+}
+
+/// Only the supplied anchor's first-parent exact rename can carry the old
+/// path here. Copies, edited renames and arbitrary merge history retain the
+/// ordinary ownership rules. NUL-delimited records preserve unusual paths.
+fn exact_anchor_rename(repo: &Path, anchor: &str, path: &str) -> Option<(String, String)> {
+    let parents = git_text(repo, &["rev-list", "--parents", "-n", "1", anchor])?;
+    let parents: Vec<_> = parents.split_whitespace().collect();
+    if parents.len() != 3 {
+        return None;
+    }
+    let first = parents[1];
+    let listing = git_text(repo, &[
+        "diff", "--find-renames=100%", "--diff-filter=R", "--name-status", "-z",
+        first, anchor, "--",
+    ])?;
+    let fields: Vec<_> = listing.split('\0').collect();
+    for entry in fields.chunks_exact(3) {
+        if entry[0] == "R100" && entry[1] == path && !entry[2].is_empty() {
+            return Some((first.to_string(), entry[2].to_string()));
+        }
+    }
+    None
 }
 
 /// Indexed content lines of a unified patch, inside its `@@`

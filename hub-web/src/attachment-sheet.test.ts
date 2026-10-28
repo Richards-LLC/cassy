@@ -224,6 +224,31 @@ describe("a note about the connection follows it (journey F28)", () => {
   });
 });
 
+it("groups a served image thumbnail and a failed preview with their own file cards", async () => {
+  for (const sender of [false, true]) {
+    const file = { ...brief, artifact_id: `thumbnail-${sender}`, name: "Screenshot.png", mime: "image/png" };
+    const sheet = renderAttachmentSheet(document, file, sender ? "you" : "supervisor");
+    const root = inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: "https://files.example/screenshot.png" } }));
+    document.body.append(root);
+    try {
+      await vi.waitFor(() => expect(root.querySelector("img")).not.toBeNull());
+      expect(sheet.querySelector(".plate img")?.getAttribute("src")).toBe("https://files.example/screenshot.png");
+      expect(root.querySelectorAll("a")).toHaveLength(1);
+      expect(sheet.querySelector<HTMLElement>(".rich-media")?.style.height).toBe("48px");
+      expect(sheet.textContent).toContain(file.name);
+      const unavailable = { ...file, artifact_id: `missing-${sender}`, name: "Unavailable.png" };
+      const failedSheet = renderAttachmentSheet(document, unavailable);
+      const failed = inlineAttachment(failedSheet, unavailable, async () => ({ ok: false, status: 404 }));
+      document.body.append(failed);
+      try {
+        await vi.waitFor(() => expect(failedSheet.querySelector(".preview-note")?.textContent).toBe("Preview unavailable"));
+        expect(failed.querySelector<HTMLElement>(".rich-media")?.style.display).toBe("none");
+        expect(failed.querySelector("a.sheet")).toBe(failedSheet);
+      } finally { failed.remove(); }
+    } finally { root.remove(); }
+  }
+});
+
 it("loads supported inline media into reserved space and keeps the original Open link", async () => {
   for (const [mime, tag] of [["image/png", "img"], ["video/mp4", "video"], ["audio/mpeg", "audio"]]) {
     const file = { ...brief, mime: mime!, name: "Evidence", artifact_id: `art-${tag}` };

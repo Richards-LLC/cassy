@@ -432,6 +432,14 @@ fn remove_with(
 }
 
 pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
+    rename_with_platform(target, home, name, cfg!(target_os = "macos"))
+}
+
+fn rename_with_platform(target: &Target, home: &Path, name: &str, macos: bool) -> Result<()> {
+    // Claude keys secure storage by profile path. Keep the existing login in
+    // place instead of reading and rewriting its secret under another key.
+    anyhow::ensure!(!(macos && target.provider == Provider::Claude),
+        "Cannot rename a Claude account on macOS without moving its login.\nRun: cas claude login {name}");
     ensure_idle(target, home)?;
     read_policy(home)?;
     anyhow::ensure!(
@@ -452,13 +460,6 @@ pub(crate) fn rename(target: &Target, home: &Path, name: &str) -> Result<()> {
         set_disabled(home, &target.folder, true)?;
     }
     std::fs::rename(&target.folder, &to)?;
-    if cfg!(target_os = "macos") && target.provider == Provider::Claude {
-        if let Err(error) = keychain_rekey(&target.folder, &to, &mut security) {
-            std::fs::rename(&to, &target.folder)
-                .context("Keychain migration failed and folder rollback failed")?;
-            return Err(error);
-        }
-    }
     if was_disabled && old_canonical != to.canonicalize()? {
         set_disabled(home, &to, true)?;
         set_disabled(home, &target.folder, false)?;
@@ -519,62 +520,6 @@ fn keychain_delete(
         "{remedy}"
     );
     Ok(())
-}
-fn keychain_account() -> String {
-    // Claude Code 2.1.311 uses USER (or the OS username), restricted to this alphabet.
-    let user = std::env::var("USER")
-        .ok()
-        .filter(|user| !user.is_empty())
-        .or_else(|| {
-            let output = Command::new("/usr/bin/id").arg("-un").output().ok()?;
-            output
-                .status
-                .success()
-                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-        })
-        .unwrap_or_else(|| "claude-code-user".into());
-    if !user.is_empty()
-        && user
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
-    {
-        user
-    } else {
-        "claude-code-user".into()
-    }
-}
-fn keychain_rekey(
-    from: &Path,
-    to: &Path,
-    run: &mut impl FnMut(&[String], Option<&str>) -> Result<Output>,
-) -> Result<()> {
-    let out = run(
-        &[
-            "find-generic-password".into(),
-            "-s".into(),
-            service(from),
-            "-w".into(),
-        ],
-        None,
-    )?;
-    if out.status.code() == Some(44) {
-        return Ok(());
-    }
-    anyhow::ensure!(out.status.success(), "Cannot read account Keychain item");
-    let secret = String::from_utf8(out.stdout).context("Keychain item is not UTF-8")?;
-    // Match Claude's stdin protocol so the secret is never visible in argv.
-    let input = format!(
-        "add-generic-password -U -a \"{}\" -s \"{}\" -X \"{}\"\n",
-        keychain_account(),
-        service(to),
-        hex::encode(secret.trim_end_matches('\n').as_bytes())
-    );
-    let out = run(&["-i".into()], Some(&input))?;
-    anyhow::ensure!(
-        out.status.success(),
-        "Cannot write renamed account Keychain item"
-    );
-    keychain_delete(from, run)
 }
 
 #[cfg(unix)]
@@ -645,6 +590,13 @@ impl LoginSignals {
     }
 
     fn answer(&self) -> Result<String> {
+        // A line typed right after the picker's email prompt was read by
+        // inquire's terminal reader, not stdin. Raw mode did not echo it.
+        if let Some(typed) = crate::cli::account_picker::take_typeahead_line() {
+            eprintln!("{}", typed.trim_end());
+            self.check()?;
+            return Ok(typed);
+        }
         // Use the shared stdin buffer, including bytes prefetched by an earlier
         // prompt. read_line retries EINTR, so read on a separate thread while
         // the login owner remains able to notice cancellation and clean up.
@@ -652,8 +604,12 @@ impl LoginSignals {
         std::thread::Builder::new()
             .name("login-answer".into())
             .spawn(move || {
-                let mut answer = String::new();
-                let result = std::io::stdin().read_line(&mut answer).map(|_| answer);
+                use std::io::IsTerminal;
+                // EOF, including Ctrl-D after an unfinished answer, is empty.
+                let stdin = std::io::stdin();
+                let terminal = stdin.is_terminal();
+                let result = crate::cli::account_picker::read_answer(&mut stdin.lock(), terminal)
+                    .map(Option::unwrap_or_default);
                 let _ = send.send(result);
             })?;
         loop {
@@ -789,6 +745,8 @@ pub(crate) struct NewLogin {
     home: PathBuf,
     provider: Provider,
     dir: tempfile::TempDir,
+    stable_path: bool,
+    committed: bool,
     #[cfg(unix)]
     _lease: std::fs::File,
     // Fields drop in declaration order: restore signals only after dir cleanup.
@@ -796,6 +754,10 @@ pub(crate) struct NewLogin {
 }
 impl NewLogin {
     pub(crate) fn begin(home: &Path, provider: Provider, typed: &str) -> Result<Self> {
+        Self::begin_with_platform(home, provider, typed, cfg!(target_os = "macos"))
+    }
+
+    fn begin_with_platform(home: &Path, provider: Provider, typed: &str, macos: bool) -> Result<Self> {
         anyhow::ensure!(
             typed == typed.trim(),
             "Account name cannot contain whitespace"
@@ -803,9 +765,18 @@ impl NewLogin {
         crate::cli::account_picker::validate_new_profile_name(typed, "main")
             .map_err(anyhow::Error::msg)?;
         let signals = LoginSignals::enter()?;
-        let dir = tempfile::Builder::new()
-            .prefix(&format!("{}login.tmp.", provider.prefix()))
-            .tempdir_in(home)?;
+        let stable_path = macos && provider == Provider::Claude;
+        let mut builder = tempfile::Builder::new();
+        let prefix = if stable_path {
+            format!("{}{typed}", provider.prefix())
+        } else {
+            format!("{}login.tmp.", provider.prefix())
+        };
+        builder.prefix(&prefix);
+        if stable_path { builder.rand_bytes(0); }
+        // tempfile creates the final path atomically with private permissions;
+        // failure/cancellation still removes it through the existing RAII guard.
+        let dir = builder.tempdir_in(home)?;
         #[cfg(unix)]
         let lease = {
             let file = open_login_dir(dir.path())?;
@@ -816,6 +787,8 @@ impl NewLogin {
             home: home.into(),
             provider,
             dir,
+            stable_path,
+            committed: false,
             #[cfg(unix)]
             _lease: lease,
             signals,
@@ -844,10 +817,10 @@ impl NewLogin {
         }
         result
     }
-    pub(crate) fn finish(self, typed: &str) -> Result<String> {
+    pub(crate) fn finish(mut self, typed: &str) -> Result<String> {
         self.signals.check()?;
         let email = self.provider.login_email(&self.home, self.path());
-        let name = email.as_deref().unwrap_or(typed);
+        let name = if self.stable_path { typed } else { email.as_deref().unwrap_or(typed) };
         crate::cli::account_picker::validate_new_profile_name(name, "main")
             .map_err(anyhow::Error::msg)?;
         let pending =
@@ -858,6 +831,7 @@ impl NewLogin {
             })?
             .into_iter()
             .find(|account| {
+                if account.folder == self.path() { return false; }
                 let strong = |a: &crate::account_registry::Account| {
                     a.identity
                         .as_ref()
@@ -890,6 +864,13 @@ impl NewLogin {
             }
             bail!("Login cancelled; existing account kept");
         }
+        if self.stable_path {
+            self.signals.check()?;
+            self.dir.disable_cleanup(true);
+            self.committed = true;
+            eprintln!("[OK] Added {} account {}", self.provider.name(), name);
+            return Ok(name.to_owned());
+        }
         let mut final_name = name.to_owned();
         let mut to = self
             .home
@@ -911,20 +892,13 @@ impl NewLogin {
         }
         self.signals.check()?;
         std::fs::rename(self.path(), &to)?;
-        if cfg!(target_os = "macos") && self.provider == Provider::Claude {
-            if let Err(error) = keychain_rekey(self.path(), &to, &mut security) {
-                std::fs::rename(&to, self.path())
-                    .context("Keychain migration failed and login rollback failed")?;
-                return Err(error);
-            }
-        }
         eprintln!("[OK] Added {} account {}", self.provider.name(), final_name);
         Ok(final_name)
     }
 }
 impl Drop for NewLogin {
     fn drop(&mut self) {
-        if cfg!(target_os = "macos") && self.provider == Provider::Claude {
+        if !self.committed && cfg!(target_os = "macos") && self.provider == Provider::Claude {
             let _ = keychain_delete(self.path(), &mut security);
         }
     }
@@ -1123,72 +1097,34 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
-    fn keychain_lifecycle_uses_named_services_and_preserves_old_item_on_write_failure() {
-        use std::os::unix::process::ExitStatusExt;
-        let mut env = crate::test_support::TestEnvGuard::temp_home();
-        env.set("USER", "fixture");
-        let from = Path::new("/Users/fixture/.claude-old@example.com");
-        let to = Path::new("/Users/fixture/.claude-new@example.com");
-        let old = "Claude Code-credentials-0be5f251";
-        for fail_write in [false, true] {
-            let mut calls = Vec::new();
-            let result = keychain_rekey(from, to, &mut |args, input| {
-                calls.push((args.to_vec(), input.map(str::to_owned)));
-                Ok(Output {
-                    status: std::process::ExitStatus::from_raw(if fail_write && args[0] == "-i" {
-                        256
-                    } else {
-                        0
-                    }),
-                    stdout: b"fixture-secret\n".to_vec(),
-                    stderr: Vec::new(),
-                })
-            });
-            assert_eq!(result.is_err(), fail_write);
-            assert_eq!(
-                calls[0],
-                (
-                    ["find-generic-password", "-s", old, "-w"]
-                        .map(str::to_owned)
-                        .to_vec(),
-                    None
-                )
-            );
-            assert_eq!(calls[1].0, ["-i"]);
-            assert_eq!(
-                calls[1].1.as_deref(),
-                Some(
-                    "add-generic-password -U -a \"fixture\" -s \"Claude Code-credentials-ef91b6f7\" -X \"666978747572652d736563726574\"\n"
-                )
-            );
-            if fail_write {
-                assert_eq!(calls.len(), 2, "old item must survive failed writes");
-            } else {
-                assert_eq!(
-                    calls[2],
-                    (
-                        ["delete-generic-password", "-s", old]
-                            .map(str::to_owned)
-                            .to_vec(),
-                        None
-                    )
-                );
-            }
+    fn keychain_migration_refuses_before_reading_any_secret() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(".claude-old");
+        std::fs::create_dir(&folder).unwrap();
+        let target = Target { provider: Provider::Claude, name: "old".into(), folder: folder.clone(), email: None };
+        let error = rename_with_platform(&target, home.path(), "new", true).unwrap_err();
+        assert!(error.to_string().contains("cas claude login new"));
+        assert!(folder.exists(), "refused rename leaves the login in place");
+        assert!(!home.path().join(".claude-new").exists());
+    }
+
+    #[test]
+    fn macos_claude_login_keeps_the_path_used_by_the_official_binary() {
+        let env = crate::test_support::TestEnvGuard::temp_home();
+        let home = env.home();
+        let dir = home.join(".claude-typed");
+        {
+            let login = NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).unwrap();
+            assert_eq!(login.path(), dir);
+            std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"different@example.com"}}"#).unwrap();
+            assert_eq!(login.finish("typed").unwrap(), "typed");
         }
-        let mut calls = Vec::new();
-        keychain_delete(from, &mut |args, input| {
-            assert!(input.is_none());
-            calls.push(args.to_vec());
-            Ok(Output {
-                status: std::process::ExitStatus::from_raw(44 << 8),
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        })
-        .unwrap();
-        assert_eq!(calls, vec![vec!["delete-generic-password", "-s", old]]);
+        assert!(dir.is_dir(), "successful login remains at the original selector");
+        assert!(NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).is_err());
+        let cancelled = home.join(".claude-cancelled");
+        drop(NewLogin::begin_with_platform(home, Provider::Claude, "cancelled", true).unwrap());
+        assert!(!cancelled.exists(), "cancelled login is removed");
     }
 
     #[test]

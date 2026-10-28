@@ -1,3 +1,4 @@
+import { sentMessageLabel } from "./sent-attachments";
 import type { ConversationHistoryMessage, ConversationHistoryReply, MessageQueued, OperatorReply } from "./types";
 import type { PendingSend } from "./conversation-store";
 
@@ -236,6 +237,20 @@ export class ConversationHistory {
    * even when the machine's clock runs ahead.
    */
   private insertDurable(event: ConversationEvent): void {
+    // Terminal input is captured asynchronously from the harness. Its queue
+    // ID records the capture, not when the operator asked the question. Keep
+    // ordinary traffic sequenced as before, then place terminal inputs by
+    // their original machine timestamp on every live/history arrival.
+    const terminal = (item: ConversationEvent) => item.kind === "send" && item.value.target === "terminal-history";
+    const inputs = this.events.filter(terminal);
+    this.events.splice(0, this.events.length, ...this.events.filter(item => !terminal(item)));
+    if (terminal(event)) inputs.push(event);
+    else this.insertSequenced(event);
+    inputs.sort((a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY));
+    for (const input of inputs) this.insert(input);
+  }
+
+  private insertSequenced(event: ConversationEvent): void {
     const seq = durableSeq(event);
     if (seq === undefined) { this.insert(event); return; }
     const later = this.events.findIndex((existing) => { const other = durableSeq(existing); return other !== undefined && other > seq; });
@@ -470,6 +485,10 @@ export class ConversationHistory {
       this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: incoming, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
       return;
     }
+    // A reconnect can lose MessageQueued even though the durable turn arrived.
+    // Reuse receipt correlation before the notification-id merge: the pending
+    // send knows its client_ref, but cannot yet know the queue's notification id.
+    if (message.client_ref) this.acknowledge({ client_ref: message.client_ref, notification_id: message.notification_id, target: message.target, stamped: message.stamped, operator_label: message.operator_label });
     const existing = this.events.find((event) => event.kind === "send" && event.value.notificationId === message.notification_id);
     if (existing?.kind === "send") {
       existing.value.target = message.target;
@@ -486,6 +505,8 @@ export class ConversationHistory {
       // not re-open the ask it answered or move it across the session line
       // (cas-1f13); in_reply_to never changes after the send.
       existing.value.replyTo = message.reply_to ?? existing.value.replyTo;
+      delete existing.value.unconfirmedAt;
+      delete existing.value.restored;
       existing.session ??= message.session;
       return;
     }
@@ -493,7 +514,7 @@ export class ConversationHistory {
     // cas-e7b1: an unsettled message restored from the journal that the machine's
     // history now shows did arrive. It becomes that row instead of a second
     // copy of the message.
-    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
+    const restored = message.client_ref ? undefined : this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
       && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
       && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
     if (restored?.kind === "send") {
@@ -800,9 +821,9 @@ export class ConversationHistory {
       // A failed send the operator dismissed is out of the thread, so out of the preview too.
       if (event.value.dismissed && this.isFailedSend(event.value)) continue;
       // cas-b00c: a message whose delivery was never confirmed says so in the list too.
-      if (event.value.state === "unconfirmed" && !this.repliedSince(event.value)) return `Not confirmed: ${event.value.text}`;
-      if (event.value.state !== "error") return `You: ${event.value.text}`;
-      if (!event.value.replaced) return `Not sent: ${event.value.text}`;
+      if (event.value.state === "unconfirmed" && !this.repliedSince(event.value)) return `Not confirmed: ${sentMessageLabel(event.value.text)}`;
+      if (event.value.state !== "error") return `You: ${sentMessageLabel(event.value.text)}`;
+      if (!event.value.replaced) return `Not sent: ${sentMessageLabel(event.value.text)}`;
     }
     return undefined;
   }

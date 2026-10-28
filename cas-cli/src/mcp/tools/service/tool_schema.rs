@@ -99,7 +99,7 @@ pub(crate) const COORDINATION_DESCRIPTIONS: &[(&str, &str)] = &[
     ("sticky", "Broadcast: late joiners get it."),
     ("task_id", "Parked task for merge_request; remind: bind to task."),
     // cas-6ccb: polled rows can resurface once until acknowledged.
-    ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked polled rows reappear once."),
+    ("notification_id", "message_ack/message_status: id. inbox_poll: read held row; unacked unnamed batch reads reappear once."),
     ("limit", "inbox_poll: max rows."),
     ("name", "register/session_start: agent name."),
     ("agent_type", "register/session_start: primary|sub_agent|worker|ci."),

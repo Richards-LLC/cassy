@@ -257,6 +257,10 @@ mod internal_llm_tests {
             },
         )
         .expect("codex session start");
+        // Codex 0.165 rejects unknown fields in its native SessionStart schema.
+        let wire = serde_json::to_value(&output).expect("hook JSON");
+        let fields = wire["hookSpecificOutput"].as_object().expect("session output");
+        assert_eq!(fields.len(), 2, "Codex accepts only hookEventName/additionalContext: {fields:?}");
         let Some(HookSpecificOutput::SessionStart { additional_context, .. }) =
             output.hook_specific_output
         else {

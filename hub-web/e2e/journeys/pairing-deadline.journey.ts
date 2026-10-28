@@ -29,7 +29,7 @@ test("HUB-J1 approved pairing health check has a deadline and keeps its invitati
     await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Operator");
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden(); expect(hub.exchanges).toHaveLength(1);
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible();
   });
 });
 
@@ -76,7 +76,7 @@ test("HUB-J2 unanswered pairing exchange times out safely and can be retried (ca
     await dialog.getByRole("button", { name: "Pair", exact: true }).click();
     await expect(dialog).toBeHidden();
     expect(hub.exchanges).toHaveLength(1);
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible();
   });
 });
 

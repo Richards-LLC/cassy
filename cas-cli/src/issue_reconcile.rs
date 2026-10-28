@@ -180,11 +180,17 @@ pub fn external_ref_hint_note(hint: &ExternalRefHint) -> String {
 fn open_states(
     issues: &[IssueRef],
     states: &dyn IssueStates,
+    default_repo: Option<&str>,
 ) -> BTreeMap<String, Result<HashSet<u64>, String>> {
     let repos: BTreeSet<String> = issues
         .iter()
         .map(|issue| repo_key(&issue.owner, &issue.repo))
         .collect();
+    let mut repos: Vec<_> = repos.into_iter().collect();
+    let default_repo = default_repo.map(|repo| repo.trim().to_ascii_lowercase());
+    // Spend the bounded budget on this project's issues before foreign refs.
+    // Stable sorting preserves alphabetical order for the remaining repos.
+    repos.sort_by_key(|repo| Some(repo.as_str()) != default_repo.as_deref());
     repos
         .into_iter()
         .take(MAX_REPOS)
@@ -215,7 +221,7 @@ pub fn epic_open_issue_warning(
         return None;
     }
     let issues: Vec<IssueRef> = referenced.iter().map(|(issue, _)| issue.clone()).collect();
-    let states = open_states(&issues, states);
+    let states = open_states(&issues, states, default_repo);
     let mut open = Vec::new();
     let mut unchecked = Vec::new();
     for (issue, tasks) in &referenced {
@@ -257,6 +263,13 @@ pub struct ShippedOpenIssue {
     pub issue: String,
     /// `(task id, release tag containing its delivery)`.
     pub tasks: Vec<(String, String)>,
+}
+
+/// Successful shipped-issue findings, plus references that could not be checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShippedIssueReport {
+    pub shipped: Vec<ShippedOpenIssue>,
+    pub unchecked: Vec<String>,
 }
 
 /// The delivery commits recorded on `task`, most specific first.
@@ -308,12 +321,14 @@ pub fn release_tag_containing(repo_root: &Path, commit: &str) -> Option<String> 
 /// cas-dd56 item 4: open issues whose every referencing task is closed with
 /// a delivery that a release tag contains. A task with no recorded delivery
 /// commit, or one no tag contains, keeps its issue out of the list.
+/// Failed repositories are listed alongside successful results; only a check
+/// with no successful repository lookup returns an error.
 pub fn shipped_open_issues(
     tasks: &[Task],
     default_repo: Option<&str>,
     states: &dyn IssueStates,
     tag_containing: &dyn Fn(&str) -> Option<String>,
-) -> Result<Vec<ShippedOpenIssue>, String> {
+) -> Result<ShippedIssueReport, String> {
     let mut referenced: Vec<(IssueRef, Vec<&Task>)> = Vec::new();
     for task in tasks {
         if task.status == TaskStatus::Cancelled {
@@ -327,9 +342,56 @@ pub fn shipped_open_issues(
         }
     }
     let issues: Vec<IssueRef> = referenced.iter().map(|(issue, _)| issue.clone()).collect();
-    let states = open_states(&issues, states);
-    if let Some(error) = states.values().find_map(|state| state.as_ref().err()) {
-        return Err(error.clone());
+    let states = open_states(&issues, states, default_repo);
+    let mut by_repo: BTreeMap<String, Vec<&IssueRef>> = BTreeMap::new();
+    for issue in &issues {
+        by_repo
+            .entry(repo_key(&issue.owner, &issue.repo))
+            .or_default()
+            .push(issue);
+    }
+    let mut unchecked = Vec::new();
+    let (mut omitted_repos, mut omitted_refs) = (0, 0);
+    let mut by_repo: Vec<_> = by_repo.into_iter().collect();
+    let default_key = default_repo.map(|repo| repo.trim().to_ascii_lowercase());
+    by_repo.sort_by_key(|(repo, _)| Some(repo.as_str()) != default_key.as_deref());
+    for (repo, refs) in by_repo {
+        let error = match states.get(&repo) {
+            Some(Ok(_)) => continue,
+            Some(Err(error)) => error.as_str(),
+            None => "repository limit reached",
+        };
+        // One representative ref per repository, under the same row bound as
+        // lookups. Keep omitted counts rather than dumping every task citation.
+        if unchecked.len() == MAX_REPOS {
+            omitted_repos += 1;
+            omitted_refs += refs.len();
+            continue;
+        }
+        let more = if refs.len() > 1 {
+            format!(" (+{} more)", refs.len() - 1)
+        } else {
+            String::new()
+        };
+        unchecked.push(format!("{}{more} ({error})", refs[0].display()));
+    }
+    if omitted_repos > 0 {
+        let repo_label = if omitted_repos == 1 {
+            "repository"
+        } else {
+            "repositories"
+        };
+        let ref_label = if omitted_refs == 1 {
+            "reference"
+        } else {
+            "references"
+        };
+        unchecked.push(format!(
+            "{omitted_repos} more unchecked {repo_label} ({omitted_refs} {ref_label})"
+        ));
+    }
+    if !unchecked.is_empty() && !states.values().any(Result::is_ok) {
+        return Err(unchecked.join("; "));
     }
     let mut shipped = Vec::new();
     for (issue, linked) in referenced {
@@ -356,7 +418,7 @@ pub fn shipped_open_issues(
             });
         }
     }
-    Ok(shipped)
+    Ok(ShippedIssueReport { shipped, unchecked })
 }
 
 #[cfg(test)]
@@ -441,6 +503,32 @@ mod tests {
     }
 
     #[test]
+    fn task_issue_refs_resolves_task_gh_mentions_in_the_default_repo() {
+        let task = task(
+            "cas-8284",
+            TaskStatus::Closed,
+            "Fixed cas-397b/GH#188 and cas-cdb0/gh#195, cas-90541/GH#188; see cas-397b/actual#7",
+        );
+        let refs = task_issue_refs(&task, Some(REPO));
+        assert_eq!(
+            refs.iter().map(IssueRef::display).collect::<Vec<_>>(),
+            [
+                "Richards-LLC/cassy#188",
+                "Richards-LLC/cassy#195",
+                "cas-397b/actual#7"
+            ]
+        );
+        assert_eq!(
+            task_issue_refs(&task, None)
+                .iter()
+                .map(IssueRef::display)
+                .collect::<Vec<_>>(),
+            ["cas-397b/actual#7"],
+            "unresolved task/GH shorthand must not invent a repository"
+        );
+    }
+
+    #[test]
     fn epic_close_warns_about_open_referenced_issues_and_names_unchecked_ones() {
         let children = vec![
             task("cas-a", TaskStatus::Closed, "GH #1158: first"),
@@ -513,8 +601,9 @@ mod tests {
         };
         let states = FakeStates::new("richards-llc/cassy", &[1158, 1159, 1160, 1161]);
         let found = shipped_open_issues(&tasks, Some(REPO), &states, &tags).unwrap();
+        assert!(found.unchecked.is_empty());
         assert_eq!(
-            found,
+            found.shipped,
             vec![ShippedOpenIssue {
                 issue: "Richards-LLC/cassy#1158".into(),
                 tasks: vec![

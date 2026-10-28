@@ -37,12 +37,22 @@ fn mime_allowed(mime: &str, allowlist: &'static [&'static str]) -> bool {
         })
 }
 
-/// Fetch no URL until both the session and the thread's published ref match.
+enum ArtifactSource {
+    Cloud(std::path::PathBuf),
+    Composer(std::fs::File),
+}
+
+struct ScopedArtifact {
+    record: PublishedArtifact,
+    source: ArtifactSource,
+}
+
+/// Resolve only a published thread ref or the session's own composer upload.
 async fn scoped<R: SessionReadModel>(
     state: &HubState<R>,
     session: &str,
     artifact: &str,
-) -> Result<(std::path::PathBuf, PublishedArtifact), Response> {
+) -> Result<ScopedArtifact, Response> {
     let found = state
         .catalog
         .list()
@@ -57,6 +67,15 @@ async fn scoped<R: SessionReadModel>(
     tokio::task::spawn_blocking(move || {
         let root = crate::store::find_cas_root_ignoring_env(std::path::Path::new(&project)).ok()?;
         let store = cas_store::SqliteArtifactStore::open(&root).ok()?;
+        if let Some(record) = store.get(&artifact).ok()?
+            && record.task_id == format!("commander-{session}")
+        {
+            let file = super::composer_upload::open_preview(&root, &session, &record).ok()?;
+            return Some(ScopedArtifact {
+                record,
+                source: ArtifactSource::Composer(file),
+            });
+        }
         let record = store.get_for_session(&artifact, &session).ok()??;
         if record.status != "committed"
             || record
@@ -68,7 +87,10 @@ async fn scoped<R: SessionReadModel>(
         {
             return None;
         }
-        Some((root, record))
+        Some(ScopedArtifact {
+            record,
+            source: ArtifactSource::Cloud(root),
+        })
     })
     .await
     .ok()
@@ -97,7 +119,7 @@ fn refusal(error: &anyhow::Error) -> Response {
 }
 
 /// Issue a reusable ticket only for a live SessionRead context and a committed
-/// ref in that session's thread. `allowlist` is a static, server-owned MIME list,
+/// ref in that session's thread or its own upload. `allowlist` is a static, server-owned MIME list,
 /// never request input; page routes can admit HTML without relaxing media routes.
 pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
     state: &HubState<R>,
@@ -112,7 +134,7 @@ pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
     }
     auth.ensure_active_context(context, chrono::Utc::now())
         .map_err(|error| refusal(&error))?;
-    let (_, record) = scoped(state, session, artifact).await?;
+    let ScopedArtifact { record, .. } = scoped(state, session, artifact).await?;
     if !mime_allowed(&record.mime, allowlist) {
         return Err(generic_not_found());
     }
@@ -318,7 +340,7 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     if let Err(error) = auth.ensure_active_context(&context, chrono::Utc::now()) {
         return private(refusal(&error), headers);
     }
-    let (root, record) = match scoped(state, session, artifact).await {
+    let ScopedArtifact { record, source } = match scoped(state, session, artifact).await {
         Ok(found) => found,
         Err(response) => return private(response, headers),
     };
@@ -342,12 +364,16 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     tokio::task::spawn_blocking(move || {
         // Resolve only the server-owned cloud id after all local checks. The
         // signed URL and upstream errors never appear in client errors/logs.
-        #[cfg(test)]
-        let client = injected.or_else(|| crate::artifacts::cloud_client(&root));
-        #[cfg(not(test))]
-        let client = crate::artifacts::cloud_client(&root);
-        let opened = (|| -> anyhow::Result<_> {
+        let opened = (|| -> anyhow::Result<(Box<dyn Read + Send + Sync>, bool)> {
             auth.ensure_active_context(&context, chrono::Utc::now())?;
+            let root = match source {
+                ArtifactSource::Composer(file) => return Ok((Box::new(file), false)),
+                ArtifactSource::Cloud(root) => root,
+            };
+            #[cfg(test)]
+            let client = injected.or_else(|| crate::artifacts::cloud_client(&root));
+            #[cfg(not(test))]
+            let client = crate::artifacts::cloud_client(&root);
             let client = client.context("media unavailable")?;
             let view = client.view_url(
                 record

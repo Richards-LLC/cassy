@@ -17,7 +17,7 @@
 //! decision so it can no longer drift per call site.
 
 use cas_mux::{InjectOutcome, SupervisorCli};
-use cas_store::WakeAttempt;
+use cas_store::{PromptQueueStore, WakeAttempt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -985,6 +985,7 @@ impl FactoryDaemon {
                             summary.as_deref(),
                             urgent,
                             in_reply_to,
+                            client_ref.as_deref(),
                             &attribution,
                         )?;
                         live_view = Some(self.live_operator_message(outcome.id()));
@@ -1043,6 +1044,7 @@ impl FactoryDaemon {
     /// Enqueue a Commander semantic message through the same durable prompt
     /// queue drained by MCP coordination messages. Delivery therefore reuses
     /// the existing inbox+wake and urgent interrupt-and-redirect machinery.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_attributed_message(
         &self,
         target: &str,
@@ -1050,9 +1052,10 @@ impl FactoryDaemon {
         summary: Option<&str>,
         urgent: bool,
         in_reply_to: Option<i64>,
+        client_ref: Option<&str>,
         attribution: &crate::ui::factory::protocol::MessageAttribution,
     ) -> anyhow::Result<cas_store::EnqueueOutcome> {
-        let outcome = enqueue_commander_message(
+        let outcome = crate::ops::fleet::enqueue_commander_message_with_client_ref(
             self.app.cas_dir(),
             &self.session_name,
             target,
@@ -1060,6 +1063,7 @@ impl FactoryDaemon {
             summary,
             urgent,
             in_reply_to,
+            client_ref,
             attribution,
         )?;
 
@@ -1508,8 +1512,24 @@ impl FactoryDaemon {
                 }
                 // cas-1f0c: a queued row's body reaches a Claude Teams
                 // recipient through the CAS hook only; its inbox gets a pointer.
-                let inbox_text =
-                    queued.map(|(id, body)| claude_teams_inbox_text(text, body, source, id));
+                let delivery = if let Some((id, _)) = queued {
+                    let queue = cas_store::SqlitePromptQueueStore::open_read_only(self.app.cas_dir())?;
+                    Some(queue.recipient_delivery(id, target)?
+                        .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?)
+                } else { None };
+                let reference = match &delivery {
+                    Some(cas_store::RecipientDelivery::Reference(row)
+                        | cas_store::RecipientDelivery::Settled(row)) => Some(row),
+                    _ => None,
+                };
+                // Use the projection for every payload field and for a Teams
+                // failure's PTY fallback, which otherwise resurrects the body.
+                let text = reference.map_or(text, |row| row.prompt.as_str());
+                let summary = reference.map_or(summary, |row| row.summary.as_deref());
+                let inbox_text = queued.map(|(id, body)| {
+                    if reference.is_some() { text.to_string() }
+                    else { claude_teams_inbox_text(text, body, source, id) }
+                });
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);
                 let write = if let Some(native) = completed_native {
                     native.result
@@ -2503,6 +2523,7 @@ mod tests {
         origin: cas_store::QueueOrigin,
     ) -> cas_store::QueuedPrompt {
         cas_store::QueuedPrompt {
+            reference_only: false,
             id,
             source: source.to_string(),
             target: "true-leopard-45".to_string(),
@@ -2960,6 +2981,23 @@ mod tests {
         assert_eq!(inbox.len(), 6, "{inbox:?}");
         assert!(inbox[5].text.contains(shared), "{}", inbox[5].text);
         assert!(queue.teams_body_fallback_claimed(broadcast, worker).unwrap());
+
+        // The oversized transport is also subject to recipient state: a poll
+        // in another turn, an ACK or an answer must not recover its old body.
+        queue.poll_named_for_recipient(worker, Some(&session), &[long_id]).unwrap();
+        daemon.deliver_queued_to_worker(worker, "supervisor", &long, Some(&long), long_id, &long)
+            .await.unwrap();
+        let repeated = read_inbox().last().unwrap().clone();
+        assert!(!repeated.text.contains(long.trim()), "{repeated:?}");
+        assert!(!repeated.summary.as_deref().unwrap_or_default().contains(long.trim()));
+        assert!(repeated.text.contains("not acknowledged"), "{repeated:?}");
+        queue.acknowledge_for_recipients(long_id, &[worker.into()], None).unwrap();
+        daemon.deliver_queued_to_worker(worker, "supervisor", &long, Some(&long), long_id, &long)
+            .await.unwrap();
+        let terminal = read_inbox().last().unwrap().clone();
+        assert!(!terminal.text.contains(long.trim()), "{terminal:?}");
+        assert!(!terminal.summary.as_deref().unwrap_or_default().contains(long.trim()));
+        assert!(terminal.text.contains("acknowledged"), "{terminal:?}");
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

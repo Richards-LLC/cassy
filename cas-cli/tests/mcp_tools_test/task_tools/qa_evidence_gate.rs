@@ -204,6 +204,62 @@ impl Fx {
 }
 
 #[tokio::test]
+async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
+    use super::independent_qa::{reviewer_core, round_evidence};
+    use cas::mcp::CasService;
+    use cas_mcp::types::VerificationRequest;
+
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, body.replace("independent_pass = false", "independent_pass = true"))
+        .unwrap();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let producer = fx.write_bundle(&head);
+    let producer_bytes = std::fs::read(&producer).unwrap();
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now()).unwrap().unwrap();
+    let qa_task = pass.qa_task_id.unwrap();
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    reviewer.cas_task_start(Parameters(IdRequest { id: qa_task.clone() })).await.unwrap();
+    // GH #1403: the reviewer owns a different task root, with no
+    // /independent-qa/ segment for the old path heuristic to recognize.
+    let reviewer_dir = fx.artifacts.join(&qa_task).join("qa");
+    let ledger = round_evidence(&reviewer_dir, TASK, &head);
+    let reviewer_bundle = reviewer_dir.join("bundle.json");
+    let reviewer_bytes = std::fs::read(&reviewer_bundle).unwrap();
+    let service = CasService::new(reviewer, None);
+    let request: VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action": "qa_record", "task_id": TASK, "status": "approved",
+        "summary": "Independent review of the unchanged delivery",
+        "ledger_path": ledger.display().to_string(),
+    })).unwrap();
+    let recorded = extract_text(service.verification(Parameters(request)).await.unwrap());
+    assert!(recorded.contains("APPROVAL"), "{recorded}");
+
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    let closed = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
+    assert_eq!(cas::qa_evidence::cited_bundle_path(&fx.notes()).as_deref(), producer.to_str());
+    assert!(fx.notes().contains(&format!("qa-review-bundle: {}", reviewer_bundle.display())));
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now()).unwrap().unwrap();
+    assert_eq!(pass.ledger_path.as_deref(), ledger.to_str());
+    assert_eq!(pass.bound_head, head);
+    assert_eq!(std::fs::read(&producer).unwrap(), producer_bytes);
+    assert_eq!(std::fs::read(&reviewer_bundle).unwrap(), reviewer_bytes);
+}
+
+#[tokio::test]
 async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_daa6() {
     for changed_diff in [true, false] {
         let mut env = TestEnvGuard::temp_home();
@@ -254,7 +310,7 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
             .to_string(),
         )
         .unwrap();
-        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-bundle: {}", bundle.display());
+        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-review-bundle: {}", bundle.display());
         tasks.update(&task).unwrap();
         let now = chrono::Utc::now();
         cas_store::open_qa_pass(
@@ -483,6 +539,127 @@ async fn refreshed_bundle_dispatches_current_tip_without_reusing_old_approval_ca
         prior.bound_head, old_head,
         "prior verdict remains immutable"
     );
+}
+
+/// GH #1373: a required docs-only correction must not strand API evidence
+/// on the declined code commit. Exercise request_changes, restart, push and
+/// the actual close gate, with stale/unrelated evidence as negative controls.
+#[tokio::test]
+async fn request_changes_accepts_only_pushed_correction_api_evidence_cas_9e60() {
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("app/api/widgets.ts", "export const status = 400;\n")],
+        "",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let config_text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        config_text.replace(
+            "independent_pass = false",
+            "independent_pass = false\napi_paths = ['app/api/**']",
+        ),
+    )
+    .unwrap();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let branch = format!("factory/test-agent-{TASK}");
+    git(&fx.repo, &["checkout", "-q", "-b", &branch]);
+    let remote = tempfile::tempdir().unwrap();
+    git(
+        &fx.repo,
+        &["init", "-q", "--bare", remote.path().to_str().unwrap()],
+    );
+    git(
+        &fx.repo,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    git(&fx.repo, &["push", "-q", "origin", "main", &branch]);
+    let original = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let artifacts = fx.artifacts.join(TASK);
+    std::fs::create_dir_all(&artifacts).unwrap();
+    let write_ledger = |head: &str| {
+        std::fs::write(artifacts.join("LEDGER.md"), format!(
+            "head_sha: {head}\norigin: http://127.0.0.1:3000\n\
+             | A1 | invalid input | 400 | 400 | PASS | real-build | inline | |\n\
+             request: POST http://127.0.0.1:3000/api/widgets\nstatus: 400\nbody: {{\"error\":\"invalid input\"}}\n"
+        )).unwrap();
+        std::fs::write(artifacts.join("contracts.diff"), "").unwrap();
+    };
+    write_ledger(&original);
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("MERGE REQUIRED"), "{parked}");
+    assert_eq!(anchor(&fx), Some(original.clone()));
+
+    let supervisor = cas_6f10_supervisor(&fx);
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    supervisor
+        .cas_task_request_changes(Parameters(TaskRequestChangesRequest {
+            id: TASK.into(),
+            reason: "Keep the API fix and add the required regression case before re-delivery"
+                .into(),
+        }))
+        .await
+        .unwrap();
+    env.remove("CAS_AGENT_ROLE");
+    fx.core
+        .cas_task_start(Parameters(IdRequest { id: TASK.into() }))
+        .await
+        .unwrap();
+    let corrected = commit_file(
+        &fx.repo,
+        "docs/qa/journeys.yaml",
+        r#"version: 1
+updated: "2026-10-28"
+invariants:
+  INV-API:
+    statement: Invalid widget input returns HTTP 400
+    check: POST invalid input and read the response
+    bug: {task: cas-ev01}
+journeys:
+  - id: API-WIDGETS
+    name: Reject invalid widget input
+    status: live
+    entry: {url: /api/widgets, trigger: POST}
+    steps: [post invalid input, read response]
+    owners: [app/api/widgets.ts]
+    invariants: [INV-API]
+    traffic: {share_pct: 100, basis: requests}
+"#,
+    );
+    git(&fx.repo, &["push", "-q", "origin", &branch]);
+    assert_eq!(
+        git(&fx.repo, &["rev-parse", &format!("origin/{branch}")]),
+        corrected
+    );
+    let unrelated = git(
+        &fx.repo,
+        &["commit-tree", "main^{tree}", "-m", "unrelated root"],
+    );
+
+    for (head, accepted) in [(&original, false), (&unrelated, false), (&corrected, true)] {
+        write_ledger(head);
+        let result = close_text(&fx.core, TASK).await;
+        if accepted {
+            assert!(result.contains("MERGE REQUIRED"), "{result}");
+            assert!(!result.contains("QA EVIDENCE REJECTED"), "{result}");
+            assert_eq!(fx.status(), TaskStatus::AwaitingMerge, "{result}");
+            assert_eq!(anchor(&fx), Some(corrected.clone()), "{result}");
+            assert!(
+                fx.notes()
+                    .contains("API HTTP transcript and contract diff accepted"),
+                "{}",
+                fx.notes()
+            );
+        } else {
+            assert!(
+                result.contains("API transcript head_sha does not match the delivered commit"),
+                "head={head}: {result}"
+            );
+            assert_eq!(fx.status(), TaskStatus::InProgress, "{result}");
+        }
+    }
 }
 
 #[tokio::test]

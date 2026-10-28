@@ -39,6 +39,12 @@ user-facing change they never ran.
 | Bypass | `supervisor_override=true` with a non-empty reason from a live supervisor (the existing mechanism). It is logged as a `✅ DECISION` note that names the gate. |
 | Config | `qa.evidence_gate` (bool, default `true`) in cas-619f's `[qa]` section. |
 
+Independent reviewer bundles use the separate `qa-review-bundle:` citation on
+the delivery task. Producer close resolves only `qa-bundle:` evidence; the
+reviewer's QA record retains its own ledger and bundle regardless of which
+task artifacts root holds them. Historical independent-round notes using the
+older marker remain reviewer evidence and cannot shadow a producer citation.
+
 ## Loaded-proof receipt grammar (risk=concurrency)
 
 When the existing risk close gate requires loaded execution, submit

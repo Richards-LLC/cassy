@@ -17,6 +17,50 @@ use std::path::{Path, PathBuf};
 
 mod socket_cleanup;
 
+/// Confirmed teardown outcome retained after active metadata is removed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionEndOutcome {
+    pub at: String,
+    pub reason: String,
+    pub workers_stopped: Vec<String>,
+    pub orphans: Vec<String>,
+    /// Missing ownership evidence must never count as a successful stop.
+    #[serde(default)]
+    pub unverified: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EndedSession {
+    pub metadata: SessionMetadata,
+    pub ended: SessionEndOutcome,
+}
+
+/// Match end evidence to the daemon's owned supervisor generation.
+pub(crate) fn supervisor_end_is_current(
+    metadata: &SessionMetadata,
+    owned_pid: Option<u32>,
+    recorded_pid: Option<u32>,
+    recorded_starttime: Option<u64>,
+    registered_at: &str,
+) -> bool {
+    if let Some(owned_pid) = owned_pid {
+        if recorded_pid != Some(owned_pid) {
+            return false;
+        }
+        if let Some((supervisor_start, daemon_start)) = recorded_starttime.zip(metadata.daemon_pid_starttime) {
+            // SessionStart can finish before metadata is written. The owned
+            // PTY's PID and boot-relative birth identify its generation without
+            // depending on the wall-clock ordering of those two writes.
+            return supervisor_start >= daemon_start;
+        }
+    }
+    // Older receipts without process fingerprints retain the conservative
+    // timestamp check; missing evidence must never borrow an earlier reason.
+    chrono::DateTime::parse_from_rfc3339(registered_at).ok().zip(
+        chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok())
+        .is_some_and(|(registered, created)| registered >= created)
+}
+
 /// Directory for factory session data
 const SESSIONS_DIR: &str = "sessions";
 /// Directory for factory logs (under ~/.cas)
@@ -357,6 +401,38 @@ impl SessionManager {
         metadata.cas_root = Some(cas_dir.to_string_lossy().to_string());
         self.save_metadata(&metadata)?;
         Ok(metadata)
+    }
+
+    /// Separate from active discovery, so a receipt never becomes a daemon candidate.
+    pub(crate) fn record_ended(&self, name: &str, ended: SessionEndOutcome) -> std::io::Result<()> {
+        if !valid_session_name(name) {
+            return Err(std::io::Error::other("invalid session name"));
+        }
+        let metadata = self.load_metadata(&self.sessions_dir.join(format!("{name}.json")))?;
+        let receipt = EndedSession { metadata, ended };
+        let dir = self.sessions_dir.join("ended");
+        fs::create_dir_all(&dir)?;
+        let temporary = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(temporary.as_file(), &receipt)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(dir.join(format!("{name}.json")))?;
+        Ok(())
+    }
+
+    pub(crate) fn ended_sessions(&self) -> std::io::Result<Vec<EndedSession>> {
+        let entries = match fs::read_dir(self.sessions_dir.join("ended")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut receipts: Vec<EndedSession> = entries.filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()?.to_str()? != "json" { return None; }
+            serde_json::from_slice(&fs::read(path).ok()?).ok()
+        }).collect();
+        receipts.sort_by(|a, b| b.ended.at.cmp(&a.ended.at));
+        receipts.truncate(100);
+        Ok(receipts)
     }
 
     /// Save session metadata
@@ -752,6 +828,24 @@ pub fn create_metadata(
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::session::*;
+
+    #[test]
+    fn cec1_end_reason_matches_owned_process_even_when_registration_precedes_metadata() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut metadata = create_metadata("session-a", 100, "supervisor-a", &[], None, None, None);
+        metadata.created_at = "2026-10-28T18:41:32.004138274Z".into();
+        metadata.daemon_pid_starttime = Some(54141857);
+        // Measured real /exit: registration preceded metadata by 18.06 ms.
+        for (pid, start, registered, expected) in [
+            (Some(2729301), Some(54141868), "2026-10-28T18:41:31.986078318Z", true),
+            (Some(2729301), Some(54141856), "2026-10-28T18:41:31Z", false),
+            (Some(2729302), Some(54141868), "2026-10-28T18:41:33Z", false),
+            (Some(2729301), None, "2026-10-28T18:41:31Z", false),
+        ] {
+            assert_eq!(supervisor_end_is_current(&metadata, Some(2729301), pid, start, registered), expected,
+                "pid={pid:?} start={start:?} registered={registered}");
+        }
+    }
 
     /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
     /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander

@@ -437,6 +437,45 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
         );
         return;
     }
+    // Grow the catalog without refreshing the historical merge captures.
+    // Keep the mutation in a private repository, including the selector's inputs.
+    let snapshot = tempfile::tempdir().unwrap();
+    git(
+        root,
+        &[
+            "clone",
+            "--quiet",
+            "--shared",
+            ".",
+            snapshot.path().to_str().unwrap(),
+        ],
+    );
+    let root = snapshot.path();
+    let catalog = std::fs::read_to_string(root.join("docs/qa/journeys.md")).unwrap();
+    let (_, template) = catalog.rsplit_once("\n### ").unwrap();
+    let template_id = template.split(" · ").next().unwrap();
+    let added_id = "HUB-J9999";
+    write(
+        root,
+        "docs/qa/journeys.md",
+        &format!("{catalog}\n### {}", template.replace(template_id, added_id)),
+    );
+    let mut registry =
+        crate::qa_registry::load(&root.join(crate::qa_registry::DEFAULT_PATH)).unwrap();
+    let mut added = registry
+        .journeys
+        .iter()
+        .find(|j| j.id == template_id)
+        .unwrap()
+        .clone();
+    added.id = added_id.into();
+    registry.journeys.push(added);
+    write(
+        root,
+        crate::qa_registry::DEFAULT_PATH,
+        &serde_yaml::to_string(&registry).unwrap(),
+    );
+    let head = commit(root);
     let validation =
         crate::qa_registry::check(root, Path::new(crate::qa_registry::DEFAULT_PATH)).unwrap();
     assert!(validation.problems.is_empty(), "{:?}", validation.problems);
@@ -448,11 +487,12 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
     );
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("../tests/fixtures/commander-merge-diffs.json")).unwrap();
-    let head = git(root, &["rev-parse", "HEAD"]);
     let mut selected_source_merges = 0;
+    let mut selected_added_journey = false;
     for diff in fixture["diffs"].as_array().unwrap() {
         // Replay real merge path sets against the migrated catalog at this head.
         // Original revisions are provenance, not a dependency on deep CI history.
+        // Captured IDs are historical; the current catalog supplies expectations.
         let files = diff["files"]
             .as_array()
             .unwrap()
@@ -476,6 +516,7 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             .iter()
             .map(|j| j.id.as_str())
             .collect::<Vec<_>>();
+        selected_added_journey |= ids.contains(&added_id);
         if !ids.is_empty()
             && files
                 .iter()
@@ -484,16 +525,14 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             selected_source_merges += 1;
         }
         assert_eq!(ids, legacy, "merge {}", diff["head"]);
-        assert_eq!(
-            serde_json::to_value(ids).unwrap(),
-            diff["journeys"],
-            "captured legacy IDs for {}",
-            diff["head"]
-        );
     }
     assert!(
         selected_source_merges > 0,
         "parity needs a production source merge that selects journeys"
+    );
+    assert!(
+        selected_added_journey,
+        "parity must exercise catalog growth"
     );
 }
 

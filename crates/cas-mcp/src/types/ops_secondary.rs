@@ -378,7 +378,7 @@ pub struct VerificationRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::verification_action_schema",
-        description = "Operation. batch_receipt records one immutable published staging ledger for PASS task_ids in qa.mode=batch (registered supervisor, no self-review). qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request opens an explicit independent round; qa_status includes batch receipts; external_verify is registered-supervisor-only receipted external verification."
+        description = "Operation. batch_receipt: immutable PASS ledger in qa.mode=batch (registered supervisor, no self-review). qa_record: independent reviewer's verdict. qa_waive: logged supervisor waiver; qa_request: open review; qa_status: rounds and batch receipts. qa_reconcile: retire obsolete QA children of one closed task (registered supervisor), preserving current rounds/evidence. external_verify: receipted supervisor-only external checks."
     )]
     pub action: String,
 
@@ -426,8 +426,8 @@ pub struct VerificationRequest {
     #[serde(default, deserialize_with = "deser::option_u64")]
     pub duration_ms: Option<u64>,
 
-    /// Limit for list
-    #[schemars(description = "Maximum items to return")]
+    /// Limit for list or the bounded QA-child reconciliation.
+    #[schemars(description = "Maximum items to return; qa_reconcile: maximum children to retire, 1..100 (default 25)")]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
@@ -781,9 +781,9 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
-    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// gc_cleanup only: exact absolute retired worker or legacy unknown-owner target.
     /// Requires force=true, dry_run=false and the configured positive quiet window.
-    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[schemars(description = "gc_cleanup: exact retired worker or unknown-owner target; force=true dry_run=false.")]
     #[serde(default)]
     pub reclaim_unknown_target: Option<String>,
 
@@ -1507,9 +1507,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
-    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// gc_cleanup only: exact absolute retired worker or legacy unknown-owner target.
     /// Requires force=true, dry_run=false and the configured positive quiet window.
-    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[schemars(description = "gc_cleanup: exact retired worker or unknown-owner target; force=true dry_run=false.")]
     #[serde(default)]
     pub reclaim_unknown_target: Option<String>,
 

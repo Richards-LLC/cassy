@@ -18,8 +18,10 @@ use serde::Deserialize;
 #[path = "qa_journeys.rs"]
 pub mod journeys;
 
-/// Note token that cites a bundle manifest: `qa-bundle: <abs>/bundle.json`.
+/// Note token that cites the implementer's bundle manifest.
 pub const BUNDLE_CITATION: &str = "qa-bundle:";
+/// Independent-review evidence, never a producer close-gate citation.
+pub const REVIEW_BUNDLE_CITATION: &str = "qa-review-bundle:";
 /// Same-line (or preceding-line) escape for a deliberate skip marker.
 pub const ALLOW_SKIP: &str = "cas-allow-skip:";
 /// Where the contract's worked example and producing commands live.
@@ -437,15 +439,20 @@ pub(crate) fn validate_cited_pair_coverage(
 }
 
 /// Newest `qa-bundle: <path>` citation in the notes that is the
-/// implementer's own. cas-619f cites each independent round's bundle on the
-/// same delivery task (`<task>/independent-qa/round-<n>/bundle.json`); those
-/// are the reviewer's evidence and never stand in for, or shadow, the
-/// implementer's bundle.
+/// implementer's own. New independent rounds use `qa-review-bundle:`.
+/// Older rounds used this marker too, with a same-line independent-round
+/// suffix or an `/independent-qa/` path; neither shadows producer evidence,
+/// including when the reviewer kept its bundle under a separate task root.
 pub fn cited_bundle_path(notes: &str) -> Option<String> {
     notes
         .match_indices(BUNDLE_CITATION)
         .filter_map(|(index, token)| {
-            notes[index + token.len()..]
+            let rest = &notes[index + token.len()..];
+            let line = rest.lines().next()?;
+            if line.contains("(independent QA round ") {
+                return None;
+            }
+            rest
                 .split_whitespace()
                 .next()
                 .map(|raw| {

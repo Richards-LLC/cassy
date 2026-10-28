@@ -2377,6 +2377,7 @@ impl CasCore {
         // Anchors identify prior work; they must not bypass the foreign-commit
         // check when an Open task resumes after review.
         let mut factory_branch_start = None;
+        let mut current_checkout_branch = None;
         let reused_factory_branch_reset = if is_worker && task.deliverables.work_target.is_some() {
             if let Ok(worker) = agent_store.get(&agent_id) {
                 // A declared WorkTarget is the only authoritative target. Do
@@ -2530,6 +2531,10 @@ impl CasCore {
                     };
                     // Persist only with the successful InProgress transition
                     // below. Repeated starts must never advance this boundary.
+                    current_checkout_branch = Some(
+                        crate::factory_isolation::branch_at(worker_checkout)
+                            .unwrap_or_else(|| "(detached HEAD)".into()),
+                    );
                     if task.deliverables.factory_branch_start.is_none()
                         && crate::factory_isolation::branch_at(worker_checkout).as_deref()
                             == Some(worker_branch.as_str())
@@ -3347,6 +3352,26 @@ impl CasCore {
             )
             .unwrap_or_default();
 
+        // Diagnostics only: report the persisted boundary after a successful
+        // start, including when an idempotent start observed another branch.
+        let source_readback = super::query::recorded_source_readback(&task);
+        let mut source_readback = if source_readback.is_empty() {
+            source_readback
+        } else {
+            format!("\n{source_readback}")
+        };
+        if let (Some(start), Some(current)) = (
+            task.deliverables.factory_branch_start.as_ref(),
+            current_checkout_branch.as_deref(),
+        ) && current != start.branch {
+            source_readback.push_str(&format!(
+                "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
+                 Recovery: ask the supervisor to use {prefix}task action=rebind_branch id={}; repeated start does not rebind.\n",
+                start.branch, task.id,
+                prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
+            ));
+        }
+
         if brief {
             // Keep scope, resume state and recent evidence within 2000 bytes.
             // Complete fields remain available through show/notes full or pages.
@@ -3457,11 +3482,12 @@ impl CasCore {
                 clipping.excerpt(&cited_pointer, 220),
             );
             let prefix = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}",
+                "Started task: {} - {}\nDelivery mode: {}{}{}",
                 task.id,
                 clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
+                source_readback,
             );
             let hint = read_hint(&task.id, "show", true);
             let available = 2000usize.saturating_sub(prefix.len() + navigation.len() + hint.len());
@@ -3490,11 +3516,12 @@ impl CasCore {
         };
 
         Ok(Self::success(format!(
-            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             req.id,
             task.title,
             task.delivery_mode,
             claim_info.unwrap_or_default(),
+            source_readback,
             reused_factory_branch_reset.as_deref().unwrap_or_default(),
             blocker_warning,
             // cas-156b: placed directly after the claim line so the nativity

@@ -533,7 +533,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
     }
 
     // cas-5132: a re-push cancels a check and starts it again at the same
-    // SHA. Per check name, the latest non-cancelled run is the verdict; a
+    // SHA. Per check name, the newest completed non-cancelled run is the verdict; a
     // check whose every run was cancelled is superseded (awaiting its
     // rerun), never red.
     let (runs, superseded) = select_latest_check_runs(runs);
@@ -647,7 +647,7 @@ fn check_run_failed(run: &serde_json::Value) -> bool {
 
 /// cas-e845 / cas-ae6a: whether a `ci_completed` wake must keep waiting on a
 /// commit's check-runs. It shares merge admission's per-check rules (latest
-/// non-cancelled run per name; the same unfinished and red predicates), so a
+/// completed non-cancelled run per name; the same unfinished and red predicates), so a
 /// wake never fires while one of those checks is still running. A failed
 /// check settles at once, as admission answers CI RED. A check whose runs were
 /// all cancelled has no rerun at this SHA: admission waits for one before it
@@ -658,8 +658,10 @@ pub(crate) fn check_runs_still_running(runs: &[serde_json::Value]) -> bool {
         && latest.into_iter().any(check_run_unfinished)
 }
 
-/// The verdict-bearing run of each check: the newest (by id) non-cancelled
-/// run per name. Unnamed runs pass through. Returns whether any check had
+/// The verdict-bearing run of each check: the newest completed non-cancelled
+/// run per name, falling back to its newest unfinished run. A queued duplicate
+/// at the same SHA cannot erase a completed verdict. Unnamed runs pass through.
+/// Returns whether any check had
 /// only cancelled runs (superseded by a rerun that has not appeared yet).
 fn select_latest_check_runs(runs: &[serde_json::Value]) -> (Vec<&serde_json::Value>, bool) {
     let cancelled = |run: &serde_json::Value| {
@@ -685,7 +687,8 @@ fn select_latest_check_runs(runs: &[serde_json::Value]) -> (Vec<&serde_json::Val
         let same = runs
             .iter()
             .filter(|other| other.get("name").and_then(serde_json::Value::as_str) == Some(name));
-        match same.filter(|run| !cancelled(run)).max_by_key(|run| id(run)) {
+        match same.filter(|run| !cancelled(run))
+            .max_by_key(|run| (!check_run_unfinished(run), id(run))) {
             Some(run) => latest.push(run),
             None => superseded = true,
         }
@@ -3547,6 +3550,90 @@ impl CasCore {
         })
     }
 
+    /// An active task can rebind before parking. Its recorded start is the
+    /// source authority; a historical worker lane is only an identity alias.
+    fn started_task_merge_source(
+        &self,
+        repo: &Path,
+        task: Option<&cas_types::Task>,
+        id: &str,
+    ) -> Result<Option<RemoteMergeSource>, McpError> {
+        let Some(task) = task.filter(|task| {
+            task.task_type != cas_types::TaskType::Epic
+                && matches!(
+                    task.status,
+                    cas_types::TaskStatus::Open
+                        | cas_types::TaskStatus::InProgress
+                        | cas_types::TaskStatus::Blocked
+                )
+        }) else {
+            return Ok(None);
+        };
+        let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
+            return Ok(None);
+        };
+        let refuse = |reason: String| McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(format!(
+                "DELIVERY BRANCH UNRESOLVED: task {} recorded source {} cannot be validated: {reason}. No merge was attempted. Restore the approved binding or use task action=rebind_branch before retrying.",
+                task.id, start.branch,
+            )),
+            data: None,
+        };
+        if !Self::recorded_task_merge_source(task, &start.branch) {
+            return Err(refuse(
+                "assignment or work target conflicts with the recorded start".into(),
+            ));
+        }
+        let agents = self.open_agent_store()?;
+        let assignee =
+            crate::mcp::tools::core::task::resolve_agent_identity(agents.as_ref(), &start.assignee)
+                .map(|agent| agent.name)
+                .unwrap_or_else(|| {
+                    start
+                        .assignee
+                        .strip_prefix("factory/")
+                        .unwrap_or(&start.assignee)
+                        .to_string()
+                });
+        authorize_explicit_task_for_system_b_worker(task, &assignee, agents.as_ref())?;
+        let requested = id.strip_prefix("origin/").unwrap_or(id);
+        if requested != start.branch && !worker_name_token_matches(requested, &assignee) {
+            return Err(refuse(format!(
+                "requested source {id} conflicts with the approved branch"
+            )));
+        }
+        let git = crate::worktree::GitOperations::new(repo.to_path_buf());
+        let tip = git
+            .resolve_commit(&format!("refs/heads/{}", start.branch))
+            .ok_or_else(|| refuse("the approved local branch is missing".into()))?;
+        if !git.is_ancestor(&start.base_sha, &tip) {
+            return Err(refuse("the recorded base is no longer an ancestor".into()));
+        }
+        let attributed = crate::mcp::tools::core::task::lifecycle::close_ops::task_attribution::started_delivery(repo, task)
+            .map_err(&refuse)?;
+        if attributed.is_none() && !git.is_ancestor(&tip, &start.work_target.target_branch) {
+            return Err(refuse(
+                "the approved branch has no attributable task delivery".into(),
+            ));
+        }
+        if task.delivery_mode != cas_types::DeliveryMode::LocalMerge
+            && git.has_origin_remote()
+            && requested_merge_source_tip(repo, &start.branch, true)?.as_deref()
+                != Some(tip.as_str())
+        {
+            return Err(refuse(
+                "the approved local and live origin tips conflict or the pushed ref is missing"
+                    .into(),
+            ));
+        }
+        Ok(Some(RemoteMergeSource {
+            assignee,
+            branch: start.branch.clone(),
+            anchor: tip,
+        }))
+    }
+
     /// Prefer the task's recorded source, discovering names only if it is absent.
     /// The task/agent identity authorizes the worker independently of branch spelling.
     fn task_merge_source(
@@ -4115,7 +4202,15 @@ impl CasCore {
             branch: receipt.source_branch.clone(),
             anchor: receipt.commit_sha.clone(),
         });
-        let task_source = if system_a.is_none() && receipt_resume.is_none()
+        let active_source = if transactional_delivery.is_none() {
+            self.started_task_merge_source(&cwd, scoped_task.as_deref(),
+                system_a.as_ref().map(|worktree| worktree.branch.as_str()).unwrap_or(id))?
+        } else {
+            None
+        };
+        let task_source = if active_source.is_some() {
+            active_source
+        } else if system_a.is_none() && receipt_resume.is_none()
             && (transactional_delivery.is_none()
                 || scoped_task.as_deref().is_some_and(|task| task.deliverables.parked_branch.is_some()))
         {
@@ -4128,6 +4223,7 @@ impl CasCore {
         // stale explicit branch silently merge a different parked round.
         let requested_branch = id.strip_prefix("origin/").unwrap_or(id);
         if implicit_delivery.is_none()
+            && scoped_task.as_deref().is_some_and(|task| task.status == cas_types::TaskStatus::AwaitingMerge)
             && let Some(source) = task_source.as_ref()
             && requested_branch.starts_with("factory/")
             && requested_branch != source.branch
@@ -4184,7 +4280,9 @@ impl CasCore {
         let (mut worktree, is_system_b, source_worktree_live, target_reason, trunk_fallback) =
             match system_a {
                 Some(mut wt) => {
-                    if let Some((task, _)) = implicit_delivery.as_ref() {
+                    if let Some(source) = task_source.as_ref() {
+                        wt.branch = source.branch.clone();
+                    } else if let Some((task, _)) = implicit_delivery.as_ref() {
                         wt.branch = task.deliverables.parked_branch.clone().expect("validated parked branch");
                     }
                     let source_worktree_live = is_git_worktree(&wt.path);
@@ -6269,6 +6367,16 @@ mod tests {
         assert!(matches!(state(&format!("{cancelled},{success}")), BranchCiState::Green { .. }));
         assert!(matches!(state(cancelled), BranchCiState::Pending { .. }));
         assert!(matches!(state(&format!("{cancelled},{success},{failure}")), BranchCiState::Red { .. }));
+        // cas-53bb: publishing a second ref at the same SHA can register a
+        // queued duplicate after this check already completed. The newest
+        // completed conclusion remains the verdict; other check names still
+        // owe their own completion.
+        let queued = r#"{"id":4,"name":"Fast Validation","status":"queued","conclusion":null}"#;
+        assert!(matches!(state(&format!("{success},{queued}")), BranchCiState::Green { .. }));
+        assert!(matches!(state(&format!("{success},{failure},{queued}")), BranchCiState::Red { .. }));
+        assert!(matches!(state(queued), BranchCiState::Pending { .. }));
+        let runs: Vec<serde_json::Value> = serde_json::from_str(&format!("[{success},{queued}]")).unwrap();
+        assert!(!super::check_runs_still_running(&runs));
         assert!(matches!(state(classifier), BranchCiState::Pending { .. }));
         assert!(matches!(
             require_code_validation(state(classifier)),

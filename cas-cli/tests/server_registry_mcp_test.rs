@@ -229,14 +229,32 @@ fn extract_pid(output: &str) -> u32 {
 #[tokio::test]
 async fn server_start_list_stop_round_trip() {
     let env = TestEnv::new();
+    // GH #1368: disposable npm-exec -> shell -> server shape. The server
+    // publishes its actual port; no package installation or fixed host port.
+    let fixture = env.workdir.join("npm-exec.py");
+    std::fs::write(&fixture, r#"import json, os, pathlib, socket, subprocess, sys, time
+root = pathlib.Path(__file__).parent
+if sys.argv[1] == "wrapper":
+    (root / "wrapper.pid").write_text(str(os.getpid()))
+    subprocess.run(["sh", "-c", 'printf "%s" "$$" > "$1"; "$2" "$3" server & wait',
+                    "sh", str(root / "shell.pid"), sys.executable, __file__], check=True)
+else:
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen()
+        (root / "server.json").write_text(json.dumps({"pid": os.getpid(), "port": server.getsockname()[1]}))
+        deadline = time.monotonic() + 60
+        # Also clean up after a failed assertion removes the fixture directory.
+        while pathlib.Path(__file__).exists() and time.monotonic() < deadline:
+            time.sleep(0.025)
+"#).unwrap();
 
     let started = env
         .call(serde_json::json!({
             "action": "server_start",
             "id": "dev-web",
-            "command": "sleep 300",
+            "command": "python3 npm-exec.py wrapper",
             "cwd": env.workdir.to_str().unwrap(),
-            "port": 5173,
             "task_id": "cas-7c93",
         }))
         .await;
@@ -246,6 +264,29 @@ async fn server_start_list_stop_round_trip() {
     );
     let id = extract_id(&started);
     let pid = extract_pid(&started);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (wrapper, shell, server, port) = loop {
+        let read_pid = |name: &str| std::fs::read_to_string(env.workdir.join(name))
+            .ok()?.trim().parse::<u32>().ok();
+        let ready = std::fs::read(env.workdir.join("server.json")).ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+        if let (Some(wrapper), Some(shell), Some(ready)) =
+            (read_pid("wrapper.pid"), read_pid("shell.pid"), ready)
+            && let (Some(server), Some(port)) = (ready["pid"].as_u64(), ready["port"].as_u64())
+        {
+            break (wrapper, shell, server as u32, port as u16);
+        }
+        if std::time::Instant::now() >= deadline {
+            let cleanup = env.call(serde_json::json!({"action": "server_stop", "id": id})).await;
+            panic!("nested fixture never became ready: {started}; cleanup: {cleanup}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    };
+    let owned = [wrapper, shell, server];
+    assert_eq!(pid, wrapper, "registered pid must be the npm-style wrapper");
+    assert!(wrapper != shell && shell != server && wrapper != server);
+    assert!(owned.iter().all(|pid| pid_alive(*pid)), "all three fixture processes must be live");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok(), "server must own a listening socket");
     assert!(pid_alive(pid), "the server must actually be running");
     assert!(
         started.contains("dies at teardown"),
@@ -261,7 +302,7 @@ async fn server_start_list_stop_round_trip() {
     assert!(listed.contains("dev-web"), "{listed}");
     assert!(listed.contains(&id), "{listed}");
     assert!(listed.contains("cas-7c93"), "owner task shown: {listed}");
-    assert!(listed.contains("sleep 300"), "command shown: {listed}");
+    assert!(listed.contains("npm-exec.py"), "command shown: {listed}");
     assert!(listed.contains("pgid"), "process group shown: {listed}");
     assert!(
         listed.contains("live descendants"),
@@ -271,15 +312,20 @@ async fn server_start_list_stop_round_trip() {
     let stopped = env
         .call(serde_json::json!({"action": "server_stop", "id": id}))
         .await;
-    assert!(stopped.contains("Stopped server 'dev-web'"), "{stopped}");
-
     for _ in 0..80 {
-        if !pid_alive(pid) {
+        if owned.iter().all(|pid| !pid_alive(*pid)) {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
-    assert!(!pid_alive(pid), "server_stop must actually stop it");
+    let survivors: Vec<_> = owned.into_iter().filter(|pid| pid_alive(*pid)).map(|pid| {
+        let command = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="])
+            .output().map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned()).unwrap_or_default();
+        format!("pid {pid} ({command})")
+    }).collect();
+    assert!(stopped.contains("Stopped server 'dev-web'") && survivors.is_empty(),
+        "stop must reap every owned descendant; output: {stopped}; survivors: {survivors:?}");
+    assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_ok(), "server_stop must release the owned port");
 
     let after = env.call(serde_json::json!({"action": "server_list"})).await;
     assert!(
@@ -485,7 +531,7 @@ async fn cas_7694_immediate_exit_reports_failure_and_log_tail() {
 /// Registered identity controls both factory and legacy coordination routes.
 #[tokio::test]
 async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
-    use cas::types::{Agent, AgentRole};
+    use cas::types::{Agent, AgentRole, Task, TaskStatus};
     let env = TestEnv::new();
     let mut alice = Agent::new_with_role("alice-id".into(), "alice".into(), AgentRole::Worker);
     alice.factory_session = Some("session-a".into());
@@ -552,4 +598,119 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
     )
     .await;
     assert!(stopped.contains("Stopped server"), "{stopped}");
+
+    // A context recycle preserves the name/session/task binding, releases
+    // the old process's lease, and task start claims it for the new UUID.
+    let agents = cas::store::open_agent_store(&env.cas_root).unwrap();
+    let tasks = cas::store::open_task_store(&env.cas_root).unwrap();
+    let mut task = Task::new("cas-recycle".into(), "Resume server work".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(alice.name.clone());
+    tasks.add(&task).unwrap();
+    assert!(
+        agents
+            .try_claim(&task.id, &alice.id, 600, None)
+            .unwrap()
+            .is_success()
+    );
+    let started = call(
+        service(&alice),
+        serde_json::json!({
+            "action":"server_start", "id":"recycled", "command":"sleep 300",
+            "cwd":env.workdir, "task_id":task.id, "shared":true,
+        }),
+    )
+    .await;
+    let id = extract_id(&started);
+    agents.graceful_shutdown(&alice.id).unwrap();
+
+    let mut replacement = Agent::new_with_role(
+        "alice-recycled-id".into(),
+        alice.name.clone(),
+        AgentRole::Worker,
+    );
+    // Each identity gets the same live lease where indicated. Names alone,
+    // another factory session, or another task must not authorize a stop.
+    for (label, name, session, assigned, leased, allowed) in [
+        (
+            "different worker",
+            "bob",
+            Some("session-a"),
+            "bob",
+            true,
+            false,
+        ),
+        (
+            "different session",
+            "alice",
+            Some("session-b"),
+            "alice",
+            true,
+            false,
+        ),
+        ("missing session", "alice", None, "alice", true, false),
+        (
+            "different task binding",
+            "alice",
+            Some("session-a"),
+            "bob",
+            true,
+            false,
+        ),
+        (
+            "no resumed lease",
+            "alice",
+            Some("session-a"),
+            "alice",
+            false,
+            false,
+        ),
+        (
+            "resumed owner",
+            "alice",
+            Some("session-a"),
+            "alice",
+            true,
+            true,
+        ),
+    ] {
+        replacement.name = name.into();
+        replacement.factory_session = session.map(str::to_string);
+        let svc = service(&replacement);
+        task.assignee = Some(assigned.into());
+        tasks.update(&task).unwrap();
+        if leased {
+            assert!(
+                agents
+                    .try_claim(&task.id, &replacement.id, 600, None)
+                    .unwrap()
+                    .is_success()
+            );
+        }
+        let result = call(svc, serde_json::json!({"action":"server_stop", "id":id})).await;
+        if leased {
+            agents.release_lease(&task.id, &replacement.id).unwrap();
+        }
+        if allowed {
+            // Clean up on the red path only. Re-stopping an already reaped
+            // wrapper without a cgroup correctly refuses unverifiable legacy
+            // descendants (as on macOS); it is not an ownership failure.
+            let cleanup = if result.contains("Stopped server") {
+                String::new()
+            } else {
+                env.call(serde_json::json!({"action":"server_stop", "id":id})).await
+            };
+            assert!(result.contains("Stopped server"), "{label}: {result}; cleanup: {cleanup}");
+            assert!(!pid_alive(extract_pid(&started)), "{label} left its owned server alive");
+        } else {
+            assert!(
+                result.contains("workers may stop only servers they started"),
+                "{label}: {result}"
+            );
+            assert!(
+                pid_alive(extract_pid(&started)),
+                "{label} killed the server"
+            );
+        }
+    }
 }

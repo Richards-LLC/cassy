@@ -676,7 +676,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cas"
-version = "3.86.0"
+version = "3.87.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -702,6 +702,7 @@ dependencies = [
  "claude_rs",
  "code-mode-mcp",
  "criterion 0.5.1",
+ "crossterm 0.25.0",
  "crossterm 0.29.0",
  "dirs",
  "dotenvy",
@@ -801,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "cas-core"
-version = "3.86.0"
+version = "3.87.0"
 dependencies = [
  "cas-store",
  "cas-types",
@@ -871,7 +872,7 @@ dependencies = [
 
 [[package]]
 name = "cas-mcp"
-version = "3.86.0"
+version = "3.87.0"
 dependencies = [
  "cas-core",
  "cas-store",
@@ -971,7 +972,7 @@ dependencies = [
 
 [[package]]
 name = "cas-search"
-version = "3.86.0"
+version = "3.87.0"
 dependencies = [
  "anyhow",
  "cas-code",
@@ -994,7 +995,7 @@ dependencies = [
 
 [[package]]
 name = "cas-store"
-version = "3.86.0"
+version = "3.87.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1035,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "cas-types"
-version = "3.86.0"
+version = "3.87.0"
 dependencies = [
  "chrono",
  "glob",
@@ -1495,8 +1496,6 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 [[package]]
 name = "crossterm"
 version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e64e6c0fbe2c17357405f7c758c1ef960fce08bdfb2c03d88d2a18d7e09c4b67"
 dependencies = [
  "bitflags 1.3.2",
  "crossterm_winapi",

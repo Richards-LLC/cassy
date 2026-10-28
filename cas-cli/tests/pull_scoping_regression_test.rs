@@ -30,13 +30,28 @@ fn production_source_root() -> PathBuf {
 
 /// Recursively collect every `.rs` file under `dir`.
 fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    // A default out-of-line module can be gated in mod.rs/lib.rs or in the
+    // sibling foo.rs that owns foo/. Do not exempt filenames by convention:
+    // an ungated tests.rs is still production source for this guard.
+    static TEST_MODULE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"#\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;").unwrap()
+    });
+    let test_modules: std::collections::HashSet<String> = [
+        dir.join("mod.rs"), dir.join("lib.rs"), dir.with_extension("rs"),
+    ].iter().filter_map(|path| fs::read_to_string(path).ok())
+        .flat_map(|src| TEST_MODULE.captures_iter(&strip_comments(&src))
+            .map(|capture| capture[1].to_owned()).collect::<Vec<_>>())
+        .collect();
     let Ok(read) = fs::read_dir(dir) else {
         return;
     };
     for entry in read.flatten() {
         let path = entry.path();
+        let module = if path.is_dir() { path.file_name() } else { path.file_stem() };
+        if module.and_then(|name| name.to_str()).is_some_and(|name| test_modules.contains(name)) {
+            continue;
+        }
         if path.is_dir() {
-            // Tests/benches/fixtures live elsewhere; nothing to skip under src/.
             collect_rust_files(&path, out);
         } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
             out.push(path);
@@ -221,6 +236,13 @@ fn pull_url_scan_ignores_cfg_test_module_fixture() {
         "references inside #[cfg(test)] modules must not be reported as production: {}",
         fixture.display(),
     );
+
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("lib.rs"), "#[cfg(test)]\nmod test_support;\nmod tests;\n").unwrap();
+    fs::write(root.path().join("test_support.rs"), "const MOCK: &str = \"/api/sync/pull\";\n").unwrap();
+    fs::write(root.path().join("tests.rs"), "const PRODUCTION: &str = \"/api/sync/pull\";\n").unwrap();
+    assert_eq!(pull_url_hits(root.path()), vec![(root.path().join("tests.rs"), vec![1])],
+        "exclude declared cfg(test) files, but never hide ungated production by filename");
 }
 
 #[test]

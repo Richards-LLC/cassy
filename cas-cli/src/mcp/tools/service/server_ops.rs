@@ -131,6 +131,33 @@ impl CasService {
         self.inner.open_agent_store().ok()?.get(&id).ok()
     }
 
+    /// A recycle changes the registered UUID but preserves the task binding.
+    /// Require task start's live lease as well as the original name/session;
+    /// reusing a worker name alone never inherits another task's servers.
+    fn owns_resumed_server(&self, record: &RegisteredServer, caller: &crate::types::Agent) -> bool {
+        let Some(task_id) = record.owner_task.as_deref() else {
+            return false;
+        };
+        if record.owner_agent_id.is_none()
+            || record.owner_worker.as_deref() != Some(caller.name.as_str())
+            || caller.factory_session.as_deref().is_none_or(str::is_empty)
+            || record.factory_session != caller.factory_session
+        {
+            return false;
+        }
+        // This store selection resolves task assignees by canonical id/name
+        // and excludes retired agents, reassigned tasks and terminal work.
+        self.inner
+            .open_agent_store()
+            .ok()
+            .and_then(|store| store.list_renewable_task_leases(&caller.id).ok())
+            .is_some_and(|leases| {
+                leases
+                    .iter()
+                    .any(|lease| lease.task_id == task_id && lease.is_valid())
+            })
+    }
+
     /// Launch a long-running server under Cassy supervision.
     pub(super) async fn factory_server_start(
         &self,
@@ -307,7 +334,11 @@ impl CasService {
             .as_ref()
             .map(|a| a.role == crate::types::AgentRole::Worker)
             .unwrap_or_else(crate::harness_policy::is_worker_from_env);
-        if worker && !caller.as_ref().is_some_and(|a| owns_server(&record, a)) {
+        if worker
+            && !caller
+                .as_ref()
+                .is_some_and(|a| owns_server(&record, a) || self.owns_resumed_server(&record, a))
+        {
             return Err(Self::error(
                 ErrorCode::INVALID_REQUEST,
                 "server_stop: workers may stop only servers they started; ask the supervisor to stop another owner's server",

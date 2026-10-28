@@ -516,6 +516,118 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
     }
 }
 
+/// GH #1370: held A and later integrated C belong to separate deliveries;
+/// neither can turn B's empty task lane into a code delivery.
+#[tokio::test]
+async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
+    let mut env = TestEnvGuard::temp_home();
+    for (own_commit, legacy_start) in [(false, false), (false, true), (true, false)] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let mut held = assigned("cas-a0b1", TaskType::Bug, "main");
+        held.status = TaskStatus::AwaitingMerge;
+        held.deliverables.parked_branch = Some(LANE.into());
+        held.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
+        f.put(&held);
+
+        let id = "cas-b3d4";
+        let own_lane = format!("{LANE}-{id}");
+        git(&worker_path, &["checkout", "-q", "-b", &own_lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut helper = assigned(id, TaskType::Task, "main");
+        helper.status = TaskStatus::Open;
+        f.put(&helper);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref().unwrap().branch, own_lane);
+        if legacy_start {
+            // Older starts recorded the reusable lane before isolation.
+            // The allocated task lane still defines B's actual delivery.
+            let mut recorded = f.task(id);
+            recorded.deliverables.factory_branch_start.as_mut().unwrap().branch = LANE.into();
+            f.put(&recorded);
+        }
+
+        let c_lane = format!("{LANE}-cas-c3d4");
+        git(repo, &["checkout", "-q", "-b", &c_lane, "main"]);
+        std::fs::write(repo.join("sibling.rs"), "pub fn sibling() {}\n").unwrap();
+        git(repo, &["add", "sibling.rs"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-c3d4): separate delivery"]);
+        let c_tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["push", "-q", "origin", &c_lane]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", &c_lane, "-m", "Integrate C"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let mut delivered = assigned("cas-c3d4", TaskType::Bug, "main");
+        delivered.status = TaskStatus::Closed;
+        delivered.deliverables.parked_branch = Some(c_lane.clone());
+        delivered.deliverables.factory_branch_anchor = Some(c_tip.clone());
+        f.put(&delivered);
+        if own_commit {
+            std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&worker_path, &["add", "own.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-b3d4): own delivery"]);
+        }
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Diagnosis finished", "no_delivery":true,
+        })).await;
+        if own_commit {
+            assert!(response.contains("NO DELIVERY CLOSE REJECTED"), "{response}");
+            assert_eq!(f.task(id).status, TaskStatus::InProgress, "{response}");
+        } else {
+            assert_closed_without_lane(&f, id, &response);
+            assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        }
+        assert_eq!(f.task(&held.id).status, TaskStatus::AwaitingMerge);
+        assert_eq!(git(repo, &["rev-parse", LANE]), f.foreign_tip);
+        assert_eq!(git(repo, &["rev-parse", &c_lane]), c_tip);
+        assert_eq!(f.task(&delivered.id).status, TaskStatus::Closed);
+    }
+}
+
+/// A derived empty ref cannot erase work on B's publicly recorded source.
+#[tokio::test]
+async fn no_delivery_keeps_generic_source_work_despite_empty_task_ref_gh1370() {
+    let mut env = TestEnvGuard::temp_home();
+    for remote_only in [false, true] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        git(repo, &["merge", "-q", "--ff-only", LANE]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-b137";
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        let source = f.task(id).deliverables.factory_branch_start.unwrap();
+        assert_eq!(source.branch, LANE, "{started}");
+        git(repo, &["branch", &format!("{LANE}-{id}"), &source.base_sha]);
+        std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+        git(&worker_path, &["add", "own.rs"]);
+        git(&worker_path, &["commit", "-q", "-m", "fix(cas-b137): real generic-source work"]);
+        git(&worker_path, &["push", "-q", "origin", LANE]);
+        if remote_only {
+            git(&worker_path, &["reset", "-q", "--hard", &source.base_sha]);
+        }
+        assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Claims no delivery", "no_delivery":true,
+        })).await;
+        assert!(response.contains("NO DELIVERY CLOSE REJECTED"), "remote_only={remote_only}: {response}");
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{response}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&source));
+    }
+}
+
 /// GH #1133: a deploy-only task targeting `main`, started on a lane whose tip
 /// is another task's delivery. The worker declares no-code at close.
 #[tokio::test]
@@ -1247,6 +1359,56 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
         })).await;
         assert_ne!(f.task(id).status, TaskStatus::Closed, "{subject}: {response}");
         assert!(response.contains("MERGE REQUIRED"), "{subject}: {response}");
+    }
+}
+
+/// Diagnostics expose the immutable source through the real task dispatcher.
+#[tokio::test]
+async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    git(repo, &["merge", "-q", "--ff-only", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let id = "cas-a1c3";
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    let recorded = f.task(id).deliverables.factory_branch_start.unwrap();
+    assert!(started.contains(&format!("Recorded source branch: {LANE}")), "{started}");
+    assert!(started.contains(&format!("Start base: {}", recorded.base_sha)), "{started}");
+    assert!(!started.contains("rebind_branch"), "matching checkout needs no recovery: {started}");
+
+    let replacement = format!("{LANE}-{id}");
+    git(&worker_path, &["checkout", "-q", "-b", &replacement]);
+    for full in [false, true] {
+        let started = call(&f.worker, serde_json::json!({
+            "action":"start", "id":id, "brief":!full,
+        })).await;
+        assert!(started.contains(&format!("Recorded source branch: {LANE}")), "{started}");
+        assert!(started.contains(&format!("Start base: {}", recorded.base_sha)), "{started}");
+        assert!(started.contains("WARNING") && started.contains(&replacement)
+            && started.contains("supervisor") && started.contains("rebind_branch"), "{started}");
+        let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
+        assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
+        assert!(shown.contains(&format!("Start base: {}", recorded.base_sha)), "{shown}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&recorded));
+        assert_eq!(git(&worker_path, &["branch", "--show-current"]), replacement);
+    }
+    let mut task = f.task(id);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some(replacement.clone());
+    f.put(&task);
+    for full in [false, true] {
+        let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
+        assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
+        assert!(shown.contains(&format!("Parked branch: {replacement}")), "{shown}");
     }
 }
 

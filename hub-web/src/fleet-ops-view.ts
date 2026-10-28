@@ -348,8 +348,6 @@ export function taskControls(document: Document, context: FleetOpsViewContext, t
 
 /** The header's reason line for a missing permission: one per scope. */
 const headerReasonId = (gate: FleetControlGate): string => `fleet-reason-header-${gate.scope}`;
-const HEADER_REASON_LEAD_ID = "fleet-reason-header-lead";
-const HEADER_INSTRUCTION_ID = "fleet-instruction-header";
 type MissingFleetControlGate = Extract<FleetControlGate, { readonly allowed: false }>;
 
 function permissionName(reason: string): string {
@@ -364,6 +362,8 @@ function headerInstruction(groups: readonly { gate: MissingFleetControlGate; nam
   if (actions.length === 1) return `Pair again from Paired machines to add the ${permissionName(groups[0]!.gate.reason)} permission.`;
   return `In Paired machines, ${actions.join(", then ")}.`;
 }
+
+const permissionDisclosure = new WeakMap<FleetOpsState, boolean>();
 
 /** The section header's Add worker… and Focus epic…, with their small panels. */
 export function headerControls(document: Document, context: FleetOpsViewContext, panel: FleetHeaderPanel | undefined): HTMLElement {
@@ -383,43 +383,29 @@ export function headerControls(document: Document, context: FleetOpsViewContext,
   grant.setAttribute("aria-expanded", String(panel === "grant"));
   const grantGate = fleetControlGate(context.scopes, "write-access", context.origin);
   gateDisabled(grant, grantGate, headerReasonId(grantGate));
-  wrap.append(add, focus);
-  if (context.writeAccess) wrap.append(grant);
-  // cas-ba64: one shared lead, short scope-specific lines, and one instruction
-  // that describes the grant or pairing command the Paired machines surface has.
+  if (addGate.allowed) wrap.append(add);
+  if (focusGate.allowed) wrap.append(focus);
+  if (context.writeAccess && grantGate.allowed) wrap.append(grant);
   const gated: [FleetControlGate, string][] = [[addGate, "Add worker"], [focusGate, "Focus epic"]];
   if (context.writeAccess) gated.push([grantGate, "Write access"]);
   const byScope = new Map<string, { gate: MissingFleetControlGate; names: string[] }>();
   for (const [gate, name] of gated) {
     if (gate.allowed) continue;
     const group = byScope.get(gate.scope) ?? { gate, names: [] };
-    group.names.push(name);
-    byScope.set(gate.scope, group);
+    group.names.push(name); byScope.set(gate.scope, group);
   }
   const groups = [...byScope.values()];
   if (groups.length) {
-    const lead = document.createElement("small");
-    lead.className = "fleet-ops-reason";
-    lead.id = HEADER_REASON_LEAD_ID;
-    lead.textContent = `${groups[0]!.gate.state}.`;
-    wrap.append(lead);
-    for (const { gate, names } of groups) {
-      const reason = document.createElement("small");
-      reason.className = "fleet-ops-reason";
-      reason.id = headerReasonId(gate);
-      reason.textContent = `${names.join(", ")}: needs ${permissionName(gate.reason)}.`;
-      wrap.append(reason);
-    }
-    const instruction = document.createElement("small");
-    instruction.className = "fleet-ops-instruction";
-    instruction.id = HEADER_INSTRUCTION_ID;
-    instruction.textContent = headerInstruction(groups);
-    wrap.append(instruction);
-    for (const [gate, control] of [[addGate, add], [focusGate, focus], [grantGate, grant]] as const) {
-      if (!gate.allowed && (control !== grant || context.writeAccess)) {
-        control.setAttribute("aria-describedby", `${HEADER_REASON_LEAD_ID} ${headerReasonId(gate)} ${HEADER_INSTRUCTION_ID}`);
-      }
-    }
+    const disclosure = document.createElement("details"); disclosure.className = "fleet-permissions";
+    disclosure.open = permissionDisclosure.get(context.state) ?? false;
+    disclosure.ontoggle = () => permissionDisclosure.set(context.state, disclosure.open);
+    const summary = document.createElement("summary");
+    summary.textContent = !addGate.allowed && !focusGate.allowed && (!context.writeAccess || !grantGate.allowed) ? "View only · Permissions" : "Limited access · Permissions";
+    const explanation = document.createElement("p");
+    explanation.textContent = headerInstruction(groups);
+    const link = document.createElement("a"); link.href = "#paired-machines"; link.textContent = "Open Paired machines";
+    link.onclick = event => { event.preventDefault(); document.getElementById("paired-machines-toggle")?.click(); };
+    disclosure.append(summary, explanation, link); wrap.append(disclosure);
   }
   if (panel === "add" && addGate.allowed) {
     const form = document.createElement("div");

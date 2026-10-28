@@ -1,7 +1,8 @@
-import { fitMachineLine, hostMarkup } from "./conversation-shell";
+import { sentAttachments, sentMessageLabel } from "./sent-attachments";
+import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
-import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
+import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { reconcileChildren, ThreadWindow } from "./thread-window";
@@ -10,7 +11,7 @@ import { machineName } from "./conversation-list";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
-import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
+import type { ArtifactRef, OperatorReply, OperatorTurnKind, SessionEndOutcome } from "./types";
 import type { WorkEvent } from "./work-events";
 import { renderWork, workSignature, type WorkRowsContext } from "./work-rows-view";
 import {
@@ -92,6 +93,7 @@ export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer)
 }
 
 export interface ConversationViewOptions {
+  sessionEnd?: () => SessionEndOutcome | undefined;
   /** Supervisor codename; bold in the thread header and the accessible label. */
   supervisor: string;
   /** Machine label and project name for the mono line beneath the name. */
@@ -383,7 +385,7 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
       time.textContent = stampLabel(event.at, now) ?? "";
     }
     const text = document.createElement("p");
-    text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);
+    text.textContent = plainTextMarkdown(event.kind === "send" ? sentMessageLabel(event.value.text) : event.value.message);
     item.append(who, " ", time, text);
     list.append(item);
   }
@@ -419,6 +421,7 @@ export class ConversationView {
   private readonly head: HTMLElement;
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
+  private readonly endReceipt: HTMLElement;
   private readonly empty: HTMLElement;
   /** Other sessions' turns, collapsed and labelled (cas-55a4); never part of the log. */
   private readonly earlier: HTMLElement;
@@ -542,6 +545,10 @@ export class ConversationView {
       if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
+    this.endReceipt = document.createElement("section");
+    this.endReceipt.className = "session-end-receipt";
+    this.endReceipt.setAttribute("role", "status");
+    this.endReceipt.hidden = true;
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.above = document.createElement("div"); this.below = document.createElement("div");
@@ -558,7 +565,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -702,7 +709,8 @@ export class ConversationView {
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
-    const working = this.options.working?.() === true;
+    const ended = this.options.sessionEnd?.();
+    const working = !ended && this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -747,6 +755,16 @@ export class ConversationView {
     this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
+    this.endReceipt.hidden = !ended;
+    if (ended) {
+      this.empty.hidden = true;
+      const title = document.createElement("strong"); title.textContent = "Session ended";
+      const summary = document.createElement("p"); summary.textContent = sessionEndSummary(ended);
+      const details = document.createElement("p"); details.className = "session-end-orphans";
+      details.textContent = [ended.orphans.length ? `Still alive: ${ended.orphans.join(", ")}.` : "", ended.unverified?.length ? `Stop not verified: ${ended.unverified.join(", ")}.` : ""].filter(Boolean).join(" ");
+      details.hidden = !details.textContent;
+      this.endReceipt.replaceChildren(title, summary, details);
+    }
     const held = anchor && this.anchorNode(anchor);
     if (anchor && held) {
       // The button sits above every turn, so the browser's own scroll
@@ -1127,7 +1145,7 @@ export class ConversationView {
     if (!reply.reply_to_session || reply.reply_to === null) return undefined;
     const entry = this.history.earlierSessions().find((entry) => entry.session === reply.reply_to_session);
     const question = entry?.events.find((event) => event.kind === "send" && event.value.notificationId === reply.reply_to);
-    return question?.kind === "send" ? question.value.text : undefined;
+    return question?.kind === "send" ? sentMessageLabel(question.value.text) : undefined;
   }
 
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
@@ -1459,7 +1477,20 @@ export class ConversationView {
       origin.textContent = `from ${send.deviceLabel}`;
       bubble.append(origin);
     }
-    bubble.append(...paragraphs(document, send.text));
+    const { text, attachments } = sentAttachments(send.text);
+    bubble.append(...paragraphs(document, text));
+    if (attachments.length) {
+      const reply: OperatorReply = { notification_id: send.notificationId ?? 0, reply_to: null, message: text, summary: "", device_id: "", attachments };
+      const context = this.context(document, turn, reply);
+      const renderer = turnRenderers.get("attachment");
+      for (const attachment of attachments) {
+        if (renderer) bubble.append(renderer(reply, { ...context, attachment }));
+        else {
+          const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`;
+          link.textContent = attachment.name; bubble.append(link);
+        }
+      }
+    }
     if (send.state === "sending") {
       const state = document.createElement("span");
       state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");
@@ -1837,20 +1868,28 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
     table.dataset.columns = String(columns);
+    // Intrinsic table layout shares column widths across rows, preserving each
+    // word's minimum width. The outer sheet owns overflow on narrow screens.
+    const body = document.createElement("div"); body.className = "evi-body"; body.setAttribute("role", "rowgroup");
+    const evidence = (text: string): boolean => /^(?:[+-]?\d[\d,.]*(?:\s*(?:%|ms|s|x))?|(?:\d+\s+)?(?:pass(?:ed)?|ok|green|✓|flakes?|flaky|warn(?:ing)?|skipped|fail(?:ed)?|error|red))$/i.test(plainTextMarkdown(text).trim());
+    const evidenceColumns = Array.from({ length: columns }, (_, index) => {
+      const values = block.table.rows.map(row => row[index] ?? "").filter(value => value.trim());
+      return values.length > 0 && values.every(evidence);
+    });
     const row = (cells: string[], head: boolean): HTMLElement => {
       const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
-      // First column takes the slack, the rest hug their numbers; widths beyond three columns are set here, not in CSS.
-      if (columns !== 3) line.style.gridTemplateColumns = `minmax(0, 1fr)${" auto".repeat(Math.max(0, columns - 1))}`;
       for (let index = 0; index < columns; index += 1) {
         const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
-        const text = cells[index] ?? ""; cell.textContent = text;
-        const tone = head ? undefined : cellTone(text); if (tone) cell.classList.add(tone);
+        const text = cells[index] ?? ""; appendInline(document, cell, text);
+        if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
+        const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
         line.append(cell);
       }
       return line;
     };
-    if (block.table.header) table.append(row(block.table.header, true));
-    for (const cells of block.table.rows) table.append(row(cells, false));
+    if (block.table.header) body.append(row(block.table.header, true));
+    for (const cells of block.table.rows) body.append(row(cells, false));
+    table.append(body);
     nodes.push(table);
   }
   if (options.attachments === "none") return nodes;

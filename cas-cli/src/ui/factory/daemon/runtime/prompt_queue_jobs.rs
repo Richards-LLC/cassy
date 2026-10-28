@@ -363,7 +363,8 @@ pub(crate) enum ClaimOutcome {
     /// The transport claim was taken: the row may be injected on its next pass.
     Claimed(cas_store::ClaimToken),
     /// The recipient already has the row: a delivered handoff, a hook or a
-    /// poll (review M2).
+    /// poll (review M2), or explicitly settled its own copy. This control
+    /// result does not create transport or body evidence.
     HandedOff,
     /// A bare transport claim nobody handed off holds the row.
     NotClaimed,
@@ -434,6 +435,12 @@ pub(crate) fn run_claim_for_inject(
         }
         let outcome = match queue.claim_recipient_transport_token(row, recipient)? {
             Some(token) => ClaimOutcome::Claimed(token),
+            // An explicit ACK/answer retires this member without claiming any
+            // new transport handoff or body observation. In particular, a
+            // broadcast ACK before first surfacing must not count as a failed
+            // bare claim and consume the broadcast's retry budget.
+            None if matches!(queue.recipient_delivery(row, recipient)?,
+                Some(cas_store::RecipientDelivery::Settled(_))) => ClaimOutcome::HandedOff,
             None if queue.recipient_handed_off(row, recipient)? => ClaimOutcome::HandedOff,
             None => ClaimOutcome::NotClaimed,
         };
@@ -1590,7 +1597,7 @@ impl QueueJobs {
                         );
                     }
                 }
-                QueueJobOutcome::Mirrored(state) => {
+                QueueJobOutcome::Mirrored(mut state) => {
                     #[cfg(test)]
                     {
                         self.mirror_results_seen += 1;
@@ -1599,6 +1606,7 @@ impl QueueJobs {
                     // back; a scan whose drop was already reported is stale.
                     if self.mirror_in_flight && result.generation == self.mirror_generation {
                         self.mirror_in_flight = false;
+                        self.operator_messages.append(&mut state.operator_messages);
                         self.mirror_state = Some(state);
                     }
                 }

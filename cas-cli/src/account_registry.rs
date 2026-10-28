@@ -1,5 +1,5 @@
-//! Shared read model for Claude and Codex accounts. No credentials leave this
-//! module or the limits adapter. Legacy folder aliases remain launch keys;
+//! Shared read model for Claude and Codex accounts. Claude data comes from
+//! non-credential metadata and official binary output. Legacy folder aliases remain launch keys;
 //! display names are presentation only. Consumers should require `LoggedIn`,
 //! known usage, and their own flag policy before automatically choosing an account.
 
@@ -83,7 +83,7 @@ pub struct Account {
     pub display_name: String,
     /// Typed provider account/workspace identity, or an explicit email fallback.
     pub identity: Option<AccountIdentity>,
-    /// Subscription tier from credentials/claims or the usage API, if known.
+    /// Subscription tier from provider metadata or native usage output, if known.
     pub plan: Option<String>,
     /// Current probe result, with explicit rejection and missing-login states.
     pub login_state: LoginState,
@@ -138,9 +138,7 @@ fn metadata(
                     email: None,
                 })
             });
-            let plan = json_file(&folder.join(provider.credentials()))
-                .and_then(|value| string_at(&value, "/claudeAiOauth/subscriptionType"));
-            (identity, plan)
+            (identity, None) // Never load Claude secret-bearing credential JSON.
         }
         Provider::Codex => {
             let auth = json_file(&folder.join(provider.credentials())).unwrap_or_default();
@@ -457,6 +455,17 @@ fn receive_updates(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_plan_does_not_come_from_credentials() {
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join(".claude-fixture");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"fixture-only","subscriptionType":"max"}}"#).unwrap();
+        let row = account(Provider::Claude, home.path(), folder);
+        assert!(row.plan.is_none(), "credential contents must not supply plan metadata");
+    }
 
     #[test]
     fn deadline_keeps_completed_usage_and_leaves_pending_accounts_unknown() {

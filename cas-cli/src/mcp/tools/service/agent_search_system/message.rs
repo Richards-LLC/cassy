@@ -358,6 +358,7 @@ mod viktor_provenance_tests {
     #[test]
     fn viktor_queue_rows_keep_the_standard_provenance_envelope() {
         let row = QueuedPrompt {
+            reference_only: false,
             id: 73,
             source: "viktor".to_string(),
             target: "worker-1".to_string(),
@@ -390,6 +391,7 @@ mod viktor_provenance_tests {
     #[test]
     fn provenance_marks_only_rows_past_the_operational_freshness_window() {
         let row = QueuedPrompt {
+            reference_only: false,
             id: 74,
             source: "director".to_string(),
             target: "worker-1".to_string(),
@@ -418,6 +420,7 @@ mod viktor_provenance_tests {
 
     fn commander_row(origin: Option<cas_store::QueueOrigin>) -> QueuedPrompt {
         QueuedPrompt {
+            reference_only: false,
             id: 75,
             source: "commander:Daniel@iphone-15".to_string(),
             target: "supervisor".to_string(),
@@ -1892,8 +1895,9 @@ impl CasService {
         // This is strong evidence for exactly one row; the conservative
         // generic reply-inference rule below remains unchanged.
         let explicit_reply_to = req.in_reply_to;
-        // Only a direct reply acknowledges the row it names (cas-009c).
-        let mut explicit_reply_acks = false;
+        // Direct replies settle their addressed copy; a broadcast answer
+        // settles only this recipient, never the shared row (cas-009c).
+        let mut explicit_reply_settles = false;
         let mut replied_blocker = None;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
@@ -1928,7 +1932,11 @@ impl CasService {
             ];
             let reference =
                 classify_reply_reference(&prior.source, &prior.target, &counterparty, &me);
-            explicit_reply_acks = reference == Some(ReplyReference::DirectReply);
+            explicit_reply_settles = reference == Some(ReplyReference::DirectReply)
+                || (reference == Some(ReplyReference::Thread)
+                    && prior.target.eq_ignore_ascii_case("all_workers")
+                    && counterparty.iter().any(|name| !name.is_empty() && name.eq_ignore_ascii_case(&prior.source))
+                    && !me.iter().any(|name| !name.is_empty() && name.eq_ignore_ascii_case(&prior.source)));
             match reference {
                 Some(ReplyReference::DirectReply) => {
                     replied_blocker = crate::prompt_revalidation::parse_blocker_envelope(&prior.prompt)
@@ -2988,8 +2996,11 @@ impl CasService {
                     )
                 })?;
         }
-        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_acks) {
-            queue.ack(notification_id).map_err(|error| {
+        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_settles) {
+            let sender_name = agent_from_store.as_ref().map(|a| a.name.as_str())
+                .unwrap_or(display_name.as_str());
+            let sender_aliases = crate::harness_policy::inbox_aliases(sender_name, role == "supervisor");
+            queue.acknowledge_for_recipients(notification_id, &sender_aliases, Some(message_id)).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!(
@@ -3073,10 +3084,11 @@ impl CasService {
                 .claim_recipient_transport_token(message_id, &worker.name)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
             {
-                let body =
-                    crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
-                        &row,
-                    );
+                let delivery = queue.recipient_delivery(row.id, &worker.name)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "recovery row unavailable"))?;
+                let row = delivery.into_prompt();
+                let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
                 if let Err(error) = inbox.write_to_inbox(
                     &worker.name,
                     &row.source,
@@ -3559,12 +3571,19 @@ impl CasService {
         let mut withheld: Vec<(i64, String)> = Vec::new();
         let mut redelivered = 0usize;
         let mut shown_redeliveries: Vec<i64> = Vec::new();
+        let mut rendered_named: Vec<i64> = Vec::new();
         // cas-098d (GH #904): older transport deliveries are claimed and named,
         // not replayed.
         let mut replays: Vec<(i64, String)> = Vec::new();
         let now = chrono::Utc::now();
         let mut body = String::new();
         for message in &messages {
+            if message.reference_only {
+                body.push_str(&format!("**[{}] From: {}**\n{}\n\n", message.id, message.source, message.prompt));
+                rendered += 1;
+                continue;
+            }
+
             // A supervisor can claim a queue row directly through inbox_poll,
             // bypassing the daemon's transport-time check. Re-run the exact
             // merge-request predicate here so an invalidated delivery anchor
@@ -3795,6 +3814,9 @@ impl CasService {
                 }
             }
             rendered += 1;
+            if named.contains(&message.id) {
+                rendered_named.push(message.id);
+            }
         }
         // cas-6ccb (GH #1215): a row this poll withheld as already done, or
         // named without replaying it, is settled now, so the next turn's
@@ -3808,6 +3830,12 @@ impl CasService {
             }))
             .chain(shown_redeliveries.iter().map(|id| {
                 (*id, "shown again by inbox_poll as an earlier delivery".to_string())
+            }))
+            // A named read explicitly requested this full body. Do not inject
+            // the batch-poll recovery repeat; this settles rendering only,
+            // never an acknowledgement or subsequent model action.
+            .chain(rendered_named.iter().map(|id| {
+                (*id, "requested full body rendered by named inbox_poll".to_string())
             }))
             .collect();
         if let Err(error) = queue.settle_polled_rows(&aliases, &settled) {
@@ -3859,7 +3887,7 @@ impl CasService {
 
         let mut output = format!(
             "Pulled {rendered} unread message(s) for {recipient} (inbox claim: marked seen \
-             now; a direct message you neither message_ack nor answer is shown once more at \
+             now; an unnamed direct message you neither message_ack nor answer is shown once more at \
              your next turn, except broadcasts and rows withheld or marked already delivered \
              here; daemon transport delivery is unchanged)"
         );
@@ -3946,7 +3974,13 @@ impl CasService {
             )));
         }
 
-        queue.ack(notification_id).map_err(|error| {
+        let agent_id = self.inner.get_agent_id().map_err(|_| Self::error(
+            ErrorCode::INVALID_REQUEST, "message_ack requires a registered agent identity"))?;
+        let agent = self.inner.open_agent_store()?.get(&agent_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
+        let aliases = crate::harness_policy::inbox_aliases(&agent.name,
+            agent.role == cas_types::AgentRole::Supervisor);
+        queue.acknowledge_for_recipients(notification_id, &aliases, None).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to acknowledge message: {error}"),
@@ -5045,6 +5079,7 @@ mod inbox_poll_identity_tests {
     #[test]
     fn a_named_progress_relay_is_shown_after_its_task_moves_on() {
         let relay = |source: &str, transition: &str, new: &str| cas_store::QueuedPrompt {
+            reference_only: false,
             id: 7,
             source: source.to_string(),
             target: "supervisor".to_string(),
@@ -6645,6 +6680,132 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cas_ad3d_named_long_poll_does_not_repeat_the_consumed_body() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "factory-a");
+        env.set("CAS_AGENT_NAME", "supervisor-a");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        for claimed in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(temp.path()).unwrap();
+            let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+            register_gh_1171_fleet(&core, false);
+            let agents = core.open_agent_store().unwrap();
+            let mut supervisor = agents.get("supervisor-a-id").unwrap();
+            supervisor.factory_session = Some("factory-a".into());
+            agents.update(&supervisor).unwrap();
+            core.set_agent_id_for_testing(supervisor.id.clone());
+            let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+            let long = "Complete delivery evidence. ".repeat(110);
+            let id = queue
+                .enqueue_with_session("worker-a", "supervisor-a", &long, "factory-a")
+                .unwrap();
+            let untouched = queue
+                .enqueue_with_session("worker-a", "supervisor-a", "Another request", "factory-a")
+                .unwrap();
+            let held = queue
+                .surface_for_recipient_within_budget(
+                    "supervisor-a",
+                    Some("factory-a"),
+                    cas_store::HookDrain::Unseen,
+                    1,
+                    1_000,
+                )
+                .unwrap();
+            assert!(held.rows.is_empty());
+            assert_eq!(held.over_budget.first().map(|(row, _)| *row), Some(id));
+            if claimed {
+                assert!(queue.claim_recipient_transport(id, "supervisor-a").unwrap());
+            }
+            let service = gh_1171_service(&core);
+            let response = response_text(
+                service
+                    .inbox_poll(
+                        serde_json::from_value(serde_json::json!({
+                            "action":"inbox_poll", "notification_id":id, "limit":1
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert!(response.contains(&long));
+            // A scan may have read the old transport claim while this named poll
+            // consumed it. Its delayed receipt must not replace the poll or its
+            // settlement, including the next-turn recovery decision.
+            queue
+                .record_recipient_surfaced(id, "supervisor-a", cas_store::SurfacingSource::ObservedWake)
+                .unwrap();
+            assert_eq!(
+                queue.recipient_receipt(id, "supervisor-a").unwrap(),
+                Some(cas_store::SurfacingSource::InboxPoll)
+            );
+            let input = crate::hooks::HookInput {
+                agent_role: Some("supervisor".into()),
+                session_id: "sup-session".into(),
+                ..Default::default()
+            };
+            let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+            let next = crate::hooks::handlers::handlers_middle::factory_inbox::surface_polled_unacked(
+                &root,
+                &input,
+                chrono::Utc::now() + chrono::Duration::seconds(1),
+                &mut budget,
+            );
+            assert!(
+                next.and_then(|out| out.text).is_none(),
+                "a named body read must not be injected at the next turn"
+            );
+            assert!(
+                queue
+                    .peek_for_targets(&["supervisor-a"], Some("factory-a"), 10)
+                    .unwrap()
+                    .iter()
+                    .all(|row| row.id != id)
+            );
+            assert!(
+                queue
+                    .recipient_receipt(untouched, "supervisor-a")
+                    .unwrap()
+                    .is_none(),
+                "named consumption must not settle other mail"
+            );
+            assert!(
+                queue
+                    .message_delivery_report(id)
+                    .unwrap()
+                    .unwrap()
+                    .confirmed_at
+                    .is_none()
+            );
+            let batch = response_text(
+                service
+                    .inbox_poll(
+                        serde_json::from_value(serde_json::json!({
+                            "action":"inbox_poll", "limit":1
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap(),
+            );
+            assert!(batch.contains("Another request")); // pin: fixture body must reach the real handler.
+            let repeated =
+                crate::hooks::handlers::handlers_middle::factory_inbox::surface_polled_unacked(
+                    &root,
+                    &input,
+                    chrono::Utc::now() + chrono::Duration::seconds(1),
+                    &mut budget,
+                )
+                .and_then(|out| out.text)
+                .unwrap();
+            assert!(!repeated.contains("Another request")); // pin: an ordinary polled body is recovered by reference.
+            assert!(repeated.contains(&format!("Message {untouched}:")), "{repeated}");
+            assert!(!repeated.contains(&long));
+        }
+    }
+
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve
     /// 'supervisor'" while its supervisor was live and messaging it, because
     /// that supervisor's row carried no factory session and a second
@@ -7204,6 +7365,7 @@ mod cas_89e1_post_merge_message_type_tests {
     #[test]
     fn verified_commander_rows_print_the_exact_operator_reply_command() {
         let mut row = cas_store::QueuedPrompt {
+            reference_only: false,
             id: 3139,
             source: "commander:Daniel@Soundwave".into(),
             target: "supervisor".into(),

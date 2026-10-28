@@ -199,8 +199,19 @@ pub(crate) struct TaskSummaryJson {
     pub(crate) status: String,
     pub(crate) priority: i32,
     pub(crate) assignee: Option<String>,
+    /// Epic review ownership, alongside status and assignee for session scoping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) epic_verification_owner: Option<String>,
     pub(crate) task_type: String,
     pub(crate) epic: Option<String>,
+    pub(crate) epic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) delivery_state: Option<&'static str>,
+    /// Withhold a merge request while the bounded evidence read is incomplete.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) merge_check_pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) progress: Option<EpicProgressJson>,
     pub(crate) branch: Option<String>,
     /// Last update, RFC 3339 (cas-566b): a fleet operation's precondition.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -209,6 +220,14 @@ pub(crate) struct TaskSummaryJson {
     /// "ask the supervisor to merge" states it saw.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) tip: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct EpicProgressJson {
+    pub(crate) total: usize,
+    pub(crate) merged: usize,
+    pub(crate) last_merged_at: Option<String>,
+    pub(crate) merges_per_hour: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,6 +244,8 @@ pub(crate) struct AgentSummaryJson {
     pub(crate) name: String,
     pub(crate) status: String,
     pub(crate) current_task: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) liveness: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) latest_activity: Option<AgentLatestActivityJson>,
     #[serde(skip_serializing_if = "Option::is_none")]

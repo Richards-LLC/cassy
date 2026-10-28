@@ -912,7 +912,7 @@ async fn task_show_renders_work_target_and_explicit_trunk_fallback_cas_0094() {
 #[tokio::test]
 async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, core) = setup_cas(&mut test_env);
+    let (temp, core) = setup_cas(&mut test_env);
     let created = core
         .cas_task_create(Parameters(TaskCreateRequest {
             ..basic_create("Structured state target", None)
@@ -940,14 +940,32 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
         .await
         .expect("state update");
 
+    // A newer runtime persisted additional state. Read it through the real
+    // store/tool boundary rather than asking this version's strict patch writer
+    // to accept a field it does not know how to author.
+    let tasks = open_task_store(&temp.path().join(".cas")).unwrap();
+    let mut stored = tasks.get_execution_state(&task_id).unwrap().unwrap();
+    stored["blocker_ask"] = serde_json::json!("pending-operator-decision");
+    stored["future_resume"] = serde_json::json!({"checkpoint": "newer-runtime"});
+    let conn = Connection::open(temp.path().join(".cas/cas.db")).unwrap();
+    conn.execute("UPDATE task_execution_states SET state = ?1 WHERE task_id = ?2",
+        rusqlite::params![stored.to_string(), task_id]).unwrap();
+
     let show: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "show",
         "id": task_id,
+        "full": true,
     }))
     .expect("deserialize show");
     let shown = extract_text(service.task(Parameters(show)).await.expect("show task"));
     assert!(shown.contains("Structured execution state:"), "{shown}");
     assert!(shown.contains("run focused tests"), "{shown}");
+
+    let rendered: serde_json::Value = shown.lines()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .expect("show retains structured execution state");
+    assert_eq!(rendered["blocker_ask"], stored["blocker_ask"]);
+    assert_eq!(rendered["future_resume"], stored["future_resume"]);
 
     let invalid: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "update",
@@ -963,6 +981,7 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
     let show_after_rejection: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "show",
         "id": task_id,
+        "full": true,
     }))
     .expect("deserialize second show");
     let shown_after = extract_text(
@@ -972,6 +991,15 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
             .expect("show task after rejection"),
     );
     assert!(shown_after.contains("run focused tests"), "{shown_after}");
+    // Read compatibility does not weaken validation of known stored fields.
+    stored["files_touched"] = serde_json::json!("not-an-array");
+    conn.execute("UPDATE task_execution_states SET state = ?1 WHERE task_id = ?2",
+        rusqlite::params![stored.to_string(), task_id]).unwrap();
+    let malformed: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "show", "id": task_id, "full": true
+    })).unwrap();
+    let error = service.task(Parameters(malformed)).await.expect_err("known stored field types stay validated");
+    assert!(error.to_string().contains("files_touched"));
 }
 
 // =============================================================================
@@ -7137,6 +7165,112 @@ async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
 // =============================================================================
 // cas-dbbb: factory-mode session UUID → display-name normalization in task.update
 // =============================================================================
+
+#[tokio::test]
+async fn immutable_qa_assignment_does_not_follow_the_moving_epic() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nwarn_stale_assignment=true\nblock_stale_assignment=true\nstale_threshold_commits=1\n").unwrap();
+    let repo = temp.path().join("qa-upstream");
+    let checkout = temp.path().join("reviewer-checkout");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |path: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(path).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    std::fs::write(repo.join("file"), "producer").unwrap();
+    git(&repo, &["add", "file"]);
+    git(&repo, &["commit", "-qm", "producer"]);
+    let bound_head = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", "epic/moving"]);
+    git(&repo, &["clone", "-q", repo.to_str().unwrap(), checkout.to_str().unwrap()]);
+    git(&repo, &["checkout", "-q", "epic/moving"]);
+    for n in 0..17 {
+        std::fs::write(repo.join("file"), format!("epic advance {n}")).unwrap();
+        git(&repo, &["commit", "-qam", "advance epic"]);
+    }
+    // Real factory worktrees share the supervisor's local epic refs. Mirror
+    // that layout explicitly: clone only creates a local main branch.
+    git(&checkout, &["fetch", "-q", "origin"]);
+    git(&checkout, &["branch", "-f", "epic/moving", "origin/epic/moving"]);
+    let mut reviewer = Agent::new("reviewer-session".into(), "reviewer".into());
+    reviewer.role = AgentRole::Worker;
+    reviewer.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+    open_agent_store(&root).unwrap().register(&reviewer).unwrap();
+    let tasks = open_task_store(&root).unwrap();
+    let service = CasService::new(core, None);
+    env.set("CAS_FACTORY_MODE", "1");
+
+    // A label alone is not an immutable review binding. Check both stored
+    // spellings of the producer identity as well as the implementation row.
+    for (index, (qa_label, producer, accepted)) in [
+        (false, None, false),
+        (true, Some("independent-producer"), true),
+        (true, None, false),
+        (true, Some(reviewer.name.as_str()), false),
+        (true, Some(reviewer.id.as_str()), false),
+    ].into_iter().enumerate() {
+        let mut task = Task::new(format!("cas-assignment-{index}"), "assignment contract".into());
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "epic/moving".into(),
+        });
+        if qa_label { task.labels.push("qa-pass".into()); }
+        tasks.add(&task).unwrap();
+        if let Some(producer) = producer {
+            let source = Task::new(format!("cas-producer-{index}"), "immutable producer".into());
+            tasks.add(&source).unwrap();
+            let pass = cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+                task_id: &source.id, implementer_agent_id: producer,
+                branch: "factory/producer", bound_head: &bound_head,
+                deadline_at: chrono::Utc::now() + chrono::Duration::hours(1), max_rounds: 2,
+            }, chrono::Utc::now()).unwrap();
+            let cas_store::QaPassOpen::Dispatched(pass) = pass else { panic!("new pass expected") };
+            cas_store::set_qa_task(&root, &pass.id, &task.id).unwrap();
+        }
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":"update", "id":task.id, "assignee":reviewer.name,
+        })).unwrap();
+        let result = service.task(Parameters(request)).await;
+        if accepted {
+            let text = extract_text(result.expect("immutable QA must ignore moving epic ancestry"));
+            assert!(!text.contains("rebase"), "immutable candidate must never get a rebase remedy: {text}");
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(reviewer.name.as_str()));
+            // Reserving a review also preserves another clean idle checkout.
+            git(&checkout, &["checkout", "-q", "--detach", "epic/moving"]);
+            let idle_head = git(&checkout, &["rev-parse", "HEAD"]);
+            let assign = || serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+                "action":"update", "id":task.id, "assignee":reviewer.name,
+            })).unwrap();
+            let text = extract_text(service.task(Parameters(assign())).await.unwrap());
+            assert!(text.contains(&bound_head) && !text.contains("rebase"), "{text}");
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), idle_head);
+            std::fs::write(checkout.join("file"), "reviewer's pending work").unwrap();
+            let error = service.task(Parameters(assign())).await.expect_err("dirty review checkout stays protected");
+            assert!(error.message.contains("tracked checkout changes"), "{error}");
+            git(&checkout, &["checkout", "--", "file"]);
+            git(&checkout, &["checkout", "-q", "--detach", &bound_head]);
+        } else {
+            let error = result.expect_err("implementation, unbound label and self-review remain guarded");
+            if producer.is_none() {
+                // pin: the real17-commit regression keeps the implementation freshness guard.
+                assert!(error.message.contains("17 commits behind"), "{error}");
+            } else {
+                assert!(error.message.contains("no self-review"), "{error}");
+                assert!(!error.message.contains("rebase"), "{error}");
+            }
+            assert!(tasks.get(&task.id).unwrap().assignee.is_none());
+        }
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), bound_head,
+            "assignment never changes the review candidate");
+        assert!(git(&checkout, &["status", "--porcelain"]).is_empty());
+    }
+}
 
 #[tokio::test]
 async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted() {

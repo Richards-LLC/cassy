@@ -1486,7 +1486,7 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
     let remote_has_provenance = remote.split("\n\n").any(is_provenance_paragraph);
     let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
     for (is_local, notes) in [(true, local), (false, remote)] {
-        for block in notes.split("\n\n") {
+        for block in cas_store::task_note_markers::note_blocks(notes) {
             let block = block.trim();
             if block.is_empty()
                 || (is_local && remote_has_provenance && is_provenance_paragraph(block))
@@ -2371,7 +2371,7 @@ impl CloudSyncer {
             };
             let trusted_provenance =
                 take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
-            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
                 &mut remote_task.notes, &remote_task.id,
             );
             // cas-7a63: a row without its own origin cannot be attributed.
@@ -3573,7 +3573,7 @@ impl CloudSyncer {
             };
             let trusted_provenance =
                 take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
-            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
                 &mut remote_task.notes, &remote_task.id,
             );
             // cas-7a63: a row without its own origin cannot be attributed.
@@ -4448,6 +4448,11 @@ mod web_close_tests {
             merge_task_notes(local, remote),
             "[2026-08-09 09:30] 📝 PROGRESS remote first\n\n[2026-08-09 10:30] 📝 PROGRESS local follow-up\n\n[2026-08-09 11:30] 📝 PROGRESS shared"
         );
+        // A separately published metadata pointer is its own block, rather
+        // than an enrichment of the preceding receipt.
+        let receipt = "[2026-08-09 11:30] 📝 PROGRESS shared";
+        let pointer = format!("{receipt}\n\nARTIFACT_PROOF: standalone metadata");
+        assert_eq!(merge_task_notes(&pointer, receipt), pointer);
     }
 
     #[test]

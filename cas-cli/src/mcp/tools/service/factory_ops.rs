@@ -64,7 +64,7 @@ fn account_dir_supported(cli: cas_mux::SupervisorCli) -> bool {
 fn requester_account_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
     match cli {
         cas_mux::SupervisorCli::Claude => std::env::var("CLAUDE_CONFIG_DIR").ok(),
-        cas_mux::SupervisorCli::Codex => std::env::var("CODEX_HOME").ok(),
+        cas_mux::SupervisorCli::Codex => std::env::var("CODEX_HOME").ok().filter(|value| !value.is_empty()),
         _ => None,
     }
 }
@@ -110,14 +110,8 @@ fn preflight_claude_config_dir_with(
     if trimmed.is_empty() {
         return Err("config_dir is empty; expected a Claude configuration directory".to_string());
     }
-    let path = trimmed.strip_prefix('~').map_or_else(
-        || std::path::PathBuf::from(trimmed),
-        |suffix| {
-            dirs::home_dir()
-                .map(|home| home.join(suffix.trim_start_matches('/')))
-                .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
-        },
-    );
+    let selector = cas_pty::expand_claude_selector(trimmed);
+    let path = std::path::Path::new(&selector);
     let settings_error = |error: &dyn std::fmt::Display| {
         format!("config_dir preflight failed: missing or unreadable settings.json: {error}")
     };
@@ -130,8 +124,11 @@ fn preflight_claude_config_dir_with(
         Err(error) => return Err(settings_error(&error)),
     }
     if macos {
-        let service = claude_profile_keychain_service(&path.to_string_lossy());
-        if !keychain_item_exists(&service) {
+        let service = claude_profile_keychain_service(&selector);
+        if !keychain_item_exists(&service)
+            && !std::fs::File::open(path.join(".credentials.json"))
+                .is_ok_and(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+        {
             return Err(format!(
                 "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service {service})"
             ));
@@ -645,7 +642,7 @@ fn factory_rehome_label(agent: &cas_types::Agent) -> String {
 /// session. Prefer the freshest heartbeat: it is the strongest evidence of
 /// which same-name process is currently answering. This keeps a live respawn
 /// from being hidden behind its older ghost row.
-fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
+pub(crate) fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
     let original_len = agents.len();
     let mut by_identity = std::collections::BTreeMap::<(String, String), cas_types::Agent>::new();
 
@@ -7684,7 +7681,7 @@ impl CasService {
             // retention, journey cleanup or any other GC mutation.
             if req.artifacts == Some(true) || req.older_than_secs.is_some() {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "Named unknown-cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed"));
+                    "Named cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed"));
             }
             let config = crate::config::Config::load(&self.inner.cas_root)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Cannot establish cache policy: {error}")))?;
@@ -7696,7 +7693,7 @@ impl CasService {
             let report = cleanup_target_cache_report(&self.inner.cas_root, &config, agents.as_ref(),
                 worktrees.as_ref(), &live, req.force == Some(true) && req.dry_run == Some(false), Some(Path::new(path)));
             return Ok(Self::success(match report {
-                Ok(report) => format!("Named unknown-owner cache reclaim.{}", render_target_cache_report(&report)),
+                Ok(report) => format!("Named target-cache reclaim.{}", render_target_cache_report(&report)),
                 Err(error) => format!("Named cache reclaim refused (fail-closed): {error}"),
             }));
         }
@@ -8069,8 +8066,12 @@ fn cleanup_target_cache_report(
     unknown: Option<&std::path::Path>,
 ) -> std::io::Result<crate::factory_target_cache::TargetCacheReport> {
     let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
-    let known = known_target_cache_worktrees(cas_root, config, agents, worktrees);
-    let mut report = crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?;
+    let mut report = if let Some(path) = unknown {
+        crate::factory_target_cache::inspect_named(cas_root, policy, path, live, !authorized)?
+    } else {
+        let known = known_target_cache_worktrees(cas_root, config, agents, worktrees);
+        crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?
+    };
     if authorized || unknown.is_some() {
         crate::factory_target_cache::cleanup_selected_with_opt_in(cas_root, &mut report, policy, live, unknown)?;
     }
@@ -11272,19 +11273,34 @@ const STATUS_ROLLOUT_ENTRIES: usize = 256;
 const STATUS_ROLLOUT_FILES: usize = 8;
 fn status_codex_rollout_entries(root: &std::path::Path) -> impl Iterator<Item = std::io::Result<std::fs::DirEntry>> {
     // Codex uses sessions/YYYY/MM/DD/rollout-*.jsonl. Prefer new calendar
-    // folders. Bound read_dir itself before sorting, including errors and
-    // directory entries; sorting WalkDir would eagerly enumerate whole folders.
+    // folders and sort each day's filenames newest-first before applying the
+    // unchanged 256-entry sample cap. Only one day's entries are materialized
+    // for sorting; errors and non-file entries still count toward the cap.
     let mut pending = vec![(root.join("sessions"), 0)];
     let mut entries = Vec::new();
     while let Some((dir, depth)) = pending.pop() {
+        let remaining = STATUS_ROLLOUT_ENTRIES - entries.len();
+        if remaining == 0 { break; }
         let Ok(children) = std::fs::read_dir(dir) else { continue };
-        for entry in children.take(STATUS_ROLLOUT_ENTRIES - entries.len()) {
-            if let Ok(entry) = &entry {
-                if depth < 3 && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    pending.push((entry.path(), depth + 1));
+
+        if depth == 3 {
+            let mut day_entries = children.collect::<Vec<_>>();
+            day_entries.sort_unstable_by(|left, right| match (left, right) {
+                (Err(_), Ok(_)) => std::cmp::Ordering::Less,
+                (Ok(_), Err(_)) => std::cmp::Ordering::Greater,
+                (Err(_), Err(_)) => std::cmp::Ordering::Equal,
+                (Ok(left), Ok(right)) => right.file_name().cmp(&left.file_name()),
+            });
+            entries.extend(day_entries.into_iter().take(remaining));
+        } else {
+            for entry in children.take(remaining) {
+                if let Ok(entry) = &entry {
+                    if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                        pending.push((entry.path(), depth + 1));
+                    }
                 }
+                entries.push(entry);
             }
-            entries.push(entry);
         }
         if entries.len() == STATUS_ROLLOUT_ENTRIES { break; }
         pending.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -13122,15 +13138,27 @@ mod spawn_lifecycle_tests {
 
     #[test]
     fn a_refusal_names_the_default_account_when_the_caller_named_none() {
-        let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, None)];
-        let error = preflight_account_auth_with(&specs, |_, _| {
-            evidence(
-                cas_factory::CapabilityAvailability::Unavailable,
-                "logged out",
-            )
-        }, || None)
-        .expect_err("refusal expected");
-        assert!(error.contains("~/.codex"), "{error}");
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for inherited in [None, Some("")] {
+            match inherited {
+                Some(value) => env.set("CODEX_HOME", value),
+                None => env.remove("CODEX_HOME"),
+            }
+            let mut spec = spec_for(cas_mux::SupervisorCli::Codex, None);
+            spec.requester_config_dir = requester_account_dir(spec.cli);
+            assert!(spec.requester_config_dir.is_none(), "empty account must act as unset: {spec:?}");
+            assert_eq!(codex_home_path(spec.requester_config_dir.as_deref()), Some(env.home().join(".codex")));
+            let error = preflight_account_auth_with(&[spec], |_, _| {
+                evidence(
+                    cas_factory::CapabilityAvailability::Unavailable,
+                    "logged out",
+                )
+            }, || None)
+            .expect_err("refusal expected");
+            assert!(error.contains("~/.codex"), "{error}");
+        }
+        env.set("CODEX_HOME", "/selected/codex-account");
+        assert_eq!(requester_account_dir(cas_mux::SupervisorCli::Codex).as_deref(), Some("/selected/codex-account"));
     }
 
     #[test]
@@ -15205,10 +15233,21 @@ mod tests {
             claude_profile_keychain_service("/tmp/cafe\u{301}"),
             "Claude Code-credentials-0873cca0"
         );
-        for present in [true, false] {
+        for (keychain_present, file_state) in [
+            (true, "missing"),
+            (false, "readable"),
+            (false, "missing"),
+            (false, "directory"),
+        ] {
             let profile = tempfile::tempdir().unwrap();
             valid_claude_config(profile.path());
-            std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+            let credentials = profile.path().join(".credentials.json");
+            if file_state != "readable" {
+                std::fs::remove_file(&credentials).unwrap();
+                if file_state == "directory" {
+                    std::fs::create_dir(&credentials).unwrap();
+                }
+            }
             let probed = std::cell::Cell::new(false);
             let result = preflight_claude_config_dir_with(
                 profile.path().to_str().unwrap(),
@@ -15217,18 +15256,52 @@ mod tests {
                     assert!(service.starts_with("Claude Code-credentials-"), "{service}");
                     assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
                     probed.set(true);
-                    present
+                    keychain_present
                 },
             );
             assert_eq!(
                 result.is_ok(),
-                present,
-                "Keychain present={present}: {result:?}"
+                keychain_present || file_state == "readable",
+                "Keychain present={keychain_present}, file={file_state}: {result:?}"
             );
+            if let Err(error) = result {
+                // pin: preserve the actionable credential error for existing callers.
+                assert!(
+                    error.starts_with(
+                        "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service "
+                    ),
+                    "{error}"
+                );
+            }
             assert!(
                 probed.get(),
                 "darwin must probe the selected profile's Keychain item"
             );
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_hashes_the_launched_selector() {
+        let profile = tempfile::tempdir().unwrap();
+        valid_claude_config(profile.path());
+        std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+        for raw in [
+            profile.path().display().to_string(),
+            format!("  {}/  ", profile.path().display()),
+        ] {
+            let mut launch = cas_pty::PtyConfig::default();
+            launch.apply_claude_config_dir(Some(&raw), Some("explicit"));
+            let (_, launched_selector) = launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                .unwrap();
+            let expected_service = claude_profile_keychain_service(launched_selector);
+            preflight_claude_config_dir_with(&raw, true, |service| {
+                assert_eq!(service, expected_service, "selector {raw:?}");
+                true
+            })
+            .unwrap();
         }
     }
 
@@ -18845,7 +18918,9 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 8, "{output}");
+        let liveness_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("liveness:")).collect();
+        assert_eq!(liveness_lines.len(), 5, "{output}");
+        assert!(lines.iter().any(|line| line.starts_with("Factory MCP versions")), "{output}");
         assert!(
             lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
                 && line.contains("has not reported a mailbox poll")),
@@ -18867,8 +18942,8 @@ effort = "high"
         .enumerate()
         {
             assert!(
-                lines
-                    .get(index + 1)
+                liveness_lines
+                    .get(index)
                     .unwrap()
                     .starts_with(&format!("liveness: {expected} |")),
                 "{output}"
@@ -18962,6 +19037,8 @@ effort = "high"
         let rel = "2026/08/18/rollout-2026-08-18T17-22-01-live.jsonl";
         let (account_home, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
         let account_dir = account_home.path().to_str().expect("utf-8 account home");
+        // macOS temp roots can be spelled /var or /private/var; compare the real file.
+        let expected_rollout = sessions.join(rel).canonicalize().unwrap();
 
         let resolved = resolve_worker_transcript_path_for_account(
             Some(clone),
@@ -18969,7 +19046,7 @@ effort = "high"
             cas_mux::SupervisorCli::Codex,
             Some(account_dir),
         );
-        assert_eq!(resolved, Some(sessions.join(rel)));
+        assert_eq!(resolved, Some(expected_rollout.clone()));
 
         let status_path = worker_status_transcript_path_for_account(
             Some(clone),
@@ -18977,7 +19054,7 @@ effort = "high"
             cas_mux::SupervisorCli::Codex,
             Some(account_dir),
         );
-        assert_eq!(status_path, Some(sessions.join(rel)));
+        assert_eq!(status_path, Some(expected_rollout.clone()));
 
         let mut agent = cas_types::Agent::new(
             "codex-kind-owl-71-session".to_string(),
@@ -18994,7 +19071,7 @@ effort = "high"
             .insert("worker_account_dir".to_string(), account_dir.to_string());
         assert_eq!(
             worker_transcript_path_for_agent(account_home.path(), &agent),
-            Some(sessions.join(rel)),
+            Some(expected_rollout),
             "the registered worker's spawn-time CODEX_HOME must reach all agent-aware callers"
         );
     }
@@ -19822,12 +19899,6 @@ effort = "high"
         let recent = root.join("sessions/2026/10/27");
         std::fs::create_dir_all(&archive).unwrap();
         std::fs::create_dir_all(&recent).unwrap();
-        for i in 0..300 {
-            let path = archive.join(format!("rollout-{i:03}.jsonl"));
-            std::fs::write(&path, "{}\n").unwrap();
-            std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
-                .set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
-        }
         let now = chrono::Utc::now();
         for i in 0..=STATUS_ROLLOUT_FILES {
             let path = recent.join(format!("rollout-{i:02}.jsonl"));
@@ -19839,13 +19910,60 @@ effort = "high"
             std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
                 .set_modified(std::time::SystemTime::UNIX_EPOCH+std::time::Duration::from_secs(i as u64+10))).unwrap();
         }
+        let prior_entries = status_codex_rollout_entries(&root).count();
+        let archive_budget = STATUS_ROLLOUT_ENTRIES.saturating_sub(prior_entries);
+        assert!(archive_budget > 1 && archive_budget < 300, "fixture cap must split the 300-file day");
+        for i in 0..300 {
+            let path = archive.join(format!("rollout-{i:03}.jsonl"));
+            std::fs::write(&path, "{}\n").unwrap();
+            std::fs::File::open(path).unwrap().set_times(std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::UNIX_EPOCH)).unwrap();
+        }
+        let old_sample = std::fs::read_dir(&archive).unwrap().take(archive_budget)
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let newest_candidates = (0..300).rev().take(archive_budget)
+            .map(|i| format!("rollout-{i:03}.jsonl"))
+            .filter(|name| name != "rollout-299.jsonl")
+            .collect::<Vec<_>>();
+        let skipped_newest = newest_candidates.iter()
+            .find(|name| !old_sample.contains(*name))
+            // Some filesystems already enumerate this prefix newest-first.
+            // Keep that valid layout as a control instead of panicking.
+            .or_else(|| newest_candidates.iter().find(|name| old_sample.contains(*name)))
+            .expect("fixture must contain a newest-name candidate")
+            .clone();
+        let newest_path = archive.join(&skipped_newest);
+        std::fs::write(&newest_path, serde_json::json!({"rate_limits": {
+            "primary": {"window_minutes":300,"resets_at":now.timestamp()+3600},
+            "secondary": {"window_minutes":10080,"resets_at":now.timestamp()+86400}
+        }}).to_string()).unwrap();
+        std::fs::File::open(newest_path).unwrap().set_times(std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH+std::time::Duration::from_secs(31))).unwrap();
+        let newest_named_path = archive.join("rollout-299.jsonl");
+        std::fs::write(&newest_named_path, serde_json::json!({"rate_limits": {
+            "primary": {"window_minutes":300,"resets_at":now.timestamp()+7200},
+            "secondary": {"window_minutes":10080,"resets_at":now.timestamp()+172800}
+        }}).to_string()).unwrap();
+        std::fs::File::open(newest_named_path).unwrap().set_times(std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH+std::time::Duration::from_secs(30))).unwrap();
         let inspected = status_codex_rollout_entries(&root).count();
         assert!(inspected <= STATUS_ROLLOUT_ENTRIES, "status scanned {inspected} entries");
         let mut agent = cas_types::Agent::new("bounded-reset".into(), "worker".into());
         agent.metadata.insert("worker_cli".into(), "codex".into());
         agent.metadata.insert("worker_account_dir".into(), root.to_string_lossy().into_owned());
+        let newest = worker_usage_reset_lines(&agent, None, now);
+        let expected_reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(1)), now);
+        assert!(newest.contains(&format!("5h: {expected_reset}")) && newest.contains("weekly: resets "),
+            "newest rollout name in a 300-file day folder must survive the inventory cap: {newest}");
+        std::fs::remove_file(archive.join(&skipped_newest)).unwrap();
+        let newest_named = worker_usage_reset_lines(&agent, None, now);
+        let expected_named_reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(2)), now);
+        assert!(newest_named.contains(&format!("5h: {expected_named_reset}")),
+            "the newest filename must remain in the capped sample: {newest_named}");
+        std::fs::remove_file(archive.join("rollout-299.jsonl")).unwrap();
         let unknown = worker_usage_reset_lines(&agent, None, now);
-        assert!(!unknown.contains("resets "), "an older file beyond the read budget must stay unknown: {unknown}");
+        assert!(!unknown.contains("resets "), "an older file outside the newest 8 by mtime must stay unknown: {unknown}");
         std::fs::remove_file(recent.join(format!("rollout-{:02}.jsonl", STATUS_ROLLOUT_FILES))).unwrap();
         let known = worker_usage_reset_lines(&agent, None, now);
         assert!(known.contains("5h: resets ") && known.contains("weekly: resets "), "{known}");

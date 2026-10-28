@@ -158,7 +158,13 @@ pub fn handle_user_prompt_submit(
                 && is_operator_terminal_prompt(input, prompt)
             {
                 if let Ok(queue) = crate::store::open_prompt_queue_store(root) {
-                    let _ = queue.record_terminal_operator_turn(&session, prompt);
+                    if let Some(id) = input.prompt_id.as_deref() {
+                        let _ = queue.record_terminal_transcript_turn(
+                            &session, &input.session_id, id, prompt, chrono::Utc::now(),
+                        );
+                    } else {
+                        let _ = queue.record_terminal_operator_turn(&session, prompt);
+                    }
                 }
             }
         }

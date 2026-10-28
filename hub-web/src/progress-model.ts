@@ -41,3 +41,45 @@ export function workerProgress(roster: readonly string[] | undefined, agents: re
     return { name, agent, currentTask, work };
   });
 }
+
+/** Additive status fields; older hubs deliberately keep progress unavailable. */
+export interface ReleaseEpic {
+  readonly id: string;
+  readonly title?: string;
+  readonly focused?: boolean;
+  readonly status?: string;
+  readonly assignee?: string | null;
+  readonly epic_verification_owner?: string | null;
+  readonly progress?: { readonly total: number; readonly merged: number; readonly merges_per_hour: number; readonly last_merged_at?: string | null };
+}
+export type ProgressTask = FleetTask & { readonly epic_id?: string | null; readonly delivery_state?: string | null };
+
+/** Status epics are a project catalog, never a session ownership list. */
+function supervisorEpics(epics: readonly ReleaseEpic[], focused: string | null, supervisors: readonly string[]): ReleaseEpic[] {
+  const open = epics.filter(epic => ["Open", "Ready", "In progress", "Blocked", "Awaiting merge"].includes(statusLabel(epic.status)));
+  const pinned = open.find(epic => epic.id === focused) ?? open.find(epic => epic.focused);
+  return pinned ? [pinned] : open.filter(epic =>
+    (epic.assignee != null && supervisors.includes(epic.assignee))
+    || (epic.epic_verification_owner != null && supervisors.includes(epic.epic_verification_owner)));
+}
+
+export function releaseProgress(epics: readonly ReleaseEpic[], focused: string | null, tasks: readonly ProgressTask[], supervisors: readonly string[] = []): ReleaseEpic | undefined {
+  epics = supervisorEpics(epics, focused, supervisors);
+  return epics.find(epic => epic.id === focused || epic.focused)
+    ?? [...epics].sort((a, b) => tasks.filter(task => task.epic_id === b.id && statusLabel(task.status) === "In progress").length
+      - tasks.filter(task => task.epic_id === a.id && statusLabel(task.status) === "In progress").length)[0];
+}
+
+export function taskGroups(tasks: readonly ProgressTask[], epics: readonly ReleaseEpic[], workers: readonly string[], all: boolean, supervisors: readonly string[] = [], focused: string | null = null): { label: string; tasks: ProgressTask[] }[] {
+  const epicIds = new Set(supervisorEpics(epics, focused, supervisors).map(epic => epic.id));
+  const scoped = tasks.filter(task => all || (task.epic_id ? epicIds.has(task.epic_id) : (task.assignee != null && workers.includes(task.assignee))));
+  const needs = (task: ProgressTask) => task.delivery_state !== "merged" && ["Awaiting merge", "Blocked", "Ask"].includes(statusLabel(task.status));
+  const ready = (task: ProgressTask) => ["Open", "Ready"].includes(statusLabel(task.status));
+  const done = (task: ProgressTask) => ["Closed", "Cancelled"].includes(statusLabel(task.status));
+  return [
+    { label: "Needs you", tasks: scoped.filter(needs) },
+    { label: "In progress", tasks: scoped.filter(task => !needs(task) && !ready(task) && !done(task)) },
+    { label: "Ready", tasks: scoped.filter(ready) },
+    ...(all ? [{ label: "Finished", tasks: scoped.filter(done) }] : []),
+  ];
+}

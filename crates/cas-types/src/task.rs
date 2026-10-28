@@ -920,21 +920,21 @@ pub fn merge_task_execution_state_patch(current: &Value, patch: &Value) -> Resul
     Ok(result)
 }
 
-/// Validate a stored execution-state JSON object without changing it.
+/// Validate known stored execution-state fields without changing the object.
+/// Additive fields from newer runtimes remain readable and are preserved by
+/// merge patches. Patch authors still use the explicit allowlist above, and
+/// unknown stored data remains subject to the total resume-state size limit.
 pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
     let object = state
         .as_object()
         .ok_or_else(|| "execution state must be a JSON object".to_string())?;
     for (field, value) in object {
+        if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
+            continue;
+        }
         if value.is_null() {
             return Err(format!(
                 "execution state field '{field}' must be deleted, not stored as null"
-            ));
-        }
-        if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
-            return Err(format!(
-                "unknown execution state field '{field}'; allowed fields: {}",
-                TASK_EXECUTION_STATE_FIELDS.join(", ")
             ));
         }
         validate_task_execution_state_field(field, value)?;
@@ -1667,6 +1667,20 @@ mod tests {
         assert!(merge_task_execution_state_patch(&answered, &serde_json::json!({
             "answered_blocker": {"message_id": 0}
         })).is_err());
+
+        let mut future = answered.clone();
+        future["future_resume"] = serde_json::json!({"checkpoint": "newer-runtime"});
+        future["future_optional"] = Value::Null;
+        assert!(validate_task_execution_state(&future).is_ok());
+        let updated = merge_task_execution_state_patch(&future,
+            &serde_json::json!({"next_step": "continue"})).unwrap();
+        assert_eq!(updated["future_resume"], future["future_resume"]);
+        assert!(updated.get("future_optional").unwrap().is_null());
+        assert!(merge_task_execution_state_patch(&future,
+            &serde_json::json!({"future_resume": {}})).is_err(),
+            "a reader preserves future state; its writer still rejects unknown patches");
+        future["blocker_ask"] = serde_json::json!({"invalid": "not a fingerprint string"});
+        assert!(validate_task_execution_state(&future).is_err());
 
         let impact = serde_json::json!({"version": 1, "head_sha": "a".repeat(40),
             "registry": {"present": true}, "journeys": [{"id": "SEND", "status": "live"}],

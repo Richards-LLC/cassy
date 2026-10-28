@@ -55,12 +55,38 @@ pub(crate) fn observations_after_delivery(
     prompt: &str,
 ) -> HarnessObservations {
     match cli {
-        cas_mux::SupervisorCli::Claude => scan_claude_message(artifact_path, delivered_at, prompt),
-        cas_mux::SupervisorCli::Codex => scan_codex_message(artifact_path, delivered_at, prompt),
+        cas_mux::SupervisorCli::Claude => {
+            scan_claude_message(artifact_path, delivered_at, prompt, None)
+        }
+        cas_mux::SupervisorCli::Codex => {
+            scan_codex_message(artifact_path, delivered_at, prompt, None)
+        }
         cas_mux::SupervisorCli::Grok => scan_grok_completion(artifact_path, delivered_at),
         // OpenCode has no artifact transcript. Its mapped session observation
         // is resolved by factory_ops/message.rs with the CAS projection.
         cas_mux::SupervisorCli::OpenCode => HarnessObservations::default(),
+    }
+}
+
+/// Correlate a concrete queued message, including the daemon's provenance
+/// frame, with its recipient's transcript. Both the id and the complete body
+/// must match; a pointer, quoted fragment or same-body sibling is insufficient.
+/// Unsupported wire shapes remain unknown rather than implying consumption.
+pub(crate) fn observations_for_queued_message(
+    artifact_path: &Path,
+    cli: cas_mux::SupervisorCli,
+    created_at: DateTime<Utc>,
+    notification_id: i64,
+    prompt: &str,
+) -> HarnessObservations {
+    match cli {
+        cas_mux::SupervisorCli::Claude => {
+            scan_claude_message(artifact_path, created_at, prompt, Some(notification_id))
+        }
+        cas_mux::SupervisorCli::Codex => {
+            scan_codex_message(artifact_path, created_at, prompt, Some(notification_id))
+        }
+        _ => HarnessObservations::default(),
     }
 }
 
@@ -112,6 +138,7 @@ fn scan_claude_message(
     path: &Path,
     delivered_at: DateTime<Utc>,
     prompt: &str,
+    notification_id: Option<i64>,
 ) -> HarnessObservations {
     if prompt.is_empty() {
         return HarnessObservations::default();
@@ -128,7 +155,8 @@ fn scan_claude_message(
         }
 
         if matched_wake.is_none()
-            && claude_user_text(value).is_some_and(|text| text_matches_queued_prompt(text, prompt))
+            && claude_user_text(value)
+                .is_some_and(|text| text_matches_queued_prompt(text, prompt, notification_id))
         {
             matched_wake = Some(at);
             observations.wake = Some(ArtifactObservation {
@@ -235,6 +263,7 @@ fn scan_codex_message(
     path: &Path,
     delivered_at: DateTime<Utc>,
     prompt: &str,
+    notification_id: Option<i64>,
 ) -> HarnessObservations {
     if prompt.is_empty() {
         return HarnessObservations::default();
@@ -251,7 +280,7 @@ fn scan_codex_message(
             starts.insert(turn_id.to_string(), at);
         }
         if at >= delivered_at {
-            if let Some(turn_id) = codex_matching_user_turn(value, prompt) {
+            if let Some(turn_id) = codex_matching_user_turn(value, prompt, notification_id) {
                 matched_inputs.push((at, turn_id.to_string()));
             }
             if let Some(turn_id) = codex_assistant_turn(value) {
@@ -575,7 +604,11 @@ fn codex_turn_start_id(value: &Value) -> Option<&str> {
     .flatten()
 }
 
-fn codex_matching_user_turn<'a>(value: &'a Value, prompt: &str) -> Option<&'a str> {
+fn codex_matching_user_turn<'a>(
+    value: &'a Value,
+    prompt: &str,
+    notification_id: Option<i64>,
+) -> Option<&'a str> {
     let payload = value.get("payload")?;
     if value.get("type").and_then(Value::as_str) != Some("response_item")
         || payload.get("type").and_then(Value::as_str) != Some("message")
@@ -590,19 +623,55 @@ fn codex_matching_user_turn<'a>(value: &'a Value, prompt: &str) -> Option<&'a st
         .flatten()
         .filter(|part| part.get("type").and_then(Value::as_str) == Some("input_text"))
         .filter_map(|part| part.get("text").and_then(Value::as_str))
-        .any(|text| text_matches_queued_prompt(text, prompt));
+        .any(|text| text_matches_queued_prompt(text, prompt, notification_id));
     matches.then(|| codex_response_turn_id(payload)).flatten()
 }
 
-fn text_matches_queued_prompt(text: &str, prompt: &str) -> bool {
-    if text == prompt {
-        return true;
+fn text_matches_queued_prompt(text: &str, prompt: &str, notification_id: Option<i64>) -> bool {
+    let mut text = text.trim();
+    // Native pasted-content records may repeat the id attribute on the
+    // closing tag (see ambient-supervisor-replay.json). Keep the entire body
+    // intact and reject an incomplete wrapper rather than matching a fragment.
+    if text.starts_with("<pasted_content ") {
+        let Some((opening, body)) = text.split_once('>') else {
+            return false;
+        };
+        let closing = format!("</{}>", &opening[1..]);
+        let Some(body) = body
+            .strip_suffix(&closing)
+            .or_else(|| body.strip_suffix("</pasted_content>"))
+        else {
+            return false;
+        };
+        text = body.trim();
     }
-    if text.starts_with("<teammate-message ") && text.contains(prompt) {
-        return true;
+    if text.starts_with("Message from ") {
+        let Some((_, body)) = text.split_once(": ") else {
+            return false;
+        };
+        text = body.trim();
     }
-    text.strip_suffix(prompt)
-        .is_some_and(|prefix| prefix.starts_with("Message from ") && prefix.ends_with(": "))
+    if text.starts_with("<teammate-message ") {
+        let Some((_, body)) = text.split_once('>') else {
+            return false;
+        };
+        let Some(body) = body.strip_suffix("</teammate-message>") else {
+            return false;
+        };
+        text = body.trim();
+    }
+    if let Some(id) = notification_id {
+        let Some(frame) = text.strip_prefix(&format!("[cas #{id} ")) else {
+            return false;
+        };
+        let Some((_, body)) = frame.split_once("]\n") else {
+            return false;
+        };
+        // A machine frame alone is never consumption: the entire stored body
+        // must be present. In particular, a pointer is not the queued message.
+        text = body.trim();
+    }
+    text == prompt.trim()
 }
 
 fn codex_assistant_turn(value: &Value) -> Option<&str> {

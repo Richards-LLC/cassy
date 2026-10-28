@@ -2,19 +2,48 @@
 import { expect, it, vi } from "vitest";
 import { composerMarkup } from "./composer-markup";
 import { ComposerUploads } from "./composer-uploads";
+import { ConversationHistory } from "./conversation-history";
+import { ConversationView } from "./conversation-view";
+import { installAttachmentSheet } from "./attachment-sheet";
+import type { ArtifactRef } from "./types";
 
-it("previews pasted content, keeps failed uploads across rebinding, and sends stable local paths", async () => {
+it("previews pasted content, keeps failed uploads across rebinding, and renders sent files without exposing host paths", async () => {
   const draft = new ComposerUploads();
   document.body.innerHTML = composerMarkup("supervisor");
   draft.bind(document.body);
   draft.add([new File(["notes"], "notes.txt", { type: "text/plain" })]);
   expect(document.body.textContent).toContain("notes.txt");
-  const upload = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ path: "/host/project/notes.txt", artifact_id: "art-one" });
+  const upload = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue({ path: "/host/project/art-one/notes.txt", artifact_id: "art-one", mime: "text/plain" });
   await expect(draft.prepare("See this", upload)).rejects.toThrow("offline");
   document.body.innerHTML = composerMarkup("supervisor");
   draft.bind(document.body);
   expect(document.body.textContent).toContain("notes.txt");
-  expect(await draft.prepare("See this", upload)).toContain("/host/project/notes.txt");
+  const text = await draft.prepare("See this", upload);
+  expect(text).toContain("/host/project/art-one/notes.txt");
+  draft.add([new File(["image"], "screenshot.bin", { type: "application/octet-stream" })]);
+  upload.mockResolvedValueOnce({ path: "/host/project/art-image/screenshot.bin", artifact_id: "art-image", mime: "image/png" });
+  const prepared = await draft.prepare("See this", upload);
+  const files: ArtifactRef[] = [];
+  const unregister = installAttachmentSheet((sheet, file) => { files.push(file); return sheet; });
+  const history = new ConversationHistory();
+  const view = new ConversationView(document, history, { supervisor: "supervisor" });
+  try {
+    history.submit("send", "supervisor", prepared);
+    view.update();
+    expect(view.element.textContent).toContain("See this");
+    expect(view.element.textContent).toContain("notes.txt");
+    expect(view.element.textContent).toContain("screenshot.bin");
+    expect(view.element.textContent).not.toContain("/host/");
+    expect(history.preview()).not.toContain("/host/");
+    expect(files.map(file => [file.artifact_id, file.mime, file.size_bytes])).toEqual([
+      ["art-one", "text/plain", 5], ["art-image", "image/png", 5],
+    ]);
+    expect(view.element.querySelector('a[data-artifact-id="art-image"]')?.getAttribute("href")).toBe("#artifact:art-image");
+    history.submit("legacy", "supervisor", "Attached files\n\nAttached file: /home/operator/.cas/artifacts/commander/session/art-legacy/photo.png");
+    view.update();
+    expect(view.element.textContent).not.toContain("/home/operator");
+    expect(view.element.querySelector('a[data-artifact-id="art-legacy"]')).not.toBeNull();
+  } finally { view.dispose(); unregister(); }
   expect(upload.mock.calls[0]![0]).toBe(upload.mock.calls[1]![0]);
   draft.clear();
   expect(document.body.textContent).not.toContain("notes.txt");

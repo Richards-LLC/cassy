@@ -55,14 +55,14 @@ pub(crate) fn task_risk(task: &Task) -> String {
     }
 }
 
-/// Links to the evidence recorded on the task (`qa-bundle:` and
-/// `base-vs-change:` note lines).
+/// Links to producer and independent-review bundles plus comparison runs.
 fn task_evidence_references(task: &Task) -> Vec<String> {
     task.notes
         .lines()
         .filter_map(|line| {
             for (marker, label) in [
                 ("qa-bundle:", "QA bundle"),
+                (crate::qa_evidence::REVIEW_BUNDLE_CITATION, "Independent QA bundle"),
                 ("base-vs-change:", "Base-vs-change run"),
             ] {
                 if let Some((_, reference)) = line.split_once(marker) {
@@ -490,7 +490,7 @@ mod tests {
         let mut task = Task::new("cas-fixture".into(), "Fixture".into());
         task.risk = vec![cas_types::TaskRisk::BlastRadius];
         task.door = Some(cas_types::TaskDoor::OneWay);
-        task.notes = "qa-bundle: /proof/qa/bundle.json".into();
+        task.notes = "qa-bundle: /proof/qa/bundle.json\nqa-review-bundle: /review/qa/bundle.json".into();
         let body = delivery_body(
             repo,
             Some(&task),
@@ -505,6 +505,7 @@ mod tests {
         assert!(body.contains("**Before:** fails"));
         assert!(body.contains("**After:** passes"));
         assert!(body.contains("/proof/qa/bundle.json"));
+        assert!(body.contains("[Independent QA bundle](</review/qa/bundle.json>)"));
         assert!(body.contains("**Risk:** blast-radius"));
         assert!(body.contains("**Door:** one-way"));
         let legacy = delivery_body(repo, None, &base, "HEAD", None, None, None).unwrap();

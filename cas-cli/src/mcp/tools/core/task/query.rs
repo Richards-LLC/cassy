@@ -1,5 +1,20 @@
 use crate::mcp::tools::core::imports::*;
 
+/// Read the persisted delivery source, never infer it from the current checkout.
+pub(super) fn recorded_source_readback(task: &Task) -> String {
+    let mut output = String::new();
+    if let Some(start) = task.deliverables.factory_branch_start.as_ref() {
+        output.push_str(&format!(
+            "Recorded source branch: {}\nStart base: {}\n",
+            start.branch, start.base_sha,
+        ));
+    }
+    if let Some(branch) = task.deliverables.parked_branch.as_ref() {
+        output.push_str(&format!("Parked branch: {branch}\n"));
+    }
+    output
+}
+
 fn retain_list_tasks(
     tasks: &mut Vec<Task>,
     filter: &str,
@@ -267,6 +282,8 @@ impl CasCore {
             origin,
             target
         );
+        let source_readback = recorded_source_readback(&task);
+        output.push_str(&source_readback);
         // cas-ea9c (GH #1005): cited issues attached at assignment.
         if let Some(section) =
             crate::github_issue_attach::cited_issue_section(&self.cas_root, &task)
@@ -404,13 +421,6 @@ impl CasCore {
                 output.push_str(
                     "(mergeable — queued for the supervisor to merge the factory branch)\n",
                 );
-            }
-            if let Some(ref branch) = task.deliverables.parked_branch {
-                read_status.insert_str(
-                    0,
-                    &format!("Parked branch: {}\n", clipping.excerpt(branch, 100)),
-                );
-                output.push_str(&format!("Parked branch: {branch}\n"));
             }
         }
 
@@ -637,10 +647,18 @@ impl CasCore {
                     output.push_str("\n\nDependencies:\n");
                 }
                 if !blocked_by.is_empty() {
-                    output.push_str(&format!("  - Blocked by: {}\n", blocked_by.join(", ")));
+                    output.push_str(&format!(
+                        "  - Blocked by: {}\n    {}\n",
+                        blocked_by.join(", "),
+                        super::super::task_extensions::BLOCKED_BY_LIFECYCLE,
+                    ));
                 }
                 if !blocking.is_empty() {
-                    output.push_str(&format!("  - Blocks: {}\n", blocking.join(", ")));
+                    output.push_str(&format!(
+                        "  - Blocks: {}\n    {}\n",
+                        blocking.join(", "),
+                        super::super::task_extensions::BLOCKS_LIFECYCLE,
+                    ));
                 }
                 if !requires_start.is_empty() {
                     output.push_str(&format!(
@@ -783,10 +801,11 @@ impl CasCore {
         // Builtin verifier/epic flows consume Type and Demo from bare show.
         // Name full-only sections so callers cannot silently infer absence.
         let summary = format!(
-            "Type: {}\nDemo: {}\nOmitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}\nNotes:\n{}",
+            "Type: {}\nDemo: {}\nOmitted from summary (full=true): Design, Deliverables (files/commit/merge), Dependencies/Epic/Subtasks, Outcome/Terminal reason/Superseded by, worktree.\n{}\n{}{}{}{}\nNotes:\n{}",
             task.task_type,
             clipping.excerpt(&task.demo_statement, 160),
             clipping.excerpt(&header, 400),
+            source_readback,
             task_scope(&task, &mut clipping),
             clipping.excerpt(&read_status, 200),
             batch_summary,

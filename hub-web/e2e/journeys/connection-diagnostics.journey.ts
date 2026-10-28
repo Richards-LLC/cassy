@@ -21,7 +21,7 @@ test("HUB-J12 named connection cause and safe export recover together (cas-2b3a5
     return route.fallback();
   });
   await page.goto("./"); await hub.seedPaired(); await clock.start(); await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
   await expect(page.locator(".conversation-thread-slot .conversation-reading.thread")).toBeVisible();
   await journey.stage("A healthy public route does not hide an opaque authenticated failure", async () => {
@@ -125,7 +125,7 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
   await clock.start();
   await journey.stage("Open Details during an outage and leave it open after recovery", async () => {
     await page.goto("./");
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
     // The header reports the machine connection; it can go Live before the
     // session's first Welcome has painted a thread frame. The outage banner
@@ -143,6 +143,9 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
   });
   await journey.stage("Two failed heartbeats show the machine cause despite a live session", async () => {
     await hub.down("atlas");
+    const firstProbe = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
+    await clock.advance(5_000);
+    await firstProbe;
     for (let beat = 0; beat < 2; beat++) {
       const failed = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
       await clock.advance(5_000);
@@ -152,7 +155,7 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
     // The log's periodic projection is a one-second protocol timer, independent
     // of the five-second heartbeat. Let that tick observe the settled failure.
     await clock.advance(1_000);
-    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Network or browser policy blocked the request.");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Request deadline exceeded.");
     await expect(page.locator(".connection-log-summary")).not.toContainText("nothing is failing now");
     // Unsteady: the log agrees with the rail's "checking…" (F08), never "No retry scheduled".
     await expect(page.locator(".connection-log-summary")).not.toContainText("No retry scheduled");
@@ -172,7 +175,7 @@ test("HUB-J12 retryable auth-store 503 keeps the pairing and names the hub cause
     return route.fulfill({ status: 503, headers: { "retry-after": "2", "x-cas-refusal": reason }, json: { error: reason, reason, retryable: true } });
   });
   await page.goto("./"); await hub.seedPaired(); await clock.start(); await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   const header = page.locator("#conversation-connection");
   const summary = page.locator(".connection-log-summary");
   await expect(header).toHaveText(" · Live");

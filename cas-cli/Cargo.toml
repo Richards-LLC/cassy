@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "3.86.0"
+version = "3.87.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -90,6 +90,10 @@ crossterm = "0.29"
 # for prompts; ratatui is the wrong tool for this surface). Pinned to the 0.7
 # stable line; bump if a platform handler needs a 0.9-only feature.
 inquire = "0.7"
+# The exact crossterm line inquire 0.7 reads with. Cargo unifies it with
+# inquire's copy, so the picker can collect keystrokes inquire read ahead of a
+# later std::io::stdin question; it is never used to draw.
+crossterm_inquire = { package = "crossterm", version = "0.25" }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

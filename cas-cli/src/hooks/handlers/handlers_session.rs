@@ -600,10 +600,12 @@ pub fn handle_session_start(
         HookOutput::with_session_start_context(context.clone())
     };
 
+    // Codex's strict native SessionStart schema accepts neither reloadSkills
+    // nor sessionTitle. Keep these Claude metadata fields off the Codex wire.
     // Emit reloadSkills when skill files have changed since this session last
     // loaded them (cas-f9ad). Best-effort: failure to read/write sentinel/marker
     // files is silently ignored so SessionStart never blocks on I/O errors.
-    let output = if detect_and_mark_skill_drift(cas_root, &input.session_id) {
+    let output = if !is_codex && detect_and_mark_skill_drift(cas_root, &input.session_id) {
         output.with_reload_skills(true)
     } else {
         output
@@ -613,8 +615,8 @@ pub fn handle_session_start(
     // show which worker owns which task at a glance (cas-ae09).
     // Non-factory sessions produce None → field absent → unchanged wire shape.
     let output = match factory_session_title {
-        Some(title) => output.with_session_title(title),
-        None => output,
+        Some(title) if !is_codex => output.with_session_title(title),
+        _ => output,
     };
 
     // Record trace if dev mode is enabled

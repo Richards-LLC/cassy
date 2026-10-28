@@ -901,7 +901,9 @@ fn listed_files_may_not_escape_the_bundle() {
 #[test]
 fn newest_citation_wins() {
     let notes = "qa-bundle: /a/old/bundle.json\n[later] qa-bundle: `/a/new/bundle.json`.\n\
-                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json";
+                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json\n\
+                 [legacy reviewer] qa-bundle: /qa-task/qa/bundle.json (independent QA round 1, passed)\n\
+                 [reviewer] qa-review-bundle: /other-qa-task/qa/bundle.json";
     assert_eq!(
         cited_bundle_path(notes).as_deref(),
         Some("/a/new/bundle.json"),
@@ -2673,6 +2675,93 @@ fn cas_0b07_doc_rebind_accepts_hub_web_critique_but_rejects_input_changes() {
             "rebind must reject changed QA input {input}"
         );
     }
+}
+
+#[test]
+fn identical_tree_merge_accepts_repaired_ledger_without_reexecuting_gh1395() {
+    let mut fx = Fixture::new();
+    let executed = fx.head.clone();
+    let manifest_path = fx.write_bundle(|_| {});
+    let original_trace = std::fs::read(fx.bundle_dir().join("trace.zip")).unwrap();
+    let original_receipt = std::fs::read(fx.bundle_dir().join("receipt.webm")).unwrap();
+
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "epic"]);
+    git_ok(&fx.repo, &["commit", "-q", "--allow-empty", "-m", "target bookkeeping"]);
+    git_ok(&fx.repo, &["checkout", "-q", "-b", "delivery", &executed]);
+    git_ok(&fx.repo, &["merge", "-q", "--no-ff", "epic", "-m", "merge reviewed delivery"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", executed)]),
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", fx.head)]),
+    );
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    manifest["executed_head_sha"] = serde_json::json!(executed);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let notes = fx.notes();
+    let context = journey_context(&fx, &notes);
+    let missing = run_close_gate(
+        &context, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[],
+    ).unwrap_err();
+    assert!(missing.contains("no ledger"), "{missing}");
+    std::fs::write(
+        fx.task_dir.join("LEDGER.md"),
+        "| M01 | reviewed flow | ready | ready | PASS | real-build | qa/trace.zip | - |\n",
+    ).unwrap();
+    run_close_gate(
+        &context, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[],
+    ).unwrap();
+    run_close_gate(
+        &context, EvidenceTier::Bundle, &["journeys:HUB-J7".into()], &[],
+    ).expect("the original execution covers the identical merged tree");
+    assert_eq!(std::fs::read(fx.bundle_dir().join("trace.zip")).unwrap(), original_trace);
+    assert_eq!(std::fs::read(fx.bundle_dir().join("receipt.webm")).unwrap(), original_receipt);
+
+    // The implementer bundle does not silently approve the independent QA
+    // round at B. Carrying A's verdict remains a separate logged operation.
+    let mut task = cas_types::Task::new(TASK.into(), "Reviewed delivery".into());
+    task.demo_statement = "Reviewed flow works".into();
+    let now = chrono::Utc::now();
+    let pass = cas_types::QaPass {
+        id: "qapass-A".into(), task_id: TASK.into(), round: 1,
+        implementer_agent_id: "worker".into(), branch: "delivery".into(),
+        bound_head: executed.clone(), qa_task_id: Some("qa-A".into()),
+        reviewer_agent_id: Some("reviewer".into()), state: cas_types::QaPassState::Passed,
+        summary: Some("reviewed A".into()), issues_json: None, ledger_path: None,
+        issuer_agent_id: None, requested_at: now, deadline_at: now, resolved_at: Some(now),
+    };
+    assert!(crate::qa_pass::merge_gate(&task, &crate::config::QaConfig::default(), &[pass], &fx.head).is_err());
+
+    let merged = fx.head.clone();
+    git_ok(&fx.repo, &["checkout", "-q", "--orphan", "unrelated"]);
+    git_ok(&fx.repo, &["add", "-A"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "unrelated same tree"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", executed)]),
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", fx.head)]),
+    );
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let unrelated = run_close_gate(
+        &journey_context(&fx, &notes), EvidenceTier::Bundle,
+        &["journeys:HUB-J7".into()], &[],
+    ).unwrap_err();
+    assert!(unrelated.contains("changed product or journey inputs"), "{unrelated}");
+
+    git_ok(&fx.repo, &["checkout", "-q", "delivery"]);
+    fx.head = merged;
+
+    std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
+    fx.head = commit(&fx.repo, "scripts/journey-eval.sh", 0);
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let changed = run_close_gate(
+        &journey_context(&fx, &notes), EvidenceTier::Bundle,
+        &["journeys:HUB-J7".into()], &[],
+    ).unwrap_err();
+    assert!(changed.contains("changed product or journey inputs"), "{changed}");
 }
 
 #[test]

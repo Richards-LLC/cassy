@@ -1,3 +1,4 @@
+import { sentMessageLabel } from "./sent-attachments";
 import { BLOCKER_HINT } from "./context-rail";
 import { registerTurnRenderer, renderBody, type TurnRenderContext } from "./conversation-view";
 import { blockerEvidence } from "./thread-model";
@@ -68,8 +69,8 @@ export function renderAskObject(reply: OperatorReply, context: TurnRenderContext
     // still waits keeps the attention treatment.
     object.dataset.answered = "true";
     const sent = document.createElement("span"); sent.className = "chip sent"; sent.dataset.state = answer.state;
-    sent.append(tick(document), document.createTextNode(answer.text));
-    sent.setAttribute("aria-label", `You replied: ${answer.text}`);
+    sent.append(tick(document), document.createTextNode(sentMessageLabel(answer.text)));
+    sent.setAttribute("aria-label", `You replied: ${sentMessageLabel(answer.text)}`);
     foot.append(sent);
   } else if (!retired || retired === "dismissed") {
     object.dataset.answered = "false";

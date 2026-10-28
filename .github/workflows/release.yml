@@ -16,7 +16,8 @@ name: Release
 #      archive: the bytes that ship;
 #   4. creates the annotated tag v<version> and the GitHub release
 #      (scripts/release-publish.sh), whose notes carry the PR-opened timer;
-#   5. dispatches the install-path proof.
+#   5. dispatches the install-path proof;
+#   6. deploys the tagged Commander dist to hub.petrastella.io after publication.
 # The supervisor host installs on publish (scripts/install-on-publish.sh).
 #
 # workflow_dispatch with dry_run=true (the default) runs every step for the
@@ -236,8 +237,10 @@ jobs:
       && needs.detect.outputs.pending == 'true'
       && needs.audit-linux.result == 'success'
       && needs.audit-macos.result == 'success'
-    # This is the only job that holds a `contents: write` token.
+    # Publication and the post-publish hub provenance asset need contents: write.
     runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
     permissions:
       contents: write
       actions: write
@@ -257,7 +260,8 @@ jobs:
           run-id: ${{ needs.lookup.outputs.found == 'true' && needs.lookup.outputs.run-id || github.run_id }}
           github-token: ${{ github.token }}
 
-      - name: Create Release
+      - id: publish
+        name: Create Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.detect.outputs.version }}
@@ -269,6 +273,7 @@ jobs:
           args=(--version "$VERSION" --sha "$GITHUB_SHA" --assets release --tag "$TAG" --notes-out "$RUNNER_TEMP/notes.md")
           [[ "$DRY_RUN" != true ]] || args+=(--prerelease)
           ./scripts/release-publish.sh "${args[@]}"
+          echo 'published=true' >> "$GITHUB_OUTPUT"
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
 
       # GITHUB_TOKEN-created releases do not fan out a release.published event
@@ -328,3 +333,49 @@ jobs:
             git push origin --delete "refs/tags/$TAG"
           fi
           echo "deleted dry-run prerelease $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+  # No dependency points back to this job: uploads and verification add no work
+  # to commit -> main or main -> published. A later install-proof dispatch error
+  # must not suppress a hub update for a release already published successfully.
+  deploy-hub:
+    name: Deploy released Commander to hosted hub
+    needs: [detect, release]
+    if: >-
+      !cancelled()
+      && needs.release.outputs.published == 'true'
+      && needs.detect.outputs.dry-run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    # Serialize alias changes and rollback across distinct release workflow runs.
+    concurrency:
+      group: hub-static-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.detect.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pinned static-upload CLI
+        run: npm install --global vercel@59.1.3
+
+      - name: Upload, verify, promote or restore, and record provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERCEL_HUB_TOKEN: ${{ secrets.VERCEL_HUB_TOKEN }}
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: python3 scripts/deploy-hub-release.py "$TAG" --receipt "$RUNNER_TEMP/hub-deployment.json"
+
+      - name: Retain hosted hub receipt (including failures)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hub-deployment
+          path: ${{ runner.temp }}/hub-deployment.json
+          if-no-files-found: ignore

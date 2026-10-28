@@ -805,7 +805,7 @@ async fn cas_bf20_verified_commander_send_wakes_an_idle_supervisor() {
         operator_verified: true,
     };
     let supervisor = daemon.app.supervisor_name().to_string();
-    daemon.enqueue_attributed_message(&supervisor, body, None, false, None, &attribution).unwrap();
+    daemon.enqueue_attributed_message(&supervisor, body, None, false, None, None, &attribution).unwrap();
     typed_once(&root, &mut daemon, body).await;
 }
 

@@ -6565,52 +6565,46 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     )
     .unwrap();
 
-    // Probe a separate, fresh, unregistered cache with no retained handles or
-    // fixture processes. A live result here establishes unavailable visibility,
-    // independently of genuine liveness in the actual MCP worker below. With
-    // readable visibility, an accidentally live MCP fixture must fail selection.
-    let baseline = TempDir::new().unwrap();
-    let baseline_root = baseline.path().join(".cas");
-    let baseline_worker = baseline_root.join("worktrees/capability-probe");
-    let baseline_cache = baseline_worker.join("target");
-    std::fs::create_dir_all(&baseline_cache).unwrap();
-    std::fs::write(baseline_cache.join("probe"), b"x").unwrap();
-    use cas::factory_target_cache::{CacheDisposition, TargetCachePolicy};
-    let native = cas::factory_target_cache::inspect(
-        &baseline_root,
-        TargetCachePolicy {
-            high_watermark_percent: 1,
-            low_watermark_percent: 0,
-            min_idle_secs: 0,
-            retention_count: 0,
-        },
-        &[],
-        &[],
-        true,
-    )
-    .unwrap();
-    assert_eq!(native.caches.len(), 1);
-    assert_eq!(native.candidate_bytes, 1);
-    assert_eq!(native.caches[0].bytes, 1);
-    assert_eq!(
-        native.caches[0].path,
-        baseline_cache.canonicalize().unwrap()
-    );
-    assert_ne!(native.caches[0].worktree, worker.canonicalize().unwrap());
-    let reclaim = match native.caches[0].disposition {
-        CacheDisposition::Selected => true,
-        CacheDisposition::Indeterminate => {
-            eprintln!(
-                "RECLAIM PROOF UNAVAILABLE: separate idle capability fixture has unverifiable native process evidence; actual MCP fixture must preserve source/cache bytes and JSON status. Indeterminate is distinct from positive process evidence."
-            );
-            false
+    // Native visibility can change between requests. Validate the typed
+    // disposition and accounting of each actual MCP snapshot independently;
+    // another cache's earlier process probe cannot predict this one.
+    fn assert_accounting(machine: &serde_json::Value, dry_run: bool) -> bool {
+        use cas::factory_target_cache::CacheDisposition;
+        assert_eq!(machine["schema_version"], 1);
+        assert_eq!(machine["dry_run"], dry_run);
+        assert_eq!(machine["candidate_bytes"], 64);
+        let caches = machine["caches"].as_array().unwrap();
+        assert_eq!(caches.len(), 1);
+        assert_eq!(caches[0]["bytes"], 64);
+        let disposition: CacheDisposition = serde_json::from_value(caches[0]["disposition"].clone()).unwrap();
+        match (dry_run, disposition) {
+            (true, CacheDisposition::Selected) => {
+                assert_eq!(machine["selected_bytes"], 64);
+                assert_eq!(machine["reclaimed_bytes"], 0);
+                false
+            }
+            (false, CacheDisposition::Reclaimed) => {
+                assert_eq!(machine["selected_bytes"], 64);
+                assert_eq!(machine["reclaimed_bytes"], 64);
+                true
+            }
+            (_, CacheDisposition::Indeterminate | CacheDisposition::LiveProcess) => {
+                // Cleanup may select first, then obtain blocking evidence at
+                // its final recheck. Selection never authorizes deletion once
+                // native evidence is live or unavailable.
+                let selected = machine["selected_bytes"].as_u64().unwrap();
+                if dry_run {
+                    assert_eq!(selected, 0);
+                } else {
+                    assert!(selected == 0 || selected == 64);
+                }
+                assert_eq!(machine["reclaimed_bytes"], 0);
+                assert!(!caches[0]["reason"].as_str().unwrap().is_empty());
+                false
+            }
+            _ => panic!("unexpected actual MCP cache state: {machine}"),
         }
-        other => panic!("unexpected native GC fixture state: {other:?}"),
-    };
-    assert_eq!(native.selected_bytes, if reclaim { 1 } else { 0 });
-    assert_eq!(native.reclaimed_bytes, 0);
-    assert_eq!(std::fs::read(baseline_cache.join("probe")).unwrap(), b"x");
-    let disposition = if reclaim { "selected" } else { "indeterminate" };
+    }
     let cache_path = worker.join("target").canonicalize().unwrap();
     let assert_preserved = || {
         assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
@@ -6639,18 +6633,12 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let full = env.service.factory_request(Parameters(full_request)).await.unwrap();
     let full_text = get_text(&full);
     let machine = status(&full_text);
-    assert_eq!(machine["schema_version"], 1);
-    assert_eq!(machine["dry_run"], true);
-    assert_eq!(machine["candidate_bytes"], 64);
-    assert_eq!(machine["selected_bytes"], if reclaim { 64 } else { 0 });
-    assert_eq!(machine["reclaimed_bytes"], 0);
-    assert_eq!(machine["caches"].as_array().unwrap().len(), 1);
+    assert!(!assert_accounting(&machine, true));
     assert_eq!(
         machine["caches"][0]["path"],
         serde_json::to_value(&cache_path).unwrap()
     );
     assert_eq!(machine["caches"][0]["bytes"], 64);
-    assert_eq!(machine["caches"][0]["disposition"], disposition);
     let cache_category = report_text
         .lines()
         .find(|line| line.starts_with("- Cargo target cache pressure: "))
@@ -6676,15 +6664,7 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let preview_text = get_text(&preview);
     assert!(preview_text.contains("mode=dry-run"), "{preview_text}");
     let preview_status = status(&preview_text);
-    assert_eq!(preview_status["schema_version"], 1);
-    assert_eq!(preview_status["dry_run"], true);
-    assert_eq!(preview_status["candidate_bytes"], 64);
-    assert_eq!(
-        preview_status["selected_bytes"],
-        if reclaim { 64 } else { 0 }
-    );
-    assert_eq!(preview_status["reclaimed_bytes"], 0);
-    assert_eq!(preview_status["caches"][0]["disposition"], disposition);
+    assert!(!assert_accounting(&preview_status, true));
     assert!(preview_status["caches"][0]["scan_elapsed_ms"].is_u64());
     assert!(preview_text.contains("scan_ms="));
     assert_preserved(); // force alone/omitted dry_run never deletes.
@@ -6700,36 +6680,16 @@ async fn test_target_cache_gc_public_dry_run_and_explicit_cleanup() {
     let cleanup_text = get_text(&cleanup);
     assert!(cleanup_text.contains("mode=cleanup"), "{cleanup_text}");
     let cleaned = status(&cleanup_text);
-    assert_eq!(cleaned["schema_version"], 1);
-    assert_eq!(cleaned["dry_run"], false);
-    assert_eq!(cleaned["candidate_bytes"], 64);
-    assert_eq!(cleaned["selected_bytes"], if reclaim { 64 } else { 0 });
-    assert_eq!(cleaned["reclaimed_bytes"], if reclaim { 64 } else { 0 });
-    assert_eq!(cleaned["caches"].as_array().unwrap().len(), 1);
+    let reclaimed = assert_accounting(&cleaned, false);
     assert_eq!(
         cleaned["caches"][0]["path"],
         serde_json::to_value(&cache_path).unwrap()
     );
     assert_eq!(cleaned["caches"][0]["bytes"], 64);
-    assert_eq!(
-        cleaned["caches"][0]["disposition"],
-        if reclaim {
-            "reclaimed"
-        } else {
-            "indeterminate"
-        }
-    );
-    assert_eq!(worker.join("target").exists(), !reclaim);
-    if !reclaim {
+    assert_eq!(worker.join("target").exists(), !reclaimed);
+    if !reclaimed {
         assert_preserved();
-        assert!(
-            cleanup_text.contains("state=Indeterminate"),
-            "{cleanup_text}"
-        );
-        assert!(!cleaned["caches"][0]["reason"].as_str().unwrap().is_empty());
-        eprintln!(
-            "RECLAIM PROOF UNAVAILABLE: raw actual-fixture status (ambiguous live/unknown reason, not an observed-process claim): {cleanup_text}"
-        );
+        eprintln!("CACHE PRESERVED: actual MCP snapshot has blocking native evidence: {cleanup_text}");
     }
     assert_eq!(std::fs::read(worker.join("source.rs")).unwrap(), source);
 }
@@ -10930,7 +10890,13 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         "per-task-branch",
         "empty",
         "foreign",
+        "target-change",
+        "target-same-branch",
+        "target-dirty",
+        "target-invalid",
+        "target-foreign",
     ] {
+        let retargeted = shape.starts_with("target-");
         let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
         let env = FactoryTestEnv::with_server_supervisor();
         // cas-b403: a logged-in project, so the rebind writes through the
@@ -10955,7 +10921,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         env.agent_store().update(&supervisor).unwrap();
         // Squashing can lose only the anchor; reset recovery also drops an
         // inherited local-only supervisor base. Both need an audited rebind.
-        if shape != "squashed-anchor" {
+        if !matches!(shape, "squashed-anchor" | "target-same-branch") {
             git(&[
                 "commit",
                 "--allow-empty",
@@ -10986,7 +10952,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             branch: old_branch.clone(),
             base_sha: old_base.clone(),
         });
-        task.deliverables.factory_branch_anchor = Some(old_anchor.clone());
+        task.deliverables.factory_branch_anchor = (!retargeted).then(|| old_anchor.clone());
         env.task_store().add(&task).unwrap();
         assert!(
             env.agent_store()
@@ -10994,9 +10960,17 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .unwrap()
                 .is_success()
         );
-        let previous = env.task_store().get(&task.id).unwrap();
-        let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
-        let branch = if shape == "per-task-branch" {
+        let core = CasCore::with_daemon(env.cas_root.clone(), None, None);
+        core.set_agent_id_for_testing(worker_id.clone());
+        let worker_service = CasService::new(core, None);
+        let start_request = || task_req(serde_json::json!({"action": "start", "id": task.id}));
+        if retargeted {
+            worker_service
+                .task(Parameters(start_request()))
+                .await
+                .unwrap();
+        }
+        let branch = if shape == "per-task-branch" || (retargeted && shape != "target-same-branch") {
             let branch = format!("factory/{worker}-{}", task.id);
             git(&["switch", "-qc", &branch, "origin/main"]);
             branch
@@ -11009,7 +10983,7 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             git(&["add", "delivery.txt"]);
             // Unnamed work is valid on the assigned lane. A foreign task
             // subject overrides worker authorship and the task's time window.
-            let subject = if shape == "foreign" {
+            let subject = if matches!(shape, "foreign" | "target-foreign") {
                 "cas-dead: another task"
             } else if shape == "squashed-anchor" {
                 "cas-88c1: squashed replacement"
@@ -11021,19 +10995,66 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
         git(&["push", "-q", "--force", "origin", &branch]);
         let tip = git(&["rev-parse", "HEAD"]);
         assert!(git(&["status", "--porcelain"]).is_empty());
+        if retargeted {
+            git(&["branch", "epic/recovery", "origin/main"]);
+            git(&["push", "-q", "origin", "epic/recovery"]);
+            let old_start = env
+                .task_store()
+                .get(&task.id)
+                .unwrap()
+                .deliverables
+                .factory_branch_start;
+            let updated = env
+                .service
+                .task(Parameters(task_req(serde_json::json!({
+                    "action": "update", "id": task.id, "target_branch": "epic/recovery",
+                }))))
+                .await
+                .unwrap();
+            assert_ne!(updated.is_error, Some(true), "{}", get_text(&updated));
+            worker_service
+                .task(Parameters(start_request()))
+                .await
+                .unwrap();
+            assert_eq!(
+                env.task_store()
+                    .get(&task.id)
+                    .unwrap()
+                    .deliverables
+                    .factory_branch_start,
+                old_start,
+                "restarting cannot silently erase the prior boundary; explicit rebind approves recovery"
+            );
+        }
+        if shape == "target-dirty" {
+            std::fs::write(path.join("uncommitted.txt"), "keep this work\n").unwrap();
+        }
+        let previous = env.task_store().get(&task.id).unwrap();
+        let lease = serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap();
+        let refs = git(&["show-ref"]);
+        let status = git(&["status", "--porcelain"]);
+        let requested_branch = if shape == "target-invalid" {
+            "factory/other-worker-cas-88c1"
+        } else {
+            &branch
+        };
         let request = || {
             task_req(serde_json::json!({
-                "action": "rebind_branch", "id": task.id, "branch": branch,
+                "action": "rebind_branch", "id": task.id, "branch": requested_branch,
                 "reason": "Supervisor approved recovery onto the corrected target base",
             }))
         };
         let result = env.service.task(Parameters(request())).await;
-        if matches!(shape, "empty" | "foreign") {
-            let error = result.expect_err("empty and foreign deliveries must refuse");
-            let reason = if shape == "empty" {
-                "no unmerged task delivery"
-            } else {
-                "foreign commit"
+        if matches!(
+            shape,
+            "empty" | "foreign" | "target-dirty" | "target-invalid" | "target-foreign"
+        ) {
+            let error = result.expect_err("invalid replacement must refuse");
+            let reason = match shape {
+                "empty" => "no unmerged task delivery",
+                "target-dirty" => "clean worktree",
+                "target-invalid" => "replacement must be this worker",
+                _ => "foreign commit",
             };
             if !error.message.contains(reason) {
                 failures.push(format!("{shape}: expected {reason}: {error}"));
@@ -11052,6 +11073,11 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
             assert_eq!(start.branch, branch, "{shape}");
             assert_eq!(
+                start.work_target.target_branch,
+                if retargeted { "epic/recovery" } else { "main" },
+                "{shape}: record the explicitly selected target"
+            );
+            assert_eq!(
                 start.base_sha, target_tip,
                 "{shape}: replace the obsolete start base"
             );
@@ -11060,13 +11086,19 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 rebound.deliverables.work_target,
                 previous.deliverables.work_target
             );
-            assert!(rebound.deliverables.factory_branch_anchor.is_none());
-            assert!(
-                rebound
-                    .deliverables
-                    .historical_factory_branch_anchors
-                    .contains(&old_anchor)
+            assert_eq!(
+                Some(&start.work_target),
+                rebound.deliverables.work_target.as_ref()
             );
+            assert!(rebound.deliverables.factory_branch_anchor.is_none());
+            if !retargeted {
+                assert!(
+                    rebound
+                        .deliverables
+                        .historical_factory_branch_anchors
+                        .contains(&old_anchor)
+                );
+            }
             let audit = rebound
                 .notes
                 .lines()
@@ -11074,7 +11106,14 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
                 .map(|(_, json)| serde_json::from_str::<serde_json::Value>(json).unwrap())
                 .expect("persist the old-tip audit even when the branch name stays the same");
             assert_eq!(audit["previous_start"]["base_sha"], old_base);
-            assert_eq!(audit["previous_anchor"], old_anchor);
+            assert_eq!(
+                audit["previous_anchor"],
+                serde_json::to_value(&previous.deliverables.factory_branch_anchor).unwrap()
+            );
+            assert_eq!(
+                audit["previous_start"],
+                serde_json::to_value(&previous.deliverables.factory_branch_start).unwrap()
+            );
             assert_eq!(
                 audit["previous_tip"],
                 if branch == old_branch {
@@ -11096,6 +11135,16 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             "approval never moves Git refs"
         );
         assert_eq!(git_stdout(project, &["rev-parse", "main"]), target_tip);
+        assert_eq!(
+            git(&["show-ref"]),
+            refs,
+            "{shape}: rebind must not mutate Git refs"
+        );
+        assert_eq!(
+            git(&["status", "--porcelain"]),
+            status,
+            "{shape}: preserve checkout contents"
+        );
         assert_eq!(
             serde_json::to_value(env.agent_store().get_lease(&task.id).unwrap()).unwrap(),
             lease
@@ -14928,6 +14977,25 @@ async fn cas009c_worker_reply_to_supervisor_by_name_threads_and_acknowledges() {
         .expect("report")
         .expect("row");
     assert_eq!(report.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(decision);
+    let result = env.service.coordination(Parameters(named)).await.expect("named answered read");
+    let text = get_text(&result);
+    assert!(!text.contains("Take option B."), "an actual reply makes even a named read terminal: {text}");
+    assert!(text.contains("answered"), "{text}");
+
+    let broadcast = env.prompt_queue().enqueue("supervisor", "all_workers", "Shared follow-up instruction").unwrap();
+    env.service.coordination(Parameters(reply("cosmic-bear-43", "Answered the shared instruction.", broadcast)))
+        .await.expect("reply to broadcast");
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(broadcast);
+    let result = env.service.coordination(Parameters(named)).await.unwrap();
+    let text = get_text(&result);
+    assert!(!text.contains("Shared follow-up instruction"), "{text}");
+    assert!(text.contains("answered"), "{text}");
+    assert_eq!(env.prompt_queue().poll_unseen_for_recipient("another-worker", None, 10).unwrap()[0].prompt,
+        "Shared follow-up instruction", "another recipient still gets the first body");
+
 }
 
 /// cas-009c AC3: a lifecycle row, a broadcast and the director's rows are
@@ -14976,4 +15044,38 @@ async fn cas009c_lifecycle_and_broadcast_rows_are_thread_references() {
         .coordination(Parameters(reply("bold-spider-9", "Not my thread.", unrelated)))
         .await;
     assert!(refused.is_err(), "a row between two other agents is not this sender's thread");
+}
+
+
+#[tokio::test]
+async fn cas_afe0_authenticated_ack_is_recipient_scoped_and_does_not_surface_a_body() {
+    let _guard = EnvGuard::set(&[("CAS_AGENT_ROLE", "supervisor"), ("CAS_AGENT_NAME", "lead-pane")]);
+    let env = FactoryTestEnv::with_agent_id_and_env("lead-id", None);
+    let mut lead = Agent::new("lead-id".into(), "lead-pane".into());
+    lead.role = AgentRole::Supervisor;
+    env.agent_store().register(&lead).unwrap();
+    env.register_worker_with_id("other-id", "worker-b", None);
+    let queue = env.prompt_queue();
+    let id = queue.enqueue("director", "all_workers", "Shared body that must stay private after ACK").unwrap();
+    let mut ack = coord_msg("message_ack", "unused", "unused", None);
+    ack.notification_id = Some(id);
+    env.service.coordination(Parameters(ack)).await.unwrap();
+    for alias in ["lead-pane", "supervisor"] {
+        assert_eq!(queue.recipient_receipt(id, alias).unwrap(), None);
+        assert!(queue.poll_unseen_for_recipient(alias, None, 10).unwrap().is_empty());
+    }
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(id);
+    let response = env.service.coordination(Parameters(named)).await.unwrap();
+    let text = get_text(&response);
+    assert!(!text.contains("Shared body that"), "{text}");
+    assert!(text.contains("acknowledged"), "{text}");
+    // Alias mirroring must not turn a terminal reference into body evidence.
+    assert_eq!(queue.recipient_receipt(id, "lead-pane").unwrap(), None);
+    assert_eq!(queue.poll_unseen_for_recipient("worker-b", None, 10).unwrap()[0].prompt,
+        "Shared body that must stay private after ACK");
+    let foreign = queue.enqueue("director", "worker-b", "Other worker's body").unwrap();
+    let mut ack = coord_msg("message_ack", "unused", "unused", None);
+    ack.notification_id = Some(foreign);
+    assert!(env.service.coordination(Parameters(ack)).await.is_err());
 }

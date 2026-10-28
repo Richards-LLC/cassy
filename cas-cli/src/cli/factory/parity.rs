@@ -448,11 +448,11 @@ mod tests {
 
     /// The harness-specific ambient-recall delivery contract for a supervisor
     /// launch. This is deliberately separate from the skill contract because
-    /// Claude receives its packet through SessionStart while Codex and Grok
-    /// receive it through their queued launch intros.
+    /// Claude and Codex receive their packet through native SessionStart;
+    /// Grok and OpenCode receive it through their queued launch intros.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum AmbientRecallDelivery {
-        /// Claude reads its SessionStart hook's stdout.
+        /// Claude and Codex read their native SessionStart hook context.
         SessionStart,
         /// Grok ignores SessionStart stdout, so the factory's queued launch
         /// intro is its delivery channel.
@@ -481,15 +481,14 @@ mod tests {
                 ambient_recall: AmbientRecallDelivery::SessionStart,
             },
             SupervisorCli::Codex => SupervisorHarnessRequirement {
-                // Codex's checklist is the intentional no-hooks compensation
-                // twin. It is still the universal supervisor-checklist
-                // capability, but its shipped skill name is harness-specific.
+                // Codex retains its harness-specific checklist, while trusted
+                // native hooks now deliver context (57c20b7ab).
                 supervisor_skills: [
                     "cas-supervisor",
                     "cas-codex-supervisor-checklist",
                     "cas-codebase-design",
                 ],
-                ambient_recall: AmbientRecallDelivery::QueuedSupervisorIntro,
+                ambient_recall: AmbientRecallDelivery::SessionStart,
             },
             SupervisorCli::Grok => SupervisorHarnessRequirement {
                 supervisor_skills: [
@@ -551,10 +550,10 @@ mod tests {
         }
     }
 
-    /// Capture the actual Claude SessionStart payload, whose stdout is the
-    /// declared ambient-recall delivery seam. The fixture is hermetic because
+    /// Capture the shared native SessionStart handler used by Claude and Codex,
+    /// whose context is the declared ambient-recall delivery seam. The fixture is hermetic because
     /// session start otherwise consults host-scoped context under `HOME`.
-    fn claude_session_start_payload(cas_dir: &std::path::Path) -> String {
+    fn native_session_start_payload(cas_dir: &std::path::Path) -> String {
         use crate::hooks::{HookInput, handle_session_start};
 
         let input = HookInput {
@@ -569,7 +568,7 @@ mod tests {
             .unwrap()
             .pointer("/hookSpecificOutput/additionalContext")
             .and_then(|value| value.as_str())
-            .expect("Claude SessionStart must emit additional context")
+            .expect("native SessionStart must emit additional context")
             .to_string()
     }
 
@@ -647,14 +646,16 @@ mod tests {
 
             match requirement.ambient_recall {
                 AmbientRecallDelivery::SessionStart => {
-                    let payload = claude_session_start_payload(&cas_dir);
+                    env.set("CAS_HOOK_HARNESS", harness.backend().name());
+                    env.set("CAS_FACTORY_SUPERVISOR_CLI", harness.backend().name());
+                    let payload = native_session_start_payload(&cas_dir);
                     let budget = crate::hooks::handlers::session_budget::SESSION_START_BUDGET_BYTES;
                     assert!(
                         payload.len() <= budget,
-                        "Claude SessionStart exceeds {budget}B"
+                        "{harness:?} SessionStart exceeds {budget}B"
                     );
                     eprintln!(
-                        "Claude SessionStart with full ambient recall: {}B / {budget}B",
+                        "{harness:?} SessionStart with full ambient recall: {}B / {budget}B",
                         payload.len()
                     );
                     assert!(

@@ -7,6 +7,95 @@ use crate::store::TaskStore;
 use crate::types::{Task, TaskStatus};
 
 #[tokio::test]
+async fn artifact_note_append_survives_personal_and_team_reconciliation_once() {
+    use crate::mcp::CasCore;
+    use crate::mcp::tools::TaskNotesRequest;
+    use rmcp::handler::server::wrapper::Parameters;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let source = tempfile::tempdir().unwrap();
+    let root = crate::store::init_cas_dir(source.path()).unwrap();
+    std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"note-project\"\n").unwrap();
+    let source_store = crate::store::open_task_store_local(&root).unwrap();
+    let mut task = Task::new("cas-note-proof".into(), "Proof round trip".into());
+    task.origin_project = Some("note-project".into());
+    source_store.add(&task).unwrap();
+    let artifacts = cas_store::SqliteArtifactStore::open(&root).unwrap();
+    artifacts.record_local(&cas_store::NewArtifact {
+        id: "art-note-proof".into(), task_id: task.id.clone(), name: "LEDGER.md".into(),
+        mime: "text/markdown".into(), size_bytes: 11,
+        sha256: "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9".into(),
+    }).unwrap();
+    artifacts.mark_uploaded("art-note-proof", "cloud-note-proof").unwrap();
+    artifacts.mark_committed("art-note-proof", None).unwrap();
+    let core = CasCore::with_daemon(root.clone(), None, None);
+    core.set_agent_id_for_testing("note-test-agent".into());
+    core.cas_task_notes(Parameters(TaskNotesRequest {
+        id: task.id.clone(), note_type: "platform_proof".into(),
+        note: "Epic flow walk\n\nLedger: art-note-proof\ncells=16; PASS=10; FAIL=1; NOT EXERCISED=5".into(),
+        supervisor_override: None, reason: None,
+    })).await.unwrap();
+    let mut published = source_store.get(&task.id).unwrap();
+    // Exercise an accepted Cloud reconciliation, rather than a stale-row skip.
+    published.updated_at += chrono::Duration::hours(1);
+    assert_eq!(published.notes.matches("Epic flow walk").count(), 1);
+    let raw = published.notes.lines().filter(|line| !line.starts_with("ARTIFACT_PROOF:")).collect::<Vec<_>>().join("\n");
+    let server = MockServer::start().await;
+    for endpoint in ["/api/sync/pull", "/api/teams/note-team/sync/pull"] {
+        Mock::given(method("GET")).and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [published], "pulled_at": "2026-10-27T20:00:00Z",
+                "team_id": "note-team", "status": "ok"
+            }))).mount(&server).await;
+    }
+    // Fresh peer, enriched source, and a legacy raw/enriched duplicate must
+    // converge without moving a proof onto an unrelated later note.
+    for team in [false, true] {
+        for seed in [published.notes.clone(), String::new(), format!("{}\n\n{raw}", published.notes)] {
+            let receiver = tempfile::tempdir().unwrap();
+            let root = crate::store::init_cas_dir(receiver.path()).unwrap();
+            std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"note-project\"\n").unwrap();
+            let tasks = crate::store::open_task_store_local(&root).unwrap();
+            tasks.add(&task).unwrap();
+            if !seed.is_empty() { tasks.append_trusted_note(&task.id, &seed).unwrap(); }
+            let history = "[2026-10-27 19:00] unrelated history\nARTIFACT_PROOF: prior trusted receipt";
+            tasks.append_trusted_note(&task.id, history).unwrap();
+            tasks.append_note(&task.id, "[2026-10-27 21:00] later unrelated note").unwrap();
+            let queue = Arc::new(SyncQueue::open(&root).unwrap());
+            queue.init().unwrap();
+            let syncer = CloudSyncer::new_for_project(queue, CloudConfig {
+                endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+            }, CloudSyncerConfig::default(), "note-project".into(), &root);
+            let entries = crate::store::open_store_local(&root).unwrap();
+            let rules = crate::store::open_rule_store_local(&root).unwrap();
+            let skills = crate::store::open_skill_store_local(&root).unwrap();
+            for _ in 0..2 {
+                let result = if team {
+                    syncer.pull_team("note-team", "note-project", &*entries, &*tasks, &*rules, &*skills)
+                } else {
+                    syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                        &*crate::store::open_spec_store(&root).unwrap(),
+                        &*crate::store::open_event_store(&root).unwrap(),
+                        &*crate::store::open_prompt_store(&root).unwrap(),
+                        &*crate::store::open_file_change_store(&root).unwrap(),
+                        &*crate::store::open_commit_link_store(&root).unwrap())
+                }.unwrap();
+                assert!(result.errors.is_empty(), "{:?}", result.errors);
+                assert_eq!(result.pulled_tasks, 1, "Cloud row did not reconcile: {result:?}");
+                let notes = tasks.get(&task.id).unwrap().notes;
+                assert_eq!(notes.matches("Epic flow walk").count(), 1, "team={team}: {notes}");
+                assert_eq!(notes.matches("cells=16").count(), 1, "duplicated receipt body: {notes}");
+                assert!(notes.contains(&published.notes), "proof detached from receipt: {notes}");
+                assert!(notes.contains(history), "unrelated proof lost: {notes}");
+                assert_eq!(notes.matches("later unrelated note").count(), 1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn legacy_queued_entry_recovers_stored_origin_and_unknown_row_is_skipped() {
     use crate::cloud::{CloudConfig, EntityType, SyncOperation};
     use cas_store::{RuleStore, SqliteRuleStore, SqliteStore, Store};

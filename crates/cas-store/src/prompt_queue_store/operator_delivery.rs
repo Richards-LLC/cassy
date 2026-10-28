@@ -58,6 +58,8 @@ pub struct OperatorTurnMetadata<'a> {
     pub kind: Option<&'a str>,
     pub attachments: &'a [cas_types::ArtifactRef],
     pub dedupe_key: Option<&'a str>,
+    /// Original harness input time, preserved in both history and its immutable event.
+    pub occurred_at: Option<DateTime<Utc>>,
     /// Explicit reply confirmation, committed with the reply and its event.
     pub acknowledge_prompt_id: Option<i64>,
     /// cas-9b7d: the turn already has durable account history under this
@@ -187,7 +189,7 @@ impl SqlitePromptQueueStore {
         event_id: &str,
     ) -> Result<EnqueueOutcome> {
         let metadata = &turn.metadata;
-        let now = Utc::now();
+        let now = metadata.occurred_at.unwrap_or_else(Utc::now);
         if let Some(key) = metadata.dedupe_key {
             if let Some(id) = conn
                 .query_row(

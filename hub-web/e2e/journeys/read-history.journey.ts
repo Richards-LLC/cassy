@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
 import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
@@ -8,6 +8,148 @@ import { ATLAS, PELICAN } from "./world";
 const you = (id: number, text: string, at: string) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at });
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
+
+test("HUB-J4 prose tables keep words readable and render inline markdown", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  hub.supervisorSays(PELICAN, [
+    "| Tab | State |", "| --- | --- |",
+    "| **Daniel Open Hours** | Tracks *open hours* in `time-tracking`; [details](https://example.org/hours) stay available. |",
+    "| Weekly summary | Ready after the current work session ends. |", "",
+    "| # | What | Starts |", "| --- | --- | --- |",
+    "| C2 | **Review the current changes** and record the remaining work. | After `C1` |",
+    "| C3 | Publish the reviewed report when every check passes. | After C2 |",
+  ].join("\n"));
+  const tables = page.getByRole("log").getByRole("table");
+  await expect(tables).toHaveCount(2);
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia({ colorScheme });
+    await journey.stage(`Read prose tables at ${width} in ${colorScheme}`, async () => {
+      for (let index = 0; index < 2; index++) {
+        const table = tables.nth(index);
+        await table.scrollIntoViewIfNeeded();
+        if (process.env.DELIVERY_QA) {
+          mkdirSync(process.env.DELIVERY_QA, { recursive: true });
+          await table.screenshot({ path: `${process.env.DELIVERY_QA}/table-${index + 2}-${width}-${colorScheme}.png` });
+          writeFileSync(`${process.env.DELIVERY_QA}/table-${index + 2}.html`, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style><body><div class="thread"><div class="bub">${await table.evaluate(node => node.outerHTML)}</div></div></body></html>`);
+        }
+        const rendered = await table.evaluate(node => {
+          const cells = [...node.querySelectorAll<HTMLElement>('[role="cell"]')];
+          // A word's Range stays on one line, including C2 in the three-column case.
+          const words = cells.flatMap(cell => {
+            const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+            const counts: number[] = [];
+            for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+              for (const match of text.textContent!.matchAll(/[\p{L}\p{N}]+/gu)) {
+                const range = document.createRange();
+                range.setStart(text, match.index!); range.setEnd(text, match.index! + match[0].length);
+                counts.push(range.getClientRects().length);
+              }
+            }
+            return counts;
+          });
+          return {
+            words, bold: node.querySelector("strong")?.textContent,
+            code: node.querySelector("code")?.textContent,
+            italic: node.querySelector("em")?.textContent,
+            link: node.querySelector("a")?.getAttribute("href"),
+            proseAlignment: getComputedStyle(cells[1]!).textAlign,
+            proseFont: getComputedStyle(cells[1]!).fontFamily,
+            bodyFont: getComputedStyle(document.querySelector(".bub")!).fontFamily,
+            overflow: getComputedStyle(node).overflowX,
+            right: node.getBoundingClientRect().right,
+            pageWidth: document.documentElement.clientWidth,
+            pageScrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        expect.soft(rendered.words.every(count => count === 1), `words stay whole in ${index + 2} columns at ${width}`).toBe(true);
+        expect.soft(rendered.bold).toBe(index === 0 ? "Daniel Open Hours" : "Review the current changes");
+        expect.soft(rendered.code).toBe(index === 0 ? "time-tracking" : "C1");
+        if (index === 0) {
+          expect.soft(rendered.italic).toBe("open hours");
+          expect.soft(rendered.link).toBe("https://example.org/hours");
+        }
+        expect.soft(rendered.proseAlignment).toBe("left");
+        expect.soft(rendered.proseFont).toBe(rendered.bodyFont);
+        expect.soft(rendered.overflow).toBe("auto");
+        expect.soft(rendered.right).toBeLessThanOrEqual(rendered.pageWidth);
+        expect.soft(rendered.pageScrollWidth).toBe(rendered.pageWidth);
+      }
+    });
+  }
+});
+
+test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  hub.supervisorSays(PELICAN, [
+    "# Release is ready", "## Evidence", "### Checks", "The reviewed build passed.",
+    "> [!NOTE]", "> **Read** the [receipt](https://example.org/receipt).", ">", "> The evidence stays available.", "",
+    "> [!WARNING]", "> Keep `rollback` available.", "",
+    "> [!CAUTION]", "> <script>unsafe()</script> is literal; [unsafe](javascript:run) stays text.", "",
+    "Ordinary prose continues here.",
+  ].join("\n"));
+  const bubble = page.getByRole("log").locator(".bub").filter({ hasText: "Release is ready" });
+  await expect(bubble).toBeVisible();
+  const modes = [
+    { name: "light", colorScheme: "light", forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" },
+    { name: "dark", colorScheme: "dark", forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" },
+    { name: "forced-colors", colorScheme: "light", forcedColors: "active", reducedMotion: "no-preference", contrast: "no-preference" },
+  ] as const;
+  const cells = [
+    ...[1280, 390].flatMap(width => modes.map(mode => ({ width, ...mode }))),
+    { width: 390, ...modes[0], name: "reduced-motion", reducedMotion: "reduce" as const },
+    { width: 390, ...modes[0], name: "contrast-more", contrast: "more" as const },
+  ];
+  for (const { width, name, ...media } of cells) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia(media);
+    await journey.stage(`Read heading hierarchy and caveats at ${width} in ${name}`, async () => {
+      await bubble.scrollIntoViewIfNeeded();
+      if (name === "forced-colors") expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      if (name === "reduced-motion") expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
+      if (name === "contrast-more") expect(await page.evaluate(() => matchMedia("(prefers-contrast: more)").matches)).toBe(true);
+      if (process.env.HIERARCHY_QA) {
+        mkdirSync(process.env.HIERARCHY_QA, { recursive: true });
+        await bubble.screenshot({ path: `${process.env.HIERARCHY_QA}/hierarchy-${width}-${name}.png` });
+        writeFileSync(`${process.env.HIERARCHY_QA}/hierarchy.html`, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style><body><main class="thread"><div class="bub">${await bubble.innerHTML()}</div></main></body></html>`);
+      }
+      expect.soft(await bubble.getByRole("heading", { level: 1, name: "Release is ready" }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("heading", { level: 2, name: "Evidence" }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("heading", { level: 3, name: "Checks" }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("complementary", { name: "Note", exact: true }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("complementary", { name: "Warning", exact: true }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("complementary", { name: "Caution", exact: true }).count()).toBe(1);
+      expect.soft(await bubble.locator("script, button, [role=alert], [role=status], .obj, .ask, .blocker").count()).toBe(0);
+      expect.soft(await bubble.getByRole("link").count()).toBe(1);
+      expect.soft(await bubble.locator("code").allTextContents()).toEqual(["rollback"]);
+      expect.soft(await bubble.locator(":scope > p").last().textContent()).toBe("Ordinary prose continues here.");
+      const layout = await bubble.evaluate(node => {
+        const headings = [...node.querySelectorAll<HTMLElement>(".markdown-heading")].map(h => parseFloat(getComputedStyle(h).fontSize));
+        const caveats = [...node.querySelectorAll<HTMLElement>(".markdown-callout")].map(c => ({
+          background: getComputedStyle(c).backgroundColor,
+          border: getComputedStyle(c).borderInlineStartStyle,
+          width: parseFloat(getComputedStyle(c).borderInlineStartWidth),
+        }));
+        return { headings, caveats, width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth };
+      });
+      expect.soft(layout.headings[0]).toBeGreaterThan(layout.headings[1] ?? Infinity);
+      expect.soft(layout.headings[1]).toBeGreaterThan(layout.headings[2] ?? Infinity);
+      expect.soft(layout.caveats).toHaveLength(3);
+      for (const caveat of layout.caveats) {
+        expect.soft(caveat.background).toMatch(/^rgba\([\d, ]+, 0\)$/);
+        expect.soft(caveat.border).toBe("solid");
+        expect.soft(caveat.width).toBeGreaterThan(0);
+      }
+      expect.soft(layout.scroll).toBe(layout.width);
+    });
+  }
+});
 
 function historyWorld(): DoubleOptions {
   return {
@@ -30,7 +172,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
 
   await journey.stage("Open the conversation and see the recent turns", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(log.getByText("Yes. The gate is green on the release branch.")).toBeVisible();
     await expect(log.getByText("Is the release ready to cut?")).toBeVisible();
     // cas-acb4b: the latest exchange is on screen at once, without Jump to latest.
@@ -40,6 +182,19 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
     const atTail = () => page.evaluate(() => {
       const thread = document.querySelector<HTMLElement>(".conversation-reading.thread")!;
       return thread.scrollHeight - thread.clientHeight - thread.scrollTop <= 4;
+    });
+    // cas-c3ac: wait for initial font/layout delivery before introducing a
+    // separate resize. The view's ResizeObserver and deferred pin must see
+    // the initial geometry first; a fixed frame delay can precede that delivery.
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await new Promise<void>(resolve => {
+        const observer = new ResizeObserver(() => {
+          observer.disconnect();
+          requestAnimationFrame(() => resolve());
+        });
+        observer.observe(document.querySelector(".conversation-reading.thread .msgs")!);
+      });
     });
     await expect.poll(atTail, { message: "the thread opens at its latest turn" }).toBe(true);
     await expect(newest).toBeInViewport();
@@ -120,7 +275,7 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
   const hub = await journey.hub(historyWorld());
   const log = page.getByRole("log");
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
   // Reach the real history boundary before reconnecting. The reattach's newest
   // page still advertises older turns; it must not reset the reader's boundary.
@@ -309,7 +464,7 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
 
   await journey.stage("Read mid-history, then move on to the composer", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
     await loadEarlier.scrollIntoViewIfNeeded();
     await loadEarlier.click();
@@ -387,7 +542,7 @@ for (const [name, viewport, rest] of [
 
     await journey.stage(`Read an earlier page mid-history, then move on to the composer (${name})`, async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
       await expect(log.getByText("Recent turn 11:")).toBeVisible();
       await loadEarlier.scrollIntoViewIfNeeded();
       await loadEarlier.click();
@@ -479,10 +634,14 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     await tab.route("https://foreign.example/**", (route) => route.fulfill({ contentType: "text/html", body: `<iframe title="reframed" src="${new URL(route.request().url()).searchParams.get("src")}"></iframe>` }));
     await tab.addInitScript(() => { (window as unknown as { heard: unknown[] }).heard = []; addEventListener("message", (event) => (window as unknown as { heard: unknown[] }).heard.push(event.data)); });
     await journey.open();
-    await tab.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await tab.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(tab.locator(".conversation-row")).click();
     const log = tab.getByRole("log");
     await expect(log.getByText("Here it is, and the page the scanner flagged.")).toBeVisible();
-    const storage = () => tab.evaluate(async () => ({ local: Object.keys(localStorage).sort(), databases: (await indexedDB.databases()).map((db) => db.name).sort() }));
+    // cas-b255: HOSTILE attempts to write exactly this key. Host arrivals,
+    // navigation and panel-size persistence may legitimately change meanwhile.
+    // Compare the probe's value (including absence), retaining the database
+    // isolation check, rather than treating every host write as a frame escape.
+    const storage = () => tab.evaluate(async () => ({ local: localStorage.getItem("pwned"), databases: (await indexedDB.databases()).map((db) => db.name).sort() }));
     const before = await storage();
     const tabs = tab.context().pages().length;
 

@@ -562,9 +562,8 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
 }
 
 /// Picker new-login on a real terminal: keys typed together with the email
-/// are read by inquire's reader at the email prompt. A finished `y` line still
-/// answers the duplicate question and a typed-ahead Ctrl-C still cancels;
-/// everything else is the terminal's own native input handling.
+/// reach the duplicate question through the terminal's own line discipline,
+/// in order, with its editing, EOF and Ctrl-C meanings intact.
 #[cfg(unix)]
 #[tokio::test]
 async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_providers() {
@@ -605,18 +604,20 @@ exit 0
         ))
         .unwrap();
         // (keys written with the email, output that triggers the next write,
-        // keys written then, succeeds). After the email prompt the terminal
-        // owns input natively; only finished type-ahead lines carry over.
-        let cases: [(&[u8], &str, &[u8], bool); 7] = [
+        // keys written then, succeeds). Everything typed after the email's
+        // Enter is the terminal's own input, in order, until the question.
+        let cases: [(&[u8], &str, &[u8], bool); 9] = [
             (b"typed@example.com\ry\r", "", b"", true),
-            // Ctrl-U inside the typed-ahead line erases it, as the terminal would.
+            // Enter typed during the login finishes the echoed `y`.
+            (b"typed@example.com\ry", "LOGIN_STARTED", b"\r", true),
+            // Answers are consumed in order: the first one, `n`, wins.
+            (b"typed@example.com\rn\ry\r", "", b"", false),
             (b"typed@example.com\ry\x15\r", "", b"", false),
-            // The undisplayed fragment is dropped; the terminal edits natively.
             (b"typed@example.com\rn", "[y/N] ", b"\x7fy\r", true),
-            // Ctrl-D typed while the login runs, or at the question, is EOF.
+            // EOF between the two readers, in every position, cancels.
+            (b"typed@example.com\r\x04", "", b"", false),
             (b"typed@example.com\ry", "LOGIN_STARTED", b"\x04", false),
             (b"typed@example.com\ry", "[y/N] ", b"\x04", false),
-            (b"typed@example.com\ry", "[y/N] ", b"\r", false),
             (b"typed@example.com\r\x03", "", b"", false),
         ];
         for (with_email, trigger, then, succeeds) in cases {
@@ -677,7 +678,7 @@ exit 0
             .await;
             pty.kill_tree_force();
             let output = String::from_utf8_lossy(&output).replace('\r', "");
-            let case = String::from_utf8_lossy(with_email);
+            let case = format!("{} then {:?} at {trigger:?}", String::from_utf8_lossy(with_email), String::from_utf8_lossy(then));
             let Ok(code) = result else { panic!("{provider} {case:?}: still waiting for input: {output}") };
             assert!(!output.contains("CHILD_RAW"), "{provider} {case:?}: {output}");
             if succeeds {

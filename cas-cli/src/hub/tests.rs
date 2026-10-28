@@ -1589,6 +1589,8 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
         "worker-src 'self'",
         "media-src 'self'",
         "img-src 'self' data:",
+        // cas-3aff: Commander may frame a paired machine's sandboxed page.
+        "frame-src 'self' https: http://127.0.0.1:*;",
     ] {
         assert!(csp.contains(required), "missing CSP directive {required}");
     }
@@ -5288,6 +5290,121 @@ async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_
     );
 }
 
+
+/// cas-3aff: a visual reply page opens only through a DPoP-minted ticket for
+/// committed HTML in the session's thread, under a sandbox policy framed by the
+/// minting origin alone, and serves only the page and passive sibling assets
+/// through the shared session artifact path.
+#[tokio::test]
+async fn visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets() {
+    use cas_store::{NewArtifact, SqliteArtifactStore};
+    let mut f = ops_fixture([Scope::SessionRead].into_iter().collect());
+    let upstream = wiremock::MockServer::start().await;
+    let artifacts = SqliteArtifactStore::open(&f.cas_dir).unwrap();
+    let queue = crate::store::open_prompt_queue_store(&f.cas_dir).unwrap();
+    for (id, mime, session) in [
+        ("art-page", "text/html", OPS_SESSION),
+        ("art-chart", "image/png", OPS_SESSION),
+        ("art-diagram", "image/svg+xml", OPS_SESSION),
+        ("art-other-page", "text/html", OPS_SESSION),
+        ("art-data", "application/json", OPS_SESSION),
+        ("art-foreign", "image/png", "another-session"),
+    ] {
+        artifacts.record_local(&NewArtifact {
+            id: id.into(), task_id: OPS_TASK.into(), name: id.into(),
+            mime: mime.into(), size_bytes: 6, sha256: "a".repeat(64),
+        }).unwrap();
+        artifacts.mark_uploaded(id, &format!("cloud-{id}")).unwrap();
+        artifacts.mark_committed(id, None).unwrap();
+        let row = queue.enqueue_with_session("supervisor", "operator", "report", session).unwrap();
+        queue.stamp_operator_reply(row, "status", &[cas_types::ArtifactRef {
+            artifact_id: id.into(), name: id.into(), mime: mime.into(), size_bytes: 6, sha256: "a".repeat(64),
+        }]).unwrap();
+    }
+    let mut candidate = fixture_session(OPS_SESSION);
+    candidate.project_dir = Some(f.cas_dir.parent().unwrap().display().to_string());
+    let events = MachineEventBus::new(4);
+    f.app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![candidate])),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(4), events.clone()), events,
+    ).with_auth(f.auth.clone()).with_artifact_cloud_client(
+        crate::artifacts::cloud::ArtifactUploadClient::new(&upstream.uri(), "fixture-cloud-token"),
+    ));
+    let blob_origin = upstream.uri();
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex("^/api/artifacts/"))
+        .respond_with(move |request: &wiremock::Request| {
+            let id = request.url.path().split('/').nth(3).unwrap();
+            wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "artifact_id": id, "url": format!("{blob_origin}/blob/{id}"),
+                "expires_at": (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            }))
+        }).mount(&upstream).await;
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex("^/blob/"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_bytes(b"<h1></h1>"[..6].to_vec()))
+        .mount(&upstream).await;
+    let get = |path: String, origin: Option<&str>| {
+        let request = Request::get(path);
+        let request = match origin { Some(origin) => request.header("origin", origin), None => request };
+        f.app.clone().oneshot(request.body(Body::empty()).unwrap())
+    };
+
+    let unsigned = f.app.clone().oneshot(Request::post(format!("/v1/sessions/{OPS_SESSION}/artifacts/art-page/page"))
+        .header("origin", "https://controller.example").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED, "minting needs DPoP");
+    for refused in ["art-chart", "art-missing", "art-foreign"] {
+        let (status, _) = f.call("POST", &format!("/v1/sessions/{OPS_SESSION}/artifacts/{refused}/page"), None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused} is not an HTML page in this thread");
+    }
+    let (status, minted) = f.call("POST", &format!("/v1/sessions/{OPS_SESSION}/artifacts/art-page/page"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let page_url = minted["url"].as_str().unwrap().to_owned();
+    let ticket_root = page_url.strip_suffix("art-page").unwrap().to_owned();
+    assert!(ticket_root.starts_with("/v1/pages/") && ticket_root.len() > "/v1/pages/".len() + 40, "{page_url}");
+    assert!(upstream.received_requests().await.unwrap().is_empty(), "minting never fetches the page");
+
+    let expected_csp = "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors https://controller.example";
+    for (path, mime) in [(page_url.clone(), "text/html"), (format!("{ticket_root}art-chart"), "image/png")] {
+        let response = get(path.clone(), Some("null")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        let headers = response.headers();
+        assert_eq!(headers["content-security-policy"], expected_csp, "{path}");
+        assert_eq!(headers.get_all("content-security-policy").iter().count(), 1);
+        assert_eq!(headers["content-type"], mime);
+        assert_eq!(headers["x-content-type-options"], "nosniff");
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert!(headers["cache-control"].to_str().unwrap().contains("no-store"));
+        assert!(!headers.contains_key("x-frame-options"), "frame-ancestors replaces DENY for the minting origin");
+        assert!(!headers.contains_key("access-control-allow-origin"), "no origin may read a page by script");
+    }
+    // cas-a473: an SVG sibling, a document when opened alone, also keeps the
+    // media route's own sandbox beside the page policy.
+    let svg = get(format!("{ticket_root}art-diagram"), None).await.unwrap();
+    assert_eq!(svg.status(), StatusCode::OK);
+    let policies: Vec<_> = svg.headers().get_all("content-security-policy").iter().map(|value| value.to_str().unwrap().to_owned()).collect();
+    assert_eq!(policies, [expected_csp, "default-src 'none'; sandbox"]);
+
+    // A second page, JSON, another session's file, a missing artifact and an
+    // unknown ticket are refused under Commander's own strict policy.
+    for path in [
+        format!("{ticket_root}art-other-page"),
+        format!("{ticket_root}art-data"),
+        format!("{ticket_root}art-foreign"),
+        format!("{ticket_root}art-missing"),
+        "/v1/pages/not-a-ticket/art-page".to_owned(),
+    ] {
+        let response = get(path.clone(), None).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        assert_eq!(response.headers()["x-frame-options"], "DENY", "{path}");
+        assert!(response.headers()["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"), "{path}");
+    }
+
+    // Revoking the minting device closes the page it opened.
+    f.auth.revoke_device(&f.device_id, chrono::Utc::now()).unwrap();
+    assert_ne!(get(page_url, None).await.unwrap().status(), StatusCode::OK);
+}
 
 /// Media elements need reusable, narrowly scoped capabilities instead of a
 /// pairing credential in a URL (cas-1b35). One table drives the public router.

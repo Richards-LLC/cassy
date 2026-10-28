@@ -53,6 +53,8 @@ pub struct HubState<R: SessionReadModel> {
     usage: Option<super::usage::UsageStore>,
     #[cfg(test)]
     artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
+    /// Visual reply page tickets (cas-3aff).
+    pages: super::visual_pages::PageTickets,
     #[cfg(test)]
     artifact_stream_clock: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
 }
@@ -81,6 +83,7 @@ impl<R: SessionReadModel> HubState<R> {
             usage: None,
             #[cfg(test)]
             artifact_cloud_client: None,
+            pages: super::visual_pages::PageTickets::default(),
             #[cfg(test)]
             artifact_stream_clock: None,
         }
@@ -234,6 +237,11 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/sessions/{session}/artifacts/{artifact}/content",
             get(crate::hub::artifact_proxy::content::<R>).options(crate::hub::artifact_proxy::preflight::<R>),
         )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/page",
+            post(visual_page_ticket::<R>).options(preflight::<R>),
+        )
+        .route("/v1/pages/{ticket}/{artifact}", get(visual_page::<R>))
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
         .layer(middleware::from_fn_with_state(recovery, connection_evidence))
@@ -427,6 +435,10 @@ async fn security_headers(
     let mut response = next.run(request).await;
     let additional_csp = response.extensions_mut()
         .remove::<artifact_proxy::AdditionalContentSecurityPolicy>();
+    // A visual reply page carries its own sandbox policy in place of
+    // Commander's (cas-3aff); every other response gets Commander's.
+    let page_policy = response.extensions_mut()
+        .remove::<super::visual_pages::PageContentSecurityPolicy>();
     let headers = response.headers_mut();
     if matches!(
         transport,
@@ -442,6 +454,13 @@ async fn security_headers(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    if let Some(page) = page_policy {
+        headers.insert("content-security-policy", page.0);
+        if let Some(policy) = additional_csp {
+            headers.append("content-security-policy", policy.0);
+        }
+        return response;
+    }
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     // connect-src: `https:`/`wss:` reach the paired machines the operator
     // chose (arbitrary hub hosts) and the loopback hub. Two cloud services are
@@ -449,11 +468,14 @@ async fn security_headers(
     // OPERATOR_INBOX_CSP_SOURCE, the production cloud operator inbox API
     // (`/api/operator/` only, no wildcard, nothing for non-production). They
     // are the embedded page's only external origins (`h4_csp_03`).
+    // frame-src: Commander frames visual reply pages from the same paired
+    // machines (cas-3aff); each page carries its own sandbox policy.
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
             "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
+            "; frame-src 'self' https: http://127.0.0.1:*",
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
         )),
     );
@@ -2516,6 +2538,118 @@ async fn artifact_view_url<R: SessionReadModel>(
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Mint a ticket that opens one HTML page attached to the session's thread,
+/// framed only by the minting device's Commander origin (cas-3aff). The page
+/// is served by [`visual_page`]; an iframe or tab can't send DPoP, so the
+/// ticket is the capability. The shared artifact path refuses, before any
+/// fetch, a page that isn't committed HTML in this session's thread.
+async fn visual_page_ticket<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((session, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    use super::visual_pages::PAGE_MIME_ALLOWLIST;
+    let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/page");
+    let context = match authorize(
+        &state,
+        HubAction::SessionRead,
+        Scope::SessionRead,
+        &headers,
+        "POST",
+        &uri,
+    ) {
+        Ok(Some(context)) => context,
+        // A page needs a paired device's live context to recheck per fetch.
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if let Err(refused) = super::artifact_proxy::issue_session_artifact_ticket(
+        &state,
+        &context,
+        &session,
+        &artifact,
+        PAGE_MIME_ALLOWLIST,
+    )
+    .await
+    {
+        return with_cors(refused, &headers);
+    }
+    let (ticket, expires) = state
+        .pages
+        .issue(&session, &artifact, &context, Instant::now());
+    let expires_at = chrono::Utc::now()
+        + chrono::Duration::from_std(expires.saturating_duration_since(Instant::now()))
+            .unwrap_or_default();
+    let url = format!("/v1/pages/{ticket}/{}", urlencoding::encode(&artifact));
+    let mut response = with_cors(
+        Json(serde_json::json!({
+            "artifact_id": artifact,
+            "url": url,
+            "expires_at": expires_at.to_rfc3339(),
+            "mime": "text/html",
+        }))
+        .into_response(),
+        &headers,
+    );
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Serve a visual reply page, or a passive asset it references by artifact
+/// id, under the sandbox policy (cas-3aff). Bytes come through the shared
+/// session artifact path with the minting device's context, rechecked live;
+/// every refusal keeps Commander's own strict policy.
+async fn visual_page<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((ticket, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    use super::visual_pages::{PAGE_MIME_ALLOWLIST, SUB_ASSET_MIME_ALLOWLIST, page_csp};
+    let Some(held) = state.pages.resolve(&ticket, Instant::now()) else {
+        return generic_not_found();
+    };
+    let allowlist = if artifact == held.page {
+        PAGE_MIME_ALLOWLIST
+    } else {
+        SUB_ASSET_MIME_ALLOWLIST
+    };
+    let Ok(policy) = HeaderValue::from_str(&page_csp(&held.context.controller_origin)) else {
+        return generic_not_found();
+    };
+    let mut response = super::artifact_proxy::fetch_session_artifact(
+        &state,
+        held.context,
+        &held.session,
+        &artifact,
+        &headers,
+        allowlist,
+    )
+    .await;
+    // A page is navigated to, never read by script: no origin may read it.
+    response.headers_mut().remove("access-control-allow-origin");
+    if response.status().is_success() {
+        let svg = response.headers().get("content-type").is_some_and(|mime| {
+            mime.to_str()
+                .is_ok_and(|mime| mime.eq_ignore_ascii_case("image/svg+xml"))
+        });
+        response
+            .headers_mut()
+            .insert("content-disposition", HeaderValue::from_static("inline"));
+        let extensions = response.extensions_mut();
+        extensions.insert(super::visual_pages::PageContentSecurityPolicy(policy));
+        // cas-a473: SVG is a document when opened alone; it keeps the media
+        // route's own sandbox on top of the page policy.
+        if svg {
+            extensions.insert(artifact_proxy::AdditionalContentSecurityPolicy(
+                HeaderValue::from_static("default-src 'none'; sandbox"),
+            ));
+        }
+    }
     response
 }
 

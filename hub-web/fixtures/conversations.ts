@@ -305,6 +305,13 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));
     history.acknowledge({ client_ref: 'report', notification_id: 70, target: supervisor, stamped: true });
     reply(71, 70, 'Gate green on all 14 targets. 3.26.0 is tagged and the brief is attached; the report card has the per-target timings.', 'receipt', at(9, 52), REPORT_CARD_ATTACHMENTS);
+  } else if (state === 'conversation-visual-page') {
+    // cas-3aff: the report card's page shows inline beneath its sheet, in the
+    // sandboxed frame; the fixture serves the page itself.
+    installAttachmentSheet(undefined, async () => '/visual-page.html');
+    history.submit('report', supervisor, 'Send me the release report card.', at(9, 40));
+    history.acknowledge({ client_ref: 'report', notification_id: 70, target: supervisor, stamped: true });
+    reply(71, 70, 'Here is the report card.', 'receipt', at(9, 52), [REPORT_CARD_ATTACHMENTS[1]!]);
   } else if (state === 'conversation-empty' || state === 'conversation-empty-long-machine') {
     // empty.html: nothing in the thread, the last thing said as a faint echo.
     echo = 'Promoted the hub to production on Monday.';

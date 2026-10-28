@@ -7,9 +7,12 @@
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
 import { expect, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 import { createHash, webcrypto } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { journeyNow } from "./clock";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
+/** The hub's visual page policy, the very file it embeds (cas-3aff). */
+const VISUAL_PAGE_CSP = readFileSync(new URL("../../../cas-cli/src/hub/visual_page_csp.txt", import.meta.url), "utf8").trim();
 export const SCOPES = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
 
 export type Session = {
@@ -65,6 +68,12 @@ export type DoubleOptions = {
   paired?: string[];
   /** Conversation history pages served in order for each session, newest first. */
   history?: Record<string, HistoryPage[]>;
+  /**
+   * Artifacts the machine's visual page route serves, by id (cas-3aff): an
+   * HTML page and the passive assets it names. Served under the real hub's
+   * sandbox policy, read from the same file the hub embeds.
+   */
+  visualPages?: Record<string, { mime: string; body: string | Buffer }>;
   /** Relay pairing: which machine the relay authorizes, and after how many polls. */
   relay?: { machine: string; claimAfter: number; authorizeAfter: number };
   /** How far each session's machine clock runs ahead of this browser (ms): the
@@ -195,6 +204,10 @@ export class HubDouble {
   private readonly pendingReplyFlights = new Map<string, Set<number>>();
   /** Artifact ids Commander asked a signed view URL for (cassy#910). */
   readonly artifactRequests: string[] = [];
+  /** Visual page tickets minted (cas-3aff), with the origin that asked. */
+  readonly pageTickets = new Map<string, { session: string; page: string; origin: string }>();
+  /** Every `/v1/pages/...` path the browser fetched, in order. */
+  readonly pageRequests: string[] = [];
   readonly previewTicketRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
@@ -459,6 +472,9 @@ export class HubDouble {
       };
     }, Object.values(this.options.baseUrls ?? {}));
     await page.route("https://*.test/**", (route) => this.hub(route));
+    // cas-3aff: a visual page opened in its own tab is a new page; its
+    // ticketed route is answered there too.
+    await page.context().route(/^https:\/\/[^/]+\.test\/v1\/pages\//, (route) => this.visualPage(route, new URL(route.request().url()).pathname));
     for (const base of Object.values(this.options.baseUrls ?? {})) await page.route(`${new URL(base).origin}/v1/**`, (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
     await page.routeWebSocket((url) => url.pathname.startsWith("/v1/") && (url.hostname.endsWith(".test") || Object.values(this.options.baseUrls ?? {}).some((base) => new URL(base).host === url.host)), (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
@@ -851,6 +867,31 @@ export class HubDouble {
     return this.machine(machineId).sessions;
   }
 
+  /**
+   * The hub's visual page route (hub/server.rs `visual_page`): the page must
+   * be HTML, a sibling only a passive type, and every refusal one plain 404.
+   */
+  private visualPage(route: Route, path: string): Promise<void> {
+    this.pageRequests.push(path);
+    const [, , , ticket, artifact] = path.split("/");
+    const held = this.pageTickets.get(ticket ?? "");
+    const found = this.options.visualPages?.[decodeURIComponent(artifact ?? "")];
+    const type = found?.mime.split(";")[0]!.trim().toLowerCase() ?? "";
+    const allowed = held && found && (decodeURIComponent(artifact!) === held.page ? type === "text/html" : /^(image|video|audio|font)\//.test(type) || type === "text/css");
+    if (!allowed) return route.fulfill({ status: 404, headers: { "x-frame-options": "DENY" } });
+    return route.fulfill({
+      status: 200,
+      headers: {
+        "content-type": found.mime,
+        "content-security-policy": VISUAL_PAGE_CSP.replace("{frame_ancestor}", held.origin),
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "cache-control": "no-store",
+      },
+      body: found.body,
+    });
+  }
+
   private async hub(route: Route): Promise<void> {
     const url = new URL(route.request().url());
     const machineId = this.machineIdFor(url);
@@ -864,6 +905,7 @@ export class HubDouble {
     }
     if (path === "/v1/auth/pairing/protocol") return route.fulfill({ json: { installation_protocol: 1 } });
     if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
+    if (path.startsWith("/v1/pages/")) return this.visualPage(route, path);
     if (path === "/v1/auth/pairing/commit" || path === "/v1/auth/pairing/abort") return this.installationAction(route, machineId, path.endsWith("commit"));
     const active = [...this.installations.values()].find((d) => route.request().headers()["authorization"] === `DPoP ${d.credential}` && d.machine === machineId && !d.revoked_at);
     const secret = route.request().headers()["authorization"]?.replace(/^DPoP /, "");
@@ -999,6 +1041,14 @@ export class HubDouble {
       if (id.startsWith("art-cloud-down")) return route.fulfill({ status: 502, json: { error: "cloud_failed", status: null } });
       if (id.startsWith("art-offline")) return route.abort("connectionrefused");
       return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: this.stamp(600_000), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
+    }
+    // cas-3aff: a ticket for one HTML page, framed only by the asking origin.
+    const pageTicket = /^\/v1\/sessions\/([^/]+)\/artifacts\/([^/]+)\/page$/.exec(path);
+    if (pageTicket && method === "POST") {
+      const ticket = `ticket-${this.pageTickets.size + 1}-${"x".repeat(32)}`;
+      const page = decodeURIComponent(pageTicket[2]!);
+      this.pageTickets.set(ticket, { session: decodeURIComponent(pageTicket[1]!), page, origin: route.request().headers()["origin"] ?? "" });
+      return route.fulfill({ headers: { "cache-control": "no-store" }, json: { artifact_id: page, url: `/v1/pages/${ticket}/${encodeURIComponent(page)}`, expires_at: this.stamp(600_000), mime: "text/html" } });
     }
     const leased = /^\/v1\/sessions\/([^/]+)\/lease$/.exec(path);
     if (leased) {

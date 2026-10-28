@@ -67,6 +67,9 @@ invariants:
     check: 'Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: history pages come from
       the double; real rows are covered by `hub-web/scripts/conversation-history-qa.mjs`'
+  HUB-J4-VISUAL-SANDBOX:
+    statement: A supervisor's HTML page shows inline and in its own tab, and a hostile page can't run script, reach Commander's storage, leave its frame or call out to another host
+    check: 'Run the cas-3aff parts of hub-web/e2e/journeys/read-history.journey.ts at desktop and phone, whose double serves the policy file the hub embeds, and the hub route test visual_reply_page_is_ticketed_sandboxed_and_serves_only_passive_assets. Threat model: docs/design/hub-web/visual-replies-threat-model.md.'
   HUB-J5-GOAL:
     statement: my message reaches the supervisor and I see its answer
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
@@ -577,6 +580,11 @@ journeys:
     follows its tail) or outside the thread (the thread stays on their earlier page): the focused "Load earlier"
     stays inside the thread through the reconnect, never pinned or put back above it, and Enter still loads the
     start of the conversation (cas-c2cb)'
+  - "See a page the supervisor sent, inline — at desktop 1280 and phone 390, an HTML attachment shows its page beneath
+    the file card in a frame with every sandbox permission withheld, on the machine's own origin through a short-lived
+    ticket; its diagram, images and video load; a hostile page runs no script, leaves Commander's storage untouched,
+    can't move the top window, open a window, submit a form or reach another host, and another site can't frame it;
+    the card opens the same page in its own tab, still sandboxed, never the raw stored file (cas-3aff)"
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -616,6 +624,7 @@ journeys:
   - hub-web/src/transcript.ts
   invariants:
   - HUB-J4-GOAL
+  - HUB-J4-VISUAL-SANDBOX
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

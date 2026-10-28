@@ -202,6 +202,7 @@ style-src 'self';
 img-src 'self' data:;
 font-src 'self';
 connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:*;
+frame-src 'self' https: http://127.0.0.1:*;
 object-src 'none';
 base-uri 'none';
 frame-ancestors 'none';
@@ -210,6 +211,7 @@ worker-src 'none';
 manifest-src 'self'</pre>
       <p>No inline/eval/third-party runtime is allowed. Secure-scheme <code>connect-src</code> is not authorization: the client connects only to catalog entries and each target independently checks Origin, DPoP, and scope. Literal IPv6 loopback may be added only with equivalent browser-tested restriction. Plaintext hostnames, LAN targets, and wildcard subdomains are excluded.</p>
       <p>Responses also send <code>Referrer-Policy: no-referrer</code>, <code>X-Content-Type-Options: nosniff</code>, framing-denial protections, and <code>Strict-Transport-Security: max-age=31536000</code> on TLS origins. <code>includeSubDomains</code> is omitted because a hub must not assert policy for names it does not control.</p>
+      <p>Commander may itself frame one thing (cas-3aff): a paired machine's visual reply page at <code>/v1/pages/{ticket}/{artifact}</code>, served by that machine under a CSP <code>sandbox</code> policy (no script, opaque origin, no popups or top navigation, no network beyond its own assets) with <code>frame-ancestors</code> naming only the minting Commander origin. Frame URLs are built only from a paired machine's base URL and a ticket that machine issued. See the <a href="../design/hub-web/visual-replies-threat-model.md">visual replies threat model</a>.</p>
       <h3>Transport</h3>
       <p>Plaintext control is restricted to literal loopback. A non-loopback HTTP/WS listener must refuse startup. Remote control uses verified <code>https</code>/<code>wss</code> or a loopback hub behind a configured TLS-terminating loopback proxy such as <code>tailscale serve</code>. Direct hub termination requires TLS 1.3; the supported proxy must provide an equivalent browser-trusted policy. Forwarded identity is trusted only from that configured immediate peer; conflicting forwarding fails closed. Certificate, hostname, and UI bypasses are forbidden.</p>
     </section>

@@ -10,6 +10,11 @@ pub(super) struct MediaQuery {
     t: Option<String>,
 }
 
+/// A route can add a restrictive policy without replacing the application CSP.
+/// Multiple CSP fields are enforced together by browsers.
+#[derive(Clone)]
+pub(crate) struct AdditionalContentSecurityPolicy(pub HeaderValue);
+
 const MEDIA_MIME_ALLOWLIST: &[&str] = &["image/*", "video/*", "audio/*", "application/pdf"];
 
 fn mime_allowed(mime: &str, allowlist: &'static [&'static str]) -> bool {
@@ -267,7 +272,7 @@ pub(crate) async fn fetch_session_media<R: SessionReadModel>(
     if origin(headers).is_some_and(|origin| origin != context.controller_origin) {
         return private(unauthorized(), headers);
     }
-    fetch_session_artifact(
+    let mut response = fetch_session_artifact(
         state,
         context,
         session,
@@ -275,7 +280,20 @@ pub(crate) async fn fetch_session_media<R: SessionReadModel>(
         headers,
         MEDIA_MIME_ALLOWLIST,
     )
-    .await
+    .await;
+    if response.status().is_success()
+        && response
+            .headers()
+            .get("content-type")
+            .is_some_and(|mime| mime == "image/svg+xml")
+    {
+        response
+            .extensions_mut()
+            .insert(AdditionalContentSecurityPolicy(HeaderValue::from_static(
+                "default-src 'none'; sandbox",
+            )));
+    }
+    response
 }
 
 /// Fetch only a server-resolved, session-referenced artifact. All consumers
@@ -354,7 +372,12 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
             );
             let agent = ureq::AgentBuilder::new()
                 .redirects(0)
-                .timeout(Duration::from_secs(120))
+                // A paused downstream consumer can backpressure this stream for
+                // longer than two minutes. Bound socket inactivity, not total
+                // body lifetime; a client can re-ticket and resume after failure.
+                .timeout_connect(Duration::from_secs(10))
+                .timeout_read(Duration::from_secs(120))
+                .timeout_write(Duration::from_secs(120))
                 .build();
             let mut request = agent.get(url.as_str()).set("Accept-Encoding", "identity");
             if requested.is_some() {
@@ -399,19 +422,32 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
                 }
             }
             let mut remaining = count;
+            let mut last_auth_check: Option<Instant> = None;
             while remaining > 0 {
-                #[cfg(test)]
-                let _now = stream_clock.as_ref().map_or_else(Instant::now, |clock| clock());
-                if auth
-                    .ensure_active_context(&context, chrono::Utc::now())
-                    .is_err()
-                {
-                    return Err(io::Error::other("media authorization ended"));
-                }
                 let mut chunk = vec![0; remaining.min(64 * 1024) as usize];
                 let read = reader.read(&mut chunk)?;
                 if read == 0 {
                     return Err(io::Error::other("short media stream"));
+                }
+                // Check after reading, so a stalled upstream cannot release a
+                // chunk using authorization from before the pause. The eager
+                // checks above still authorize before resolving or fetching bytes.
+                #[cfg(test)]
+                let now = stream_clock
+                    .as_ref()
+                    .map_or_else(Instant::now, |clock| clock());
+                #[cfg(not(test))]
+                let now = Instant::now();
+                if last_auth_check
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(1))
+                {
+                    if auth
+                        .ensure_active_context(&context, chrono::Utc::now())
+                        .is_err()
+                    {
+                        return Err(io::Error::other("media authorization ended"));
+                    }
+                    last_auth_check = Some(now);
                 }
                 chunk.truncate(read);
                 remaining -= read as u64;

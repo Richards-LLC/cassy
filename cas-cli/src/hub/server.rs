@@ -425,6 +425,8 @@ async fn security_headers(
     next: Next,
 ) -> Response {
     let mut response = next.run(request).await;
+    let additional_csp = response.extensions_mut()
+        .remove::<artifact_proxy::AdditionalContentSecurityPolicy>();
     let headers = response.headers_mut();
     if matches!(
         transport,
@@ -455,6 +457,9 @@ async fn security_headers(
             "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
         )),
     );
+    if let Some(policy) = additional_csp {
+        headers.append("content-security-policy", policy.0);
+    }
     response
 }
 

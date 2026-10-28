@@ -229,6 +229,116 @@ async fn test_0447_brief_task_start_returns_only_own_notes_and_is_size_bounded()
     );
 }
 
+/// Default reads must expose the fields that builtin verifier/epic gates consume.
+#[tokio::test]
+async fn task_read_default_show_preserves_gate_inputs() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let store = open_task_store(&temp.path().join(".cas")).unwrap();
+    let mut task = Task::new("cas-show-gates".into(), "Review epic".into());
+    task.task_type = cas::types::TaskType::Epic;
+    task.demo_statement = "The reviewer sees the delivered dashboard".into();
+    task.design = "Keep the dashboard accessible".into();
+    task.deliverables.files_changed = vec!["dashboard.rs".into()];
+    task.deliverables.commit_hash = Some("a".repeat(40));
+    store.add(&task).unwrap();
+    let service = CasService::new(core, None);
+    let request = |full| Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+        serde_json::json!({"action": "show", "id": task.id, "full": full})
+    ).unwrap());
+    let brief = extract_text(service.task(request(false)).await.unwrap());
+    // pin: task-verifier and epic-flow-walk parse these bare-show fields.
+    assert!(brief.contains("Type: epic"), "epic gate hidden: {brief}");
+    assert!(brief.contains(&format!("Demo: {}", task.demo_statement)), "demo gate hidden: {brief}");
+    assert!(brief.len() <= 2_000, "{} bytes", brief.len());
+    for section in ["Design", "Deliverables", "Dependencies", "Epic", "Subtasks", "Outcome", "Terminal reason", "Superseded by"] {
+        assert!(brief.contains(section), "unmarked omission of {section}: {brief}");
+    }
+    let full = extract_text(service.task(request(true)).await.unwrap());
+    assert!(full.contains(&task.design) && full.contains("dashboard.rs"));
+    assert!(full.contains(task.deliverables.commit_hash.as_deref().unwrap()));
+    // Short notes have no clipped instructions; navigation alone is sufficient.
+    let notes = extract_text(service.task(Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+        serde_json::json!({"action": "notes", "id": task.id})
+    ).unwrap())).await.unwrap());
+    assert!(!notes.contains("Read clipped instructions"), "{notes}");
+}
+
+/// Complete start-only guidance must survive default reads and later full reads.
+#[tokio::test]
+async fn task_read_default_start_preserves_complete_advisories() {
+    for case in ["qa-blockers", "unanchored", "parked"] {
+        let mut env = TestEnvGuard::temp_home();
+        let (temp, core) = setup_cas_as(&mut env, AgentRole::Worker);
+        let cas_dir = temp.path().join(".cas");
+        let store = open_task_store(&cas_dir).unwrap();
+        let mut task = Task::new("cas-start-read".into(), "Start with complete instructions".into());
+        task.notes = "old evidence α".repeat(1000);
+        let required: Vec<String>;
+        if case == "qa-blockers" {
+            task.labels.push("qa-pass".into());
+            store.add(&task).unwrap();
+            for id in ["cas-blocker-one", "cas-blocker-two"] {
+                store.add(&Task::new(id.into(), "Open blocker".into())).unwrap();
+                store.add_dependency(&cas::types::Dependency::new(task.id.clone(), id.into(), cas::types::DependencyType::Blocks)).unwrap();
+            }
+            let now = chrono::Utc::now();
+            let cas_store::QaPassOpen::Dispatched(pass) = cas_store::open_qa_pass(&cas_dir, &cas_store::NewQaPass {
+                task_id: "cas-delivery", implementer_agent_id: "another-worker",
+                branch: "factory/another-worker", bound_head: "aaaa1111bbbb2222",
+                deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+            }, now).unwrap() else { panic!("new QA round"); };
+            cas_store::set_qa_task(&cas_dir, &pass.id, &task.id).unwrap();
+            required = vec!["cas-blocker-one, cas-blocker-two".into(), "close remains gated until these tasks are done.".into(), "you are the reviewer; deadline".into()];
+        } else if case == "unanchored" {
+            let mut cloud = CloudConfig::default();
+            cloud.endpoint = "http://127.0.0.1:1".into();
+            cloud.token = Some("fixture-token".into());
+            cloud.save_to_cas_dir(&cas_dir).unwrap();
+            store.add(&task).unwrap();
+            required = vec!["stop now: working it here records lease, verification".into(), "target_repo=<path> target_branch=<branch>".into(), "cas cloud purge-foreign".into(), "foreign rows and re-pull.".into()];
+        } else {
+            let root = temp.path();
+            branch_transfer_git(root, &["init", "-b", "main"]);
+            branch_transfer_git(root, &["config", "user.name", "Fixture"]);
+            branch_transfer_git(root, &["config", "user.email", "fixture@example.test"]);
+            std::fs::write(root.join(".gitignore"), ".cas/\n").unwrap();
+            branch_transfer_git(root, &["add", ".gitignore"]);
+            branch_transfer_git(root, &["commit", "-m", "seed"]);
+            branch_transfer_git(root, &["switch", "-c", "factory/test-agent"]);
+            std::fs::write(root.join("parked.txt"), "parked delivery\n").unwrap();
+            branch_transfer_git(root, &["add", "parked.txt"]);
+            branch_transfer_git(root, &["commit", "-m", "fix(cas-parked): prior delivery"]);
+            let tip = branch_transfer_git(root, &["rev-parse", "HEAD"]);
+            branch_transfer_git(root, &["switch", "main"]);
+            std::fs::write(root.join("target.txt"), "target work\n").unwrap();
+            branch_transfer_git(root, &["add", "target.txt"]);
+            branch_transfer_git(root, &["commit", "-m", "advance target"]);
+            branch_transfer_git(root, &["switch", "factory/test-agent"]);
+            let mut parked = Task::new("cas-parked".into(), "Prior delivery".into());
+            parked.status = cas::types::TaskStatus::AwaitingMerge;
+            parked.assignee = Some("test-agent".into());
+            parked.deliverables.factory_branch_anchor = Some(tip.clone());
+            store.add(&parked).unwrap();
+            task.deliverables.work_target = Some(cas::types::WorkTarget { repo_selector: root.display().to_string(), target_branch: "main".into() });
+            store.add(&task).unwrap();
+            required = vec![format!("cas-parked is parked for merge at anchor {tip}; that SHA is its delivery."), "Don't force-push factory/test-agent while a PR is open on it.".into()];
+        }
+        let service = CasService::new(core, None);
+        let request = |action, full| Parameters(serde_json::from_value::<cas_mcp::TaskRequest>(
+            serde_json::json!({"action": action, "id": task.id, "full": full})
+        ).unwrap());
+        let started = extract_text(service.task(request("start", false)).await.unwrap());
+        assert!(started.len() <= 2_000, "{case}: {} bytes", started.len());
+        let recovered = extract_text(service.task(request("notes", true)).await.unwrap());
+        for instruction in required {
+            assert!(recovered.contains(&instruction), "{case}: start-only instruction unreachable: {instruction}\n{started}\n{recovered}");
+            assert!(started.contains(&instruction) || started.contains("Start advisories exceed"), "{case}: silently clipped instruction: {instruction}\n{started}");
+        }
+        assert!(started.contains("task notes id=cas-start-read"), "no durable recovery path: {started}");
+    }
+}
+
 /// The public read boundary must preserve newest decisions/proofs without
 /// replaying a task's entire history. Full and byte pages keep every byte reachable.
 #[tokio::test]

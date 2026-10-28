@@ -2522,6 +2522,18 @@ pub trait PromptQueueStore: Send + Sync {
     /// It must never enter the pending notification queue.
     fn record_terminal_operator_turn(&self, factory_session: &str, prompt: &str) -> Result<i64>;
 
+    /// Capture a transcript/hook input by its stable harness turn identity.
+    /// Reconciles one legacy hook row, then deduplicates across polls/restarts.
+    fn record_terminal_transcript_turn(
+        &self,
+        factory_session: &str,
+        harness_session: &str,
+        turn_id: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+    ) -> Result<i64>;
+
+
     /// Queue a prompt with session, summary, and priority for UI display
     fn enqueue_with_summary(
         &self,
@@ -6151,6 +6163,62 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "UPDATE prompt_queue SET processed_at = created_at WHERE id = ?1",
                 [id],
             )?;
+            tx.commit()?;
+            Ok(id)
+        })
+    }
+
+    fn record_terminal_transcript_turn(
+        &self,
+        factory_session: &str,
+        harness_session: &str,
+        turn_id: &str,
+        prompt: &str,
+        at: DateTime<Utc>,
+    ) -> Result<i64> {
+        require_operator_session("operator", Some(factory_session))?;
+        // JSON encodes component boundaries, including colons in harness IDs.
+        let key = format!("terminal-input:{}", serde_json::to_string(&(factory_session, harness_session, turn_id))?);
+        let event_id = operator_delivery::new_event_identity();
+        crate::shared_db::with_write_retry(|| {
+            let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
+            let existing: Option<i64> = tx.query_row(
+                "SELECT id FROM prompt_queue WHERE dedupe_key = ?1", [&key], |row| row.get(0),
+            ).optional()?;
+            if let Some(id) = existing {
+                return Ok(id);
+            }
+            // Older Claude hooks had no stable identity. Claim only an unbound
+            // row so two identical prompts in distinct turns stay distinct.
+            let legacy: Option<i64> = tx.query_row(
+                "SELECT id FROM prompt_queue WHERE factory_session = ?1
+                  AND source = 'terminal' AND target = 'terminal-history'
+                  AND dedupe_key IS NULL AND prompt = ?2
+                  AND julianday(created_at) BETWEEN julianday(?3) AND julianday(?4)
+                  ORDER BY ABS(julianday(created_at) - julianday(?5)), id LIMIT 1",
+                params![factory_session, prompt.trim(),
+                    (at - chrono::Duration::seconds(120)).to_rfc3339(),
+                    (at + chrono::Duration::seconds(120)).to_rfc3339(), at.to_rfc3339()],
+                |row| row.get(0),
+            ).optional()?;
+            if let Some(id) = legacy {
+                tx.execute("UPDATE prompt_queue SET dedupe_key = ?1 WHERE id = ?2", params![key, id])?;
+                tx.commit()?;
+                return Ok(id);
+            }
+            let id = Self::insert_complete_operator_turn(
+                &tx,
+                &OperatorTurn {
+                    source: "terminal", target: "terminal-history", prompt: prompt.trim(),
+                    factory_session: Some(factory_session),
+                    metadata: OperatorTurnMetadata {
+                        dedupe_key: Some(&key), occurred_at: Some(at), ..Default::default()
+                    },
+                },
+                &event_id,
+            )?.id();
+            tx.execute("UPDATE prompt_queue SET processed_at = created_at WHERE id = ?1", [id])?;
             tx.commit()?;
             Ok(id)
         })
@@ -12680,6 +12748,31 @@ mod tests {
             None,
             "a turn far from the recorded question is not its answer"
         );
+    }
+
+    #[test]
+    fn terminal_transcript_identity_reconciles_hooks_and_preserves_repeated_inputs() {
+        let (temp, store) = create_test_store();
+        let legacy = store.record_terminal_operator_turn("factory-7", "same question").unwrap();
+        let now = Utc::now();
+        let hook = store.record_terminal_transcript_turn("factory-7", "harness", "turn-1", "same question", now).unwrap();
+        assert_eq!(hook, legacy, "legacy hook row claimed once");
+        let at = now - chrono::Duration::seconds(10);
+        let second = store.record_terminal_transcript_turn("factory-7", "harness", "turn-2", "same question", at).unwrap();
+        assert_ne!(second, legacy, "a different turn can repeat the exact prompt");
+        drop(store);
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        assert_eq!(store.record_terminal_transcript_turn("factory-7", "harness", "turn-2", "same question", at).unwrap(), second);
+        let row = store.queued_prompt(second).unwrap().unwrap();
+        assert_eq!(row.created_at, at);
+        assert_eq!(row.processed_at, Some(at));
+        let event = store.operator_delivery_event(second).unwrap().unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&event.payload_snapshot).unwrap();
+        assert_eq!(snapshot["created_at"], at.to_rfc3339());
+        assert_eq!(snapshot["prompt"], "same question");
+        assert_eq!(store.conversation_history("factory-7", "phone", None, 50).unwrap().len(), 2);
+        assert_ne!(store.record_terminal_transcript_turn("factory-7", "other-harness", "turn-2", "same question", at).unwrap(), second);
+        assert_ne!(store.record_terminal_transcript_turn("other-factory", "harness", "turn-2", "same question", at).unwrap(), second);
     }
 
     #[test]

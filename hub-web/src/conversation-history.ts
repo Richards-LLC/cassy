@@ -237,6 +237,20 @@ export class ConversationHistory {
    * even when the machine's clock runs ahead.
    */
   private insertDurable(event: ConversationEvent): void {
+    // Terminal input is captured asynchronously from the harness. Its queue
+    // ID records the capture, not when the operator asked the question. Keep
+    // ordinary traffic sequenced as before, then place terminal inputs by
+    // their original machine timestamp on every live/history arrival.
+    const terminal = (item: ConversationEvent) => item.kind === "send" && item.value.target === "terminal-history";
+    const inputs = this.events.filter(terminal);
+    this.events.splice(0, this.events.length, ...this.events.filter(item => !terminal(item)));
+    if (terminal(event)) inputs.push(event);
+    else this.insertSequenced(event);
+    inputs.sort((a, b) => (a.at ?? Number.POSITIVE_INFINITY) - (b.at ?? Number.POSITIVE_INFINITY));
+    for (const input of inputs) this.insert(input);
+  }
+
+  private insertSequenced(event: ConversationEvent): void {
     const seq = durableSeq(event);
     if (seq === undefined) { this.insert(event); return; }
     const later = this.events.findIndex((existing) => { const other = durableSeq(existing); return other !== undefined && other > seq; });

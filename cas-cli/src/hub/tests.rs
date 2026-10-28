@@ -5283,7 +5283,7 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     for (id, mime, session, size) in [
         ("art-image", "image/png", OPS_SESSION, 6),
         ("art-video", "video/mp4", OPS_SESSION, 6),
-        ("art-svg", "image/svg+xml", OPS_SESSION, 6),
+        ("art-svg", "image/SvG+xMl", OPS_SESSION, 6),
         ("art-stream", "video/mp4", OPS_SESSION, 2 * 1024 * 1024),
         ("art-pdf", "application/pdf", OPS_SESSION, 6),
         ("art-html", "text/html", OPS_SESSION, 6),
@@ -5386,7 +5386,7 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         "/v1/sessions/{OPS_SESSION}/artifacts/art-svg/content?t={}", tickets["art-svg"]))
         .body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["content-type"], "image/svg+xml");
+    assert_eq!(response.headers()["content-type"], "image/SvG+xMl");
     if !response.headers().get_all("content-security-policy").iter().any(|value| value == "default-src 'none'; sandbox") {
         followup_failures.push("SVG response lacks restrictive sandbox CSP".to_owned());
     }

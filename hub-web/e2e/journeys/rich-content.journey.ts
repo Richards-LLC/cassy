@@ -93,7 +93,7 @@ for (const [index, variant] of variants.entries()) {
 
       await journey.stage("Open plain text without loading rich renderers", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.locator("#conversation-connection")).toContainText("Live");
         hub.supervisorSays(PELICAN, "Evidence is ready to inspect.");
         await expect(log.getByText("Evidence is ready to inspect.")).toBeVisible();

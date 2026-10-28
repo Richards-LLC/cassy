@@ -28,6 +28,11 @@ export type Session = {
   last_activity?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), as the hub reports it. */
   cloud_project_id?: string;
+  /** Additive catalog identity; older hubs omit these fields. */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  machine_online?: boolean;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };

@@ -34,7 +34,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       const announcer = page.locator("#fleet-ops-announcer");
       await journey.stage("Open the fleet", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
         await expect(rail.getByRole("button", { name: "Write access…" })).toBeVisible();
       });
@@ -180,7 +180,7 @@ test.describe("write access without factory:manage cas_ab04", () => {
     const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate"] }, fleet: { [PELICAN]: fleet() } });
     await journey.stage("A pairing without factory:manage", async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
       await expect(page.locator("#status-view").getByRole("button", { name: "Write access…" })).toHaveCount(0);
       const permissions = page.locator("#status-view .fleet-permissions");
       await permissions.locator("summary").focus(); await page.keyboard.press("Enter");

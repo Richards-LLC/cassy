@@ -22,7 +22,7 @@ async function openQuestionless(page: Page, journey: Journey) {
     ], epics: [{ id: "cas-release", title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5, last_merged_at: "2026-09-30T12:00:00Z" } }], focused_epic: "cas-release", spawnNames: [],
   } } });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
   hub.supervisorSays(PELICAN, "**Earlier question:** which **route** is clearer?", { kind: "ask" });
   const ask = hub.supervisorSays(PELICAN, "**Which plan** should we use?\n\nExplain your choice in a reply.", { kind: "ask" });
@@ -157,7 +157,7 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
   } });
   await journey.stage("Long names and missing task details stay within the rail", async () => {
     await page.setViewportSize({ width: 1280, height: 800 }); await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator("#status-view")).toContainText("Task details not reported");
     await expect(page.locator(".status-agent")).toHaveCount(1);
     expect(await page.locator("#status-view").evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true);
@@ -183,7 +183,7 @@ test("HUB-J7 empty roster and long unreported work (cas-6e3a)", journeyPart, asy
   });
   await journey.stage("An empty session shows no borrowed workers", async () => {
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /empty-world/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /empty-world/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator(".status-agent")).toHaveCount(0);
     await expect(page.locator("#status-view")).not.toContainText(name);
     await expect(page.locator(".pinned-ask")).toBeHidden();

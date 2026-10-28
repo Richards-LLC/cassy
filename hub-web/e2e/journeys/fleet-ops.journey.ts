@@ -42,7 +42,7 @@ async function openFailureFleet(page: Page, journey: Journey, width: number) {
   const result = page.locator("#fleet-ops-announcer");
   await journey.stage("Open the fleet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
     await expect(row).toBeVisible();
   });
@@ -155,7 +155,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const open = () => page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
       await journey.stage("A refused Stop leaves the final task readable at rest", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await open();
         await agent.getByRole("button", { name: "Actions for swift-lark-3" }).click();
         await page.locator("dialog.fleet-action-sheet").getByRole("menuitem", { name: "Stop…" }).click();
@@ -199,7 +199,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const sheet = page.locator("dialog.fleet-action-sheet");
       await journey.stage("Choose an assignee while seeing the task being assigned", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
         await page.locator(".status-task", { hasText: "cas-2001" }).getByRole("button", { name: "Actions for cas-2001" }).click();
         await sheet.getByRole("menuitem", { name: "Assign…" }).click();
@@ -241,7 +241,7 @@ async function openDesktopFleet(page: Page, journey: Journey) {
 
   await journey.stage("Open the conversation; the rail lists the fleet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(row("swift-lark-3")).toBeVisible();
     await expect(rail.getByRole("button", { name: "Add worker…" })).toBeVisible();
     await expect(rail.getByRole("button", { name: "Focus epic…" })).toBeVisible();
@@ -354,7 +354,7 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
   });
 
   await journey.stage("A pairing without factory:manage", async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click();
     await expect(row("swift-lark-3")).toBeVisible();
     // cas-d043 G13: the merge was asked on cas-src; the same task id here is another task.
     await expect(task("cas-1999")).toBeVisible();
@@ -414,7 +414,7 @@ async function openPhoneFleet(page: Page, journey: Journey) {
   };
   await journey.stage("Open the first machine's Tasks & progress sheet", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await target(page.getByRole("button", { name: "Tasks & progress", exact: true })); await openFleet();
     await expect(page.getByRole("dialog", { name: "Tasks & progress", exact: true })).toBeVisible();
     // cas-d043 G01: the sheet covers the header, so it names whose tasks these are.
@@ -442,7 +442,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
       await journey.stage("Switch conversation and confirm Stop on the second machine", async () => {
         await page.getByRole("button", { name: "Close tasks & progress" }).click();
         await page.getByRole("button", { name: "‹ Conversations" }).click();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click(); await openFleet();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click(); await openFleet();
         await expect(page.locator(".context-sheet-where")).toHaveText("gabber-studio on Studio Mac");
         await agent("brisk-wren-9").getByRole("button", { name: "Actions for brisk-wren-9" }).click();
         await actions().getByRole("menuitem", { name: "Stop…" }).click();
@@ -530,7 +530,7 @@ for (const viewport of [{ width: 390, height: 844 }, { width: 844, height: 390 }
         const raw = () => page.getByRole("button", { name: "Raw output", exact: true });
         const drawer = () => page.getByRole("dialog", { name: "Raw output" });
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await journey.stage("M12 a pending notice survives a shell rebuild and Raw output", async () => {
           await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
           await agent().getByRole("button", { name: "Actions for swift-lark-3" }).click();

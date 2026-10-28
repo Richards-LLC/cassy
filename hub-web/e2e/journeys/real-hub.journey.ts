@@ -170,7 +170,8 @@ test(
         await expect(dialog).toBeHidden();
         await page
           .getByRole("navigation", { name: "Choose a supervisor" })
-          .getByRole("button", { name: /project on/ })
+          .getByRole("button", { name: /project on/ }).and(page
+          .getByRole("navigation", { name: "Choose a supervisor" }).locator(".conversation-row"))
           .click();
         await expect(header).toContainText("Live");
         await command("queue", {

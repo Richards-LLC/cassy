@@ -15,7 +15,8 @@ import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./wo
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
-import { activityTime, ConversationList, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
+import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
+import { ProjectNavigation } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
@@ -212,7 +213,7 @@ const readReplies = new Map<string, number>();
 let conversationRows: ConversationRow[] = [];
 /** The list search's text (journey F8); rows render filtered by it. */
 let conversationSearchQuery = "";
-const conversationList = new ConversationList();
+const conversationList = new ProjectNavigation();
 const pendingSubmissions = new Set<string>();
 /**
  * The thread for machine:session. With `session`, the thread learns which
@@ -4414,7 +4415,7 @@ function conversationNeedsYou(machineId: string, session: string): boolean {
 
 function markConversationEnterTarget(container: HTMLElement): HTMLButtonElement | undefined {
   const search = document.querySelector<HTMLInputElement>("#conversation-search");
-  const target = conversationSearchQuery.trim() ? container.querySelector<HTMLButtonElement>(".conversation-row") ?? undefined : undefined;
+  const target = conversationSearchQuery.trim() ? [...container.querySelectorAll<HTMLButtonElement>(".conversation-row")].find((node) => !node.closest("[hidden]")) : undefined;
   for (const row of container.querySelectorAll<HTMLElement>(".conversation-row[data-enter-target]")) if (row !== target) delete row.dataset.enterTarget;
   if (target) {
     target.dataset.enterTarget = "true";
@@ -4522,7 +4523,14 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, ended: session.ended, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    const summary = sessionSummaries.get(key);
+    const merge = attention.find((item) => item.machineId === machine.id && item.session === session.name && !item.acknowledgedAt && item.kind === "awaiting_merge");
+    const needsYou = waiting > 0 || Boolean(merge);
+    // A kept catalog can still carry yesterday's positive online bit.
+    const machineOnline = connectionStates.get(machine.id)?.phase === "live" && session.machine_online !== false;
+    const history = conversationHistories.get(key);
+    const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
+    return { key, ended: session.ended, harness: session.harness, account_email: session.account_email, project: session.project, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4538,7 +4546,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession);
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live" })), searchActive: Boolean(conversationSearchQuery.trim()) });
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -5894,6 +5902,9 @@ function renderMachineRegister(): void {
   const dialog = document.querySelector<HTMLDialogElement>('#paired-machines-dialog');
   if (!dialog) return;
   const list = dialog.querySelector<HTMLElement>('#paired-machines-list')!;
+  let filters = dialog.querySelector<HTMLElement>("#paired-machine-filters");
+  if (!filters) { filters = document.createElement("div"); filters.id = "paired-machine-filters"; filters.className = "conversation-filters"; list.before(filters); }
+  conversationList.renderMachineFilters(filters, rows.map((row) => ({ id: row.id, label: row.label, online: row.connected })), () => dialog.close());
   // cas-0739: a closed register is kept in order (not connected first) and
   // scrolled to its top, so it opens on the machine the footer names; an open
   // one keeps its order so a status tick never moves a row under the operator.

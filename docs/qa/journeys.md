@@ -112,7 +112,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Find the conversation through the list search — "Search conversations (Ctrl K)" at the top of the list filters rows by project, machine or supervisor; the row Enter opens is marked ("Enter ↵") and is the field's active descendant; opening a result clears the search and brings the whole list back; the header names the project once
 6. Find the conversation from the keyboard — Ctrl+K lands in the search, type the project, Enter: the conversation is open and the reply box has focus
    - An empty thread's card also leads with the project, with machine and codename beneath it
-   - A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px
+   - A 40-character machine name wraps in its project header and stays separate from session times — the full name remains keyboard reachable at 1280 and 390px
 7. Jump to a supervisor by name — the command palette ("Type a command or conversation"; grouped Conversations / Machines / Appearance / Advanced, the same groups with a conversation open, Advanced collapsed and holding only the dormant-session switch; "Dismiss all info" only when something is outstanding) filters by supervisor or project and opens the conversation; each "Jump to" row leads with the project, the codename first in its description (right of the title on a desktop, on the line beneath on a phone); a filter that matches nothing says "No commands or conversations match"; the command Enter runs is marked and is the filter's active descendant ("light" marks "Jump to lighthouse")
 8. Jump to a supervisor from the keyboard — Ctrl+K twice opens the palette, type the name, Enter: the palette closes, the conversation is open and the reply box has focus
    - Open Paired machines from the palette, then a conversation — the palette gives way to Paired machines and stays closed afterwards; it never comes back over the next conversation opened
@@ -501,7 +501,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of one project
 - **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; I can retire a stale one
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/connection.ts`
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/session-identity.journey.ts`
 - **Gaps:** the daemon's session-bound history page, the catalog's last activity and the hub's End session are doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
 
@@ -528,6 +528,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
 - Under Needs pairing, Reconnecting or Unreachable the empty thread says why new messages cannot arrive; before its first page has loaded it claims no messages at all (cas-010f).
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
+- Every canonical project has one closed outlined card across machines, including singletons. Machine chips expose online state and filter; rows expose supplied harness/email or gracefully omit them. Verify boundaries at 1280 and 390 pixels in light, dark and forced colors (cas-6024).
+- Needs you pins operator decisions above the cards; unread alone never pins. All/Needs you/machine filters intersect search with an explicit no-results recovery. A shortcut opens its own session without sending an answer.
+- Collapse by keyboard retains focus and survives reload on this device; search temporarily reveals matches. The paired-machine footer applies the same machine filter and keeps machine-management access.
 
 ### HUB-J15 · See a delivery problem as attention, not conversation
 

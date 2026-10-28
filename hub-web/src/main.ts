@@ -256,7 +256,18 @@ function syncConversationContext(): void {
   }
   const history = conversationHistories.get(sessionKey(selectedMachineId, selectedSession));
   syncContextRail(document, { history, progress: contextProgress || progressSheetOpen(), attention: contextAttention });
-  markRailEdges();
+  scheduleConversationLayout();
+}
+
+let conversationLayoutFrame: number | undefined;
+/** Measure the finished shell once, after its region writes and focus landing. */
+function scheduleConversationLayout(): void {
+  if (conversationLayoutFrame !== undefined) return;
+  conversationLayoutFrame = requestAnimationFrame(() => {
+    conversationLayoutFrame = undefined;
+    fitConversationHost(document);
+    markRailEdges();
+  });
 }
 
 /** cas-d043 H10: which edges of the rail have rows beyond them, for glass.css's edge fades. */
@@ -266,7 +277,7 @@ function markRailEdges(rail: Element | null = document.querySelector(".conversat
   rail.toggleAttribute("data-more-below", rail.scrollHeight - rail.scrollTop - rail.clientHeight > 1);
 }
 document.addEventListener("scroll", (event) => { if (event.target instanceof HTMLElement && event.target.matches(".conversation-context")) markRailEdges(event.target); }, true);
-window.addEventListener("resize", () => markRailEdges());
+window.addEventListener("resize", scheduleConversationLayout);
 let workingRefresh: ReturnType<typeof setTimeout> | undefined;
 /** Pane output lights the working line now and schedules the check that puts it out. */
 function refreshWorkingLines(): void {
@@ -2221,7 +2232,7 @@ function syncControlHolder(): void {
   const holder = lease && !lease.held_by_me ? lease.controller_label || undefined : undefined;
   let note = host.querySelector<HTMLElement>(":scope > #conversation-control");
   if (!holder) {
-    if (note) { note.remove(); fitConversationHost(document); }
+    if (note) { note.remove(); scheduleConversationLayout(); }
     return;
   }
   if (!note) { note = document.createElement("span"); note.id = "conversation-control"; host.append(note); }
@@ -2229,7 +2240,7 @@ function syncControlHolder(): void {
   note.dataset.holder = holder;
   const separator = document.createElement("span"); separator.setAttribute("aria-hidden", "true"); separator.textContent = " · ";
   note.replaceChildren(separator, `${holder} in control`);
-  fitConversationHost(document);
+  scheduleConversationLayout();
 }
 
 const interruptsInFlight = new Set<string>();
@@ -4416,7 +4427,7 @@ function renderConversationList(): void {
     }
   }
   // The state's width changes the room the machine · codename line has.
-  fitConversationHost(document);
+  scheduleConversationLayout();
   refreshConnectionLog?.();
 }
 
@@ -5572,7 +5583,7 @@ const localOnlyArtifacts = new Set<string>();
 window.addEventListener("keydown", globalShortcut, true);
 // The conversation header's machine · codename line is fitted to its room
 // (cas-71af): a width change can make the machine name step aside or return.
-window.addEventListener("resize", () => fitConversationHost(document), { passive: true });
+window.addEventListener("resize", () => scheduleConversationLayout(), { passive: true });
 // Rotation changes the layout in CSS instantly, but the phone's sheets (Tasks
 // & progress, Attention) are decided in JS at render time. Without this, a
 // phone turned on its side kept the composition it was mounted with until

@@ -1812,6 +1812,23 @@ mod tests {
     fn standard_lane_uses_registered_codex_accounts_cas_09fe() {
         use std::os::unix::fs::PermissionsExt;
 
+        if let Some(home) = std::env::var_os("CAS_09FE_CAPABILITY_CHILD") {
+            let account = PathBuf::from(home).join(".codex-usable@example.test");
+            let snapshot = collect_live_capability_snapshot();
+            let decision = cas_factory::resolve_lane("standard", &snapshot)
+                .expect("a logged-out default must not hide a usable registered Codex account");
+            assert_eq!(decision.spec.cli, cas_mux::SupervisorCli::Codex);
+            assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.1-sol"));
+            assert_eq!(decision.spec.effort, Some(cas_mux::Effort::High));
+            assert_eq!(decision.spec.config_dir.as_deref(), account.to_str(),
+                "the account proven available must reach the worker's auth preflight");
+            assert!(decision.warnings.is_empty());
+
+            std::fs::remove_file(account.join("auth.json")).unwrap();
+            assert!(cas_factory::resolve_lane("standard", &collect_live_capability_snapshot()).is_err(),
+                "a registered directory without a usable login must not activate the lane");
+            return;
+        }
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.remove("CODEX_HOME");
         let bin = env.home().join("bin");
@@ -1822,7 +1839,6 @@ mod tests {
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex 1.0'; exit 0; fi\nif [ -f \"${CODEX_HOME:-$HOME/.codex}/auth.json\" ]; then echo 'Logged in using ChatGPT'; else echo 'Not logged in'; exit 1; fi\n",
         ).unwrap();
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
-        env.set("PATH", &bin);
         let default = env.home().join(".codex");
         std::fs::create_dir_all(&default).unwrap();
         std::fs::write(default.join("config.toml"), "").unwrap();
@@ -1830,17 +1846,14 @@ mod tests {
         std::fs::create_dir_all(&account).unwrap();
         std::fs::write(account.join("auth.json"), "{}").unwrap();
 
-        let snapshot = collect_live_capability_snapshot();
-        let decision = cas_factory::resolve_lane("standard", &snapshot)
-            .expect("a logged-out default must not hide a usable registered Codex account");
-        assert_eq!(decision.spec.cli, cas_mux::SupervisorCli::Codex);
-        assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.1-sol"));
-        assert_eq!(decision.spec.effort, Some(cas_mux::Effort::High));
-        assert!(decision.warnings.is_empty());
-
-        std::fs::remove_file(account.join("auth.json")).unwrap();
-        assert!(cas_factory::resolve_lane("standard", &collect_live_capability_snapshot()).is_err(),
-            "a registered directory without a usable login must not activate the lane");
+        // Keep the fake CLI on this child's PATH, never the process-global PATH.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "factory_preflight::tests::standard_lane_uses_registered_codex_accounts_cas_09fe", "--nocapture"])
+            .env("CAS_09FE_CAPABILITY_CHILD", env.home())
+            .env("PATH", &bin)
+            .output().unwrap();
+        assert!(output.status.success(), "{}\n{}",
+            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 
     fn healthy_facts() -> PreflightFacts {

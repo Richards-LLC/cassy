@@ -16,6 +16,55 @@ use crate::ui::factory::{
     SessionState, daemon_capabilities,
 };
 
+/// A session subscription may wait on a loaded catalog; the machine's health
+/// response must still travel through the actual upgraded socket.
+#[tokio::test]
+async fn machine_health_answers_while_subscription_catalog_is_busy() {
+    #[derive(Clone)]
+    struct BusyCatalog {
+        entered: Arc<Notify>,
+        released: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+    }
+    impl SessionReadModel for BusyCatalog {
+        fn list_sessions(&self) -> anyhow::Result<Vec<HubSession>> {
+            self.entered.notify_one();
+            let (lock, wake) = &*self.released;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            Ok(Vec::new())
+        }
+    }
+    let model = BusyCatalog {
+        entered: Arc::new(Notify::new()),
+        released: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+    };
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(model.clone()), Arc::new(PreAuthAuthorizer),
+        MachineIdentity { id: "busy-catalog".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/attach?ticket=fixture")).await.unwrap();
+    socket.send(WsMessage::Text(serde_json::json!({"proto":2}).to_string().into())).await.unwrap();
+    socket.next().await.unwrap().unwrap();
+    socket.send(WsMessage::Text(serde_json::json!({"channel":"pty:factory-a","subscribe":true}).to_string().into())).await.unwrap();
+    model.entered.notified().await;
+    socket.send(WsMessage::Text(serde_json::json!({"channel":"health","ping":42}).to_string().into())).await.unwrap();
+    let reply = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next()).await;
+    // Release the blocking worker even when the assertion fails.
+    *model.released.0.lock().unwrap() = true;
+    model.released.1.notify_all();
+    hub.abort();
+    let frame = reply.expect("catalog work must not block machine health").unwrap().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&frame.into_data()).unwrap();
+    assert_eq!(json, serde_json::json!({"channel":"health","pong":42}));
+}
+
 /// cas-5e53: an already-open SSE grant must end after another auth-store
 /// process revokes its device, even with no event traffic or browser heartbeat.
 #[tokio::test]

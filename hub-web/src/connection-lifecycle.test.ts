@@ -1176,6 +1176,40 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
   });
 
+  it("keeps a responsive machine live when the session catalog fails under load", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("slow-catalog-health"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open();
+    socket.receive({ proto: 2, capabilities: ["pty_binary", "machine_multiplex"] });
+    await attached;
+    const fetchNow = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).pathname === "/v1/sessions"
+        ? Promise.resolve(new Response("catalog busy", { status: 503 }))
+        : fetchNow(input, init)));
+    let pings = 0;
+    vi.spyOn(socket, "send").mockImplementation(value => {
+      const frame = JSON.parse(value);
+      if (frame.channel === "health") {
+        pings += 1;
+        socket.receive({ channel: "health", pong: frame.ping });
+      }
+    });
+    for (let beat = 0; beat < 6; beat += 1) {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+      expect(pings, "catalog work must not prevent the socket liveness probe").toBe(beat + 1);
+      expect(connection.snapshot()).toMatchObject({ phase: "live", degraded: false, missedHeartbeats: 0 });
+    }
+  });
+
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {
     const hub = transport(true);
     TransportSocket.instances = [];

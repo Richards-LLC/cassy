@@ -3226,6 +3226,12 @@ the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
 boundaries. Note summary cursors address the full `task notes` response.
 For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
 context. Start's default still performs the same claim and epic lifecycle work.
+Complete start advisories are saved as a START CONTEXT task note before budgeting.
+Warnings take precedence over scope, notes and recall; an oversized warning block
+is replaced by an explicit instruction to read its saved note before acting.
+The start response gives a byte cursor into `task notes` and a full-notes path.
+Default show retains Type and Demo for builtin gates, and names full-only sections
+(including dependencies, design, deliverables and terminal outcomes) explicitly.
 
 ## Durable task artifacts
 

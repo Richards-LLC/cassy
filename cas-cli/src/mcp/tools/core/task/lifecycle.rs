@@ -3381,30 +3381,80 @@ impl CasCore {
                 })
                 .transpose()?;
             use super::query::{excerpt, read_hint, task_scope, task_show_notes};
-            // Scope and the newest evidence precede optional context. Every
-            // clipped field is available through task show/notes full or pages.
+            // Save start-only instructions before budgeting; full show cannot
+            // otherwise recover warnings computed only during this start.
             let advisory = format!(
-                "{}{}{}{}",
+                "{}{}{}{}{}",
                 claim_info.unwrap_or_default(),
                 blocker_warning,
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
-                unanchored_warning.unwrap_or_default()
+                unanchored_warning.unwrap_or_default(),
+                start_guidance(&task),
             );
-            let cited_pointer = crate::github_issue_attach::cited_issue_lines(&self.cas_root, &task)
-                .into_iter().next().map(|line| format!("Cited issue: {line}")).unwrap_or_default();
-            let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}\n{}\nNotes:\n{}\n{}\n{}\n{}",
-                task.id, excerpt(&task.title, 60), task.delivery_mode,
-                excerpt(&advisory, 160), start_guidance(&task), task_scope(&task),
+            let note = format!(
+                "[{}] START CONTEXT{}{}{}",
+                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                advisory, related_context, cited_issues
+            );
+            task_store.append_note(&task.id, &note).map_err(|error| Self::error(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
+            ))?;
+            let saved = task_store.get(&task.id).map_err(|error| {
+                Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "Task {} started, but reading saved start instructions failed: {error}",
+                        task.id
+                    ),
+                )
+            })?;
+            let offset = format!("Notes for task {}\n{}\n\n", task.id, "=".repeat(task.id.len() + 15)).len()
+                + saved.notes.rfind(&note).ok_or_else(|| Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    "Task started, but its saved start instructions are unavailable; read task notes full=true before acting",
+                ))?;
+            let navigation = format!(
+                "\nStart advisories: task notes id={} offset={offset} limit=1600 (follow next=)\nAll start advisories: task notes id={} full=true",
+                task.id, task.id
+            );
+            let cited_pointer =
+                crate::github_issue_attach::cited_issue_lines(&self.cas_root, &task)
+                    .into_iter()
+                    .next()
+                    .map(|line| format!("Cited issue: {line}"))
+                    .unwrap_or_default();
+            let optional = format!(
+                "\n{}\n{}\nNotes:\n{}\n{}\n{}",
+                excerpt(&related_context, 120),
+                task_scope(&task),
                 task_show_notes(&task.notes, &task.id),
                 excerpt(&execution_state.unwrap_or_default(), 120),
-                excerpt(&related_context, 120), excerpt(&cited_pointer, 220),
+                excerpt(&cited_pointer, 220),
             );
-            let hint = read_hint(&task.id, "show");
+            let prefix = format!(
+                "Started task: {} - {}\nDelivery mode: {}",
+                task.id,
+                excerpt(&task.title, 60),
+                task.delivery_mode
+            );
+            let hint = read_hint(&task.id, "show", true);
+            let available = 2000usize.saturating_sub(prefix.len() + navigation.len() + hint.len());
+            // A warning is either complete or explicitly deferred to its saved
+            // note, never silently clipped to a misleading prefix.
+            let (advisory, available) = if advisory.len() <= available {
+                let remaining = available - advisory.len();
+                (advisory, remaining)
+            } else {
+                let overflow = "\nStart advisories exceed the response budget. Read the saved start advisories below BEFORE acting.".to_string();
+                let remaining = available.saturating_sub(overflow.len());
+                (overflow, remaining)
+            };
+            let clipped = optional.contains('…') || optional.len() > available;
+            let hint = read_hint(&task.id, "show", clipped);
             return Ok(Self::success(format!(
-                "{}{}",
-                excerpt(&response, 2000 - hint.len()),
-                hint
+                "{prefix}{advisory}{navigation}{}{hint}",
+                excerpt(&optional, available)
             )));
         }
 
@@ -5171,12 +5221,14 @@ mod related_recall_response_tests {
             .expect("created task")
             .id;
         let started = text(
-            core.cas_task_start(Parameters(IdRequest { id: task_id }))
+            core.cas_task_start(Parameters(IdRequest { id: task_id.clone() }))
                 .await
                 .expect("start qa task"),
         );
         assert!(started.contains("m-golden-set"), "{started}");
         assert!(started.contains("QA golden test data"), "{started}");
+        let saved = core.open_task_store().unwrap().get(&task_id).unwrap();
+        assert!(saved.notes.contains("never ad-hoc fixtures."), "complete recalled instructions must be recoverable");
     }
 
     #[test]

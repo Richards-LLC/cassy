@@ -12753,7 +12753,7 @@ pub(crate) fn task_commit_identity_in_repo(
     {
         fetch_parent_branch_best_effort(repo, &target.target_branch);
     }
-    if let Some(delivery) = task_attribution::started_delivery(repo, task)? {
+    if let Some(delivery) = task_attribution::validated_started_delivery(repo, task)? {
         identity.start_base = task.deliverables.factory_branch_start.as_ref()
             .map(|start| start.base_sha.clone());
         for commit in delivery.commits {

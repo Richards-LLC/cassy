@@ -26,6 +26,15 @@ pub(crate) fn started_delivery(
     repo: &Path,
     task: &Task,
 ) -> Result<Option<StartedDelivery>, String> {
+    Ok(validated_started_delivery(repo, task)?.filter(|delivery| !delivery.commits.is_empty()))
+}
+
+/// Keep a validated boundary after integration empties the off-target graph.
+/// QA still needs that baseline; absence checks use `started_delivery` above.
+pub(super) fn validated_started_delivery(
+    repo: &Path,
+    task: &Task,
+) -> Result<Option<StartedDelivery>, String> {
     let Some(start) = task.deliverables.factory_branch_start.as_ref() else {
         return Ok(None);
     };
@@ -181,7 +190,7 @@ pub(crate) fn started_delivery(
             commits.push(sha.to_string());
         }
     }
-    Ok((!commits.is_empty()).then_some(StartedDelivery { branch, commits }))
+    Ok(Some(StartedDelivery { branch, commits }))
 }
 
 /// A legacy start may name the previous task's lane, before the worker

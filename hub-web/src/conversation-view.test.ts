@@ -123,6 +123,43 @@ describe("ConversationView (Pebble thread)", () => {
     expect(longView.element.querySelector('[data-key="reply:240"]')).not.toBeNull();
     longView.dispose();
   });
+  it("keeps a covered scroll frame free of thread derivation and row measurements", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+    onTestFinished(() => { vi.unstubAllGlobals(); });
+    const history = new ConversationHistory();
+    for (let id = 1; id <= 240; id++) history.reply(reply(id, "answer"), at(9, 0) + id * 1000);
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element);
+    view.update();
+    for (let pass = 0; pass < 3; pass++) for (const frame of frames.splice(0)) frame(0);
+    Object.defineProperty(view.element, "clientHeight", { configurable: true, value: 600 });
+    Object.defineProperty(view.element, "scrollHeight", { configurable: true, value: 20000 });
+    view.update();
+    for (let pass = 0; pass < 3; pass++) for (const frame of frames.splice(0)) frame(0);
+    view.element.scrollTop = 18000;
+    const rows = [...view.element.querySelectorAll<HTMLElement>(".msgs > .turn")];
+    const rect = (top: number, bottom: number) => ({ top, bottom, height: bottom - top }) as DOMRect;
+    vi.spyOn(view.element, "getBoundingClientRect").mockReturnValue(rect(0, 600));
+    const measurements = rows.map((row, index) => vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(-1200 + index * 300, -900 + index * 300)));
+    const visible = vi.spyOn(history, "visibleEvents");
+    view.element.dispatchEvent(new Event("scroll"));
+    const before = measurements.map(spy => spy.mock.calls.length);
+    for (const frame of frames.splice(0)) frame(0);
+    expect(visible).not.toHaveBeenCalled();
+    // Reading-position capture can inspect bubbles; a covered frame must not measure every row again.
+    expect(measurements.slice(1, -1).map(spy => spy.mock.calls.length)).toEqual(before.slice(1, -1));
+    measurements[0]!.mockReturnValue(rect(20, 320));
+    view.element.dispatchEvent(new Event("scroll"));
+    for (const frame of frames.splice(0)) frame(0);
+    expect(visible, "crossing the rendered edge reuses the history model").not.toHaveBeenCalled();
+    expect(measurements[1]!.mock.calls.length).toBeGreaterThan(before[1]!);
+    history.reply(reply(241, "answer", "Newly arrived"), at(9, 5));
+    view.jump.click();
+    expect(visible).toHaveBeenCalledTimes(1);
+    expect(view.element.textContent).toContain("Newly arrived");
+    view.dispose();
+  });
   it("shows session dividers and the no-earlier-history marker", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, {

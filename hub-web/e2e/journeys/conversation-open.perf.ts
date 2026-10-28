@@ -1,4 +1,4 @@
-// Measurement, not a synthetic scale test: replay captured real Commander rows.
+// Opening flows replay captured real Commander rows; scroll reuses the frozen independent-QA fixture.
 // No real credentials; no sends, dismissals, control claims or live service writes.
 import { test, expect, type CDPSession, type Page } from "@playwright/test";
 import { createServer, type Server } from "node:http";
@@ -7,10 +7,12 @@ import { resolve, extname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { decode } from "@jridgewell/sourcemap-codec";
 import { HubDouble, type HistoryPage, type WorkWorld } from "./hub-double";
+import { ATLAS } from "./world";
 
 type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[]; work?: WorkWorld };
 const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
 const capture: Capture = JSON.parse(await readFile(process.env.CONVERSATION_PERF_CAPTURE!, "utf8"));
+const scrollFlow = process.env.CONVERSATION_PERF_FLOW === "scroll";
 const showWork = process.env.CONVERSATION_PERF_SHOW_WORK === "1";
 if (showWork && !capture.work?.events.length) throw Error("Show work measurement requires captured work events from the same thread");
 const dist = resolve(process.env.CONVERSATION_PERF_DIST ?? "dist");
@@ -183,13 +185,20 @@ async function attributeSamples(profile: any) {
   return { leaf_ms: sorted(leaf), inclusive_ms_do_not_sum: sorted(inclusive) };
 }
 
-for (const profile of [
-  { name: "desktop", viewport: { width: 1440, height: 900 }, cpu: 1 },
-  { name: "phone", viewport: { width: 390, height: 844 }, cpu: 4 },
-]) test(`conversation opening baseline ${profile.name}`, async ({ browser }, info) => {
-  const directory = join(output, `${profile.name}-${info.repeatEachIndex}`);
+const profiles = scrollFlow
+  ? ["light", "dark"].flatMap(colorScheme => [
+    { name: "desktop", viewport: { width: 1280, height: 844 }, cpu: 1, colorScheme: colorScheme as "light" | "dark" },
+    { name: "phone", viewport: { width: 390, height: 844 }, cpu: 1, colorScheme: colorScheme as "light" | "dark" },
+  ])
+  : [
+    { name: "desktop", viewport: { width: 1440, height: 900 }, cpu: 1, colorScheme: "light" as const },
+    { name: "phone", viewport: { width: 390, height: 844 }, cpu: 4, colorScheme: "light" as const },
+  ];
+for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation ${scrollFlow ? "scroll paging" : "opening baseline"} ${profile.name}${scrollFlow ? ` ${profile.colorScheme}` : ""}`, async ({ browser }, info) => {
+  const directory = join(output, `${profile.name}${scrollFlow ? `-${profile.colorScheme}` : ""}-${info.repeatEachIndex}`);
   await mkdir(directory, { recursive: true });
-  const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone" });
+  const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone", colorScheme: profile.colorScheme });
+  if (scrollFlow) await context.tracing.start({ snapshots: { dom: true, aria: true, screen: false }, screenshots: false, sources: true });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: profile.cpu });
@@ -198,7 +207,9 @@ for (const profile of [
   await cdp.send("Profiler.setSamplingInterval", { interval: 1000 });
   const hub = new HubDouble(page, {
     time: { now: () => performance.timeOrigin + performance.now(), delay: (callback, ms) => { setTimeout(callback, ms); } },
-    paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" }] }],
+    ...(scrollFlow ? { paired: [ATLAS.id], machines: [ATLAS] } : {
+      paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" as const }] }],
+    }),
     history: { [capture.session]: capture.pages },
     ...(capture.work ? { work: { [capture.session]: capture.work } } : {}),
   });
@@ -295,7 +306,7 @@ for (const profile of [
         source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms, pending_replies: capture.pending_replies?.length,
         show_work: showWork, work_events: capture.work?.events.length ?? 0,
         flow: process.env.CONVERSATION_PERF_FLOW ?? "history", replay_cadence: "history response plus batches of ten pending OperatorReply frames, paced by browser rAF; fastest-case replay, daemon scheduling/network excluded",
-        label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
+        label: scrollFlow ? "real-bundle, frozen three-page independent-QA fixture, protocol-double" : "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
     };
     const backlog = process.env.CONVERSATION_PERF_FLOW === "backlog";
     if (backlog) expect(capture.pending_replies?.length, "capture real pending rows, not fabricated history").toBeGreaterThan(50);
@@ -305,6 +316,45 @@ for (const profile of [
       if (backlog) await drainPending();
     });
     expect(results.initial.history_requests).toBe(1);
+    if (scrollFlow) {
+      // Frozen independent-QA probe: unthrottled, wheel(-400), 60ms cadence,
+      // 1280x844 / 390x844, three pages of forty exchanges supplied by capture.
+      const thread = page.locator(".conversation-reading.thread");
+      const box = (await thread.boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      const requests = hub.historyRequests.length;
+      const sampleStart = await page.evaluate(() => performance.now());
+      const wheelMs: number[] = [], stepMs: number[] = [];
+      await startProfile(cdp);
+      for (let step = 0; step < 80 && hub.historyRequests.length === requests; step++) {
+        const start = performance.now();
+        await page.mouse.wheel(0, -400);
+        wheelMs.push(performance.now() - start);
+        await page.waitForTimeout(60);
+        stepMs.push(performance.now() - start);
+      }
+      const requested = hub.historyRequests.length > requests;
+      await settle(page);
+      const paints = await page.evaluate(since => (window as any).perfProbe.historyPaints.filter((paint: any) => paint.older && paint.at >= since), sampleStart);
+      const costs = await endProfile(cdp, directory, "scroll");
+      const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+      const receipt = { profile, source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        bundle_revision: process.env.CONVERSATION_PERF_BUNDLE_REVISION, browser: browser.version(), requested_older: requested,
+        wheel_ms: wheelMs, step_ms: stepMs, wheel_median_ms: median(wheelMs), step_median_ms: median(stepMs), history_paints: paints,
+        cpu: costs.sourceSamples, page_errors: errors };
+      await writeFile(join(directory, "scroll.json"), JSON.stringify(receipt, null, 2));
+      await page.screenshot({ path: join(directory, "paged.png") });
+      // Baselines retain their failing paging/latency evidence for comparison.
+      if (process.env.CONVERSATION_PERF_BASELINE !== "1") {
+        expect(requested, "scroll reaches the next history page").toBe(true);
+        expect(paints.length, "measure the page's actual anchor").toBeGreaterThan(0);
+        for (const paint of paints) expect(Math.abs(paint.anchor_drift_px), "fractional reading anchor stays fixed").toBeLessThanOrEqual(0.5);
+        expect(median(wheelMs), "same independent-QA wheel probe, base 358ms").toBeLessThanOrEqual(358);
+      }
+      expect(errors).toEqual([]);
+      return;
+    }
+
     if (showWork) {
       await expect(page.locator("#conversation-show-work")).toHaveAttribute("aria-pressed", "true");
       expect(results.initial.work_requests_total).toBeGreaterThan(0);
@@ -361,5 +411,8 @@ for (const profile of [
       // fix must be able to rerun this exact command with a bounded window.
     }
     expect(errors).toEqual([]);
-  } finally { await context.close(); }
+  } finally {
+    if (scrollFlow) await context.tracing.stop({ path: join(directory, "playwright.trace.zip") });
+    await context.close();
+  }
 });

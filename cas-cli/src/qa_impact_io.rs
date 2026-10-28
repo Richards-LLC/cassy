@@ -151,7 +151,12 @@ pub(super) fn analyze(
         .and_then(|text| crate::qa_registry::parse(&text).ok());
     let codemap = tree.read(".claude/CODEMAP.md")?;
     let overview_present = tree.read("docs/PRODUCT_OVERVIEW.md")?.is_some();
-    let selector_present = tree.paths.iter().any(|path| path == LEGACY_SELECTOR_PATH)
+    let needs_legacy_selector = registry.is_none()
+        || registry
+            .as_ref()
+            .is_some_and(|registry| registry.selection == crate::qa_registry::Selection::LegacyCatalog);
+    let selector_present = needs_legacy_selector
+        && tree.paths.iter().any(|path| path == LEGACY_SELECTOR_PATH)
         && tree.read(LEGACY_SELECTOR_PATH)?.is_some();
     let selected = if let Some(registry) = registry
         .as_ref()

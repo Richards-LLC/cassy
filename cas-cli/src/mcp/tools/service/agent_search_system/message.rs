@@ -3971,7 +3971,7 @@ impl CasService {
 
         let agent_id = self.inner.get_agent_id().map_err(|_| Self::error(
             ErrorCode::INVALID_REQUEST, "message_ack requires a registered agent identity"))?;
-        let agent = self.inner.open_agent_store().and_then(|store| store.get(&agent_id))
+        let agent = self.inner.open_agent_store()?.get(&agent_id)
             .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
         let aliases = crate::harness_policy::inbox_aliases(&agent.name,
             agent.role == cas_types::AgentRole::Supervisor);

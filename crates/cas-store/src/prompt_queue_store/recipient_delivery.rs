@@ -134,6 +134,10 @@ mod tests {
         assert!(!reference.rows[0].prompt.contains("Named details"));
         assert!(reference.rows[0].prompt.contains("not acknowledged"));
         assert_eq!(store.recipient_receipt(id, "worker-a").unwrap(), Some(SurfacingSource::InboxPoll));
+        let observations: i64 = store.conn.lock().unwrap().query_row(
+            "SELECT body_count FROM communication_body_observations WHERE prompt_id=?1 AND recipient='worker-a'",
+            [id], |r| r.get(0)).unwrap();
+        assert_eq!(observations, 1, "references never count as body observations");
         assert_eq!(store.message_delivery_report(id).unwrap().unwrap().confirmation_source, report.confirmation_source);
         assert!(store.surface_for_recipient_within_budget("worker-a", None,
             HookDrain::PolledBefore(Utc::now() + chrono::Duration::seconds(2)), 1, 500).unwrap().rows.is_empty());

@@ -1755,20 +1755,21 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
 
     let first_turn = worker.start_turn("working through cas-x");
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let kept = "Rebase onto v43, then re-run the named tests.";
+    let kept = "Rebase onto v43, then re-run the named tests.\n".repeat(60);
     let acked = "FYI: lane CI is green.";
-    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, &kept, SESSION).unwrap();
     let acked_id = store.enqueue_with_session("supervisor", WORKER, acked, SESSION).unwrap();
     // Mid-turn, the agent polls both (what `inbox_poll` runs) and acks one.
     let polled = store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap();
     assert_eq!(polled.len(), 2);
     store.ack(acked_id).unwrap();
     let same_turn = worker.tool_call();
-    assert!(!same_turn.contains(kept) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+    assert!(!same_turn.contains(kept.as_str()) && !same_turn.contains(acked), "{first_turn}{same_turn}");
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let next_turn = worker.take_turn("continuing my work");
-    assert_eq!(next_turn.matches(kept).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
+    println!("AFE0_FIXTURE input_body_bytes={} repeat_hook_bytes={}", kept.len(), next_turn.len());
+    assert_eq!(next_turn.matches(kept.as_str()).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
     assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
     assert_eq!(
@@ -1781,7 +1782,7 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     );
 
     let after = worker.take_turn("still working");
-    assert!(!after.contains(kept) && !after.contains("[not acknowledged]"), "once: {after}");
+    assert!(!after.contains(kept.as_str()) && !after.contains("[not acknowledged]"), "once: {after}");
 }
 
 /// cas-6ccb: a Claude Teams member's next turn may be a teammate-message

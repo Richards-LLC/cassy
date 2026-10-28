@@ -2968,6 +2968,19 @@ mod tests {
         assert_eq!(inbox.len(), 6, "{inbox:?}");
         assert!(inbox[5].text.contains(shared), "{}", inbox[5].text);
         assert!(queue.teams_body_fallback_claimed(broadcast, worker).unwrap());
+
+        // The oversized transport is also subject to recipient state: a poll
+        // in another turn, an ACK or an answer must not recover its old body.
+        queue.poll_named_for_recipient(worker, Some(&session), &[long_id]).unwrap();
+        deliver(long_id, &long).await;
+        let repeated = read_inbox().last().unwrap().text.clone();
+        assert!(!repeated.contains(long.trim()), "{repeated}");
+        assert!(repeated.contains("not acknowledged"), "{repeated}");
+        queue.acknowledge_for_recipients(long_id, &[worker.into()], None).unwrap();
+        deliver(long_id, &long).await;
+        let terminal = read_inbox().last().unwrap().text.clone();
+        assert!(!terminal.contains(long.trim()), "{terminal}");
+        assert!(terminal.contains("acknowledged"), "{terminal}");
     }
 
     /// cas-cdf9: the PTY wake is registered against the REAL notification id.

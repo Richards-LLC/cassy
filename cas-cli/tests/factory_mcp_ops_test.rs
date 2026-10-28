@@ -14888,6 +14888,13 @@ async fn cas009c_worker_reply_to_supervisor_by_name_threads_and_acknowledges() {
         .expect("report")
         .expect("row");
     assert_eq!(report.confirmation_source, cas_store::ConfirmationSource::ExplicitAck);
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(decision);
+    let result = env.service.coordination(Parameters(named)).await.expect("named answered read");
+    let text = get_text(&result);
+    assert!(!text.contains("Take option B."), "an actual reply makes even a named read terminal: {text}");
+    assert!(text.contains("answered"), "{text}");
+
 }
 
 /// cas-009c AC3: a lifecycle row, a broadcast and the director's rows are
@@ -14936,4 +14943,38 @@ async fn cas009c_lifecycle_and_broadcast_rows_are_thread_references() {
         .coordination(Parameters(reply("bold-spider-9", "Not my thread.", unrelated)))
         .await;
     assert!(refused.is_err(), "a row between two other agents is not this sender's thread");
+}
+
+
+#[tokio::test]
+async fn cas_afe0_authenticated_ack_is_recipient_scoped_and_does_not_surface_a_body() {
+    let _guard = EnvGuard::set(&[("CAS_AGENT_ROLE", "supervisor"), ("CAS_AGENT_NAME", "lead-pane")]);
+    let env = FactoryTestEnv::with_agent_id_and_env("lead-id", None);
+    let mut lead = Agent::new("lead-id".into(), "lead-pane".into());
+    lead.role = AgentRole::Supervisor;
+    env.agent_store().register(&lead).unwrap();
+    env.register_worker_with_id("other-id", "worker-b", None);
+    let queue = env.prompt_queue();
+    let id = queue.enqueue("director", "all_workers", "Shared body that must stay private after ACK").unwrap();
+    let mut ack = coord_msg("message_ack", "unused", "unused", None);
+    ack.notification_id = Some(id);
+    env.service.coordination(Parameters(ack)).await.unwrap();
+    for alias in ["lead-pane", "supervisor"] {
+        assert_eq!(queue.recipient_receipt(id, alias).unwrap(), None);
+        assert!(queue.poll_unseen_for_recipient(alias, None, 10).unwrap().is_empty());
+    }
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(id);
+    let response = env.service.coordination(Parameters(named)).await.unwrap();
+    let text = get_text(&response);
+    assert!(!text.contains("Shared body that"), "{text}");
+    assert!(text.contains("acknowledged"), "{text}");
+    // Alias mirroring must not turn a terminal reference into body evidence.
+    assert_eq!(queue.recipient_receipt(id, "lead-pane").unwrap(), None);
+    assert_eq!(queue.poll_unseen_for_recipient("worker-b", None, 10).unwrap()[0].prompt,
+        "Shared body that must stay private after ACK");
+    let foreign = queue.enqueue("director", "worker-b", "Other worker's body").unwrap();
+    let mut ack = coord_msg("message_ack", "unused", "unused", None);
+    ack.notification_id = Some(foreign);
+    assert!(env.service.coordination(Parameters(ack)).await.is_err());
 }

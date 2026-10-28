@@ -217,6 +217,10 @@ invariants:
     statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
     check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
     bug: {task: cas-0a75}
+  HUB-J17-SUPERVISOR-SCOPE:
+    statement: Default task groups and the release header use this supervisor's open pinned epic, otherwise its assigned or verification-owned epics; foreign and terminal epics stay behind All tasks.
+    check: Run the server-shaped progress-model regression and HUB-J7 truthful-progress case with an unpinned supervisor ID, several project epics, another owner and a closed epic; verify the real-store focused_epic_tests status projection preserves status, assignee and epic_verification_owner.
+    bug: {task: cas-5a42}
   HUB-J17-FLEET-INVALIDATION:
     statement: A fleet change overlapping an older heartbeat obtains a fresh catalog, so a stopped worker disappears
       without waiting for the next heartbeat.
@@ -1716,6 +1720,7 @@ journeys:
   invariants:
   - HUB-J17-GOAL
   - HUB-J17-STATUS-TRUTH
+  - HUB-J17-SUPERVISOR-SCOPE
   - HUB-J17-FLEET-INVALIDATION
   - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
   traffic:

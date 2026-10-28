@@ -14,6 +14,7 @@ import { fleetControlGate, type FleetControlGate, type FleetOperation } from "./
 import type { Scope } from "./types";
 
 export interface FleetAgent {
+  readonly id?: string;
   readonly name: string;
   readonly status?: string;
   /** Execution evidence shared with factory worker_status. */

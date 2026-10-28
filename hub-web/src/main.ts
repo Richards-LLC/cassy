@@ -5196,7 +5196,9 @@ function renderStatus(status?: Record<string, unknown>): void {
   const agents = ((status.agents as FleetAgent[]) ?? []);
   const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
   const epics = ((status.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
-  const release = releaseProgress(epics, typeof status.focused_epic === "string" ? status.focused_epic : null, tasks);
+  const focusedEpic = typeof status.focused_epic === "string" ? status.focused_epic : null;
+  const supervisorNames = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
+  const release = releaseProgress(epics, focusedEpic, tasks, supervisorNames);
   container.prepend(releaseHeader(document, release));
   const workers = workerProgress(session?.workers, agents, tasks, session?.supervisor);
   const identifier = (value: unknown): HTMLSpanElement => {
@@ -5280,7 +5282,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   filter.setAttribute("aria-pressed", String(showAll)); filter.dataset.fleetFocus = "tasks:filter";
   filter.onclick = () => { if (showAll) allProgressTasks.delete(scopeKey); else allProgressTasks.add(scopeKey); renderStatus(status); };
   container.append(filter);
-  const groups = taskGroups(tasks, epics, workers.map(worker => worker.name), showAll);
+  const groups = taskGroups(tasks, epics, workers.map(worker => worker.name), showAll, supervisorNames, focusedEpic);
   for (const group of groups) {
     if (!group.tasks.length) continue;
     container.append(sectionLabel(group.label, group.tasks.length));

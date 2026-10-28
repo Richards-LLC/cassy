@@ -1304,7 +1304,7 @@ mod tests {
         let probe = UpdateProbe {
             calls: Default::default(),
             outcome: ProbeOutcome::Tools {
-                tools: vec!["violet_read".into(), "violet_post".into()],
+                tools: VIOLET_TOOLS.map(String::from).to_vec(),
                 schema_problems: vec![],
             },
         };
@@ -1521,7 +1521,7 @@ mod tests {
             UpdateProbe {
                 calls: Default::default(),
                 outcome: ProbeOutcome::Tools {
-                    tools: vec!["violet_read".into(), "violet_post".into()],
+                    tools: VIOLET_TOOLS.map(String::from).to_vec(),
                     schema_problems: vec![],
                 },
             },

@@ -289,7 +289,7 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
         .unwrap();
         true
     });
-    let inventory = RuntimeSnapshot::capture(false);
+    let inventory = RuntimeSnapshot::capture(true);
     env.set("CAS_AGENT_ROLE", "supervisor");
     env.set("CAS_FACTORY_SESSION", "bind-fx");
     env.set("CAS_AGENT_NAME", "supervisor");
@@ -297,11 +297,19 @@ fn cas_9021_ordinary_http_invocation_is_bound_to_local_drain_and_server_receipt(
     for key in ["CAS_AGENT_ROLE", "CAS_FACTORY_SESSION", "CAS_AGENT_NAME"] {
         env.remove(key);
     }
-    let metadata: crate::ui::factory::SessionMetadata = serde_json::from_slice(
+    let mut metadata: crate::ui::factory::SessionMetadata = serde_json::from_slice(
         &std::fs::read(crate::ui::factory::metadata_path("bind-fx")).unwrap(),
     )
     .unwrap();
     assert!(metadata.last_supervisor_mcp_call_at.is_some());
+    // The daemon's full metadata writer also runs while update is working.
+    for index in 0..4 {
+        metadata.epic_id = Some(format!("fixture-epic-{index}"));
+        metadata.held_workers = vec![format!("worker-{index}")];
+        crate::ui::factory::SessionManager::new()
+            .save_metadata(&metadata)
+            .unwrap();
+    }
     let report = OrdinaryBindingClient::new(&endpoint, "ordinary-fixture-user")
         .unwrap()
         .repair_with_inventory(&root, &scope, &inventory)

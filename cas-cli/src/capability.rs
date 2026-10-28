@@ -440,12 +440,41 @@ fn probe_codex_auth(
     now_ms: u64,
     deadline: Deadline,
 ) -> CapabilityEvidence {
-    let mut command = Command::new("codex");
-    if let Some(account_dir) = account_dir.filter(|dir| !dir.trim().is_empty()) {
-        command.env("CODEX_HOME", account_dir);
-    } else {
-        command.env_remove("CODEX_HOME");
+    let selected = account_dir
+        .filter(|dir| !dir.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("CODEX_HOME")
+                .filter(|dir| !dir.is_empty())
+                .map(Into::into)
+        });
+    let homes = dirs::home_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is unavailable"))
+        .and_then(|home| crate::accounts::codex_homes(&home, selected.as_deref()));
+    let Ok(homes) = homes else {
+        return unknown(
+            now_ms,
+            "Codex account registry could not be read",
+            "Retry doctor after confirming HOME and the Codex account directories are readable.",
+        );
+    };
+    let mut uncertain = None;
+    for home in homes {
+        let evidence = probe_codex_home_auth(&home, now_ms, deadline);
+        match evidence.availability {
+            CapabilityAvailability::Available => return evidence,
+            CapabilityAvailability::Unknown => uncertain = Some(evidence),
+            CapabilityAvailability::Unavailable => {}
+        }
     }
+    // One uncertain account prevents a false logout verdict; every probe
+    // shares the caller's deadline, including when the registry has many homes.
+    uncertain.unwrap_or_else(|| classify_codex_auth(false, "Not logged in", "", now_ms))
+}
+
+fn probe_codex_home_auth(home: &Path, now_ms: u64, deadline: Deadline) -> CapabilityEvidence {
+    let mut command = Command::new("codex");
+    command.env("CODEX_HOME", home);
     command.args(["login", "status"]);
     match run_command(&mut command, deadline, AUTH_PROBE_TIMEOUT) {
         Ok(output) => {
@@ -864,6 +893,106 @@ mod tests {
     fn human_readable_binary_version_can_match_a_conformance_pin() {
         assert!(observed_pin_matches("grok 0.2.117 (build)", "0.2.117"));
         assert!(!observed_pin_matches("grok 0.2.118", "0.2.117"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_registered_accounts_enable_standard_lane_cas_cba9() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let codex = bin.join("codex");
+        std::fs::write(
+            &codex,
+            r#"#!/bin/sh
+    [ "$1 $2" = 'login status' ] || exit 2
+    printf '%s\n' "$CODEX_HOME" >> "$HOME/probes"
+    if [ -f "$CODEX_HOME/auth.json" ]; then
+        printf 'Logged in using ChatGPT\n'
+    else
+        printf 'Not logged in\n'
+        exit 1
+    fi
+    "#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if std::env::var_os("CODEX_REGISTRY_FIXTURE_CHILD").is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "capability::tests::codex_registered_accounts_enable_standard_lane_cas_cba9",
+                    "--nocapture",
+                ])
+                .env("PATH", &bin)
+                .env("CODEX_REGISTRY_FIXTURE_CHILD", "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let logged_out = env.home().join(".codex-a@example.com");
+        let logged_in = env.home().join(".codex-b@example.com");
+        for dir in [&logged_out, &logged_in] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(logged_in.join("auth.json"), "{}").unwrap();
+        let registry = cas_factory::embedded_registry().unwrap();
+        for (explicit, authenticated) in [(false, true), (true, false), (false, false)] {
+            if explicit {
+                env.set("CODEX_HOME", &logged_out);
+            } else {
+                env.remove("CODEX_HOME");
+            }
+            let now = CapabilitySnapshot::now_ms();
+            let mut snapshot = CapabilitySnapshot::default();
+            for name in ["codex_sol_6_1", "codex_sol_6"] {
+                let (identity, evidence) = probe_harness(
+                    Harness::CodexCli,
+                    &registry.recipes[name].model,
+                    None,
+                    &BinaryObservation::Observed("fixture".into()),
+                    None,
+                    now,
+                    Deadline::after(Duration::from_secs(5)),
+                );
+                assert_eq!(
+                    evidence.availability,
+                    if authenticated {
+                        CapabilityAvailability::Available
+                    } else {
+                        CapabilityAvailability::Unavailable
+                    }
+                );
+                if !authenticated {
+                    assert!(
+                        evidence
+                            .remediation
+                            .as_deref()
+                            .unwrap()
+                            .contains("codex login")
+                    );
+                }
+                snapshot.record(identity, evidence);
+            }
+            assert_eq!(
+                cas_factory::resolve_lane("standard", &snapshot).is_ok(),
+                authenticated
+            );
+            if explicit {
+                std::fs::remove_file(logged_in.join("auth.json")).unwrap();
+            }
+        }
+        let probes = std::fs::read_to_string(env.home().join("probes")).unwrap();
+        assert!(probes.lines().all(|line| line == logged_out.to_str().unwrap()
+                || line == logged_in.to_str().unwrap()), "unexpected home probed: {probes}");
+        assert!(!env.home().join(".codex").exists());
     }
 
     #[test]

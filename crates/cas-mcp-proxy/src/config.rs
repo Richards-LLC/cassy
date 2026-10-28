@@ -34,7 +34,7 @@ pub use cas_types::violet_compatibility::{
 pub const VIOLET_DEFAULT_TOKEN_ENV: &str = "VIOLET_SLACK_TOKEN_CASSY_PROXY";
 pub const VIOLET_DEFAULT_BYPASS_ENV: &str = "VIOLET_VERCEL_BYPASS";
 pub const VIOLET_BYPASS_HEADER: &str = "x-vercel-protection-bypass";
-pub const VIOLET_TOOLS: [&str; 2] = ["violet_read", "violet_post"];
+pub const VIOLET_TOOLS: [&str; 3] = ["violet_read", "violet_post", "violet_reconcile_reply"];
 
 /// Resolve the Violet/legacy pair without reading or mutating the environment.
 /// A custom variable retains its original semantics, including empty values.
@@ -734,7 +734,8 @@ impl Config {
             retired,
             VIOLET_SERVER,
             [&contract.retired_tools[0], &contract.retired_tools[1]],
-            VIOLET_TOOLS,
+            // The retired hub only had read/post aliases; reconciliation is new.
+            [VIOLET_TOOLS[0], VIOLET_TOOLS[1]],
         );
         let server = self.servers.remove(retired).expect("checked above");
         self.servers.entry(VIOLET_SERVER.into()).or_insert(server);
@@ -1278,7 +1279,10 @@ allowlist = ["neon.run_sql", "neon:write", "neon/read", "run_sql", "neon.*"]
                 .servers
                 .contains_key(&violet_compatibility().retired_server)
         );
-        assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(
+            config.violet_allowlisted_tools(),
+            ["violet_read", "violet_post", "violet_reconcile_reply"]
+        );
         assert_eq!(
             config.violet_env_names(),
             Some((
@@ -1343,7 +1347,7 @@ x-vercel-protection-bypass = "env:{bypass}"
         );
         let raw = std::fs::read_to_string(&path).unwrap();
         assert_no_legacy_hub_vocabulary(&raw);
-        let config = Config::load_from(&path).unwrap();
+        let mut config = Config::load_from(&path).unwrap();
         assert_eq!(
             config.servers.get(VIOLET_SERVER),
             Some(&ServerConfig::Http {
@@ -1356,7 +1360,26 @@ x-vercel-protection-bypass = "env:{bypass}"
                 oauth: false,
             })
         );
-        assert_eq!(config.violet_allowlisted_tools(), VIOLET_TOOLS);
+        // Passive refresh preserves policy; explicit integration installs the
+        // full contract, including the new reconciliation route.
+        assert_eq!(
+            config.violet_allowlisted_tools(),
+            ["violet_read", "violet_post"]
+        );
+        assert!(config.ensure_violet_registration(
+            violet_hub_url(),
+            VIOLET_DEFAULT_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
+        ));
+        assert!(!config.ensure_violet_registration(
+            violet_hub_url(),
+            VIOLET_DEFAULT_TOKEN_ENV,
+            VIOLET_DEFAULT_BYPASS_ENV,
+        ));
+        assert_eq!(
+            config.violet_allowlisted_tools(),
+            ["violet_read", "violet_post", "violet_reconcile_reply"]
+        );
     }
 
     #[test]
@@ -1571,14 +1594,17 @@ tool = "get_file_download_url"
         user_config.save_to(&user).unwrap();
 
         // No project `.cas/proxy.toml`: the machine registration is the whole
-        // policy, so any project on this machine can dispatch both hub tools.
+        // policy, so any project on this machine can dispatch all hub tools.
         let (merged, sources) = Config::load_merged_with_sources_from(Some(&user), None).unwrap();
         assert!(
             !merged
                 .servers
                 .contains_key(&violet_compatibility().retired_server)
         );
-        assert_eq!(merged.violet_allowlisted_tools(), VIOLET_TOOLS);
+        assert_eq!(
+            merged.violet_allowlisted_tools(),
+            ["violet_read", "violet_post", "violet_reconcile_reply"]
+        );
         assert_eq!(sources.get(VIOLET_SERVER), Some(&user));
     }
 

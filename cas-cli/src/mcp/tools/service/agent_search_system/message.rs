@@ -4890,7 +4890,7 @@ mod inbox_poll_identity_tests {
         );
         queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::TransportDelivered).unwrap();
         assert!(verdict(now).starts_with("recipient: PENDING"), "a pane handoff is not a read");
-        queue.record_recipient_surfaced(id, "zen-hound", SurfacingSource::HookSurfaced).unwrap();
+        queue.ack(id).unwrap();
         let received = verdict(now);
         assert!(received.starts_with("recipient: RECEIVED by zen-hound"), "{received}");
     }

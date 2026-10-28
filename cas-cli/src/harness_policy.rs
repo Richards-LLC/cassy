@@ -209,7 +209,7 @@ pub fn mirror_receipts_across_aliases_with_source(
     if aliases.len() < 2 {
         return;
     }
-    for row in rows {
+    for row in rows.iter().filter(|row| !row.reference_only) {
         for alias in aliases {
             if let Err(error) = queue.record_recipient_surfaced(row.id, alias, source) {
                 tracing::debug!(

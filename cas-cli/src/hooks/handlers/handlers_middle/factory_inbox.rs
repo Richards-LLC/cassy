@@ -665,8 +665,8 @@ fn surface_factory_inbox_with_transport_delivery(
     let mut block_notes: Vec<String> = Vec::new();
     block_notes.extend(polled_unacked_note(&polled_unacked));
     if notes {
-        // cas-6ccb: a row shown in full again gets the [not acknowledged]
-        // note, not also "[already shown]".
+        // Polled recovery references carry [not acknowledged], without
+        // an additional [already shown] note.
         let already_shown: Vec<i64> = already_shown
             .iter()
             .copied()
@@ -1101,6 +1101,7 @@ mod tests {
 
     fn row(id: i64, source: &str, prompt: &str) -> QueuedPrompt {
         QueuedPrompt {
+            reference_only: false,
             id,
             source: source.to_string(),
             target: "worker-1".to_string(),

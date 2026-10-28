@@ -2828,7 +2828,8 @@ async fn handle_client_message(
         *attribution = verified_attribution(context);
     }
     if let ClientMessage::ConversationHistoryRequest { device_id, .. }
-        | ClientMessage::OperatorReplyPersisted { device_id, .. } = &mut message {
+        | ClientMessage::OperatorReplyPersisted { device_id, .. }
+        | ClientMessage::OperatorNoticePersisted { device_id, .. } = &mut message {
         // History is private to the authenticated paired device. Do not trust
         // a browser-supplied selector, even though this is a read operation.
         *device_id = context.device_id.clone();
@@ -2912,6 +2913,7 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
             | ClientMessage::WorkEventsRequest { .. }
             | ClientMessage::WorkEventDetailRequest { .. }
             | ClientMessage::OperatorReplyPersisted { .. }
+            | ClientMessage::OperatorNoticePersisted { .. }
     )
 }
 

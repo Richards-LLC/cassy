@@ -7602,6 +7602,17 @@ impl FactoryDaemon {
         Ok(())
     }
 
+    pub(super) fn persist_operator_notice_receipt(
+        &mut self,
+        notification_id: i64,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        queue.record_operator_notice_persisted(notification_id, &self.session_name, device_id)?;
+        self.queue_jobs.operator_reply_retries.clear();
+        Ok(())
+    }
+
     /// Bound both store-error retries and warnings for one nudge incident.
     /// Record a `SupervisorInjected` event for a queued prompt's delivery
     /// (external ack waiters, the activity feed). cas-786a6: the write runs

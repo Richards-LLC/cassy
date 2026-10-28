@@ -3239,6 +3239,10 @@ pub trait PromptQueueStore: Send + Sync {
     /// One authenticated device committed the reply locally. Never marks read.
     fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
 
+    /// Attention-only application receipt. Authoritative daemon provenance
+    /// fences it from conversation replies; persistence never marks read.
+    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
+
     /// Broadcast outcome for `all_workers` (attempted/succeeded/failed counts).
     ///
     /// - all succeeded → Delivered + transport_delivered_at
@@ -8676,7 +8680,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     }
 
     fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
-        self.persist_operator_reply_receipt(prompt_id, factory_session, device_id)
+        self.persist_operator_receipt(prompt_id, factory_session, device_id, false)
+    }
+
+    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+        self.persist_operator_receipt(prompt_id, factory_session, device_id, true)
     }
 
     fn mark_broadcast_outcome(

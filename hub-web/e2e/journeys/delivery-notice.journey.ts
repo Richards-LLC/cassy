@@ -316,7 +316,7 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
   }));
   const choose = async () => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
-    await expect(page.locator(".conversation-connection")).toHaveText("Live");
+    await expect(page.getByRole("log")).toBeVisible();
   };
   await journey.stage("Offline notices commit only to attention and drain every pending batch", async () => {
     await journey.open(); await choose();

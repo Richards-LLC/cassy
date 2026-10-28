@@ -2733,6 +2733,26 @@ fn identical_tree_merge_accepts_repaired_ledger_without_reexecuting_gh1395() {
     };
     assert!(crate::qa_pass::merge_gate(&task, &crate::config::QaConfig::default(), &[pass], &fx.head).is_err());
 
+    let merged = fx.head.clone();
+    git_ok(&fx.repo, &["checkout", "-q", "--orphan", "unrelated"]);
+    git_ok(&fx.repo, &["add", "-A"]);
+    git_ok(&fx.repo, &["commit", "-q", "-m", "unrelated same tree"]);
+    fx.head = git_ok(&fx.repo, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", executed)]),
+        git_ok(&fx.repo, &["rev-parse", &format!("{}^{{tree}}", fx.head)]),
+    );
+    manifest["head_sha"] = serde_json::json!(fx.head);
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest).unwrap()).unwrap();
+    let unrelated = run_close_gate(
+        &journey_context(&fx, &notes), EvidenceTier::Bundle,
+        &["journeys:HUB-J7".into()], &[],
+    ).unwrap_err();
+    assert!(unrelated.contains("changed product or journey inputs"), "{unrelated}");
+
+    git_ok(&fx.repo, &["checkout", "-q", "delivery"]);
+    fx.head = merged;
+
     std::fs::create_dir_all(fx.repo.join("scripts")).unwrap();
     fx.head = commit(&fx.repo, "scripts/journey-eval.sh", 0);
     manifest["head_sha"] = serde_json::json!(fx.head);

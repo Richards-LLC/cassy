@@ -25,14 +25,16 @@ test("HUB-J16 end a session from my phone", async ({ page, journey }) => {
   /** Rows whose whole box is inside the list's visible area. */
   const rowsInView = () => list.evaluate((nav) => {
     const box = nav.getBoundingClientRect();
-    return [...nav.querySelectorAll(".conversation-row")].filter((node) => { const r = node.getBoundingClientRect(); return r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5; }).length;
+    const rows = [...nav.querySelectorAll(".conversation-row")].map((node) => { const r = node.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, height: r.height }; });
+    return { count: rows.filter((r) => r.top >= box.top - 0.5 && r.bottom <= box.bottom + 0.5).length, top: box.top, bottom: box.bottom, rows };
   });
 
   await journey.stage("See six sessions at once", async () => {
     await journey.open();
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 7 conversations on Atlas");
     await expect(list.locator(".conversation-row")).toHaveCount(7);
-    expect(await rowsInView(), "at least six sessions fit the phone list").toBeGreaterThanOrEqual(6);
+    const bounds = await rowsInView();
+    expect(bounds.count, `at least six sessions fit the phone list: ${JSON.stringify(bounds)}`).toBeGreaterThanOrEqual(6);
     // End session is in each row's corner, not a line of its own.
     await expect(list.getByRole("button", { name: "End session calm-puma-34 on Atlas" })).toBeVisible();
     // cas-339a: each row's time belongs to the row, and End is its own 44px column.

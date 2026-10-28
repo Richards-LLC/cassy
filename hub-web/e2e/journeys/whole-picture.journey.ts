@@ -43,7 +43,7 @@ const history = {
 
 async function openConversation(page: Page, journey: Journey): Promise<void> {
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
 }
 
@@ -110,7 +110,7 @@ for (const [width, colorScheme] of [[1280, "light"], [390, "dark"]] as const) {
       await journey.stage("Show work stays as set on this device", async () => {
         await page.reload();
         // A phone reopens the conversation it had open; the desktop lists it.
-        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+        const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
         const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
         await expect(send.or(row).first()).toBeVisible();
         if (!(await send.isVisible())) await row.click();

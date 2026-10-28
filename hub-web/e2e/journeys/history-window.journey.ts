@@ -22,7 +22,7 @@ for (const [name, viewport, colorScheme] of [
     const log = page.getByRole("log");
     await journey.stage("Open directly at the latest exchange", async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
       await expect(log.locator('[data-key="reply:150"]')).toBeInViewport();
       expect(hub.historyRequests).toHaveLength(1);
       expect(hub.historyRequests[0]).toMatchObject({ limit: 50 });

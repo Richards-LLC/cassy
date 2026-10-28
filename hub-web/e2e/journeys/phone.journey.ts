@@ -129,7 +129,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
       new MutationObserver(record).observe(document, { subtree: true, childList: true, characterData: true, attributes: true });
     });
     await journey.open();
-    await expect(list.getByRole("button")).toHaveCount(5);
+    await expect(list.locator(".conversation-row")).toHaveCount(5);
     const coldLoad = await page.evaluate(() => [...(window as unknown as { __coldLoadText: Set<string> }).__coldLoadText]);
     expect(coldLoad.join(" | "), "cold-load list and footer text").not.toMatch(/Not paired|No live supervisors|Reconnecting/);
     expect(coldLoad.some((text) => text.includes("Loading")), "the cold load shows it is loading").toBe(true);
@@ -144,7 +144,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   });
 
   await journey.stage("Tap a conversation", async () => {
-    await list.getByRole("button", { name: /cas-src/ }).tap();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).tap();
     await expect(list).toBeHidden();
     await expect(page.getByRole("button", { name: "‹ Conversations", exact: true })).toBeVisible();
     // The header drops the OS word before it cuts the codename (journey F14).
@@ -164,7 +164,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
   await journey.stage("Go back to the list", async () => {
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).tap();
     await expect(list).toBeVisible();
-    await expect(list.getByRole("button", { name: /cas-src/ })).toContainText("Cutting now.");
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toContainText("Cutting now.");
   });
 
   await journey.stage("Jump from the palette with a tap", async () => {
@@ -246,7 +246,7 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     for (const [project, machine, codename] of [["lab", "pippenz-workstation · Linux", "tiny-wren-3"], ["notes", "Daniel's MacBook Pro · macOS", "brisk-lark-5"], ["infra", "Build Server Rack Seven · Windows", "patient-heron-12"]] as const) {
       const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
       if (await back.isVisible()) await back.tap();
-      await list.getByRole("button", { name: new RegExp(project) }).tap();
+      await list.getByRole("button", { name: new RegExp(project) }).and(list.locator(".conversation-row")).tap();
       await expect(page.locator(".conversation-identity h1")).toHaveText(project);
       await expectHeaderKeepsMachine(machine, codename);
       // cas-d043 G01 (QA round 1): on its own header row, each of these
@@ -410,13 +410,13 @@ for (const { width, height } of SIDEWAYS) test.describe(`sideways with a notch $
 
     await journey.stage("Turn the phone sideways with the notch at one edge", async () => {
       await journey.open();
-      await expect(list.getByRole("button", { name: /cas-src/ })).toBeVisible();
+      await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"))).toBeVisible();
       await expect(page.getByRole("button", { name: "Write to a supervisor" })).toBeVisible();
       expect(await underTheBands(page, ".conversation-sidebar"), "list rows, Write to a supervisor and the footer clear both notches").toEqual([]);
     });
 
     await journey.stage("Open a conversation that waits on me", async () => {
-      await list.getByRole("button", { name: /cas-src/ }).click();
+      await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
       await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
       hub.supervisorSays(PELICAN, "Fix the warning in-train, or ship allowlisted?", { kind: "ask", options: ["Fix in-train", "Ship allowlisted"] });
       await expect(page.getByRole("region", { name: `Waiting on you: question from ${PELICAN}` })).toBeVisible();

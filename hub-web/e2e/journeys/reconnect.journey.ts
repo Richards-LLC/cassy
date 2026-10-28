@@ -23,7 +23,7 @@ test("HUB-J11 the connection drops mid-conversation and recovers", async ({ page
   });
 
   const header = page.locator("#conversation-connection");
-  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+  const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
   const footer = page.locator("#hub-footer-badges");
   const banner = page.locator(".terminal-disconnected-banner");
   /** The thread as painted, top to bottom: day and session lines by text, message groups by their spoken label. */

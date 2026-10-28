@@ -140,7 +140,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         // artifact request still take the normal application path.
         const missing = await page.request.get(`${new URL(baseURL!).origin}/commander/attachment-preview-missing.png`);
         expect(missing.status()).toBe(404);
-        await page.route(contentRoute, route => route.fulfill({ response: missing }));
+        await page.route(`https://atlas.test/v1/sessions/${PELICAN}/artifacts/*/content?*`, route => route.fulfill({ response: missing }));
         await page.reload();
         const sent = page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" });
         await expect(sent.locator('.preview-note')).toHaveText("Preview unavailable");

@@ -91,11 +91,11 @@ impl CasCore {
                 format!("Cannot prepare merged-delivery verification dispatch: {error}"),
             )
         })?;
-        // worktree_merge returns this dispatch directly to its owner. Keep
-        // the dispatch durable without injecting a second request to self.
-        if requester == owner {
-            return Ok(());
-        }
+        // cas-6a8b: a merge may already have answered COMMITTED while this
+        // close continues in the background. Its response cannot carry a
+        // dispatch created later, even when requester and owner are the same
+        // supervisor. Always queue the typed wake; the emitter deduplicates
+        // by dispatch id, independently of the response and outcome note.
         // This creates a review destination, not an approval or an exemption
         // from ancestry, content, QA, or any later close gate.
         if let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_root)

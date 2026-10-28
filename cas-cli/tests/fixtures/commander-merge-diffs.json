@@ -1,5 +1,5 @@
 {
-  "description": "Ten latest first-parent main merges captured for cas-1a420, plus two older merges with production hub-web/src changes for cas-7002. Retain changed hub-web/catalog paths and one unrelated path when none exist; all omitted paths lie outside the legacy hub-web catalog surface. Expected IDs were captured from the committed legacy selector at the migration head and sorted by the Rust legacy adapter contract. CSS/import hunks have a separate focused fixture.",
+  "description": "Ten latest first-parent main merges captured for cas-1a420, plus two older merges with production hub-web/src changes for cas-7002. Retain changed hub-web/catalog paths and one unrelated path when none exist; all omitted paths lie outside the legacy hub-web catalog surface. Merge revisions preserve path provenance; expected IDs replay those paths against the current catalog and are sorted by the Rust legacy adapter contract. The surface-wide capture includes HUB-J22..25 added by the 3.86 rich-content catalog. CSS/import hunks have a separate focused fixture.",
   "diffs": [
     {
       "base": "5f868a44a18d50c126be75adee380593465fa5a3",
@@ -149,6 +149,10 @@
         "HUB-J2",
         "HUB-J20",
         "HUB-J21",
+        "HUB-J22",
+        "HUB-J23",
+        "HUB-J24",
+        "HUB-J25",
         "HUB-J3",
         "HUB-J4",
         "HUB-J5",

@@ -618,9 +618,11 @@ mod tests {
             .unwrap();
         let mut sentinel = Entry::new(
             "grok-supervisor-ambient".to_string(),
-            "Current release recovery audit receipts preserve operator intent".to_string(),
+            "Operator prefers release recovery audit receipts that preserve intent".to_string(),
         );
         sentinel.title = Some("Current supervisor release recovery guidance".to_string());
+        // Supervisor recall admits operator context, not generic project history.
+        sentinel.entry_type = crate::types::EntryType::Preference;
         sentinel.tags = vec!["release".to_string(), "recovery".to_string()];
         sentinel.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&sentinel).unwrap();

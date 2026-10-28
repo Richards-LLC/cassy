@@ -30,6 +30,7 @@ pub mod open_files;
 pub mod operator_inbox;
 pub mod projects;
 mod runtime;
+mod chunk_assets;
 mod server;
 pub(crate) mod state;
 mod tailscale;
@@ -65,6 +66,7 @@ pub use runtime::{
     processes_holding_file,
 };
 pub use server::{HubState, router};
+pub(crate) use server::artifact_proxy;
 pub(crate) use runtime::process_command;
 pub(crate) use state::ensure_private_dir;
 pub use tailscale::{TailscaleServeManager, TailscaleServeReceipt};

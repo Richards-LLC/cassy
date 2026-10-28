@@ -11,6 +11,19 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("threadModel", () => {
+  it("paints each run of work between two turns as one keyed item, and nothing without work (cas-ff22)", () => {
+    const history = new ConversationHistory();
+    history.reply(reply(1, "answer"), at(9, 0));
+    history.reply(reply(2, "answer"), at(9, 1));
+    history.reply(reply(3, "answer"), at(9, 5));
+    const work = (id: string, when: number) => ({ id, kind: "tool" as const, session: "s", at: when, label: id, hasDetail: true, error: false });
+    const events = [work("before-history", at(8, 0)), work("a", at(9, 0) + 1_000), work("b", at(9, 0) + 2_000), work("tail", at(9, 6))];
+    const shape = (items: ReturnType<typeof threadModel>) => items.map((item) => item.type === "work" ? `${item.key}:${item.events.length}` : item.type);
+    // Work older than the loaded history waits for its page; a run splits the group it falls inside.
+    expect(shape(threadModel(history.events, { now: NOW, work: events }))).toEqual(["day", "group", "work:a:2", "group", "work:tail:1"]);
+    expect(shape(threadModel(history.events, { now: NOW, historyEnd: true, work: events }))).toEqual(["history-end", "day", "work:before-history:1", "group", "work:a:2", "group", "work:tail:1"]);
+    expect(threadModel(history.events, { now: NOW, work: [] })).toEqual(threadModel(history.events, { now: NOW }));
+  });
   it("dates any turn time that is not today's (cas-e829)", () => {
     expect(stampLabel(at(9, 41), NOW)).toBe("09:41");
     expect(stampLabel(at(17, 20, -1), NOW)).toBe("Sep 20, 17:20");

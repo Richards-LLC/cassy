@@ -718,6 +718,7 @@ dependencies = [
  "grep-searcher",
  "hashlink 0.10.0",
  "hex",
+ "hmac 0.12.1",
  "hostname",
  "ignore",
  "inquire",

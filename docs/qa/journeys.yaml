@@ -47,9 +47,6 @@ owner_groups:
     - hub-web/src/render-model.ts
     - hub-web/src/usage.ts
 invariants:
-  HUB-J24-GOAL:
-    statement: Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with readable local paths.
-    check: Walk HUB-J24 and the real authenticated upload regression; verify the real-hub supervisor describes a pasted screenshot using its stored path.
   HUB-J1-GOAL:
     statement: my machine's supervisor appears and I can open its conversation
     check: 'Walk HUB-J1 in hub-web/e2e/journeys/pair-code.journey.ts; verify the expected experience and edge paths
@@ -150,7 +147,11 @@ invariants:
       closing is proven at epic assembly on a real machine'
   HUB-J13-LAUNCH-STORE:
     statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
-    check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store and the real-hub HUB-J13 part; verify the chosen project boots, emits its first provider reply and answers one Commander message.
+    check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.
+    bug: {task: cas-dd2e}
+  HUB-J13-STARTUP-WAKE:
+    statement: A startup brief written to Teams before the supervisor pane is ready remains eligible for its deferred wake; an inbox transport reservation never suppresses the retry or claims a model turn.
+    check: Run supervisor_single_turn_tests::claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready through real startup enqueue, Teams and PTY input capture; require one submitted wake after readiness and one Teams body, with no provider-generated reply.
     bug: {task: cas-dd2e}
   HUB-J14-GOAL:
     statement: each session opens onto its own conversation, or an honest empty state with its live activity, never
@@ -232,12 +233,37 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: Explorer is stubbed
       at the cloud origin; Explorer''s own switcher back to Commander and its token adoption are tracked in Richards-LLC/petra-stella-cloud#148;
       that the hub reports `cloud_project_id` from the project''s canonical id is proven by the Rust hub test (cas-eaa3)'
+  HUB-J25-GOAL:
+    statement: see what the supervisor thought, ran and moved between its replies, collapsed until I open it, and
+      follow one worker's live timeline from Tasks & progress, without a terminal
+    check: 'Walk HUB-J25 in hub-web/e2e/journeys/whole-picture.journey.ts; verify the expected experience and edge
+      paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the work-event stream is
+      a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
+      hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
+  HUB-J22-GOAL:
+    statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
+    check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
 bug_families:
+  expired-toast-announcement:
+    title: Expired connection notices must leave an empty live region while subsequent notices still announce
+    tasks: [cas-326e8]
+    invariants: [HUB-J9-GOAL]
+    journeys: [HUB-J9]
+  deferred-session-startup:
+    title: A deferred startup wake must retry after pane readiness instead of remaining hidden by its transport claim
+    tasks: [cas-dd2e]
+    invariants: [HUB-J13-GOAL, HUB-J13-STARTUP-WAKE]
+    journeys: [HUB-J13]
   cross-project-session-launch:
     title: A machine hub's originating store must not override the project selected for New session
     tasks: [cas-dd2e]
     invariants: [HUB-J13-GOAL, HUB-J13-LAUNCH-STORE]
     journeys: [HUB-J13]
+  null-label-reply-receipt:
+    title: Null live labels normalize before durable receipt; queued browser writes survive load and batch without losing receipt fences, draining pending replay across attaches
+    tasks: [cas-c641]
+    invariants: [HUB-J3-GOAL, HUB-J12-GOAL]
+    journeys: [HUB-J3, HUB-J12]
   clean-home-launch-remedies:
     title: Clean-home readiness must preserve Claude and Codex login remedies while explicit unknown accounts still refuse
     tasks: [cas-a1bc]
@@ -258,6 +284,11 @@ bug_families:
   second-person-pairing-code:
     title: The pairing-code dialog assumed the phone's owner was at the machine; a second person had no way to send the code on
     tasks: [cas-a56c]
+    invariants: [HUB-J1-GOAL]
+    journeys: [HUB-J1]
+  pairing-code-rate-limit-refusal:
+    title: When the relay rate-limited code creation, the dialog said only that the service refused, with no cause or next step
+    tasks: [cas-310f]
     invariants: [HUB-J1-GOAL]
     journeys: [HUB-J1]
 journeys:
@@ -915,7 +946,7 @@ journeys:
     "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
   - Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected"
     toast sits below the thread header, never over the back link, project and host, and on the list below the brand
-    row
+    row. After its 3.2-second lifetime, the status region is empty so the expired notice is no longer read.
   - Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row,
     Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output
     title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom
@@ -1224,6 +1255,8 @@ journeys:
   - hub-web/e2e/journeys/real-hub-server.mjs
   - cas-cli/src/hub/server.rs
   - cas-cli/src/hub/launch_env.rs
+  - cas-cli/src/ui/factory/daemon/runtime/queue_and_events.rs
+  - cas-cli/src/ui/factory/daemon/runtime/supervisor_single_turn_tests.rs
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/artifact-open.ts
@@ -1265,12 +1298,13 @@ journeys:
   invariants:
   - HUB-J13-GOAL
   - HUB-J13-LAUNCH-STORE
+  - HUB-J13-STARTUP-WAKE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
   spec: hub-web/e2e/journeys/launch-session.journey.ts
   catalog_gaps: The catalog suite doubles the hub protocol. The separate real-hub HUB-J13 part covers project browse,
-    session start, reaper/daemon/PTY startup, first message and reply with a foreign originating CAS_ROOT.
+    session start, reaper/daemon/PTY startup, first message and reply without a planted CAS_ROOT.
     Provider and service placement alone are inert; official model action remains a bounded live check.
 - id: HUB-J14
   name: Tell a project's live sessions apart
@@ -1857,6 +1891,40 @@ journeys:
   catalog_gaps: Explorer is stubbed at the cloud origin; Explorer's own switcher back to Commander and its token
     adoption are tracked in Richards-LLC/petra-stella-cloud#148; that the hub reports `cloud_project_id` from the
     project's canonical id is proven by the Rust hub test (cas-eaa3)
+- id: HUB-J22
+  name: Read diagrams, media and diffs in the conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: A paired supervisor conversation at 1280x800 and 390x844 in light and dark
+  steps:
+  - Open plain text without loading rich renderers
+  - Read a diagram and inspect its source; bad input stays readable
+  - Expand a unified diff
+  - Decode an inline image without moving its file caption
+  - Read the real PDF first page inline
+  - Play video and audio on demand; unavailable files keep Open
+  owner_groups: [commander_runtime, commander_dependencies]
+  owners:
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/rich-code.ts
+  - hub-web/src/rich-diagram.ts
+  - hub-web/src/rich-diff.ts
+  - hub-web/src/rich-attachment.ts
+  - hub-web/src/rich-media.ts
+  - hub-web/src/rich-pdf.ts
+  - hub-web/src/rich-content.css
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/e2e/journeys/rich-content.journey.ts
+  - hub-web/playwright.rich-content-hub.config.ts
+  - hub-web/scripts/rich-content-visual-qa.mjs
+  invariants: [HUB-J22-GOAL]
+  traffic:
+    share_pct: null
+    basis: New evidence-reading journey; no per-journey usage instrumentation.
+  spec: hub-web/e2e/journeys/rich-content.journey.ts
+  catalog_gaps: Tickets and proxy bytes are doubled; real PNG/PDF/WebM/WAV decode and playback use the production browser build. Embedded assets and ticket/proxy authorization have separate hub handler tests. Hosted cross-origin media is outside this proof.
 
 - id: HUB-J24
   name: Paste text, screenshots and files into a supervisor message
@@ -1881,3 +1949,50 @@ journeys:
     basis: New journey; no production traffic attribution yet.
   spec: hub-web/e2e/journeys/paste-content.journey.ts
   catalog_gaps: Protocol-double uploads model a lost response; host storage and MIME sniffing are proven by Rust and a fixture-HOME real-hub walk. Physical iOS and Android clipboards are not driven. Native OS share-target installation is a separate follow-up; Commander has no service worker.
+
+- id: HUB-J25
+  name: See the whole picture of the work
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: '`/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a
+      thread with work between two replies, and one worker on a task'
+  steps:
+  - Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is
+    read
+  - Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and
+    its rows not; a worker's own tool call stays in its timeline
+  - Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand
+    and markup in it reads as text
+  - New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the
+    earlier reply keeps its node
+  - Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies
+    only
+  - Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the
+    worker's state, task and its own newest rows first
+  - The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
+  - Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+  owner_groups:
+  - commander_runtime
+  - commander_dependencies
+  owners:
+  - hub-web/src/work-events.ts
+  - hub-web/src/work-picture.ts
+  - hub-web/src/work-rows-view.ts
+  - hub-web/src/worker-timeline.ts
+  - hub-web/src/thread-model.ts
+  - hub-web/src/conversation-view.ts
+  - hub-web/src/conversation-shell.ts
+  - hub-web/src/connection.ts
+  - hub-web/src/main.ts
+  - hub-web/src/styles.css
+  - hub-web/e2e/journeys/whole-picture.journey.ts
+  invariants:
+  - HUB-J25-GOAL
+  traffic:
+    share_pct: null
+    basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
+  spec: hub-web/e2e/journeys/whole-picture.journey.ts
+  catalog_gaps: the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe
+    and the hub's follower-only relay are proven by the Rust tests

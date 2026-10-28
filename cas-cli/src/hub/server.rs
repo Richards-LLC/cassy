@@ -27,6 +27,8 @@ use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid
 
 #[path = "composer_upload.rs"]
 mod composer_upload;
+#[path = "artifact_proxy.rs"]
+pub(crate) mod artifact_proxy;
 
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
@@ -51,6 +53,8 @@ pub struct HubState<R: SessionReadModel> {
     recovery: super::connection_recovery::RecoveryTelemetry,
     /// Commander usage counts beside the auth store (cas-0b3d).
     usage: Option<super::usage::UsageStore>,
+    #[cfg(test)]
+    artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -75,12 +79,20 @@ impl<R: SessionReadModel> HubState<R> {
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             recovery: super::connection_recovery::RecoveryTelemetry::default(),
             usage: None,
+            #[cfg(test)]
+            artifact_cloud_client: None,
         }
     }
 
     pub fn with_auth(mut self, auth: AuthStore) -> Self {
         self.usage = Some(super::usage::UsageStore::new(auth.root()));
         self.auth = Some(auth);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_cloud_client(mut self, client: crate::artifacts::cloud::ArtifactUploadClient) -> Self {
+        self.artifact_cloud_client = Some(client);
         self
     }
 
@@ -112,6 +124,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
+        .route("/commander/{*asset}", get(commander_chunk).options(preflight::<R>))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -209,6 +222,14 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
             "/v1/sessions/{session}/artifacts/{artifact}/url",
             get(artifact_view_url::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/ticket",
+            post(crate::hub::artifact_proxy::ticket::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/content",
+            get(crate::hub::artifact_proxy::content::<R>).options(crate::hub::artifact_proxy::preflight::<R>),
+        )
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
         .layer(middleware::from_fn_with_state(recovery, connection_evidence))
@@ -260,6 +281,29 @@ fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response
     response.headers_mut().insert(
         "cache-control",
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+const COMMANDER_CHUNKS: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/commander_chunks.rs"));
+
+async fn commander_chunk(OriginalUri(uri): OriginalUri) -> Response {
+    // Use the original, encoded path: Path<String> would decode forbidden `%`
+    // sequences before validation. Never consult the filesystem at runtime.
+    let Some(name) = uri.path().strip_prefix("/commander/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(mime) = super::chunk_assets::content_type(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((_, bytes)) = COMMANDER_CHUNKS.iter().find(|(asset, _)| *asset == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = commander_asset(bytes, mime);
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
     );
     response
 }
@@ -402,9 +446,9 @@ async fn security_headers(
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
-            "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"
+            "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
         )),
     );
     response
@@ -3405,7 +3449,15 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 pub(crate) enum PendingRefKind {
     Send,
     History,
+    /// Not a pending answer: this socket has read a work-events page, so the
+    /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
+    /// [`WORK_EVENTS_FOLLOWER`] and never consumed.
+    WorkEventsFollower,
 }
+
+/// The `PendingRefs` key that marks a socket following a session's work
+/// events. A NUL never appears in a browser-supplied request id.
+const WORK_EVENTS_FOLLOWER: &str = "\u{0}work-events";
 
 /// One authenticated socket's outstanding references, keyed by session and
 /// client reference.
@@ -3554,7 +3606,7 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
             Some(PendingRefKind::History) => Correlation::Consumed(None),
-            None => Correlation::Refused,
+            Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
@@ -3570,8 +3622,25 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             client_ref: Some(client_ref),
             message,
         }) => consume(client_ref, Some(Err(message))),
+        Ok(DaemonMessage::WorkEvents { request_id, .. }) => {
+            let answered = consume(request_id, None);
+            if matches!(answered, Correlation::Consumed(_)) {
+                pending.insert(
+                    (session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned()),
+                    PendingRefKind::WorkEventsFollower,
+                );
+            }
+            answered
+        }
+        // Only a socket that reads work events hears that more arrived.
+        Ok(DaemonMessage::WorkEventsAppended { .. }) => {
+            if pending.contains_key(&(session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned())) {
+                Correlation::Uncorrelated
+            } else {
+                Correlation::Refused
+            }
+        }
         Ok(DaemonMessage::ConversationHistory { request_id, .. })
-        | Ok(DaemonMessage::WorkEvents { request_id, .. })
         | Ok(DaemonMessage::WorkEventDetail { request_id, .. }) => consume(request_id, None),
         _ => Correlation::Uncorrelated,
     }
@@ -4091,6 +4160,10 @@ async fn release_lease<R: SessionReadModel>(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("scope denied")]
+struct ScopeDenied;
+
 fn authorize<R: SessionReadModel>(
     state: &HubState<R>,
     action: HubAction,
@@ -4117,7 +4190,7 @@ fn authorize<R: SessionReadModel>(
             target_uri,
             chrono::Utc::now(),
         )?;
-        anyhow::ensure!(context.has(scope), "scope denied");
+        if !context.has(scope) { return Err(ScopeDenied.into()); }
         Ok(Some(context))
     } else if state
         .authorizer

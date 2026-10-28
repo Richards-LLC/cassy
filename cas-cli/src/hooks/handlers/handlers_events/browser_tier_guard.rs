@@ -7,9 +7,6 @@ fn selected(args: &[String]) -> bool {
     let mut targeted = false;
     while i < args.len() {
         let arg = &args[i];
-        if arg.starts_with('>') || arg == "2>&1" {
-            break;
-        }
         let grep = arg.strip_prefix("--grep=").or_else(|| {
             (arg == "--grep" || arg == "-g")
                 .then(|| args.get(i + 1).map(String::as_str))
@@ -41,12 +38,29 @@ fn selected(args: &[String]) -> bool {
                 | "--timeout"
                 | "--grep-invert"
                 | "--shard"
+                | "--retries"
+                | "-j"
+                | "--trace"
+                | "--repeat-each"
+                | "--max-failures"
+                | "--browser"
+                | "--global-timeout"
+                | "--tsconfig"
         ) {
             i += 2;
             continue;
         }
+        // The direct CLI includes its subcommand; the verified runner does not.
+        if i == 0 && arg == "test" {
+            i += 1;
+            continue;
+        }
         if !arg.starts_with('-') {
-            let filename = std::path::Path::new(arg)
+            let spec = arg
+                .rsplit_once(':')
+                .filter(|(_, line)| !line.is_empty() && line.bytes().all(|c| c.is_ascii_digit()))
+                .map_or(arg.as_str(), |(spec, _)| spec);
+            let filename = std::path::Path::new(spec)
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
@@ -73,7 +87,7 @@ fn selected(args: &[String]) -> bool {
             {
                 return false;
             }
-            if let Some(stem) = [
+            let Some(stem) = [
                 ".spec.ts",
                 ".spec.mjs",
                 ".spec.js",
@@ -81,14 +95,14 @@ fn selected(args: &[String]) -> bool {
                 ".journey.ts",
             ]
             .iter()
-            .find_map(|suffix| filename.strip_suffix(suffix))
-            {
-                if !stem.chars().any(char::is_alphanumeric) {
-                    return false;
-                }
-                // Keep scanning: another positional regex could widen the run.
-                targeted = true;
+            .find_map(|suffix| filename.strip_suffix(suffix)) else {
+                // Playwright ORs file filters, so a plain word can widen the run too.
+                return false;
+            };
+            if !stem.chars().any(char::is_alphanumeric) {
+                return false;
             }
+            targeted = true;
         }
         i += 1;
     }
@@ -99,7 +113,7 @@ fn unfiltered(command: &str, depth: usize) -> bool {
     if depth > 4 {
         return true;
     }
-    for words in super::pre_tool::shell_statement_words(command) {
+    for words in super::pre_tool::shell_statement_arguments(command) {
         if words.first().is_some_and(|w| w.starts_with('#')) {
             continue;
         }

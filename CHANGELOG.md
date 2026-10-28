@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+
+- **Rich evidence in Commander** — Mermaid diagrams follow the current theme,
+  with sanitized SVG and readable source on errors. Unified diffs show line
+  numbers and changes, with long patches collapsed. Images, video, audio and
+  PDF first-page previews sit above their original file links in reserved
+  space. Renderers, diagram types and preview styles load on demand.
+
 ### Changed
 
 - **A usage-limited worker waits on its current account** — Automatic account
@@ -16,6 +24,15 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   rewritten, and queued switches from older versions are refused. Episode
   records and supervisor notice dedupe survive restarts. Picker recommendations
   and account selection for a new spawn without `config_dir` are unchanged.
+
+### Fixed
+
+- **Commander reply replay** — Accept replies whose optional operator label is
+  null, persist them before acknowledging delivery, and let previously pending
+  replies drain instead of replaying on every attach. History and live replies
+  share the same canonical label representation. Reply writes and receipt
+  checks now batch under load; a valid IndexedDB write waiting behind another
+  writer no longer expires after five seconds.
 
 ## [3.84.0] - 2026-10-27
 

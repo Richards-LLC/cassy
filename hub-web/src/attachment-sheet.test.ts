@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes, restateAttachmentNotes } from "./attachment-sheet";
+import { inlineAttachment } from "./rich-attachment";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { ArtifactRef, OperatorReply } from "./types";
@@ -52,7 +53,8 @@ describe("sheets in the thread", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, { supervisor: "atlas-sup", machine: "Atlas", project: "cas-src" });
     document.body.replaceChildren(view.element);
-    history.reply(reply(71, "Gate green. The brief and the report card are attached.", [brief, card]), at(9, 52));
+    const files = [{ ...brief }, card];
+    history.reply(reply(71, "Gate green. The brief and the report card are attached.", files), at(9, 52));
     view.update();
     const turn = view.element.querySelector<HTMLElement>(".msgs > .turn.sup")!;
     const children = [...turn.children].map((child) => child.tagName === "TIME" ? "time" : child.className.split(" ")[0]);
@@ -65,9 +67,14 @@ describe("sheets in the thread", () => {
     expect(sheets[1]?.querySelector(".plate")?.textContent).toBe("HTML");
     expect(turn.querySelectorAll("time")).toHaveLength(1);
     const first = sheets[0]!;
+    history.markReplyPersisted(71); view.update();
+    expect(view.element.querySelector(".sheet")).toBe(first);
     history.reply(reply(72, "Also tagged.", undefined, "answer"), at(9, 53)); view.update();
     expect(view.element.querySelector(".sheet")).toBe(first);
     expect(view.element.querySelector<HTMLElement>(".bub")?.classList.contains("group-first")).toBe(true);
+    files[0]!.name = "Updated evidence.pdf"; view.update();
+    expect(view.element.querySelector(".sheet")).not.toBe(first);
+    expect(view.element.querySelector(".sheet .fname")?.textContent).toBe("Updated evidence.pdf");
   });
   it("shows an attachment-only turn as its sheet alone", () => {
     const history = new ConversationHistory();
@@ -87,6 +94,9 @@ describe("sheets in the thread", () => {
       const ask = view.element.querySelector<HTMLElement>('[data-kind="ask"]')!;
       expect(ask.querySelector(".sheet")).not.toBeNull();
       expect(ask.nextElementSibling?.classList.contains("sheet")).toBe(false);
+      const sheet = ask.querySelector(".sheet");
+      history.markReplyPersisted(60); view.update();
+      expect(view.element.querySelector('.obj .sheet')).toBe(sheet);
     } finally { unregister(); }
   });
 });
@@ -179,4 +189,61 @@ describe("a note about the connection follows it (journey F28)", () => {
     expect(line()).toBeNull();
     setAttachmentNote(document, card.artifact_id, undefined);
   });
+});
+
+it("loads supported inline media into reserved space and keeps the original Open link", async () => {
+  for (const [mime, tag] of [["image/png", "img"], ["video/mp4", "video"], ["audio/mpeg", "audio"]]) {
+    const file = { ...brief, mime: mime!, name: "Evidence", artifact_id: `art-${tag}` };
+    const sheet = renderAttachmentSheet(document, file, "supervisor");
+    const resolve = vi.fn(async () => ({ ok: true as const, view: { artifact_id: file.artifact_id, url: "https://files.example/evidence" } }));
+    const root = inlineAttachment(sheet, file, resolve); document.body.append(root);
+    const viewport = root.querySelector<HTMLElement>(".rich-media");
+    expect(viewport).not.toBeNull();
+    expect(viewport!.style.aspectRatio || viewport!.style.height).toBeTruthy();
+    await vi.waitFor(() => expect(root.querySelector(tag!)).not.toBeNull());
+    expect(root.querySelector(tag!)?.getAttribute("src")).toBe("https://files.example/evidence");
+    expect(root.querySelector("a.sheet")).toBe(sheet);
+    root.remove(); document.body.append(root);
+    await Promise.resolve();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    if (tag === "video" || tag === "audio") { expect(root.querySelector(tag)?.hasAttribute("controls")).toBe(true); expect(root.querySelector(tag)?.hasAttribute("autoplay")).toBe(false); }
+    root.remove();
+  }
+  const root = inlineAttachment(renderAttachmentSheet(document, brief), brief, async () => ({ ok: true, view: { artifact_id: brief.artifact_id, url: "javascript:alert(1)" } }));
+  document.body.append(root);
+  await vi.waitFor(() => expect(root.textContent).toContain("Preview unavailable"));
+  expect(root.querySelector("canvas")).toBeNull(); root.remove();
+});
+
+it("renews a preview once on 401 or expiry, and never retries a refusal in a loop", async () => {
+  const realNow = Date.now.bind(Date);
+  let clockOffset = 0;
+  const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + clockOffset);
+  try {
+    for (const reason of ["401", "expired", "403"]) {
+      let cancelled = 0;
+      const probe = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        expect((init?.headers as Record<string, string>).Range).toBe("bytes=0-0");
+        return new Response(new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([0])); }, cancel() { cancelled += 1; } }), { status: reason === "403" ? 403 : 401 });
+      });
+      vi.stubGlobal("fetch", probe);
+      let tickets = 0;
+      const file = { ...brief, artifact_id: `art-refresh-${reason}`, mime: "image/png" };
+      const resolve = vi.fn(async () => ({ ok: true as const, view: { artifact_id: file.artifact_id, url: `https://files.example/content?t=ticket-${++tickets}`, expires_at: new Date(Date.now() + 5_000).toISOString() } }));
+      const root = inlineAttachment(renderAttachmentSheet(document, file), file, resolve); document.body.append(root);
+      try {
+        await vi.waitFor(() => expect(root.querySelector("img")).not.toBeNull());
+        if (reason === "expired") clockOffset += 6_000;
+        root.querySelector("img")!.dispatchEvent(new Event("error"));
+        if (reason !== "403") {
+          await vi.waitFor(() => expect(root.querySelector("img")?.getAttribute("src")).toContain("ticket-2"));
+          root.querySelector("img")!.dispatchEvent(new Event("error"));
+        }
+        await vi.waitFor(() => expect(root.textContent).toContain("Preview unavailable"));
+        expect(resolve).toHaveBeenCalledTimes(reason === "403" ? 1 : 2);
+        expect(probe).toHaveBeenCalledTimes(reason === "expired" ? 0 : 1);
+        expect(cancelled).toBe(reason === "expired" ? 0 : 1);
+      } finally { root.remove(); }
+    }
+  } finally { clock.mockRestore(); vi.unstubAllGlobals(); }
 });

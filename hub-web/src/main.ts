@@ -3543,7 +3543,7 @@ async function flushDeviceReplyWrites(): Promise<void> {
         finally { done(); }
       });
       // Receipt display does not delay the next item in the same commit.
-      try { updateConversationViews(); } catch { /* presentation cannot invalidate a durable receipt */ }
+      try { scheduleReplyPresentation(); } catch { /* presentation cannot invalidate a durable receipt */ }
     }
   } finally { writingDeviceReplies = false; }
 }

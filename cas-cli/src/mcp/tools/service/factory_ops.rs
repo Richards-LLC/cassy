@@ -1522,23 +1522,29 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
 }
 
 /// Fill only unresolved worker accounts. The queue persists the selected directory;
-/// the receipt explains the choice even when no account is eligible.
+/// the receipt explains the choice even when no account is eligible. A Codex
+/// lane keeps its requester's account; unscoped slots use the shared policy.
 fn recommend_spawn_accounts(
-    specs: &mut [cas_mux::WorkerSpec], _lane_request: bool, policy: &crate::config::AccountsConfig,
+    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, policy: &crate::config::AccountsConfig,
     now: chrono::DateTime<chrono::Utc>,
     mut collect: impl FnMut(crate::accounts::Provider) -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> String {
     let mut notices = Vec::new();
+    let unresolved = |spec: &cas_mux::WorkerSpec| {
+        spec.config_dir.is_none()
+            && !(lane_request && spec.cli == cas_mux::SupervisorCli::Codex
+                && spec.requester_config_dir.as_deref().is_some_and(|dir| !dir.trim().is_empty()))
+    };
     for (provider, cli) in [(crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
         (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex)] {
-        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none()) { continue }
+        if !specs.iter().any(|s| s.cli == cli && unresolved(s)) { continue }
         let accounts = match collect(provider) {
             Ok(rows) => rows,
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
         if let Some(recommended) = selection.recommended {
-            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none()) {
+            for spec in specs.iter_mut().filter(|s| s.cli == cli && unresolved(s)) {
                 if let Some(inherited) = spec.requester_config_dir.as_deref() {
                     notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
                 }

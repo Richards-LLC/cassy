@@ -214,6 +214,13 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
   });
 
+  // The built J24 journey exercises the retry; this pins its status reset to the real submit path.
+  it("clears an upload error after a successful retry", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    const submit = source.slice(source.indexOf("async function submitSupervisorMessage("), source.indexOf("function capturePairingDraft():"));
+    expect(submit).toMatch(/if \(sent && uploads && hasAttachments\) \{\s*uploads\.clear\(\);\s*if \(!messageStatus\?\.held\) clearComposerStatus\(\);/);
+  });
+
   // Contract: a deferred structural change flushes after focus/gestures end.
   // Consumer: main.ts's app event handlers and DeferredRenderScheduler.
   // The real heartbeat/draft path is exercised by HUB-J5; gesture wiring still

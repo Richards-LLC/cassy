@@ -51,6 +51,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
       await journey.stage("A connection loss keeps the files visibly, then reuses the upload identity", async () => {
         await send.click();
         await expect(page.locator(".composer-uploads")).toContainText("Files were not sent");
+        await expect(page.locator("#message-status")).toBeVisible();
         await expect(page.getByRole("button", { name: "Remove screenshot.png", exact: true })).toBeVisible();
         expect(uploads.size).toBe(1);
         const next = hub.nextSend();
@@ -61,6 +62,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         for (const upload of uploads.values()) expect(message.text).toContain(upload.path);
         expect(attempts[0]).toBe(attempts[1]);
         await expect(page.locator(".composer-uploads")).toBeHidden();
+        await expect(page.locator("#message-status")).toBeHidden();
         await expect(field).toHaveValue("");
       });
     };

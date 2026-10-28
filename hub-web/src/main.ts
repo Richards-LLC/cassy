@@ -3880,6 +3880,7 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   const sent = await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
   if (sent && uploads && hasAttachments) {
     uploads.clear();
+    if (!messageStatus?.held) clearComposerStatus();
     if (composer.isConnected && composer.value === originalText) {
       composer.value = ""; messageDraft = ""; messageDraftSelection = 0;
       rememberDraft(submissionKey, undefined);

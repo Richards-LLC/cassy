@@ -86,7 +86,7 @@ fn codex_handoff_row(row: &serde_json::Value) -> String {
         } else {
             message.lines().next().unwrap_or(message).to_string()
         };
-        format!("- {}\n", text(&summary, 100))
+        format!("- {}\n", text(&summary, 72))
     }
 }
 
@@ -156,7 +156,13 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
             detail.push_str(&format!("{label} ({}):\n", rows.len()));
             let mut used = 0;
             let mut ordered: Vec<_> = rows.iter().collect();
-            ordered.sort_by_key(|row| row["deliverables"]["parked_branch"].is_null());
+            ordered.sort_by_key(|row| {
+                if codex && row["name"].is_string() {
+                    !matches!(row["status"].as_str(), Some("active" | "idle"))
+                } else {
+                    row["deliverables"]["parked_branch"].is_null()
+                }
+            });
             for (index, row) in ordered.iter().enumerate() {
                 let line = if let Some(inherited) = row["inherited_handoff"].as_str() {
                     format!(
@@ -170,7 +176,7 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
                 };
                 // Reserve startup space for all three groups and the exact
                 // receipt path. Long timelines and large fleets stay in JSON.
-                if used + line.len() > 650 {
+                if used + line.len() > 650 || (codex && index >= 2) {
                     detail.push_str(&format!(
                         "- {} additional row(s): see receipt.\n",
                         rows.len() - index

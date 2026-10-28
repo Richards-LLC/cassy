@@ -422,6 +422,11 @@ bug_families:
     tasks: [cas-e155, cas-b255, cas-c3ac]
     invariants: [HUB-J4-GOAL, HUB-J4-VISUAL-SANDBOX, HUB-J4-MESSAGE-HIERARCHY]
     journeys: [HUB-J4]
+  opaque-auth-transient-state:
+    title: Opaque authenticated HTTP failures retain pairing while independent transport recovery may already be Live
+    tasks: [cas-ee74]
+    invariants: [HUB-J12-GOAL]
+    journeys: [HUB-J12]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code

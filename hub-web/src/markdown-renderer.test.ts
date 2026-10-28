@@ -137,7 +137,7 @@ it("never inserts a renderer's scripts, event handlers or foreignObject", async 
 
 it("renders unified diff lines literally and collapses long changes", async () => {
   const root = document.createElement("div"); document.body.append(root);
-  const patch = ['--- a/app.ts', '+++ b/app.ts', '@@ -1,25 +1,25 @@', '-<script>bad()</script>', '+safe()', ...Array.from({ length: 24 }, (_, i) => ` context ${i}`)].join("\n");
+  const patch = ['--- a/app.ts', '+++ b/app.ts', '@@ -1,26 +1,26 @@', '-<script>bad()</script>', '+safe()', '--- SQL comment', '+++ counter', ...Array.from({ length: 24 }, (_, i) => ` context ${i}`)].join("\n");
   root.append(...renderMarkdown(document, `\`\`\`diff\n${patch}\n\`\`\``));
   await vi.waitFor(() => expect(root.querySelector("details")).not.toBeNull());
   expect(root.querySelector("details")?.open).toBe(false);
@@ -146,5 +146,7 @@ it("renders unified diff lines literally and collapses long changes", async () =
   expect(root.querySelector("details")?.open).toBe(true);
   await vi.waitFor(() => expect(root.querySelector('[data-change="remove"]')?.textContent).toContain("<script>bad()</script>"));
   expect(root.querySelector('[data-change="add"]')?.textContent).toContain("safe()");
+  expect([...root.querySelectorAll('[data-change="remove"]')].some((row) => row.textContent?.includes("--- SQL comment"))).toBe(true);
+  expect([...root.querySelectorAll('[data-change="add"]')].some((row) => row.textContent?.includes("+++ counter"))).toBe(true);
   expect(root.querySelector("script")).toBeNull(); root.remove();
 });

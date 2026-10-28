@@ -2170,6 +2170,11 @@ async fn test_worktree_merge_targets_epic_branch_when_task_id_given() {
             run_git(&["add", "peer-target.txt", "push-input.txt"], &peer);
             run_git(&["commit", "-m", "peer advances epic"], &peer);
             run_git(&["push", "origin", "epic/foo"], &peer);
+            if target_valid {
+                // Moving validation must not change a relative local origin.
+                let relative_origin = format!("../{}", remote.path().file_name().unwrap().to_str().unwrap());
+                run_git(&["remote", "set-url", "origin", &relative_origin], &repo.root);
+            }
             run_git(&["branch", "-D", "epic/foo"], &repo.root);
             run_git(
                 &["update-ref", "-d", "refs/remotes/origin/epic/foo"],

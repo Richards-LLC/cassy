@@ -82,6 +82,7 @@ impl std::fmt::Display for NamedRefusal {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClaimedDelivery {
     pub id: String,
+    pub occurrence_id: Option<String>,
     pub event_kind: Option<String>,
     pub delivery_generation: u64,
     pub lease_token: String,
@@ -640,6 +641,10 @@ fn delivery_path(id: &str, action: &str) -> Result<String, NamedRefusal> {
 fn parse_delivery(item: &Value) -> Option<ClaimedDelivery> {
     Some(ClaimedDelivery {
         id: item["delivery"]["id"].as_str()?.to_string(),
+        occurrence_id: item["delivery"]["occurrence_id"]
+            .as_str()
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .map(|id| id.to_string()),
         event_kind: item["delivery"]["event_kind"].as_str().map(str::to_string),
         delivery_generation: item["delivery"]["delivery_generation"].as_u64()?,
         // Recover listings carry no lease: their admissions are already acked.
@@ -714,7 +719,14 @@ impl PromptQueueTyper<'_> {
         // the legacy numeric carrier is unchanged for its other producers.
         let item = WakeItem { message_ts, thread_ts, user: String::new(), age_secs: source_age.unwrap_or_default(), human_mentions: Vec::new() };
         let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
-        prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), text);
+        let delivery_id = crate::prompt_revalidation::xml_attribute_value(&delivery.id);
+        let identity = match &delivery.occurrence_id {
+            Some(occurrence_id) => format!(
+                "Claimed delivery_id={delivery_id} occurrence_id={occurrence_id}\nFor a reply to this claimed mention, pass this occurrence_id to coordination reply_intent; never use the Slack message timestamp.\n"
+            ),
+            None => format!("Claimed delivery_id={delivery_id}\n"),
+        };
+        prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), &format!("{identity}{text}"));
         self.0
             .enqueue_idempotent_urgent(
                 &format!("violet-activity:{channel}"),

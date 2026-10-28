@@ -74,6 +74,13 @@ for (const [index, variant] of variants.entries()) {
       await journey.stage("Decode an inline image without moving its file caption", async () => {
         let releaseImage!: () => void;
         const held = new Promise<void>((resolve) => { releaseImage = resolve; });
+        let abortTicket!: () => void;
+        const failedTicket = new Promise<void>((resolve) => { abortTicket = resolve; });
+        let attempts = 0;
+        await page.route(`${origin}/v1/sessions/${PELICAN}/artifacts/art-inline-image/ticket`, async (route) => {
+          if (++attempts === 1) { await failedTicket; await route.abort("connectionrefused"); }
+          else await route.fallback();
+        });
         await page.route(content("art-inline-image"), async (route) => {
           await held;
           await route.fulfill({ contentType: "image/png", body: readFileSync(new URL("../media/evidence.png", import.meta.url)) });
@@ -81,7 +88,16 @@ for (const [index, variant] of variants.entries()) {
         hub.supervisorSays(PELICAN, "The screenshot is attached.", { attachments: [file("art-inline-image", "Evidence screenshot.png", "image/png")] });
         const image = log.getByRole("img", { name: "Evidence screenshot.png", exact: true });
         try {
+          await expect.poll(() => attempts).toBe(1);
+          hub.hold(PELICAN); hub.drop(PELICAN);
+          await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
+          abortTicket();
+          const preview = log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"]) .rich-media');
+          await expect(preview).toContainText("Preview unavailable");
+          hub.release(PELICAN);
+          await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
           await expect(image).toBeAttached(); await image.scrollIntoViewIfNeeded();
+          expect(attempts).toBe(2);
           const caption = log.locator('a[data-artifact-id="art-inline-image"]');
           const before = await caption.boundingBox();
           releaseImage();
@@ -89,7 +105,7 @@ for (const [index, variant] of variants.entries()) {
           const after = await caption.boundingBox();
           expect(after!.y).toBeCloseTo(before!.y, 0);
           expect(after!.height).toBeCloseTo(before!.height, 0);
-        } finally { releaseImage(); }
+        } finally { abortTicket(); hub.release(PELICAN); releaseImage(); }
       });
 
       await journey.stage("Read the real PDF first page inline", async () => {

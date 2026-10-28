@@ -347,7 +347,8 @@ fn weekly_line(
         Some(used) if used.is_finite() && used >= 0.0 => {
             format!("weekly {:.0}% left, {reset}", 100.0 - used)
         }
-        None if weekly.resets_at.is_none() => "weekly not opened yet".to_string(),
+        // No percentage and no reset is not evidence of an unused window.
+        None if weekly.resets_at.is_none() => "weekly usage unknown (not reported)".to_string(),
         _ => format!("weekly usage unknown, {reset}"),
     })
 }

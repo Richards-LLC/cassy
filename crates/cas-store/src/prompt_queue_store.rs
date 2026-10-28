@@ -10734,10 +10734,11 @@ mod tests {
     #[test]
     fn lifecycle_digest_aba_uses_newer_same_session_occurrence_only() {
         use crate::{AgentStore, NotifyIdempotentResult, SqliteSupervisorQueueStore, SupervisorQueueStore};
-        for (newer_session, newer_owner) in [
-            ("session", "supervisor-id"),
-            ("other-session", "supervisor-id"),
-            ("session", "other-supervisor-id"),
+        for (newer_session, newer_owner, publish_later) in [
+            ("session", "supervisor-id", true),
+            ("other-session", "supervisor-id", true),
+            ("session", "other-supervisor-id", true),
+            ("session", "supervisor-id", false),
         ] {
             let (temp, store) = create_test_store();
             let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
@@ -10776,25 +10777,30 @@ mod tests {
             let EnqueueIdempotentResult::Created(old_prompt) = old_prompt else { panic!("old prompt") };
             task.status = TaskStatus::Blocked;
             tasks.update(&task).unwrap();
-            publish("task_blocked", "in_progress", "blocked", newer_session, newer_owner, first + chrono::Duration::seconds(1));
+            if publish_later {
+                publish("task_blocked", "in_progress", "blocked", newer_session, newer_owner, first + chrono::Duration::seconds(1));
+            }
             task.status = TaskStatus::Open;
             tasks.update(&task).unwrap();
-            publish("task_ready", "blocked", "open", newer_session, newer_owner, first + chrono::Duration::seconds(2));
+            if publish_later {
+                publish("task_ready", "blocked", "open", newer_session, newer_owner, first + chrono::Duration::seconds(2));
+            }
             task.status = TaskStatus::InProgress;
             tasks.update(&task).unwrap();
-            let latest = publish("task_started", "open", "in_progress", newer_session, newer_owner, first + chrono::Duration::seconds(3));
-            if newer_session == "session" && newer_owner == "supervisor-id" {
+            let latest = publish_later.then(|| publish("task_started", "open", "in_progress", newer_session, newer_owner, first + chrono::Duration::seconds(3)));
+            if newer_session == "session" && newer_owner == "supervisor-id" && publish_later {
                 let latest_at = (first + chrono::Duration::seconds(3)).to_rfc3339();
+                let latest = latest.unwrap();
                 let latest_body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" notification_id=\"{latest}\" occurrence=\"{latest_at}\">restarted</task-lifecycle>", task.id);
                 store.enqueue_idempotent(&format!("lifecycle:{latest}"), "supervisor", &latest_body, Some("session"), Some("latest start"), None, &format!("lifecycle-outbox:{latest}"), Some(&QueueOrigin::Daemon)).unwrap();
             }
             let shown = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
-            if newer_session == "session" && newer_owner == "supervisor-id" {
+            if newer_session == "session" && newer_owner == "supervisor-id" && publish_later {
                 assert_eq!(shown.iter().map(|row| row.summary.as_deref()).collect::<Vec<_>>(), vec![Some("latest start")]);
                 assert_eq!(store.message_delivery_report(old_prompt).unwrap().unwrap().pending_reason, Some(PendingReason::SupersededStale));
                 assert_eq!(store.recipient_receipt(old_prompt, "supervisor").unwrap(), None);
             } else {
-                assert_eq!(shown.iter().map(|row| row.id).collect::<Vec<_>>(), vec![old_prompt], "another session or owner cannot prove supersession");
+                assert_eq!(shown.iter().map(|row| row.id).collect::<Vec<_>>(), vec![old_prompt], "missing, other-session or other-owner occurrence cannot prove supersession");
             }
         }
     }

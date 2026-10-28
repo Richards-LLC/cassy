@@ -17,6 +17,9 @@ use chrono::{DateTime, Utc};
 /// so a silent supervisor is nudged without producing a notification storm.
 pub(crate) const SUPERVISOR_STALL_REFIRE_SECS: i64 = 10 * 60;
 
+/// The same ready-work proposal must not repeatedly consume supervisor turns.
+const ASSIGN_READY_WORK_COOLDOWN_SECS: i64 = 30 * 60;
+
 /// cas-7456 (GH #1302 D): silence after which an unanswered supervisor-idle
 /// page also reaches the operator, once per silence episode. Two supervisors
 /// idled 11–12 h overnight while the page re-fired into a pane nobody read.
@@ -220,6 +223,10 @@ pub struct SupervisorStallTracker {
     /// delivery must not refire the same close demand every ten minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merged_close_blocked_key: Option<String>,
+    /// Recent delivered assignment texts, retained across supervisor activity
+    /// and metadata reloads. Pruned at the assignment cooldown boundary.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub recent_assignment_wakes: HashMap<String, DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,9 +288,21 @@ impl SupervisorStallTracker {
         let merged_state_repeated = merged_key.as_ref().is_some_and(|key| {
             self.last_merged_close_blocked_key.as_ref() == Some(key)
         });
-        let wake = if condition_true && refire_due && !merged_state_repeated {
+        let assignment_key = actionable.as_ref().and_then(|action| {
+            matches!(action, SupervisorActionableState::AssignReadyWork { .. })
+                .then(|| action.next_step_text())
+        });
+        self.recent_assignment_wakes.retain(|_, at| {
+            (now - *at).num_seconds() < ASSIGN_READY_WORK_COOLDOWN_SECS
+        });
+        let assignment_recent = assignment_key.as_ref()
+            .is_some_and(|key| self.recent_assignment_wakes.contains_key(key));
+        let wake = if condition_true && refire_due && !merged_state_repeated && !assignment_recent {
             self.last_wake_at = Some(now);
             self.last_merged_close_blocked_key = merged_key;
+            if let Some(key) = assignment_key {
+                self.recent_assignment_wakes.insert(key, now);
+            }
             actionable
         } else {
             if merged_key.is_none() {
@@ -710,16 +729,15 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
         ids.sort();
         ids
     };
-    let mut task_ids = focused_open_epic
-        .map(|epic_id| ready_ids(&|task| task.epic.as_deref() == Some(epic_id)))
-        .unwrap_or_default();
-    // cas-7456 (GH #1302 E): idle workers must never sit beside a non-empty
-    // ready queue. When the focused epic has no ready work, or no epic is
-    // focused, offer the session's own ready tasks (the snapshot is already
-    // project-scoped, cas-0c98).
-    if task_ids.is_empty() {
-        task_ids = ready_ids(&|_| true);
-    }
+    // A pin is an assignment boundary, including when it has no ready work
+    // or no longer resolves. Only an explicit no-focus state offers the
+    // existing project-wide ready queue (cas-0c98 / GH #1302).
+    let task_ids = match focused_epic_id {
+        Some(epic_id) if focused_open_epic == Some(epic_id) =>
+            ready_ids(&|task| task.epic.as_deref() == Some(epic_id)),
+        Some(_) => Vec::new(),
+        None => ready_ids(&|_| true),
+    };
     if task_ids.is_empty() {
         return None;
     }
@@ -742,6 +760,11 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
             )
         })
         .collect::<HashSet<_>>();
+    let pending_reviewers = data.agents.iter()
+        .filter_map(|agent| agent.active_lease.as_ref()?.pending_qa.as_ref())
+        .filter(|pass| pass.deadline_at > now)
+        .filter_map(|pass| pass.reviewer_agent_id.as_deref())
+        .collect::<HashSet<_>>();
     let mut idle_workers = data
         .agents
         .iter()
@@ -749,6 +772,8 @@ pub(crate) fn supervisor_actionable_state_with_ownership(
             agent.name != supervisor_name
                 && agent.current_task.is_none()
                 && !agent.qa_reviewer_between_rounds
+                && !pending_reviewers.contains(agent.id.as_str())
+                && !pending_reviewers.contains(agent.name.as_str())
                 && !held_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.name)
                 && !assigned_workers.contains(&agent.id)

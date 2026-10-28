@@ -367,16 +367,31 @@ function splitCells(line: string): string[] {
  */
 export function messageBlocks(message: string): MessageBlock[] {
   const blocks: MessageBlock[] = [];
-  const lines = message.split(/\r?\n/);
+  // Keep source bytes for fenced-code Copy, including original separators.
+  const parts = message.split(/(\r\n|\r|\n)/);
+  const lines = parts.filter((_, index) => index % 2 === 0);
   let text: string[] = [];
+  let fence: string | undefined;
+  const appendTextLine = (index: number): void => { text.push(parts.slice(index * 2, index * 2 + 2).join("")); };
   const flushText = (): void => {
-    const joined = text.join("\n").trim();
+    const joined = fence ? text.join("").trimStart() : text.join("").trim();
     if (joined) blocks.push({ type: "text", text: joined });
     text = [];
   };
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
-    if (!TABLE_ROW.test(line)) { text.push(line); continue; }
+    const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (fence) {
+      appendTextLine(index);
+      if (marker && marker[1]![0] === fence[0] && marker[1]!.length >= fence.length && !marker[2]!.trim()) fence = undefined;
+      continue;
+    }
+    if (marker && !(marker[1]![0] === "`" && marker[2]!.includes("`"))) {
+      fence = marker[1]!;
+      appendTextLine(index);
+      continue;
+    }
+    if (!TABLE_ROW.test(line)) { appendTextLine(index); continue; }
     const rows: string[][] = [];
     let header: string[] | undefined;
     while (index < lines.length && TABLE_ROW.test(lines[index]!)) {

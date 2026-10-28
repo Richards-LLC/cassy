@@ -44,6 +44,31 @@ for (const [index, variant] of variants.entries()) {
         expect(richRequests).toEqual([]);
       });
 
+      await journey.stage("Copy exact source and wrap a code frame with the keyboard", async () => {
+        const source = `const message = "<script>&amp;雪 ${"long_source_".repeat(18)}";  \n\tconsole.log(message);\n| literal | source |\n| --- | --- |`;
+        hub.supervisorSays(PELICAN, `# Source ready to copy\n\n\`\`\`ts src/example.ts\n${source}\n\`\`\`\n\n~~~unknown\nUnknown languages stay readable.\n~~~`);
+        const frame = log.locator(".code-frame").first();
+        await expect(frame.locator(".code-frame-label")).toHaveText("src/example.ts");
+        await expect(frame.locator("code")).toHaveText(source, { useInnerText: false });
+        const wrap = frame.getByRole("button", { name: "Wrap lines in src/example.ts" });
+        await wrap.focus(); await page.keyboard.press("Enter");
+        await expect(wrap).toHaveAttribute("aria-pressed", "true");
+        await expect(log.locator(".code-frame").nth(1).getByRole("button", { name: "Wrap lines in unknown" })).toHaveAttribute("aria-pressed", "false");
+        expect(await frame.locator("pre").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        const copy = frame.getByRole("button", { name: "Copy source from src/example.ts" });
+        await copy.focus(); await page.keyboard.press("Enter");
+        await expect(frame.getByRole("status")).toHaveText("Copied");
+        if (index === 0) expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
+        await expect(log.locator(".code-frame-label").nth(1)).toHaveText("unknown");
+        // A refused browser clipboard produces a visible recovery action.
+        await page.evaluate(() => { Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: () => Promise.reject(new Error("Permission denied")) }); });
+        await copy.click();
+        await expect(frame.getByRole("status")).toContainText("Copy failed");
+        await expect(copy).toBeEnabled();
+        await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
+      });
+
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {
         hub.supervisorSays(PELICAN, "# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```mermaid\ninvalid diagram source\n```");
         await expect(log.getByRole("img", { name: "Mermaid diagram", exact: true })).toBeVisible();
@@ -88,6 +113,9 @@ for (const [index, variant] of variants.entries()) {
         hub.supervisorSays(PELICAN, "The screenshot is attached.", { attachments: [file("art-inline-image", "Evidence screenshot.png", "image/png")] });
         const image = log.getByRole("img", { name: "Evidence screenshot.png", exact: true });
         try {
+          // Preview tickets are visibility-driven; inspect the attachment before
+          // waiting for its request, even after a tall wrapped code block.
+          await log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"])').scrollIntoViewIfNeeded();
           await expect.poll(() => attempts).toBe(1);
           hub.hold(PELICAN); hub.drop(PELICAN);
           await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");

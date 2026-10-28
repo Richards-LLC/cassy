@@ -177,3 +177,16 @@ configured directory is healthy, without claiming hook contents are current.
 `--fix` never changes Git configuration or installs hooks. The existing renderer
 and JSON array contract apply. The isolated final-build CLI probe and terminal
 captures live with task cas-edb0's evidence.
+
+## Shipped-issue repository failures
+
+| Field | Sentence |
+| --- | --- |
+| First two lines | The existing doctor verdict counts a partially checked shipped-issues row as a warning. |
+| Scannable | Successful shipped-issue findings stay first, followed by unchecked references and their causes. |
+| Readable | Task/GH shorthand resolves against the project repository; a failed foreign repository never erases valid findings. |
+| Machine output | The existing JSON check carries the same warning and unchecked-reference message, with no schema change. |
+| Omitted | The project repository is checked first within the existing three-repository budget; unchecked notes show one reference per repo, up to three, with omitted reference/repository counts. A wholly unavailable lookup remains an explicit skip. |
+
+Design: `DESIGN.md@b43940e43`. Renderer, palette and grouping are unchanged.
+Exact-revision candidate terminal captures are recorded in the task artifacts.

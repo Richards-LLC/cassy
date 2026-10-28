@@ -4,6 +4,7 @@
  * The renderer builds every node itself. Body text is never assigned to
  * innerHTML, which keeps tags, entities, and unsupported link schemes literal.
  */
+import { createCodeFrame } from "./code-frame";
 
 interface ListMarker {
   indent: number;
@@ -11,7 +12,7 @@ interface ListMarker {
   content: string;
 }
 
-const FENCE = /^\s{0,3}`{3,}(?:[^`]*)$/;
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const HEADING = /^\s{0,3}#{1,6}(?:\s+|$)(.*)$/;
 const CALLOUT = /^\s{0,3}>[ \t]?\[!(NOTE|WARNING|CAUTION)\][ \t]*$/i;
 const QUOTE_LINE = /^\s{0,3}>[ \t]?/;
@@ -28,7 +29,13 @@ function listMarker(line: string): ListMarker | undefined {
 }
 
 function isFence(line: string): boolean {
-  return FENCE.test(line);
+  const match = FENCE.exec(line);
+  return match !== null && !(match[1]![0] === "`" && match[2]!.includes("`"));
+}
+
+function closesFence(line: string, opening: string): boolean {
+  const match = FENCE.exec(line);
+  return match !== null && match[1]![0] === opening[0] && match[1]!.length >= opening.length && !match[2]!.trim();
 }
 
 function isBlockStart(line: string): boolean {
@@ -259,7 +266,9 @@ export function renderMarkdown(document: Document, source: string): HTMLElement[
 }
 
 function renderBlocks(document: Document, source: string, allowCallouts: boolean): HTMLElement[] {
-  const lines = normalizePlainText(source).replace(/\r\n?/g, "\n").split("\n");
+  // Keep original line separators for Copy; prose parsing still uses lines.
+  const parts = normalizePlainText(source).split(/(\r\n|\r|\n)/);
+  const lines = parts.filter((_, part) => part % 2 === 0);
   const nodes: HTMLElement[] = [];
   let index = 0;
   while (index < lines.length) {
@@ -267,14 +276,20 @@ function renderBlocks(document: Document, source: string, allowCallouts: boolean
     if (!line.trim()) { index += 1; continue; }
 
     if (isFence(line)) {
+      const fence = FENCE.exec(line)!;
+      const info = fence[2]!.trim();
+      const [tag = "", ...metadata] = info.split(/\s+/);
+      const filename = metadata.join(" ").replace(/^(?:title|filename)=["']?(.*?)["']?$/, "$1") || undefined;
+      const language = tag.toLowerCase();
       index += 1;
-      const codeLines: string[] = [];
-      while (index < lines.length && !isFence(lines[index]!)) codeLines.push(lines[index++]!);
+      const start = index;
+      while (index < lines.length && !closesFence(lines[index]!, fence[1]!)) index += 1;
+      // The separator immediately before a closing fence is structural. All
+      // bytes inside the source, including CRLF, tabs and blank lines, survive.
+      const literal = index > start ? parts.slice(start * 2, (index - 1) * 2 + 1).join("") : "";
       if (index < lines.length) index += 1;
-      const pre = document.createElement("pre"); pre.className = "markdown-code";
-      const code = document.createElement("code"); code.textContent = codeLines.join("\n"); pre.append(code);
-      nodes.push(pre);
-      const language = line.trim().replace(/^`+/, "").trim().toLowerCase();
+      const { frame, pre } = createCodeFrame(document, { source: literal, language: tag, filename });
+      nodes.push(frame);
       if (["mermaid", "diff", "patch"].includes(language)) {
         void import("./rich-code").then(({ enhanceCode }) => enhanceCode(pre, language)).catch(() => { pre.dataset.richState = "fallback"; });
       }
@@ -303,10 +318,11 @@ function renderBlocks(document: Document, source: string, allowCallouts: boolean
       index += 1;
       const body: string[] = [];
       while (index < lines.length && QUOTE_LINE.test(lines[index]!)) {
-        body.push(lines[index++]!.replace(QUOTE_LINE, ""));
+        body.push(lines[index]!.replace(QUOTE_LINE, "") + (parts[index * 2 + 1] ?? ""));
+        index += 1;
       }
       // Reuse safe blocks; nested callout markers stay literal, with bounded depth.
-      aside.append(...renderBlocks(document, body.join("\n"), false));
+      aside.append(...renderBlocks(document, body.join(""), false));
       nodes.push(aside); continue;
     }
 
@@ -332,8 +348,9 @@ export function plainTextMarkdown(source: string): string {
   while (index < lines.length) {
     const line = lines[index]!;
     if (isFence(line)) {
+      const opening = FENCE.exec(line)![1]!;
       index += 1;
-      while (index < lines.length && !isFence(lines[index]!)) output.push(lines[index++]!);
+      while (index < lines.length && !closesFence(lines[index]!, opening)) output.push(lines[index++]!);
       if (index < lines.length) index += 1;
       continue;
     }

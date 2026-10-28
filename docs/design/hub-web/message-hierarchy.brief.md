@@ -30,4 +30,12 @@ One existing unit case gains heading-role assertions. One browser regression rea
 
 ## Critique
 
-Pending rendered evidence.
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Short labeled margin rules live inside the established supervisor bubble; no competing attention card is introduced. |
+| Fit | 4 | Descending heading sizes expose the reply outline before the reader reaches the caveats. |
+| Hierarchy | 4 | The answer leads at 21px, evidence at 15px, checks at 14px; all three exceed the labeled 13px caveats. |
+| Craft | 4 | Eight real-bundle captures retain whole text; the browser assertions find no page overflow and a consistent unfilled left rule. |
+| Accessibility | 4 | Semantic headings and labeled asides survive forced colors; the safe HTTPS link remains native, and no live role or action is created. |
+
+Scored from the captured production-bundle reply on 2026-10-28. Strict mechanical QA is packaged with the final delivery; this table does not claim a completed mechanical run.

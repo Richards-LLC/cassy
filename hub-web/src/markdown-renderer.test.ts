@@ -5,6 +5,38 @@ import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 vi.mock("pele/lazy", async (original) => ({ ...await original<typeof import("pele/lazy")>() }));
 
 describe("supervisor markdown subset", () => {
+  it("copies literal fence source with honest feedback and wraps each block independently", async () => {
+    const source = '\tconst literal = "<script>&amp;雪";  \r\n\r\n  done();';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    const root = document.createElement("div");
+    root.append(...renderMarkdown(document, `\`\`\`ts src/example.ts\r\n${source}\r\n\`\`\`\r\n\r\n~~~unknown\nuntouched\n~~~`));
+    const frames = root.querySelectorAll<HTMLElement>(".code-frame");
+    expect(frames).toHaveLength(2);
+    expect(frames[0]!.querySelector(".code-frame-label")?.textContent).toBe("src/example.ts");
+    expect(frames[1]!.querySelector(".code-frame-label")?.textContent).toBe("unknown");
+    expect(root.querySelector("script")).toBeNull();
+    const copy = frames[0]!.querySelector<HTMLButtonElement>('[data-action="copy"]')!;
+    copy.click();
+    await vi.waitFor(() => expect(frames[0]!.querySelector('[role="status"]')?.textContent).toBe("Copied"));
+    expect(writeText).toHaveBeenCalledWith(source);
+    writeText.mockRejectedValueOnce(new Error("Denied"));
+    copy.click();
+    await vi.waitFor(() => expect(frames[0]!.querySelector('[role="status"]')?.textContent).toContain("Copy failed"));
+    expect(copy.disabled).toBe(false);
+    const wrap = frames[0]!.querySelector<HTMLButtonElement>('[data-action="wrap"]')!;
+    expect(wrap.getAttribute("aria-pressed")).toBe("false");
+    wrap.click();
+    expect(wrap.getAttribute("aria-pressed")).toBe("true");
+    expect(frames[0]!.dataset.wrap).toBe("true");
+    expect(frames[1]!.dataset.wrap).toBe("false");
+    wrap.click();
+    expect(wrap.getAttribute("aria-pressed")).toBe("false");
+    Reflect.deleteProperty(navigator, "clipboard");
+    frames[1]!.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();
+    expect(frames[1]!.querySelector('[role="status"]')?.textContent).toContain("Copy failed");
+  });
+
   it("renders reply structure without leaking markdown markers", () => {
     const root = document.createElement("div");
     root.append(...renderMarkdown(document, [
@@ -22,6 +54,8 @@ describe("supervisor markdown subset", () => {
       "```sh",
       "cargo check -p cas",
       "```",
+      "",
+      "> [!NOTE]\r\n> ```sh\r\n> \tkeep();  \r\n> \r\n> end();\r\n> ```",
     ].join("\n")));
 
     expect(root.querySelector("h1.markdown-heading strong")?.textContent).toBe("Ship result");
@@ -35,6 +69,8 @@ describe("supervisor markdown subset", () => {
     expect(root.querySelectorAll(".markdown-list-nested")).toHaveLength(1);
     expect(root.querySelector("ol")?.textContent).toContain("first");
     expect(root.querySelector(".markdown-code code")?.textContent).toBe("cargo check -p cas");
+    expect(root.querySelector(".code-frame-label")?.textContent).toBe("sh");
+    expect(root.querySelector(".markdown-callout code")?.textContent).toBe("\tkeep();  \r\n\r\nend();");
     expect(root.textContent).not.toContain("**");
     expect(root.textContent).not.toContain("```sh");
   });

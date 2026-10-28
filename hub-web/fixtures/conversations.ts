@@ -306,7 +306,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // Polish fixture; upload, ticket, reload and second-device behavior is HUB-J24.
     installAttachmentSheet((sheet, file) => {
       if (state === 'conversation-attachment-failure') return inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: new URL('/attachment-preview-missing.png', location.href).href } }));
-      const root = inlineAttachment(sheet, file, () => new Promise(() => {}), { openPreview: true });
+      const root = inlineAttachment(sheet, file, () => new Promise(() => {}));
       const viewport = root.querySelector<HTMLElement>('.rich-media');
       if (viewport) {
         const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;

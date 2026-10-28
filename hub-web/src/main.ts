@@ -552,6 +552,13 @@ function syncEarlyThread(): void {
     && threadBeforePanes({ placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) });
   for (const [key, view] of [...conversationViews]) {
     if (!key.endsWith(`:${EARLY_THREAD}`) || (wanted && key === earlyThreadKey(threadKey!))) continue;
+    // A catalog/attach render may retire the early view before the queued
+    // session-state callback gets to capture its focus. Hand it off here,
+    // while the actual focused node still exists, respecting newer choices.
+    const active = document.activeElement;
+    if (active && view.element.contains(active)) {
+      landFocus([focusTargets.thread, focusTargets.conversationBack], { keep: true, nextTask: true, waitMs: 2_000, since: active });
+    }
     view.dispose();
     conversationViews.delete(key);
   }

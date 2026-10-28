@@ -2131,8 +2131,10 @@ fn systemd_unit_command(
     let mut command = std::process::Command::new("systemd-run");
     command.arg("--user")
         .arg(format!("--unit=cas-factory-{name}"))
+        .arg("--slice=agent.slice")
         .arg("--collect")
         .arg("--property=Type=exec")
+        .arg("--property=Nice=5")
         .arg(format!("--property=StandardError=append:{}", log_path.display()))
         .arg("--property=StandardOutput=null")
         .arg(format!("--working-directory={}", root.display()));

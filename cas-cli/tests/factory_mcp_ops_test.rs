@@ -11073,6 +11073,11 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
             let start = rebound.deliverables.factory_branch_start.as_ref().unwrap();
             assert_eq!(start.branch, branch, "{shape}");
             assert_eq!(
+                start.work_target.target_branch,
+                if retargeted { "epic/recovery" } else { "main" },
+                "{shape}: record the explicitly selected target"
+            );
+            assert_eq!(
                 start.base_sha, target_tip,
                 "{shape}: replace the obsolete start base"
             );

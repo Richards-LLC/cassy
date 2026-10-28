@@ -6794,7 +6794,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             "SELECT id, source, target, prompt, created_at, processed_at, summary, priority, acked_at, urgent, factory_session, origin_agent_id, origin_kind, operator_label, operator_device_id, operator_device_label, operator_scopes, operator_verified
              FROM prompt_queue q
              WHERE q.factory_session = ?
-               AND (q.source LIKE 'lifecycle-wake:%' OR q.source LIKE 'lifecycle:%')
+               AND q.source LIKE 'lifecycle-wake:%'
+               {NOT_NOTICE_DIGEST_Q_SQL}
                AND lower(q.target) IN ({alias_slots})
                AND (q.created_at <= ? OR q.highest_stage = 'abandoned')
                AND q.created_at >= ?
@@ -9284,20 +9285,21 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         // arrived" — it is stamped only by `mark_transport_delivered` /
         // a fully successful broadcast. Pending relays older than 60 seconds
         // must be visible before their retry budget is exhausted.
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT id, source, target, summary, highest_stage, last_pending_reason,
                     last_pending_detail, factory_session, created_at, processed_at, prompt
              FROM prompt_queue
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
+               {NOT_NOTICE_DIGEST_SQL}
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
                         AND created_at <= ?))
                AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)
              ORDER BY id DESC
              LIMIT ?",
-        )?;
+        ))?;
         let cutoff = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
         let rows = stmt.query_map(params![cutoff, limit as i64], |row| {
             let created_at: String = row.get(8)?;
@@ -9347,14 +9349,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
     fn undelivered_lifecycle_relay_count(&self) -> Result<usize> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM prompt_queue
+            &format!("SELECT COUNT(*) FROM prompt_queue
              WHERE transport_delivered_at IS NULL
                AND acked_at IS NULL
                AND source LIKE 'lifecycle-wake:%'
+               {NOT_NOTICE_DIGEST_SQL}
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
                         AND created_at <= ?))
-               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)",
+               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)"),
             params![(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()],
             |row| row.get(0),
         )?;

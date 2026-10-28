@@ -370,16 +370,25 @@ fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
     assert!(f.app.refresh_prompt_for_delivery(&mut ready));
     // Same-tip completion must not duplicate the wake.
     assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
-    // Ordinary park is an explicit completion boundary. Historical checkpoint
-    // notes cannot silence its single signal (use a fresh receipt store).
-    std::fs::remove_dir_all(f.app.cas_dir.join("receipts/merge-ready")).unwrap();
+    // Parking the already-signalled tip must not create a second wake.
     task.status = TaskStatus::AwaitingMerge;
     task.deliverables.factory_branch_anchor = Some(checkpoint);
     store.update(&task).unwrap();
     let DirectorEvent::WorkerIdle { active_task: Some(active), .. } = &mut f.event else { unreachable!() };
     active.task_status = TaskStatus::AwaitingMerge;
-    assert_eq!(f.relay().iter().filter(|prompt| prompt.is_merge_ready()).count(), 1);
     assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    drop(f);
+
+    // A distinct parked delivery is an explicit completion boundary, even
+    // with historical incomplete notes. It must still signal exactly once.
+    let mut parked = Fixture::new();
+    let store = crate::store::open_task_store_local(&parked.app.cas_dir).unwrap();
+    let mut task = store.get("cas-9efb-test").unwrap();
+    task.execution_note = Some("test-first".into());
+    task.notes = "[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint, not merge-ready.".into();
+    store.update(&task).unwrap();
+    assert_eq!(parked.relay().iter().filter(|prompt| prompt.is_merge_ready()).count(), 1);
+    assert!(parked.relay().iter().all(|prompt| !prompt.is_merge_ready()));
 }
 
 #[test]

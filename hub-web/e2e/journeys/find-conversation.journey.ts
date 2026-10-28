@@ -724,11 +724,17 @@ for (const width of [1280, 390]) {
       await expect(page.locator("#conversation-connection")).toContainText("Ended");
       await expect(page.locator(".session-end-receipt")).toContainText("Supervisor and 2 workers stopped");
       await expect(page.locator(".session-end-receipt")).toContainText("/exit");
-      await expect(page.locator(".session-end-orphans")).toContainText("Still alive: worker-c");
+      await expect(page.locator(".session-end-receipt .session-end-orphans")).toContainText("Still alive: worker-c");
       await expect(page.locator("#message-send")).toBeDisabled();
       await expect(page.locator("#message-status")).toContainText("New session");
       await expect(page.locator("#message-text")).toHaveValue("Keep this draft");
       await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
+      if (width === 390) await page.locator("#conversation-fleet").click();
+      await expect(page.locator("#status-view")).toContainText("Session ended");
+      await expect(page.locator("#status-view")).toContainText("Stopped: worker-a, worker-b");
+      await expect(page.locator("#status-view")).toContainText("Still alive: worker-c");
+      await expect(page.locator("#status-view .status-agent")).toHaveCount(0);
+      if (width === 390) await page.getByRole("button", { name: "Close tasks & progress", exact: true }).click();
     });
     await showConversationList(page);
     await expect(page.locator(".conversation-row").first()).toContainText("Ended");

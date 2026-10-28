@@ -3183,4 +3183,4 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   overflow-wrap: anywhere;
 }
 .session-end-receipt p { margin: var(--space-2) 0 0; }
-.session-end-receipt .session-end-orphans { color: var(--state-warn); }
+.session-end-receipt .session-end-orphans, .session-ended-status .session-end-orphans { color: var(--state-warn); }

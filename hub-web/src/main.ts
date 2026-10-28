@@ -1,4 +1,4 @@
-import { syncEndedComposer } from "./conversation-shell";
+import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
 import { InstallationAccess, watchInstallations } from "./installation-access";
@@ -5087,7 +5087,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -5152,6 +5152,21 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.tabIndex = -1;
     container.focus({ preventScroll: false });
   };
+  if (session?.ended) {
+    contextProgress = true;
+    const receipt = document.createElement("article"); receipt.className = "status-row session-ended-status";
+    const title = document.createElement("strong"); title.textContent = "Session ended";
+    const summary = document.createElement("p"); summary.textContent = sessionEndSummary(session.ended);
+    receipt.append(title, summary);
+    for (const [label, names] of [["Stopped", session.ended.workers_stopped], ["Still alive", session.ended.orphans], ["Stop not verified", session.ended.unverified ?? []]] as const) {
+      if (!names.length) continue;
+      const row = document.createElement("p"); row.textContent = `${label}: ${names.join(", ")}`;
+      if (label !== "Stopped") row.className = "session-end-orphans";
+      receipt.append(row);
+    }
+    container.append(receipt);
+    return;
+  }
   if (!status) {
     container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status.";
     // cas-813a: while this session's status is on its way, the rail is open

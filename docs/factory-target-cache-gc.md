@@ -63,6 +63,18 @@ Supported unknown caches are a missing-gitdir checkout's `target/` and the exact
 retired `.cas/merge-sweeps/assembly-target`; a parent or pattern never authorizes
 reclaim. Omitting either destructive flag previews and prints the refusal reason.
 
+The same exact-path option also accepts a known retired worker target, including
+its configured scratch target. Its historical `reclaim_unknown_target` name is
+retained for compatibility. A known target receives its own eight-second scan
+budget; unrelated caches, previews and pending review output are not inventoried.
+An incomplete global report therefore cannot prevent inspecting that one path.
+Explicit consent may release its warm-cache reservation only with positive
+terminal-task and dead-owner evidence, a durable generation marker, a fresh
+inode-bound inspection, and the existing native/build/Cargo/lifetime guards.
+An indeterminate or incomplete named scan, a changed inode, recent writes or
+overlapping durable evidence refuses reclamation. Named destructive revalidation
+also has an eight-second scan budget; it never widens into general GC.
+
 This named operation invokes only the existing target-cache admission and
 quarantine pipeline. It deletes no checkout source or artifact evidence, reaps
 no process, and cannot combine artifact deletion or prompt expiry. Explicit

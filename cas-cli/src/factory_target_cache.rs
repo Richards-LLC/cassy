@@ -102,6 +102,9 @@ pub struct TargetCacheRecord {
     git_branch: Option<String>,
     #[serde(skip)]
     git_commit: Option<String>,
+    /// Bound only by a fresh exact-path inspection; never restored from JSON.
+    #[serde(skip)]
+    named_identity: Option<(u64, u64)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -229,13 +232,13 @@ fn inspect_with_probe(
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
     inspect_scoped_with_probe(
-        cas_root, policy, known_worktree_roots, live_worktree_roots, dry_run, false, probe, None,
+        cas_root, policy, known_worktree_roots, live_worktree_roots, dry_run, false, probe, None, None,
     )
 }
 
 pub(crate) fn inspect_until(cas_root: &Path, policy: TargetCachePolicy,
     known: &[PathBuf], live: &[PathBuf], deadline: Instant) -> io::Result<TargetCacheReport> {
-    inspect_scoped_with_probe(cas_root, policy, known, live, true, false, capacity_status, Some(deadline))
+    inspect_scoped_with_probe(cas_root, policy, known, live, true, false, capacity_status, Some(deadline), None)
 }
 
 /// Inspect one explicitly named retired worker target.
@@ -246,7 +249,12 @@ pub(crate) fn inspect_named(
     live: &[PathBuf],
     dry_run: bool,
 ) -> io::Result<TargetCacheReport> {
-    named::inspect(cas_root, policy, path, live, dry_run)
+    if named::worktree(cas_root, path).is_some() {
+        named::inspect(cas_root, policy, path, live, dry_run)
+    } else {
+        // Preserve the separately guarded legacy unknown-owner protocol.
+        inspect(cas_root, policy, &[], live, dry_run)
+    }
 }
 
 /// Admission reclaims verified relocated worker and resolved review targets. Keep full factory
@@ -257,7 +265,7 @@ pub(crate) fn reclaim_scratch_for_admission(
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
 ) -> io::Result<TargetCacheReport> {
     let review_bytes = crate::factory_review_scratch::reclaim_targets(cas_root, None);
-    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, &probe, None)?;
+    let mut report = inspect_scoped_with_probe(cas_root, policy, &[], &[], false, true, &probe, None, None)?;
     // Apparent file sizes may include hard-linked seed data. Keep the idle
     // fallback candidates available and stop on measured free space instead.
     for cache in &mut report.caches {
@@ -293,6 +301,7 @@ fn inspect_scoped_with_probe(
     scratch_only: bool,
     probe: impl Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>,
     deadline: Option<Instant>,
+    named: Option<&Path>,
 ) -> io::Result<TargetCacheReport> {
     let repo_root = cas_root.parent().ok_or_else(|| {
         io::Error::new(
@@ -315,6 +324,7 @@ fn inspect_scoped_with_probe(
         known_worktree_roots,
         scratch_only,
         deadline,
+        named,
     );
     let mut inventory_complete = scanned.iter().all(|cache| cache.snapshot.is_some());
     let canonical_live_roots: HashSet<PathBuf> = live_worktree_roots
@@ -384,6 +394,7 @@ fn inspect_scoped_with_probe(
                 || legacy::lane_target(cas_root, &cache.worktree, &cache.path)
                     && !relocated_target(&cache.worktree, &cache.path)
                     && legacy::terminal_dead_owner(cas_root, &cache.worktree));
+        let named_identity = named.and_then(|_| cache.snapshot.as_ref()?.root_identity());
         records.push(TargetCacheRecord {
             path: cache.path,
             worktree: cache.worktree,
@@ -398,6 +409,7 @@ fn inspect_scoped_with_probe(
             git_admin_dir: cache.git_admin_dir,
             git_branch: cache.git_branch,
             git_commit: cache.git_commit,
+            named_identity,
         });
     }
 
@@ -436,7 +448,7 @@ fn inspect_scoped_with_probe(
     records.sort_by(|a, b| a.path.cmp(&b.path));
     let candidate_bytes = records.iter().map(|record| record.bytes).sum();
     let lane_previews =
-        if scratch_only || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if named.is_some() || scratch_only || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             Vec::new()
         } else {
             lane::inspect(cas_root, policy, live_worktree_roots)
@@ -453,7 +465,9 @@ fn inspect_scoped_with_probe(
                 .map(|preview| preview.bytes)
                 .sum::<u64>(),
         );
-    let pending_reclaim_bytes = crate::factory_review_scratch::pending_reclaim_bytes_until(cas_root, deadline);
+    let pending_reclaim_bytes = if named.is_some() { Some(0) } else {
+        crate::factory_review_scratch::pending_reclaim_bytes_until(cas_root, deadline)
+    };
     inventory_complete &= pending_reclaim_bytes.is_some();
     Ok(TargetCacheReport {
         schema_version: 1,
@@ -526,6 +540,7 @@ fn cleanup_selected_with_capacity(
     proc_root: &Path,
     capacity_probe: Option<&dyn Fn(&Path, TargetCachePolicy) -> io::Result<FilesystemCapacity>>,
 ) -> io::Result<()> {
+    let deadline = reclaim_unknown_target.map(|_| Instant::now() + Duration::from_secs(8));
     if let Some(path) = reclaim_unknown_target {
         // Named reclaim never widens into ordinary cache, preview or artifact GC.
         for record in &mut report.caches {
@@ -537,10 +552,10 @@ fn cleanup_selected_with_capacity(
         report.selected_bytes = 0;
         let named = report.caches.iter_mut().find(|record| record.path.as_os_str() == path.as_os_str());
         let Some(record) = named else {
-            report.remediation = format!("Refused {}: opt-in must name one exact inventoried unknown-owner cache; no paths reclaimed", path.display());
+            report.remediation = format!("Refused {}: opt-in must name one exact inventoried cache; no paths reclaimed", path.display());
             return Ok(());
         };
-        if let Err((disposition, reason)) = unknown::validate(cas_root, record, path, policy) {
+        if let Err((disposition, reason)) = named::validate_opt_in(cas_root, record, path, policy, deadline) {
             record.disposition = disposition;
             record.reason = reason;
             return Ok(());
@@ -550,7 +565,7 @@ fn cleanup_selected_with_capacity(
             return Ok(());
         }
         record.disposition = CacheDisposition::Selected;
-        record.reason = "explicit consent for this unknown-owner cache; destructive guards pending".into();
+        record.reason = "explicit consent for this exact cache; destructive guards pending".into();
         report.selected_bytes = record.bytes;
     } else if report.dry_run {
         return Ok(());
@@ -598,7 +613,7 @@ fn cleanup_selected_with_capacity(
         let explicit_unknown =
             reclaim_unknown_target.is_some() && record.ownership == CacheOwnership::Unknown;
         if (if let Some(path) = reclaim_unknown_target {
-            unknown::validate(cas_root, record, path, policy).is_err()
+            named::validate_opt_in(cas_root, record, path, policy, deadline).is_err()
         } else {
             !ownership_is_current(cas_root, record)
         }) || record.release_warm_on_pressure
@@ -611,7 +626,7 @@ fn cleanup_selected_with_capacity(
                     .to_string();
             continue;
         }
-        let rescanned = scan_cache(&record.worktree, &record.path, record.interrupted_cleanup);
+        let rescanned = scan_cache_until(&record.worktree, &record.path, record.interrupted_cleanup, deadline);
         let Ok(rescanned) = rescanned else {
             record.disposition = CacheDisposition::CleanupError;
             record.reason = "cache vanished or became unreadable during cleanup".to_string();
@@ -642,7 +657,8 @@ fn cleanup_selected_with_capacity(
         // Pressure may revoke a terminal dead lane's warm reservation. Keep
         // the lane, every Cargo lock and any lifetime lease through deletion
         // on macOS too; readable process evidence is still mandatory.
-        if record.release_warm_on_pressure && guard.is_none() {
+        if (record.release_warm_on_pressure || reclaim_unknown_target.is_some() && !explicit_unknown)
+            && guard.is_none() {
             match rescanned
                 .snapshot
                 .as_ref()
@@ -659,7 +675,7 @@ fn cleanup_selected_with_capacity(
             }
         }
         let under_guard = if explicit_unknown {
-            match scan_cache(&record.worktree, &record.path, false) {
+            match scan_cache_until(&record.worktree, &record.path, false, deadline) {
                 Ok(scan) => Some(scan),
                 Err(error) => {
                     record.disposition = CacheDisposition::Indeterminate;
@@ -693,7 +709,7 @@ fn cleanup_selected_with_capacity(
             continue;
         }
         if let Some(path) = reclaim_unknown_target
-            && let Err((disposition, reason)) = unknown::validate(cas_root, record, path, policy) {
+            && let Err((disposition, reason)) = named::validate_opt_in(cas_root, record, path, policy, deadline) {
                 record.disposition = disposition;
                 record.reason = reason;
                 continue;
@@ -871,7 +887,7 @@ fn discover_caches(
     cas_root: &Path,
     known_worktree_roots: &[PathBuf],
 ) -> Vec<ScannedCache> {
-    discover_caches_scoped(repo_root, cas_root, known_worktree_roots, false, None)
+    discover_caches_scoped(repo_root, cas_root, known_worktree_roots, false, None, None)
 }
 
 fn discover_caches_scoped(
@@ -880,7 +896,11 @@ fn discover_caches_scoped(
     known_worktree_roots: &[PathBuf],
     scratch_only: bool,
     deadline: Option<Instant>,
+    named: Option<&Path>,
 ) -> Vec<ScannedCache> {
+    if let Some(path) = named {
+        return named::discover(cas_root, path, deadline);
+    }
     let git_worktrees = list_validated_git_worktrees(repo_root);
     let git_identities: HashMap<PathBuf, GitWorktreeIdentity> = git_worktrees
         .iter()
@@ -1941,6 +1961,7 @@ mod tests {
             git_admin_dir: None,
             git_branch: None,
             git_commit: None,
+            named_identity: None,
         }
     }
 
@@ -2066,7 +2087,7 @@ mod tests {
         cleanup_selected(&cas, &mut live_missing, policy, &[]).unwrap();
         assert!(targets[2].1.exists(), "a registered live owner must retain its unleased target");
         // An expired inventory budget retains every unmeasured cache.
-        let partial = discover_caches_scoped(&repo, &cas, &[], false, Some(Instant::now()));
+        let partial = discover_caches_scoped(&repo, &cas, &[], false, Some(Instant::now()), None);
         assert!(!partial.is_empty());
         assert!(
             partial

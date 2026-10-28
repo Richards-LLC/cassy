@@ -44,6 +44,38 @@ pub(super) fn validate(
             "unknown-cache inventory changed; only missing-gitdir targets or the retired assembly target are reclaimable",
         ));
     }
+    validate_evidence(cas_root, &record.path)?;
+    for path in [&record.worktree, &record.path] {
+        let metadata = fs::symlink_metadata(path).map_err(|error| refuse(&error.to_string()))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() || !owned_by_caller(&metadata) {
+            return Err(refuse(
+                "cache/checkout must be real directories owned by the caller",
+            ));
+        }
+    }
+    for entry in WalkDir::new(&record.path).follow_links(false) {
+        let entry = entry.map_err(|error| refuse(&error.to_string()))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| refuse(&error.to_string()))?;
+        if entry.file_type().is_symlink() || !owned_by_caller(&metadata) {
+            return Err(refuse("cache contains a symlink or another user's files"));
+        }
+        if matches!(
+            entry.file_name().to_str(),
+            Some(".git" | "cas.db" | "LEDGER.md" | ".cas-scratch-owner.json")
+        ) {
+            return Err(refuse(
+                "cache contains checkout/evidence or a managed scratch owner; use its owning protocol",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_evidence(cas_root: &Path, target: &Path)
+    -> Result<(), (CacheDisposition, String)> {
+    let refuse = |reason: &str| (CacheDisposition::UnsafePath, reason.to_string());
     // Evidence paths are independent of source/cache ownership, including a
     // custom artifacts root placed inside an otherwise regenerable target.
     let config = crate::config::Config::load(cas_root).map_err(|error| {
@@ -67,34 +99,9 @@ pub(super) fn validate(
                 format!("cannot resolve artifact containment: {error}"),
             )
         })?;
-        if evidence.starts_with(&record.path) || record.path.starts_with(&evidence) {
+        if evidence.starts_with(target) || target.starts_with(&evidence) {
             return Err(refuse(
                 "durable artifact evidence overlaps the named cache; nothing reclaimed",
-            ));
-        }
-    }
-    for path in [&record.worktree, &record.path] {
-        let metadata = fs::symlink_metadata(path).map_err(|error| refuse(&error.to_string()))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() || !owned_by_caller(&metadata) {
-            return Err(refuse(
-                "cache/checkout must be real directories owned by the caller",
-            ));
-        }
-    }
-    for entry in WalkDir::new(&record.path).follow_links(false) {
-        let entry = entry.map_err(|error| refuse(&error.to_string()))?;
-        let metadata = entry
-            .metadata()
-            .map_err(|error| refuse(&error.to_string()))?;
-        if entry.file_type().is_symlink() || !owned_by_caller(&metadata) {
-            return Err(refuse("cache contains a symlink or another user's files"));
-        }
-        if matches!(
-            entry.file_name().to_str(),
-            Some(".git" | "cas.db" | "LEDGER.md" | ".cas-scratch-owner.json")
-        ) {
-            return Err(refuse(
-                "cache contains checkout/evidence or a managed scratch owner; use its owning protocol",
             ));
         }
     }
@@ -136,7 +143,7 @@ fn resolve_evidence_path(path: &Path) -> io::Result<PathBuf> {
     Ok(resolved)
 }
 
-fn owned_by_caller(metadata: &fs::Metadata) -> bool {
+pub(super) fn owned_by_caller(metadata: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;

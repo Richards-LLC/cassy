@@ -176,10 +176,17 @@ fn blocked_only_by_verification_wait_inner(
     }
     // A new park starts a delivery cycle; old blocker notes cannot hold it.
     let notes = task.notes.rsplit("Task parked as awaiting_merge").next()?;
-    // cas-7fc3: a wait note for an earlier dispatch (one a rejected verdict
-    // ended) belongs to a finished verification cycle, not to a live hold.
-    let blockers: Vec<String> = blocker_notes(notes)
+    // cas-7fc3: only blocker notes written in this dispatch's cycle can hold
+    // it. An earlier, answered blocker ("need credentials") and a wait note
+    // for an earlier dispatch both belong to finished cycles. Note stamps are
+    // UTC minutes, so the bound is the request minute.
+    let since = cas_store::get_verification_dispatch(cas_dir, dispatch_id)
+        .ok()
+        .map(|dispatch| dispatch.requested_at.format("%Y-%m-%d %H:%M").to_string());
+    let blockers: Vec<String> = blocker_note_entries(notes)
         .into_iter()
+        .filter(|(stamp, _)| since.as_deref().is_none_or(|since| stamp.as_str() >= since))
+        .map(|(_, reason)| reason)
         .filter(|reason| is_wait(reason) || !is_any_verification_wait_note(reason))
         .collect();
     Some(
@@ -207,7 +214,8 @@ fn is_any_verification_wait_note(reason: &str) -> bool {
 
 /// The full text of every blocker note, across all of its lines. A note
 /// entry starts at a `[YYYY-MM-DD HH:MM] ` line and runs to the next one.
-fn blocker_notes(notes: &str) -> Vec<String> {
+/// Each entry is returned with its `YYYY-MM-DD HH:MM` stamp.
+fn blocker_note_entries(notes: &str) -> Vec<(String, String)> {
     let starts_entry = |line: &str| {
         let bytes = line.as_bytes();
         bytes.len() > 19 && bytes[0] == b'[' && bytes[17] == b']' && bytes[18] == b' '
@@ -224,7 +232,10 @@ fn blocker_notes(notes: &str) -> Vec<String> {
         }
     }
     entries.into_iter()
-        .filter_map(|entry| entry.get(19..)?.strip_prefix("🚫 BLOCKER").map(|body| body.trim().to_string()))
+        .filter_map(|entry| {
+            let body = entry.get(19..)?.strip_prefix("🚫 BLOCKER")?.trim().to_string();
+            Some((entry.get(1..17)?.to_string(), body))
+        })
         .collect()
 }
 

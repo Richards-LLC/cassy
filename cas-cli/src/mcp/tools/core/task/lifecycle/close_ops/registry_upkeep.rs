@@ -85,8 +85,10 @@ pub(super) fn delivery_snapshot(
         && let Some(published) = task.deliverables.green_merge_commit.as_deref()
         && let Some(head) = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
         && resolve_branch_sha(repo, anchor).as_deref() == Some(head.as_str())
+        && git_commit_is_ancestor(repo, &head, published)
         && git_commit_is_ancestor(repo, published, &freshest_target_ref(repo, target))
         && let Some((base, integrated)) = crate::qa_evidence::delivery_range(repo, &head, published, None)
+        && integrated != head
         && crate::git_evidence::git_commit_parent_count(repo, &integrated) > 1
     {
         return Ok((base, integrated, None));

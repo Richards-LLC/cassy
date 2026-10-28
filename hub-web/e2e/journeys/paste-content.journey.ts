@@ -1,6 +1,7 @@
 import { test, expect, journeyPart } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 import { HubDouble } from "./hub-double";
+import { journeyNow, journeyStamp, JOURNEY_TIMEZONE } from "./clock";
 import { readFileSync } from "node:fs";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0l8AAAAASUVORK5CYII=";
@@ -33,7 +34,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
       });
       const contentRoute = "https://*.test/v1/sessions/*/artifacts/*/content?*";
       const imageBytes = readFileSync(new URL("../media/evidence.png", import.meta.url));
-      await page.route(contentRoute, route => route.fulfill({ contentType: "image/png", body: imageBytes }));
+      await page.context().route(contentRoute, route => route.fulfill({ contentType: "image/png", body: imageBytes }));
       let sentText = "";
       let queued = 0;
       const field = page.getByRole("textbox", { name: "Your message" });
@@ -107,12 +108,12 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         await assertFiles(page);
         // A fresh pairing has none of the sender's object URLs or upload state.
         if (width === 1280 && colorScheme === "light") {
-          const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme });
+          const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, colorScheme, timezoneId: JOURNEY_TIMEZONE });
           try {
             const peer = await phone.newPage();
-            await peer.clock.install({ time: await page.evaluate(() => Date.now()) });
+            await peer.clock.install({ time: journeyNow() });
             const remote = new HubDouble(peer, { machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [{
-              messages: [{ notification_id: queued, target: "supervisor", text: sentText, state: "delivered", stamped: true, device_id: "sender-device", session: PELICAN, at: new Date(await page.evaluate(() => Date.now())).toISOString() }],
+              messages: [{ notification_id: queued, target: "supervisor", text: sentText, state: "delivered", stamped: true, device_id: "sender-device", session: PELICAN, at: journeyStamp() }],
               replies: [], has_earlier: false,
             }] } });
             await remote.install();

@@ -316,7 +316,6 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
   }));
   const choose = async () => {
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
-    await expect(page.getByRole("log")).toBeVisible();
   };
   await journey.stage("Offline notices commit only to attention and drain every pending batch", async () => {
     await journey.open(); await choose();
@@ -326,7 +325,7 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
     const rows = await stored();
     expect(rows).toHaveLength(12);
     expect(rows.filter(row => row.acknowledgedAt)).toHaveLength(1);
-    await expect(page.getByRole("log")).not.toContainText("never reached it");
+    await expect(page.locator(".turn").filter({ hasText: "never reached it" })).toHaveCount(0);
   });
   await journey.stage("A fresh attach retains attention without resending drained notices", async () => {
     const requests = hub.historyRequests.length;

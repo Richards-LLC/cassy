@@ -978,7 +978,8 @@ mod tests {
         assert_eq!(replies.len(), 1);
         let payload: crate::ui::factory::OperatorReplyPayload =
             serde_json::from_str(&replies[0].prompt).unwrap();
-        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Status);
+        assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Answer);
+        assert_eq!(payload.reply_to, history.iter().find(|row| row.source == "terminal").map(|row| row.id));
         assert_eq!(payload.message, "**Ready**\n- Next step is clear.");
         assert_eq!(payload.device_id, "*");
     }
@@ -1383,6 +1384,7 @@ mod tests {
 
     #[test]
     fn terminal_operator_prompt_is_captured_before_the_supervisor_finishes() {
+        let mut env = crate::test_support::TestEnvGuard::new();
         for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Claude] {
             let now = Utc::now();
             let question = "Please check the terminal conversation capture";
@@ -1430,6 +1432,7 @@ mod tests {
                     "message":{"role":"user","content":[{"type":"tool_result","content":"private output"},{"type":"text","text":"Generated tool context"}]}}));
             }
             let (temp, root, queue) = terminal_session(values.clone());
+            env.set("CLAUDE_CONFIG_DIR", temp.path().join("account").to_str().unwrap());
             let agents = SqliteAgentStore::open(&root).unwrap();
             let mut supervisor = agents.get("supervisor-id").unwrap();
             supervisor.metadata.insert("supervisor_cli".into(), cli.backend().name().to_owned());

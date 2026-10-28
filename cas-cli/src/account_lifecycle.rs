@@ -1106,11 +1106,11 @@ mod tests {
         {
             let login = NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).unwrap();
             assert_eq!(login.path(), dir);
-            assert!(NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).is_err());
             std::fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"different@example.com"}}"#).unwrap();
             assert_eq!(login.finish("typed").unwrap(), "typed");
         }
         assert!(dir.is_dir(), "successful login remains at the original selector");
+        assert!(NewLogin::begin_with_platform(home, Provider::Claude, "typed", true).is_err());
         let cancelled = home.join(".claude-cancelled");
         drop(NewLogin::begin_with_platform(home, Provider::Claude, "cancelled", true).unwrap());
         assert!(!cancelled.exists(), "cancelled login is removed");

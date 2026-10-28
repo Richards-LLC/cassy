@@ -193,7 +193,7 @@ const profiles = scrollFlow
     { name: "desktop", viewport: { width: 1440, height: 900 }, cpu: 1, colorScheme: "light" as const },
     { name: "phone", viewport: { width: 390, height: 844 }, cpu: 4, colorScheme: "light" as const },
   ];
-for (const profile of profiles) test(`conversation ${scrollFlow ? "scroll paging" : "opening baseline"} ${profile.name}${scrollFlow ? ` ${profile.colorScheme}` : ""}`, async ({ browser }, info) => {
+for (const profile of profiles) test(`${scrollFlow ? "HUB-J4 " : ""}conversation ${scrollFlow ? "scroll paging" : "opening baseline"} ${profile.name}${scrollFlow ? ` ${profile.colorScheme}` : ""}`, async ({ browser }, info) => {
   const directory = join(output, `${profile.name}${scrollFlow ? `-${profile.colorScheme}` : ""}-${info.repeatEachIndex}`);
   await mkdir(directory, { recursive: true });
   const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone", colorScheme: profile.colorScheme });

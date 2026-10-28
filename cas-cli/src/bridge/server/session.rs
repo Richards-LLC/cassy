@@ -141,8 +141,7 @@ pub(crate) fn build_status_json(
         status_task_store(cas_root).ok_or_else(|| anyhow::anyhow!("task store unavailable"))?;
     let agents = session_agents(session, cas_root, task_store.as_ref())?;
 
-    let task_store = status_task_store(cas_root);
-    let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, task_store.as_deref());
+    let to_task = |t: cas_factory::TaskSummary| task_summary_json(t, Some(task_store.as_ref()));
 
     let queue = open_prompt_queue_store(cas_root)?;
     let pending = queue.pending_count()?;
@@ -158,7 +157,7 @@ pub(crate) fn build_status_json(
         epics: data.epic_tasks.into_iter().map(to_task).collect(),
         focused_epic: crate::ops::fleet::pinned_epic(&session.name),
     };
-    project_deliveries(&mut status, cas_root, task_store.as_deref());
+    project_deliveries(&mut status, cas_root, Some(task_store.as_ref()));
     Ok(status)
 }
 
@@ -173,14 +172,15 @@ fn session_agents(
     use crate::mcp::tools::service::factory_ops::{
         dedupe_authoritative_agents, worker_liveness_for_agent,
     };
-    use cas_store::AgentStore;
     use cas_types::{AgentRole, TaskStatus};
-    let allowed = allowed_agent_names(session);
     let agents = crate::store::open_agent_store(root)?
         .list(None)?
         .into_iter()
         .filter(|agent| {
-            allowed.contains(&agent.name) && agent.visible_to_factory_session(Some(&session.name))
+            matches!(
+                agent.role,
+                AgentRole::Worker | AgentRole::Supervisor | AgentRole::Director
+            ) && agent.visible_to_factory_session(Some(&session.name))
         })
         .collect();
     let (agents, _) = dedupe_authoritative_agents(agents);
@@ -322,6 +322,7 @@ fn project_deliveries(
             }
             checked_ids.insert(child.id.clone());
             if !child.has_delivery_to_integrate()
+                || (row.recorded_anchor.is_none() && row.factory_branch.is_none())
                 || row.unmerged_count != 0
                 || !row.dropped_paths.is_empty()
             {
@@ -399,6 +400,7 @@ fn project_deliveries(
         }
         if collection.statuses.first().is_some_and(|row| {
             !row.refs_unresolved
+                && (row.recorded_anchor.is_some() || row.factory_branch.is_some())
                 && row.unmerged_count == 0
                 && row.dropped_paths.is_empty()
                 && row.content_check_error.is_none()
@@ -474,8 +476,10 @@ mod focused_epic_tests {
     fn status_projects_selected_session_worker_from_worker_status_evidence() {
         use cas_store::AgentStore;
         use cas_types::{Agent, AgentRole, Task, TaskStatus};
-        let _home = crate::test_env_guard::TestEnvGuard::temp_home();
-        let (_project, root, session) = fixture();
+        let mut home = crate::test_env_guard::TestEnvGuard::temp_home();
+        let (_project, root, mut session) = fixture();
+        session.metadata.workers.clear();
+        home.set("CAS_FACTORY_SESSION", "other-hub-session");
         let mut worker =
             Agent::new_with_role("worker-id".into(), "worker-a".into(), AgentRole::Worker);
         worker.factory_session = Some(session.name.clone());
@@ -530,6 +534,7 @@ mod focused_epic_tests {
         git(&["init", "-b", "main"]);
         git(&["config", "user.email", "fixture@example.test"]);
         git(&["config", "user.name", "Fixture"]);
+        git(&["commit", "--allow-empty", "-m", "base"]);
         std::fs::write(project.path().join("file"), "delivered\n").unwrap();
         git(&["add", "file"]);
         git(&["commit", "-m", "delivery"]);
@@ -569,7 +574,7 @@ mod focused_epic_tests {
             .find(|task| task["id"] == "cas-landed")
             .unwrap();
         assert_eq!(landed["epic_id"], epic.id);
-        assert_eq!(landed["delivery_state"], "merged");
+        assert_eq!(landed["delivery_state"], "merged", "{status:#}");
         let progress = &status["epics"][0]["progress"];
         assert_eq!(progress["total"], 2);
         assert_eq!(progress["merged"], 1);

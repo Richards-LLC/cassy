@@ -212,7 +212,7 @@ function startDaemon() {
     "daemon-process.log",
   );
 }
-async function reset({ messageControl = false, newSession = false } = {}) {
+async function reset({ messageControl = false, newSession = false, progressControl = false } = {}) {
   await cleanup();
   const home = await mkdtemp(join(await realpath(tmpdir()), "cas-real-hub-"));
   await writeFile(join(home, ".real-hub-fixture"), String(process.pid));
@@ -391,6 +391,9 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
     tls.once("error", fail);
     tls.listen(tlsPort, "127.0.0.1", ok);
   });
+  // A machine hub may inherit another factory's environment. Its selected
+  // session's status must remain independent of that ambient identity.
+  if (progressControl) state.env.CAS_FACTORY_SESSION = "hub-host-other-session";
   await startHub();
   const pair = JSON.parse(
     (
@@ -488,6 +491,7 @@ now=datetime.now(timezone.utc).isoformat()
 def git(*args): return subprocess.check_output(['git',*args],cwd=project,text=True).strip()
 git('config','user.email','fixture@example.test');git('config','user.name','Fixture')
 git('checkout','-b','epic/progress')
+git('commit','--allow-empty','-m','base')
 open(os.path.join(project,'delivery.txt'),'w').write('delivered\\n')
 git('add','delivery.txt');git('commit','-m','integrated delivery')
 anchor=git('rev-parse','HEAD')
@@ -499,7 +503,7 @@ with open(os.path.join(rollouts,'rollout-progress-worker.jsonl'),'w') as f:
 c=sqlite3.connect(os.path.join(project,'.cas','cas.db'))
 meta=dict(worker_cli='codex',clone_path=project,worker_account_dir=account)
 start=int(open('/proc/'+pid+'/stat').read().split(') ',1)[1].split()[19])
-c.execute('INSERT INTO agents(id,name,role,status,pid,pid_starttime,factory_session,cc_session_id,registered_at,last_heartbeat,metadata,startup_confirmed) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',('progress-worker-id','progress-worker','worker','active',int(pid),start,session,'progress-worker-id',now,now,json.dumps(meta)))
+c.execute('INSERT INTO agents(id,name,agent_type,role,status,pid,pid_starttime,factory_session,cc_session_id,registered_at,last_heartbeat,metadata,startup_confirmed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,1)',('progress-worker-id','progress-worker','worker','worker','active',int(pid),start,session,'progress-worker-id',now,now,json.dumps(meta)))
 for id,title,status,kind,assignee,deliverables in [
  ('cas-progress-epic','Progress fixture','in_progress','epic',None,{}),
  ('cas-progress-live','Live worker task','in_progress','task','progress-worker-id',{}),

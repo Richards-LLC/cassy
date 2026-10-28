@@ -32,3 +32,16 @@ it("turns only long text into a removable preview and refuses oversized files vi
   expect(document.body.textContent).toContain("10 MiB");
   expect(draft.hasFiles()).toBe(false);
 });
+
+it("names the refused file among several attachments without prescribing a reconnect", async () => {
+  const draft = new ComposerUploads();
+  document.body.innerHTML = composerMarkup("supervisor");
+  draft.bind(document.body);
+  draft.add([new File(["ok"], "notes.txt"), new File(["bad"], "archive.bin")]);
+  const upload = vi.fn().mockResolvedValueOnce({ path: "/host/notes.txt" })
+    .mockRejectedValueOnce(new Error("This file type is not supported."));
+  await expect(draft.prepare("", upload)).rejects.toThrow("archive.bin: This file type is not supported.");
+  expect(document.querySelector(".upload-error")?.textContent).toContain("archive.bin");
+  expect(document.querySelector(".upload-error")?.textContent).not.toContain("reconnect");
+  expect(draft.hasFiles()).toBe(true);
+});

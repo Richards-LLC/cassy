@@ -177,7 +177,22 @@ fn sniff_mime(bytes: &[u8]) -> Option<&'static str> {
     } else if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
         Some("application/zip")
     } else if bytes.get(4..8) == Some(b"ftyp") {
-        Some("video/mp4")
+        // ISO-BMFF covers phone photos and QuickTime as well as MP4. Inspect
+        // only this box's major/compatible brands, skipping its minor version.
+        let size = u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+        let brands = bytes.get(8..size)?;
+        let major = brands.get(..4)?;
+        let compatible = brands.get(8..)?;
+        let has = |brand: &[u8]| major == brand || compatible.chunks_exact(4).any(|b| b == brand);
+        if has(b"avif") || has(b"avis") {
+            Some("image/avif")
+        } else if [b"heic", b"heix", b"hevc", b"hevx"].iter().any(|b| has(*b)) {
+            Some("image/heic")
+        } else if has(b"qt  ") {
+            Some("video/quicktime")
+        } else {
+            Some("video/mp4")
+        }
     } else if bytes.starts_with(b"ID3") || bytes.starts_with(b"\xff\xfb") {
         Some("audio/mpeg")
     } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE") {

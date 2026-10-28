@@ -1,6 +1,6 @@
 import { test, expect, type Request } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { claimReceiptDirectory } from "./receipt-directory.mjs";
 import {
   saveQaTrace,
@@ -604,6 +604,57 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
   }
 });
 
+// The disposable project's config must load when the real upload stores bytes;
+// protocol doubles cannot catch a malformed config in real-hub-server.mjs.
+test("HUB-J24 real hub composer upload stores the picked file", {
+  annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
+}, async ({ page }) => {
+  try {
+    const fixture = await command("reset", { messageControl: true });
+    const pairing = new URL(fixture.pairUrl);
+    pairing.pathname = "/commander/";
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable upload QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    const bytes = Buffer.from("Real fixture upload must load the project config.\n");
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Attach files", exact: true }).click();
+    await (await chooser).setFiles({ name: "fixture-config.txt", mimeType: "text/plain", buffer: bytes });
+    const uploaded = page.waitForResponse(response =>
+      response.request().method() === "POST" && new URL(response.url()).pathname.includes("/uploads/"));
+    await page.getByRole("button", { name: /^Send to the .+ supervisor$/, exact: true }).click();
+    const response = await uploaded;
+    expect(response.status(), await response.text()).toBe(200);
+    const stored = await response.json();
+    expect(await readFile(stored.path)).toEqual(bytes);
+    await expect(page.locator(".composer-uploads")).toBeHidden();
+  } finally {
+    await command("cleanup");
+  }
+});
+
+test("HUB-J13 real fixture keeps cleanup state when removal is refused", {
+  annotation: { type: "journey-part", description: "real hub, failed removal and explicit recovery" },
+}, async () => {
+  const fixture = await command("reset", { newSession: true });
+  const home = dirname(fixture.project);
+  try {
+    // A real filesystem refusal, without racing a writer or mocking rm.
+    await chmod(home, 0o500);
+    await expect(command("cleanup")).rejects.toThrow(/EACCES/);
+    await chmod(home, 0o700);
+    await command("cleanup");
+    await expect(access(home)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await chmod(home, 0o700).catch(error => { if (error.code !== "ENOENT") throw error; });
+    await command("cleanup");
+  }
+});
+
 // Unlike the protocol double, this crosses POST /v1/sessions and the real
 // reaper/daemon/PTY bootstrap. Only provider and OS service placement are inert.
 test("HUB-J13 real hub starts a supervisor and carries a conversation", {
@@ -667,6 +718,7 @@ test("HUB-J13 real hub starts a supervisor and carries a conversation", {
     } finally {
       await context.close().catch(() => undefined);
       await command("cleanup");
+      await expect(access(dirname(fixture.project))).rejects.toMatchObject({ code: "ENOENT" });
     }
   }
 });

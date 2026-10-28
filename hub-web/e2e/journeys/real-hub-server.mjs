@@ -102,6 +102,65 @@ async function startHub() {
     `hub startup failed: ${redactQaText(await readFile(join(state.home, "hub-process.log"), "utf8"))}`,
   );
 }
+async function processIdentity(pid) {
+  try {
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+    const fields = stat.slice(stat.lastIndexOf(") ") + 2).split(/\s+/);
+    return fields[0] === "Z" ? undefined
+      : { pid: Number(pid), parent: Number(fields[1]), starttime: fields[19] };
+  } catch (error) {
+    if (["ENOENT", "ESRCH"].includes(error.code)) return;
+    throw error;
+  }
+}
+async function privateProcesses(home) {
+  // PTY children have their own session/group, and can be reparented when
+  // the reaper exits. This marked fixture's unique HOME follows those children.
+  const expected = `HOME=${home}`;
+  const processes = await Promise.all((await readdir("/proc"))
+    .filter(pid => /^\d+$/.test(pid)).map(async pid => {
+      try {
+        const identity = await processIdentity(pid);
+        if (!identity) return;
+        const env = await readFile(`/proc/${pid}/environ`);
+        if (!env.toString().split("\0").includes(expected)) return;
+        if ((await processIdentity(pid))?.starttime === identity.starttime) return identity;
+      } catch (error) {
+        if (["ENOENT", "ESRCH", "EACCES"].includes(error.code)) return;
+        throw error;
+      }
+    }));
+  return processes.filter(Boolean);
+}
+async function signalOwned(identity, signal) {
+  if ((await processIdentity(identity.pid))?.starttime !== identity.starttime) return;
+  try { process.kill(identity.pid, signal); }
+  catch (error) { if (error.code !== "ESRCH") throw error; }
+}
+async function stopLaunchedDaemon(home, owned) {
+  // Stop the actual daemon before its reaper. The reaper must be allowed to
+  // wait for the daemon and finish writing its exit receipt before rm.
+  let processes = await privateProcesses(home);
+  for (const child of processes.filter(p => p.parent === owned.pid))
+    await signalOwned(child, "SIGTERM");
+  const waitForExit = async () => {
+    const deadline = performance.now() + 3000;
+    do {
+      processes = await privateProcesses(home);
+      if (!processes.length) return true;
+      await delay(50);
+    } while (performance.now() < deadline);
+    return false;
+  };
+  if (await waitForExit()) return;
+  // Each signal is bounded to a PID with this private HOME and the same start
+  // fingerprint, including a provider detached into its own process group.
+  for (const signal of ["SIGTERM", "SIGKILL"]) {
+    for (const child of processes) await signalOwned(child, signal);
+    if (await waitForExit()) return;
+  }
+  throw Error("owned launch processes did not exit; fixture retained");
+}
 async function cleanup() {
   if (!state) return;
   if (state.paused) state.hub.kill("SIGCONT");
@@ -110,18 +169,12 @@ async function cleanup() {
   const ownedLaunch = join(state.home, "launched-pid");
   if (existsSync(ownedLaunch)) {
     const owned = JSON.parse(await readFile(ownedLaunch, "utf8"));
-    const alive = async () => {
-      try {
-        const fields = (await readFile(`/proc/${owned.pid}/stat`, "utf8")).split(") ")[1].split(/\s+/);
-        return fields[0] !== "Z" && fields[19] === owned.starttime;
-      } catch (e) { if (e.code === "ENOENT") return false; throw e; }
-    };
-    if (Number.isSafeInteger(owned.pid) && owned.pid > 1 && await alive()) {
-      process.kill(-owned.pid, "SIGTERM");
-      const deadline = performance.now() + 3000;
-      while (await alive() && performance.now() < deadline) await delay(50);
-      if (await alive()) process.kill(-owned.pid, "SIGKILL");
-    }
+    if (!Number.isSafeInteger(owned.pid) || owned.pid <= 1)
+      throw Error("invalid owned launch PID; fixture retained");
+    const leader = await processIdentity(owned.pid);
+    if (leader && leader.starttime !== owned.starttime)
+      throw Error("owned launch PID was reused; fixture retained");
+    await stopLaunchedDaemon(state.home, owned);
   }
   if (state.tls) {
     for (const socket of state.sockets) socket.destroy();
@@ -129,9 +182,14 @@ async function cleanup() {
     await new Promise((ok) => state.tls.close(ok));
   }
   const root = state.home;
-  state = undefined;
-  if (existsSync(join(root, ".real-hub-fixture")))
+  if (existsSync(root)) {
+    // rm may remove the marker before failing elsewhere. Retain ownership as
+    // well as state so a later explicit cleanup can finish that partial delete.
+    state.rootOwned ||= existsSync(join(root, ".real-hub-fixture"));
+    if (!state.rootOwned) throw Error("fixture ownership marker missing");
     await rm(root, { recursive: true, force: true });
+  }
+  state = undefined;
 }
 function startDaemon() {
   state.daemon = launch(
@@ -225,7 +283,7 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
   await cas(["init", "--yes", "--no-integrations"]);
   await writeFile(
     join(project, ".cas", "config.toml"),
-    "[factory]\nai_enrichment = false\n",
+    "[factory.ai_enrichment]\nenabled = false\n",
   );
   if (newSession) {
     // Match the production user service: a machine hub has no CAS_ROOT.

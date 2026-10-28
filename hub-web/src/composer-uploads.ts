@@ -52,13 +52,17 @@ export class ComposerUploads {
             reader.onerror = () => reject(new Error(`Couldn't read ${entry.file.name}. Choose the file again.`));
             reader.readAsDataURL(entry.file);
           });
-          entry.path = (await upload(entry.id, entry.file.name, data)).path;
+          try {
+            entry.path = (await upload(entry.id, entry.file.name, data)).path;
+          } catch (error) {
+            throw new Error(`${entry.file.name}: ${error instanceof Error ? error.message : "The upload failed."}`);
+          }
         }
       }
       return [text, ...this.files.map(entry => `Attached file: ${entry.path}`)].filter(Boolean).join("\n\n");
     } catch (error) {
-      this.error = `Files were not sent. ${error instanceof Error ? error.message : "The upload failed."} Your files are kept here; send again after reconnecting.`;
-      throw error;
+      this.error = `Files were not sent. ${error instanceof Error ? error.message : "The upload failed."} Your files are kept here.`;
+      throw new Error(this.error);
     } finally { this.sending = false; this.paint(); }
   }
   private paint(): void {

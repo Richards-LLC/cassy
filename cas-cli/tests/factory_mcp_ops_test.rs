@@ -2331,6 +2331,10 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
     );
     env.create_epic("Test Epic");
     let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    cas::test_paths::warm_stub(
+        &home.join("fake-bin/codex"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.0.0-test\\n'; exit 0; fi\nif [ \"$1 $2\" = 'login status' ]; then if [ -f \"$CODEX_HOME/auth.json\" ]; then printf 'Logged in\\n'; else printf 'Not logged in\\n'; exit 1; fi; fi\nexit 2\n",
+    );
     std::fs::remove_file(home.join(".codex/auth.json")).expect("log out default account");
     let registered = home.join(".codex-registered@example.com");
     std::fs::create_dir_all(&registered).expect("registered account directory");

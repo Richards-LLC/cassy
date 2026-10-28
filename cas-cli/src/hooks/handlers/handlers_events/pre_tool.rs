@@ -5218,6 +5218,18 @@ fn operator_policy_command_textual(command: &str) -> bool {
     if !names_policy {
         return false;
     }
+    let shell_command = shell_command_without_heredoc_bodies(command);
+    let mut bodies = shell_heredoc_bodies(command).into_iter();
+    // An unquoted heredoc expands command substitutions before its reader
+    // receives the data. Only complete quoted bodies are provably literal.
+    // Use the existing delimiter/body ordering, failing closed if incomplete.
+    let expanding_policy = shell_command
+        .lines()
+        .flat_map(heredoc_delimiters)
+        .any(|delimiter| {
+            let body = bodies.next();
+            body.is_none_or(|body| !delimiter.literal_body && runs_substitution(&[body]))
+        });
     let statements = shell_statement_words(command);
     let clipboard = statements.iter().any(|words| {
         matches!(
@@ -5226,13 +5238,14 @@ fn operator_policy_command_textual(command: &str) -> bool {
         )
     });
     // A literal clipboard sink handles data, but never sanctions surrounding
-    // output redirections, substitutions or shell groups. Inspect tokens with
-    // quoted text/heredoc bodies kept inert; do not exempt the whole pipeline.
+    // output redirections, substitutions or shell groups. Expanding heredoc
+    // scopes were checked above; never exempt the whole pipeline.
     let clipboard_effects = clipboard
-        && factory_shell_tokens(&shell_command_without_heredoc_bodies(command))
+        && factory_shell_tokens(&shell_command)
             .iter()
             .any(|token| matches!(token, ShellToken::Operator('>' | '(' | ')')));
-    clipboard_effects
+    expanding_policy
+        || clipboard_effects
         || statements.is_empty()
         || !statements
             .iter()
@@ -7688,6 +7701,13 @@ mod workspace_contract_tests {
                     assert_eq!(status, "allow", "copy is data: {copy}: {reason}");
                 }
             }
+            for copy in [
+                format!("cat <<'COMMAND' | pbcopy\n$({mutation})\nCOMMAND"),
+                format!("cat <<COMMAND | pbcopy\n{mutation}\nCOMMAND"),
+            ] {
+                let (status, reason) = decision(&copy);
+                assert_eq!(status, "allow", "literal body stays data: {copy}: {reason}");
+            }
             for invocation in [
                 mutation.clone(),
                 format!("sh -c '{mutation}'"),
@@ -7703,6 +7723,10 @@ mod workspace_contract_tests {
                 format!("printf '%s' \"$({mutation})\" | pbcopy"),
                 format!("printf '%s' '{mutation}' | pbcopy > command.txt"),
                 format!("printf '%s' '{mutation}' | wl-copy 2> errors.txt"),
+                format!("cat <<COMMAND | pbcopy\n$({mutation})\nCOMMAND"),
+                format!("cat <<COMMAND | wl-copy\n`{mutation}`\nCOMMAND"),
+                format!("cat <<COMMAND\n$({mutation})\nCOMMAND"),
+                format!("cat <<'COM'MAND | pbcopy\nliteral clipboard text\nCOMMAND\n{mutation}"),
             ] {
                 let (status, reason) = decision(&invocation);
                 assert_eq!(

@@ -634,6 +634,7 @@
         "external_verify",
         "latest",
         "list",
+        "qa_reconcile",
         "qa_record",
         "qa_request",
         "qa_status",

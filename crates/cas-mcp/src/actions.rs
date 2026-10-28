@@ -238,6 +238,7 @@ pub const VERIFICATION_ACTIONS: &[&str] = &[
     "qa_waive",
     "qa_request",
     "qa_status",
+    "qa_reconcile",
 ];
 
 /// Verification actions dispatched only in builds with the `mcp-proxy` feature.

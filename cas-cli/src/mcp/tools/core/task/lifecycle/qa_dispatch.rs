@@ -1372,19 +1372,17 @@ impl CasCore {
             let supervisor = self
                 .get_agent_id()
                 .unwrap_or_else(|_| "supervisor".to_string());
-            return match cas_store::waive_qa_pass(
-                &self.cas_root,
+            return match self.waive_qa_round(
                 &task.id,
                 &supervisor,
                 implementer,
                 &branch,
                 head,
                 reason,
-                chrono::Utc::now(),
             ) {
-                Ok(pass) => QaCloseGate::Waived(format!(
+                Ok((pass, retired)) => QaCloseGate::Waived(format!(
                     "✅ DECISION Independent QA waived by supervisor {supervisor} at close for @{} \
-                     (pass {}), already merged into {target_branch}. Reason: {reason}",
+                     (pass {}), already merged into {target_branch}. Reason: {reason}{retired}",
                     pass.head8(),
                     pass.id,
                 )),
@@ -1729,6 +1727,54 @@ impl CasCore {
 }
 
 impl CasCore {
+    /// Both explicit waivers and close overrides retire the superseded work.
+    pub(crate) fn waive_qa_round(
+        &self, task_id: &str, supervisor: &str, implementer: &str,
+        branch: &str, head: &str, reason: &str,
+    ) -> cas_store::Result<(QaPass, String)> {
+        let (waived, retired) = cas_store::waive_qa_pass_reporting_superseded(
+            &self.cas_root, task_id, supervisor, implementer, branch, head, reason,
+            chrono::Utc::now(),
+        )?;
+        let mut status = String::new();
+        if let Some(retired) = retired {
+            let reason = format!("Independent QA round {} for {} superseded by supervisor {}'s logged waiver {}: {}",
+                retired.id, task_id, supervisor, waived.id, reason.trim());
+            status = self.cancel_qa_task_with_reason(&retired, &reason, Some(task_id.into()));
+            if let Some(reviewer) = retired.reviewer_agent_id.as_deref() {
+                status.push_str(&self.notify_superseded_reviewer(
+                    &retired, reviewer, &format!("logged supervisor waiver {}", waived.id),
+                ));
+            }
+        }
+        Ok((waived, status))
+    }
+
+    /// Explicit repair only; queue/status reads never call this bounded path.
+    pub(crate) fn reconcile_obsolete_qa_tasks(
+        &self, delivery: &str, limit: usize, supervisor: &str,
+    ) -> cas_store::Result<Vec<String>> {
+        let passes = cas_store::obsolete_qa_task_passes(&self.cas_root, delivery, limit)?;
+        let store = self.open_task_store().map_err(|error| cas_store::StoreError::Other(error.to_string()))?;
+        let mut cancelled = Vec::new();
+        for pass in passes {
+            let id = pass.qa_task_id.as_deref().expect("obsolete selection has a child");
+            let reason = format!("Supervisor {supervisor} reconciled obsolete independent QA pass {} ({}) for closed delivery {delivery}; existing findings and evidence retained.",
+                pass.id, pass.state);
+            let receipt = self.cancel_qa_task_with_reason(&pass, &reason, Some(delivery.into()));
+            if store.get(id)?.status != TaskStatus::Cancelled {
+                return Err(cas_store::StoreError::Other(format!(
+                    "QA reconciliation stopped after retiring {} child(ren): {receipt}; {id} was not retired. Re-read qa_status before retrying.", cancelled.len()
+                )));
+            }
+            cancelled.push(id.to_owned());
+            if let Some(reviewer) = pass.reviewer_agent_id.as_deref() {
+                self.notify_superseded_reviewer(&pass, reviewer, "the delivery's existing QA decision");
+            }
+        }
+        Ok(cancelled)
+    }
+
     /// Cancel the QA work item of a withdrawn round (cas-5c38) so no
     /// reviewer is spawned for a pass that no longer binds the delivery.
     pub(crate) fn cancel_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
@@ -1762,6 +1808,15 @@ impl CasCore {
         if qa_task.is_terminal() {
             return String::new();
         }
+        if !qa_task.labels.iter().any(|label| label == QA_PASS_LABEL) {
+            return format!(" QA task {qa_task_id} retained: it is not labeled as a QA work item.");
+        }
+        match cas_store::qa_task_has_current_round(&self.cas_root, qa_task_id) {
+            Ok(true) => return format!(" QA task {qa_task_id} retained: a current round still uses it."),
+            Ok(false) => {}
+            Err(error) => return format!(" QA task {qa_task_id} could not be cancelled: {error}"),
+        }
+        let expected = qa_task.clone();
         let now = chrono::Utc::now();
         qa_task.status = TaskStatus::Cancelled;
         qa_task.closed_at = Some(now);
@@ -1769,7 +1824,7 @@ impl CasCore {
             Some(cas_types::TaskTerminalOutcome::Cancelled { superseded_by });
         qa_task.close_reason = Some(close_reason.to_string());
         qa_task.pending_verification = false;
-        match store.update(&qa_task) {
+        match store.update_if_current(&qa_task, &expected) {
             Ok(_) => format!(" QA task {qa_task_id} cancelled."),
             Err(error) => format!(" QA task {qa_task_id} could not be cancelled: {error}"),
         }

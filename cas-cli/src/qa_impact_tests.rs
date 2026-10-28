@@ -485,7 +485,7 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
     write(
         root,
         crate::qa_registry::DEFAULT_PATH,
-        &serde_yaml_ng::to_string(&registry).unwrap(),
+        &serde_yaml::to_string(&registry).unwrap(),
     );
     let head = commit(root);
     let validation =

@@ -6055,7 +6055,13 @@ fn hub_auth_load_probe() {
     let auth = AuthStore::open(&root, "machine-test").unwrap();
     let compacted_bytes = std::fs::read(root.join("auth.json")).unwrap();
     let compacted: serde_json::Value = serde_json::from_slice(&compacted_bytes).unwrap();
-    let source: serde_json::Value = serde_json::from_slice(&std::fs::read(target.join("auth-load-fixture.json")).unwrap()).unwrap();
+    let mut source: serde_json::Value = serde_json::from_slice(&std::fs::read(target.join("auth-load-fixture.json")).unwrap()).unwrap();
+    // The redactor collapsed several enum spellings to REDACTED-14; restore
+    // the same set semantics used by the real persisted-state parser.
+    for pairing in source["pairings"].as_array_mut().unwrap() {
+        let scopes: std::collections::BTreeSet<Scope> = serde_json::from_value(pairing["max_scopes"].clone()).unwrap();
+        pairing["max_scopes"] = serde_json::to_value(scopes).unwrap();
+    }
     assert_eq!(compacted["devices"].as_array().unwrap().len(), source["devices"].as_array().unwrap().len());
     assert_eq!(compacted["pairings"], source["pairings"]);
     let startup = serde_json::json!({"bytes": compacted_bytes.len(), "devices": compacted["devices"].as_array().unwrap().len(), "pairings": compacted["pairings"].as_array().unwrap().len()});

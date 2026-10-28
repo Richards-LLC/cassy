@@ -107,7 +107,7 @@ fn cas_c082_affected_and_targeted_runs_and_supervisor_full_are_allowed() {
         "npx playwright test tests/e2e/explorer-login.spec.cjs --workers=1",
         "NODE_PATH=/cached/node_modules npx --prefix /cached playwright test scripts/tests/decision-workbook.spec.js --config scripts/tests/decision-workbook.playwright.config.cjs",
         "npx --prefix=/cached playwright test scripts/tests/decision-workbook.spec.cjs --config=scripts/tests/decision-workbook.playwright.config.cjs",
-        "npx playwright test /task-artifacts/independent-qa/round-1/independent.spec.cjs --config /task-artifacts/independent-qa/round-1/independent.config.cjs --workers=1 > /task-artifacts/independent-qa/round-1/independent-browser.log 2>&1",
+        "npx playwright test /task-artifacts/independent-qa/round-1/independent.spec.cjs --config /task-artifacts/independent-qa/round-1/independent.config.cjs --workers=1 > target/independent-browser.log 2>&1",
         "npx playwright test qa/real-walk.spec.tsx --workers=1",
         "npm run journeys -- --grep=HUB-J7 --workers=4",
         "npx playwright test --grep 'HUB-J7|HUB-J12'",

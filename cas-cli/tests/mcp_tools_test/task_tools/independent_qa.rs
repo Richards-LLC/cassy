@@ -70,7 +70,7 @@ async fn close_text(core: &CasCore, id: &str) -> String {
 }
 
 /// A reviewer with a different registered name from the implementer.
-fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
+pub(super) fn reviewer_core(cas_dir: &Path, name: &str) -> CasCore {
     let id = format!("qa-session-{name}-{}", std::process::id());
     let agents = open_agent_store(cas_dir).unwrap();
     agents
@@ -131,7 +131,7 @@ fn fixture_with_project(
 }
 
 /// A round's LEDGER.md plus its cas-c3b8 `bundle.json` for `head`.
-fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
+pub(super) fn round_evidence(dir: &Path, task_id: &str, head: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let ledger = dir.join("LEDGER.md");
     std::fs::write(&ledger, "# independent QA ledger\n").unwrap();
@@ -621,7 +621,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     assert!(approved.contains("APPROVAL"), "{approved}");
     assert!(
         tasks.get(&task_id).unwrap().notes.contains(&format!(
-            "PLATFORM_PROOF qa-bundle: {}",
+            "PLATFORM_PROOF qa-review-bundle: {}",
             repo.join("round-2").join("bundle.json").display()
         )),
         "the approved round's bundle is cited on the delivery"

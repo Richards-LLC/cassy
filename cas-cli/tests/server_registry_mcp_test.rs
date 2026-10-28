@@ -578,8 +578,11 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
     let id = extract_id(&started);
     agents.graceful_shutdown(&alice.id).unwrap();
 
-    let mut replacement = alice.clone();
-    replacement.id = "alice-recycled-id".into();
+    let mut replacement = Agent::new_with_role(
+        "alice-recycled-id".into(),
+        alice.name.clone(),
+        AgentRole::Worker,
+    );
     // Each identity gets the same live lease where indicated. Names alone,
     // another factory session, or another task must not authorize a stop.
     for (label, name, session, assigned, leased, allowed) in [

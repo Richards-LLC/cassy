@@ -7,9 +7,6 @@ fn selected(args: &[String]) -> bool {
     let mut targeted = false;
     while i < args.len() {
         let arg = &args[i];
-        if arg.starts_with('>') || arg == "2>&1" {
-            break;
-        }
         let grep = arg.strip_prefix("--grep=").or_else(|| {
             (arg == "--grep" || arg == "-g")
                 .then(|| args.get(i + 1).map(String::as_str))
@@ -41,6 +38,14 @@ fn selected(args: &[String]) -> bool {
                 | "--timeout"
                 | "--grep-invert"
                 | "--shard"
+                | "--retries"
+                | "-j"
+                | "--trace"
+                | "--repeat-each"
+                | "--max-failures"
+                | "--browser"
+                | "--global-timeout"
+                | "--tsconfig"
         ) {
             i += 2;
             continue;
@@ -108,7 +113,7 @@ fn unfiltered(command: &str, depth: usize) -> bool {
     if depth > 4 {
         return true;
     }
-    for words in super::pre_tool::shell_statement_words(command) {
+    for words in super::pre_tool::shell_statement_arguments(command) {
         if words.first().is_some_and(|w| w.starts_with('#')) {
             continue;
         }

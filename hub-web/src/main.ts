@@ -26,7 +26,7 @@ import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFo
 import { isOperatorNotice, NOTICE_KIND, noticeFingerprint, noticeTime, planNotice } from "./operator-notices";
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
-import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
+import { clearTransientAttachmentNotes, installAttachmentSheet, isVisualPage, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
@@ -169,7 +169,9 @@ const mountedThreads = new Set<string>();
 installAttentionObjects();
 const conversationViews = new Map<string, ConversationView>();
 // Pebble 4: a supervisor's artifact is a dog-eared sheet on the thread, not a link row.
-installAttachmentSheet();
+// cas-3aff: an HTML attachment also shows its page inline, in a sandboxed frame
+// on the publishing machine's own origin.
+installAttachmentSheet((artifactId) => visualPageUrl(artifactId));
 const conversationHistories = new Map<string, ConversationHistory>();
 /**
  * Show work (cas-ff22): what work-event pages to read and when. A repaint
@@ -5530,8 +5532,16 @@ app.addEventListener("click", (event) => {
   const localKey = `${machineId}:${artifactId}`;
   const onCard = link.matches("a.sheet");
   const machineLabel = machines.get(machineId)?.label ?? "that machine";
+  // cas-3aff: an HTML page opens in a tab under the machine's sandbox policy,
+  // never as the raw stored file.
+  const visual = link.matches("a.sheet") && link.dataset.mime !== undefined && isVisualPage({ mime: link.dataset.mime });
   void openArtifact({
-    fetchView: () => connection.artifactView(session, artifactId),
+    fetchView: visual
+      ? async () => {
+        const ticket = await visualPageView(machineId, session, artifactId);
+        return ticket ? { ok: true, view: { artifact_id: artifactId, url: ticket.url } } : connection.visualPage(session, artifactId);
+      }
+      : () => connection.artifactView(session, artifactId),
     openWindow: () => window.open("about:blank", "_blank"),
     notify: (message, result) => {
       if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);
@@ -5550,6 +5560,38 @@ app.addEventListener("click", (event) => {
 });
 /** Files a machine said were never uploaded to Cloud, by machine and artifact (journey F6). */
 const localOnlyArtifacts = new Set<string>();
+
+/**
+ * Minted visual page URLs by machine, session and artifact (cas-3aff), reused
+ * while the machine's ticket has more than a minute left, so a repainted
+ * thread and the card's open-in-tab share one ticket.
+ */
+const visualPageTickets = new Map<string, Promise<{ url: string; until: number } | undefined>>();
+
+function visualPageView(machineId: string, session: string, artifactId: string): Promise<{ url: string; until: number } | undefined> {
+  const key = `${machineId}\u0000${session}\u0000${artifactId}`;
+  const held = visualPageTickets.get(key);
+  const fresh = held?.then((ticket) => (ticket && ticket.until > Date.now() + 60_000 ? ticket : undefined));
+  const minted = (fresh ?? Promise.resolve(undefined)).then(async (ticket) => {
+    if (ticket) return ticket;
+    const connection = connections.get(machineId);
+    const result = connection ? await connection.visualPage(session, artifactId).catch(() => undefined) : undefined;
+    if (!result?.ok) return undefined;
+    const until = Date.parse(result.view.expires_at ?? "");
+    return { url: result.view.url, until: Number.isFinite(until) ? until : Date.now() + 5 * 60_000 };
+  });
+  visualPageTickets.set(key, minted);
+  void minted.then((ticket) => { if (!ticket && visualPageTickets.get(key) === minted) visualPageTickets.delete(key); });
+  return minted;
+}
+
+/** The page URL for an HTML attachment of the open conversation. */
+async function visualPageUrl(artifactId: string): Promise<string | undefined> {
+  const machineId = selectedMachineId;
+  const session = selectedSession;
+  if (!machineId || !session) return undefined;
+  return (await visualPageView(machineId, session, artifactId))?.url;
+}
 
 window.addEventListener("keydown", globalShortcut, true);
 // The conversation header's machine · codename line is fitted to its room

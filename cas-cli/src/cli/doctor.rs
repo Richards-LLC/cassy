@@ -6627,8 +6627,9 @@ mod tests {
         let root = crate::store::init_cas_dir(&project).unwrap();
         let db = root.join("cas.db");
         for primary in ["database is locked", "database is busy"] {
-            let rendered = format!("{primary} in SELECT no_such_column FROM awaiting_busy_recipient at offset 0");
-            assert!(prompt_queue_read_failure(&rendered).contains("in use by another process"));
+            let rendered = format!("{primary} in SELECT 'no such column: missing' FROM awaiting_busy_recipient at offset 0");
+            assert_eq!(prompt_queue_read_failure(&rendered), prompt_queue_read_failure(primary),
+                "query text must not replace the primary error diagnosis");
         }
         // A complete numbered ledger must not conceal an old lazy queue.
         let conn = rusqlite::Connection::open(&db).unwrap();

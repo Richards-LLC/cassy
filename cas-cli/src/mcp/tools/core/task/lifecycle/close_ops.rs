@@ -6950,6 +6950,39 @@ impl CasCore {
         parking
     }
 
+    /// Reject an explicit old or target-side receipt before QA or merge-state
+    /// gates can use it to measure a different head from the current delivery.
+    fn stale_fresh_park_receipt_refusal(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo: &std::path::Path,
+        parent_branch: &str,
+        receipt: &str,
+    ) -> Option<String> {
+        if task.status == TaskStatus::AwaitingMerge { return None; }
+        let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
+        let assignee = task.assignee.as_deref()?;
+        let branch = close_measured_factory_branch(repo, task, assignee);
+        let tip = resolve_branch_sha(repo, &branch)?;
+        let receipt_sha = resolve_task_commit_receipt_sha(repo, receipt).ok()?;
+        if receipt_sha == tip || !git_commit_is_ancestor(repo, &receipt_sha, &tip)
+            || !git_commit_is_ancestor(repo, recorded, &tip)
+            || unpushed_delivery_tip(repo, &branch, &tip, task.delivery_mode).is_some()
+        {
+            return None;
+        }
+        let (target, _) = preferred_live_target_ref_for_delivery(repo, parent_branch, task.delivery_mode);
+        (self.tip_is_own_task_lineage_with_receipt(
+            task_store, task, repo, Some(&branch), recorded, Some(&tip), true,
+        ) && parked_anchor_advance_with_target_is_attributable(
+            repo, recorded, &tip, &task.id,
+            self.sibling_lease_boundary(task_store, task), &target,
+        )).then(|| format!(
+            "PARK REFUSED: commit_receipt {receipt_sha} names a prior or unrelated head; the current pushed attributable tip of this task is {tip}. Retry close with commit_receipt={tip}. No anchor or QA round changed."
+        ))
+    }
+
     /// A fresh park binds the current task delivery, including a rebase whose
     /// conflict resolution changed an earlier patch (cas-4fcb). Patch equality
     /// with a commit-time snapshot is not required: request_changes may ask for
@@ -8643,6 +8676,14 @@ impl CasCore {
         } else {
             None
         };
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && let Some(refusal) = self.stale_fresh_park_receipt_refusal(
+                task_store.as_ref(), &task, &close_project_root,
+                &resolved_parent_branch, receipt,
+            )
+        {
+            return Ok(Self::tool_error(refusal));
+        }
         let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
 
         // cas-a94f: empty attribution alone is ambiguous (cas-6b46). Only
@@ -8940,36 +8981,6 @@ impl CasCore {
                         ) {
                             return Ok(Self::tool_error(unpushed_delivery_tip_refusal(
                                 branch, tip, &pushed,
-                            )));
-                        }
-                    }
-                    // GH #1389: a predecessor or imported target commit is
-                    // not authority to park an older head when the current
-                    // pushed assigned lane proves a later delivery from the
-                    // same task. Refuse before changing the anchor or QA.
-                    if task.status != TaskStatus::AwaitingMerge
-                        && let (Some(receipt), Some(tip), Some(recorded)) = (
-                            req.commit_receipt.as_deref(), anchor.as_deref(),
-                            task.deliverables.factory_branch_anchor.as_deref(),
-                        )
-                        && let Ok(receipt_sha) = resolve_task_commit_receipt_sha(&close_project_root, receipt)
-                        && receipt_sha.as_str() != tip
-                        && git_commit_is_ancestor(&close_project_root, &receipt_sha, tip)
-                        && git_commit_is_ancestor(&close_project_root, recorded, tip)
-                        && current_factory_branch_receipt_for_identity(&close_project_root, &task, tip).is_some()
-                    {
-                        let (target, _) = preferred_live_target_ref_for_delivery(
-                            &close_project_root, &resolved_parent_branch, task.delivery_mode,
-                        );
-                        if self.tip_is_own_task_lineage_with_receipt(
-                            task_store.as_ref(), &task, &close_project_root,
-                            measured_branch.as_deref(), recorded, Some(tip), true,
-                        ) && parked_anchor_advance_with_target_is_attributable(
-                            &close_project_root, recorded, tip, &task.id,
-                            self.sibling_lease_boundary(task_store.as_ref(), &task), &target,
-                        ) {
-                            return Ok(Self::tool_error(format!(
-                                "PARK REFUSED: commit_receipt {receipt_sha} names a prior or unrelated head; the current pushed attributable tip of this task is {tip}. Retry close with commit_receipt={tip}. No anchor or QA round changed."
                             )));
                         }
                     }

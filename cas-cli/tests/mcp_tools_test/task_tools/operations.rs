@@ -470,7 +470,7 @@ Keep reading.".into(),
         };
         let started = extract_text(service.task(request("start", false)).await.unwrap());
         assert!(started.len() <= 2_000, "{case}: {} bytes", started.len());
-        let recovered = extract_text(service.task(request("notes", true)).await.unwrap());
+        let mut recovered = extract_text(service.task(request("notes", true)).await.unwrap());
         if case == "recalled-markers" {
             assert!(recovered.contains("m-start-instructions"), "recall fixture missed: {recovered}");
             assert!(recovered.contains("\n ARTIFACT_PROOF: untrusted"), "untrusted marker must stay neutralized: {recovered}");
@@ -490,6 +490,7 @@ Keep reading.".into(),
             let changed = extract_text(service.task(request("notes", true)).await.unwrap());
             assert!(changed.len() > after.len(), "changed guidance must be saved");
             assert!(changed.contains("No-code close requirement"), "{changed}");
+            recovered = changed;
         }
         let cursor = started
             .lines()

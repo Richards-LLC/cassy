@@ -12139,6 +12139,7 @@ mod tests {
             ("embedded", "commander:test", true, false, "embedded", false, true),
             ("zero-padded", "commander:test", true, false, "zero", false, true),
             ("plain", "commander:test", true, false, "plain", false, true),
+            ("json", "commander:test", true, false, "json", false, true),
             ("commander", "commander:test", true, false, "exact", true, true),
             ("terminal", "terminal", false, true, "exact", true, true),
         ] {
@@ -12150,6 +12151,7 @@ mod tests {
                 "embedded" => format!("quote: {prefix}answer"),
                 "zero" => format!("[CAS reply: explicitly acknowledges notification_id=0{ask}]\nanswer"),
                 "plain" => "ordinary reply".into(),
+                "json" => r#"{"kind":1,"text":"ordinary operator JSON"}"#.into(),
                 _ => format!("{prefix}answer"),
             };
             {

@@ -554,6 +554,8 @@ mod focused_epic_tests {
             if delivered {
                 child.deliverables.factory_branch_anchor = Some(anchor.clone());
                 child.deliverables.merge_commit = Some(anchor.clone());
+                child.deliverables.parked_branch = Some("factory/worker-cas-landed".into());
+                git(&["branch", "factory/worker-cas-landed", &anchor]);
             }
             store.add(&child).unwrap();
             store

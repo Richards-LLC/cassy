@@ -225,7 +225,7 @@ with open(os.path.join(os.environ['HOME'],'launched-pid'),'w') as f: json.dump(d
   await cas(["init", "--yes", "--no-integrations"]);
   await writeFile(
     join(project, ".cas", "config.toml"),
-    "[factory]\nai_enrichment = false\n",
+    "[factory.ai_enrichment]\nenabled = false\n",
   );
   if (newSession) {
     // Match the production user service: a machine hub has no CAS_ROOT.

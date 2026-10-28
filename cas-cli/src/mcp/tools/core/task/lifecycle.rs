@@ -3374,7 +3374,8 @@ impl CasCore {
                     Ok::<String, McpError>(format!("\n\nStructured execution state:\n{encoded}"))
                 })
                 .transpose()?;
-            use super::query::{excerpt, read_hint, task_scope, task_show_notes};
+            use super::query::{ReadClipping, read_hint, task_scope, task_show_notes};
+            let mut clipping = ReadClipping::default();
             // Save start-only instructions before budgeting; full show cannot
             // otherwise recover warnings computed only during this start.
             let advisory = format!(
@@ -3444,16 +3445,16 @@ impl CasCore {
                     .unwrap_or_default();
             let optional = format!(
                 "\n{}\n{}\nNotes:\n{}\n{}\n{}",
-                excerpt(&related_context, 120),
-                task_scope(&task),
-                task_show_notes(&task.notes, &task.id),
-                excerpt(&execution_state.unwrap_or_default(), 120),
-                excerpt(&cited_pointer, 220),
+                clipping.excerpt(&related_context, 120),
+                task_scope(&task, &mut clipping),
+                task_show_notes(&task.notes, &task.id, &mut clipping),
+                clipping.excerpt(&execution_state.unwrap_or_default(), 120),
+                clipping.excerpt(&cited_pointer, 220),
             );
             let prefix = format!(
                 "Started task: {} - {}\nDelivery mode: {}{}",
                 task.id,
-                excerpt(&task.title, 60),
+                clipping.excerpt(&task.title, 60),
                 task.delivery_mode,
                 claim_info.unwrap_or_default(),
             );
@@ -3469,11 +3470,11 @@ impl CasCore {
                 let remaining = available.saturating_sub(overflow.len());
                 (overflow, remaining)
             };
-            let clipped = optional.contains('…') || optional.len() > available;
+            let clipped = clipping.clipped || optional.len() > available;
             let hint = read_hint(&task.id, "show", clipped);
             return Ok(Self::success(format!(
                 "{prefix}{advisory}{navigation}{}{hint}",
-                excerpt(&optional, available)
+                clipping.excerpt(&optional, available)
             )));
         }
 

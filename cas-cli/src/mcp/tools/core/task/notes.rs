@@ -35,17 +35,18 @@ impl CasCore {
                 task.notes
             )
         };
+        let mut clipping = super::query::ReadClipping::default();
         let summary = if task.notes.is_empty() {
             full.clone()
         } else {
             format!(
                 "Notes for task {}\n{}",
                 task.id,
-                super::query::task_show_notes(&task.notes, &task.id)
+                super::query::task_show_notes(&task.notes, &task.id, &mut clipping)
             )
         };
         Ok(Self::success(super::query::render_task_read(
-            &full, &summary, &task.id, "notes", &req.read,
+            &full, &summary, &task.id, "notes", clipping.clipped, &req.read,
         )?))
     }
 

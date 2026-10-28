@@ -484,12 +484,12 @@ Keep reading.".into(),
                 .find(|line| line.starts_with("Start advisories:")).unwrap().to_string();
             assert_eq!(context_cursor(&restarted), context_cursor(&started));
             let mut changed = store.get(&task.id).unwrap();
-            changed.labels.push("qa-pass".into());
+            changed.execution_note = Some("no-code".into());
             store.update(&changed).unwrap();
             service.task(request("start", false)).await.unwrap();
             let changed = extract_text(service.task(request("notes", true)).await.unwrap());
             assert!(changed.len() > after.len(), "changed guidance must be saved");
-            assert!(changed.contains("you are the reviewer"), "{changed}");
+            assert!(changed.contains("No-code close requirement"), "{changed}");
         }
         let cursor = started
             .lines()

@@ -3213,7 +3213,4 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 @media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
   .conversation-shell.context-open { grid-template-columns: 1fr; }
   .context-resize { display: none !important; }
-  /* A taller progress ledger needs the same visible result rail in portrait as landscape. */
-  .conversation-context > #fleet-phone-undo { position: sticky; bottom: 0; z-index: 3; }
-  .conversation-shell.fleet-sheet-open > .conversation-context:has(> #fleet-phone-undo) { scroll-padding-bottom: calc(var(--rail-item-min) + var(--space-6)); }
 }

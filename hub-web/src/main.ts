@@ -267,6 +267,7 @@ function scheduleReplyPresentation(): void {
 // thread; asks, blockers and attachments are read from its history.
 let contextProgress = false;
 const allProgressTasks = new Set<string>();
+let revealedPhoneNotice: object | undefined;
 let contextAttention = 0;
 function syncConversationContext(): void {
   // With no thread open there is nothing for the rail to hold: the last
@@ -4925,7 +4926,7 @@ function fleetAnnounce(text: string, options: AnnounceOptions = {}): void {
 function syncFleetSelection(): void {
   const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
   if (!fleetOps.select(key)) return;
-  fleetHeaderPanel = undefined; fleetFocusNext = undefined;
+  fleetHeaderPanel = undefined; fleetFocusNext = undefined; revealedPhoneNotice = undefined;
   window.clearTimeout(fleetUndoTimer);
   document.getElementById("fleet-phone-undo")?.remove();
   fleetAnnounce("");
@@ -5184,6 +5185,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   // Name, state, ticket, then the sentence: the identifiers stay mono and the
   // activity reads as prose, instead of one grey mono line per agent where the
   // eye had to find the dots to tell name from state from task.
+  let revealPhoneNotice = false;
   const ops = fleetOpsContext(status);
   if (ops) {
     fleetAnnouncer();
@@ -5198,8 +5200,15 @@ function renderStatus(status?: Record<string, unknown>): void {
       : offer ? undefined
       : !phoneConversation && fleetOps.currentResult(ops.now) ? resultBar(document, ops)
         : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
-    if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
-    else if (undo) container.append(undo);
+    if (undo && phoneConversation) {
+      const identity = offer ?? [...fleetOps.pending.values()].at(-1) ?? [...fleetOps.notes.values()].at(-1);
+      revealPhoneNotice = Boolean(identity && identity !== revealedPhoneNotice);
+      revealedPhoneNotice = identity;
+      undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo();
+    } else {
+      revealedPhoneNotice = undefined;
+      if (undo) container.append(undo);
+    }
     container.append(headerControls(document, ops, fleetHeaderPanel));
   }
   if (workers.length > 0) container.append(sectionLabel("Workers", workers.length));
@@ -5267,6 +5276,11 @@ function renderStatus(status?: Record<string, unknown>): void {
   syncWorkerTimeline();
   if (phoneLayout()) presentFleetSheet(container, dismissFleetPanel);
   restoreFocus();
+  // New feedback stays in normal flow after the tasks. Reveal it once, without
+  // pulling the reader back down on a heartbeat or covering a task's controls.
+  if (revealPhoneNotice && phoneLayout() && progressSheetOpen()) {
+    document.getElementById("fleet-phone-undo")?.scrollIntoView({ block: "nearest" });
+  }
 }
 
 /** `event` is the toggle's click; Ctrl/Cmd+K passes none (cas-990d). */

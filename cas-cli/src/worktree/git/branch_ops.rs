@@ -1118,20 +1118,34 @@ impl GitOperations {
             }
         }
 
+        // GH #1386: pre-push hooks read the working tree, not the refspec.
+        // Validate a clean checkout of exactly the commit we will publish;
+        // unrelated supervisor files/dependencies must not affect the hook.
+        let started = Instant::now();
+        let checkout = match self.add_temp_worktree_bounded(&local_sha, Some(timeout)) {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                return TargetPushOutcome::NotPushed {
+                    sha: Some(local_sha),
+                    remote_sha: self.resolve_commit(&remote_ref),
+                    reason: format!("could not prepare clean push checkout for {branch}: {error}"),
+                };
+            }
+        };
         let mut cmd = Command::new("git");
         cmd.args([
             "push",
             "origin",
-            // Fully-qualified on both sides: a bare branch name lets git's
-            // push.default / refspec config decide the destination, which is
-            // exactly the kind of ambiguity this receipt is meant to remove.
-            &format!("refs/heads/{branch}:refs/heads/{branch}"),
+            // Pin the source to the validated commit even if the local ref
+            // moves while a hook runs; fully qualify the destination so
+            // push.default / configured refspecs cannot choose another ref.
+            &format!("{local_sha}:refs/heads/{branch}"),
         ])
         // Never block on an interactive credential prompt (mirrors fetch).
         .env("GIT_TERMINAL_PROMPT", "0")
-        .current_dir(&self.repo_root);
+        .current_dir(checkout.path());
 
-        match Self::run_command_bounded(cmd, timeout) {
+        match Self::run_command_bounded(cmd, timeout.saturating_sub(started.elapsed())) {
             Ok(output) if output.status.success() => TargetPushOutcome::Pushed { sha: local_sha },
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);

@@ -13926,12 +13926,13 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
     task.assignee = Some("cas-8725-close-worker".to_string());
     env.task_store().add(&task).expect("add task");
 
+    let reason = "envelopes shipped with complete proof. ".repeat(40);
     let close = get_text(
         &env.service
             .task(Parameters(task_req(serde_json::json!({
                 "action": "close",
                 "id": task.id,
-                "reason": "envelopes shipped",
+                "reason": reason,
             }))))
             .await
             .expect("close returns verification guidance rather than an error"),
@@ -13969,6 +13970,18 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
         "CAS composed every byte of this row, so it is Daemon-stamped: {handoff:?}"
     );
 
+    eprintln!("DISPATCH_REPLAY reason_bytes={} queued_bytes={}", reason.len(), handoff.prompt.len());
+    assert!(!handoff.prompt.contains(&reason), "dispatch must reference its durable evidence");
+    let artifacts = cas_store::SqliteArtifactStore::open(&env.cas_root).unwrap()
+        .list_for_task(&task.id).unwrap();
+    let manifest = artifacts.iter().find(|artifact| artifact.name.starts_with("relay-evidence-"))
+        .expect("verification dispatch must preserve complete evidence in a manifest");
+    assert!(handoff.prompt.contains(&manifest.id));
+    let config = cas::config::Config::load(&env.cas_root).unwrap_or_default();
+    let root = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = cas::artifacts::paths::PublishRoots::new(&env.cas_root, &root, &task.id);
+    assert!(std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap().contains(&reason));
+
     // The gate, driven for real: this row wakes an idle supervisor pane.
     let agents = env.agent_store().list(None).expect("roster");
     let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
@@ -13998,7 +14011,7 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": task.id,
-            "reason": "envelopes shipped",
+            "reason": reason,
         }))))
         .await;
     let handoffs = env

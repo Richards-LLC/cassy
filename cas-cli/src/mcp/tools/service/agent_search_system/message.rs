@@ -5816,7 +5816,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(row.prompt.contains(&manifest.id));
         let config = crate::config::Config::load(&cas_root).unwrap_or_default();
         let root = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
-        let roots = crate::artifacts::PublishRoots::new(&cas_root, &root, &task_b.id);
+        let roots = crate::artifacts::paths::PublishRoots::new(&cas_root, &root, &task_b.id);
         let full = std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap();
         assert!(full.contains(&review), "manifest must preserve the complete review");
         // pin: literal evidence paths and changed file names survive manifest expansion.

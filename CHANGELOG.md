@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.85.0] - 2026-10-28
+
 ### Changed — a Codex supervisor that acts on signals, answers and stays quiet
 
 - **Acts on the signal, never polls** — Was: the Codex supervisor contract

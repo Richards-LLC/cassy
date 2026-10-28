@@ -178,6 +178,10 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub''s project catalog,
       folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab
       closing is proven at epic assembly on a real machine'
+  HUB-J13-NATIVE-CLAUDE-CAPACITY:
+    statement: Claude account choices consume profile-local native statusline observations, including factory sessions; an older percentage stays visible with its Eastern observation time until its known reset, while expired windows and changed identities cannot retain that percentage.
+    check: Run generated_statusline_records_usage_even_for_a_factory_supervisor, configure_migrates_bare_statuslines_in_every_profile_once and native_claude_snapshot_reaches_limits_and_picker_without_authentication; then use the batch candidate for real sessions on two profiles and read back both cas claude percentages and their profile snapshots without a usage endpoint request or credential-content reads.
+    bug: {task: cas-7045}
   HUB-J13-LAUNCH-STORE:
     statement: A machine hub carrying another project's CAS_ROOT starts the selected project's daemon; inherited process and user-manager environments cannot select the originating store.
     check: Run hub::server::launch_tests::machine_hub_launch_does_not_inherit_its_originating_project_store. This is defensive environment isolation; production did not carry CAS_ROOT in the cas-dd2e incident.
@@ -311,6 +315,11 @@ invariants:
     check: Run npm run visual-qa in hub-web; paired-machines, conversation and pairing-step-1 must have zero shell overflow findings in both themes at desktop, phone and landscape sizes.
     bug: {task: cas-2a07}
 bug_families:
+  missing-native-claude-capacity:
+    title: Generated statuslines must record native usage and account choices must retain unreset observations with their age
+    tasks: [cas-7045]
+    invariants: [HUB-J13-NATIVE-CLAUDE-CAPACITY]
+    journeys: [HUB-J13]
   lost-ack-history-correlation:
     title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
     tasks: [cas-d17f]
@@ -1462,6 +1471,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J13-GOAL
+  - HUB-J13-NATIVE-CLAUDE-CAPACITY
   - HUB-J13-LAUNCH-STORE
   - HUB-J13-STARTUP-WAKE
   traffic:

@@ -244,12 +244,14 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
 
   const times = shownTimes(events, now);
   events.forEach((event, index) => {
-    if (event.at !== undefined) {
-      // Work older than the loaded history waits for its page.
-      if (index === 0 && !options.historyEnd) while (nextWork < work.length && work[nextWork]!.at < event.at) nextWork += 1;
-      else flushWork(event.at);
-    }
+    // Queue order survives live catch-up; its arrival sort key can be newer
+    // than the durable turns after it. Place work by the displayed clock too.
     const { at, clockAhead } = times[index]!;
+    if (at !== undefined) {
+      // Work older than the loaded history waits for its page.
+      if (index === 0 && !options.historyEnd) while (nextWork < work.length && work[nextWork]!.at < at) nextWork += 1;
+      else flushWork(at);
+    }
     if (at !== undefined) {
       const day = dayKey(at);
       if (day !== lastDay) {

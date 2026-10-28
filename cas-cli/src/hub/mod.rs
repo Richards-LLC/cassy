@@ -708,8 +708,24 @@ impl LocalSessionReadModel {
                 continue;
             }
             rows.retain(|row| row.name != receipt.metadata.name);
+            let recorded = SessionInfo {
+                name: receipt.metadata.name.clone(),
+                metadata: receipt.metadata.clone(),
+                is_running: false,
+                socket_exists: false,
+            };
+            let (harness, account_email) = session_account(&recorded);
+            let project = session_cas_root(&recorded).and_then(|root| {
+                cloud_project_id(&root).or_else(|| {
+                    root.parent()?.file_name().map(|name| name.to_string_lossy().into_owned())
+                })
+            });
             rows.push(HubSession {
                 name: receipt.metadata.name,
+                harness,
+                account_email,
+                project,
+                machine_online: Some(false),
                 project_dir: receipt.metadata.project_dir,
                 supervisor: receipt.metadata.supervisor.name,
                 workers: receipt.ended.orphans.clone(),

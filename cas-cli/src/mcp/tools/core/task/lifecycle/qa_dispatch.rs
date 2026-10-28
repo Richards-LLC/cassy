@@ -430,6 +430,27 @@ impl CasCore {
         Some(report)
     }
 
+    /// Use the implementer's validated start range when one exists. Legacy
+    /// deliveries retain their existing receipt/target classification.
+    fn attributed_qa_paths(
+        &self,
+        task: &Task,
+        repo: &Path,
+        target: &str,
+        head: &str,
+    ) -> Option<Vec<String>> {
+        let history = self.open_agent_store().ok()?
+            .get_lease_history(&task.id, None).ok()?;
+        let identity = super::close_ops::task_commit_identity_in_repo(
+            repo, task, Some(head.to_owned()),
+        ).ok()?;
+        identity.start_base.as_ref()?;
+        let window = super::close_ops::resolve_task_commit_receipt_window(
+            task.created_at, &history, identity,
+        );
+        super::close_ops::task_attribution::qa_paths(repo, target, &window, Some(head))
+    }
+
     /// Open the independent QA round for a delivery that just parked (or
     /// re-parked) for merge. Returns the text to append to the MERGE
     /// REQUIRED refusal, or `None` when the delivery is not user-facing.
@@ -454,17 +475,18 @@ impl CasCore {
         if integrated_dispatch_boundary(task, repo, delivery_ref, &target).is_some() {
             return None;
         }
-        let changed = match changed_paths_for_delivery(
-            repo,
-            &target,
-            delivery_ref,
-        ) {
-            Ok(paths) => Some(paths),
-            Err(error) => {
-                tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
-                None
-            }
-        };
+        let changed = self.attributed_qa_paths(task, repo, parent_branch, delivery_ref)
+            .or_else(|| match changed_paths_for_delivery(
+                repo,
+                &target,
+                delivery_ref,
+            ) {
+                Ok(paths) => Some(paths),
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
+                    None
+                }
+            });
         self.independent_qa_for_paths(
             task,
             repo,
@@ -1294,6 +1316,9 @@ impl CasCore {
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
         let changed = head.as_deref().and_then(|head| {
+            if let Some(paths) = self.attributed_qa_paths(task, repo, target_branch, head) {
+                return Some(paths);
+            }
             // Match the close's durable task boundary: once a multi-commit
             // FF/rebase reaches the target, merge-base collapses onto its last
             // commit. A task-creation timestamp alone is not a delivery base;
@@ -2969,14 +2994,18 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let unnamed = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
-        for (branch, tip, expected) in [
-            (WORKER_TASK_BRANCH, &rebased, &rebased),
-            ("factory/worker", &rebased, &rebased),
-            ("factory/worker", &unnamed, &f.anchor),
+        for (parked_branch, branch, tip, expected) in [
+            (WORKER_TASK_BRANCH, WORKER_TASK_BRANCH, &rebased, &rebased),
+            ("factory/worker", "factory/worker", &rebased, &rebased),
+            ("factory/worker", "factory/worker", &unnamed, &f.anchor),
+            // A handoff retains the old branch's anchor for record_park.
+            (WORKER_TASK_BRANCH, "factory/worker", &rebased, &f.anchor),
         ] {
+            let mut task = f.task.clone();
+            task.deliverables.parked_branch = Some(parked_branch.into());
             let parking = f.core.advance_commit_time_anchor_before_park(
                 tasks.as_ref(),
-                &f.task,
+                &task,
                 repo,
                 "main",
                 Some(branch),

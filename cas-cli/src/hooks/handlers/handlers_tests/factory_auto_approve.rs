@@ -251,25 +251,55 @@ fn factory_write_under_declared_scratchpad_is_allowed() {
 
 #[test]
 fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account_configs() {
-    let mut env = TestEnvGuard::temp_home();
-    set_role_env(&mut env, Some("supervisor"));
-    let tmp = tempfile::tempdir().expect("tempdir");
+    use std::os::unix::fs::symlink;
 
-    for config_dir in [".claude", ".claude-work"] {
-        let path = env
-            .home()
-            .join(config_dir)
-            .join("projects")
-            .join("-home-pippenz-Petrastella-cas-src")
-            .join("memory")
-            .join("task-context.md");
-        let input = input_for("Write", path.to_str());
-        let out = handle_pre_tool_use(&input, Some(tmp.path())).expect("handler ok");
-        assert!(
-            allow_reason(&out).is_some(),
-            "supervisor harness-memory write must be allowed: {}",
-            path.display()
-        );
+    let mut env = TestEnvGuard::temp_home();
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path().join("project");
+    let cas_root = project.join(".cas");
+    std::fs::create_dir_all(&cas_root).unwrap();
+    let slug = crate::factory_context_reset::claude_project_slug(&project.to_string_lossy());
+    let default = env.home().join(".claude");
+    let canonical = env.home().join(".cas/claude-base");
+    let account = env.home().join(".claude-test@example.invalid");
+    for root in [&default, &canonical] {
+        std::fs::create_dir_all(root.join("projects").join(&slug).join("memory")).unwrap();
+    }
+    symlink(&canonical, &account).unwrap();
+
+    for config in [None, Some(account.as_path())] {
+        match config {
+            Some(path) => env.set("CLAUDE_CONFIG_DIR", path),
+            None => env.remove("CLAUDE_CONFIG_DIR"),
+        }
+        let active = config.unwrap_or(&default);
+        let resolved = if config.is_some() { &canonical } else { &default };
+        let inactive = if config.is_some() { &default } else { &account };
+        let memory = |root: &std::path::Path, project_slug: &str| {
+            root.join("projects").join(project_slug).join("memory/note.md")
+        };
+        for role in ["supervisor", "worker"] {
+            set_role_env(&mut env, Some(role));
+            env.set("CAS_CLONE_PATH", &project);
+            for (path, active_memory) in [
+                (memory(active, &slug), true),
+                (memory(resolved, &slug), true),
+                (memory(resolved, "other-project"), false),
+                (resolved.join("settings.json"), false),
+                (memory(inactive, &slug), false),
+            ] {
+                let input = input_for("Write", path.to_str());
+                let out = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
+                let expected_allow = role == "supervisor" && active_memory;
+                assert_eq!(
+                    allow_reason(&out).is_some(), expected_allow,
+                    "role={role}, active={active:?}, target={path:?}: {out:?}"
+                );
+                if !expected_allow {
+                    assert!(deny_reason(&out).is_some(), "{out:?}");
+                }
+            }
+        }
     }
 }
 

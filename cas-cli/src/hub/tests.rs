@@ -1592,10 +1592,12 @@ async fn h4_csp_03_commander_assets_are_self_hosted_and_strictly_sandboxed() {
     ] {
         assert!(csp.contains(required), "missing CSP directive {required}");
     }
-    for directive in ["img-src", "media-src", "worker-src"] {
+    // pin: Native media and workers receive only these exact CSP sources.
+    for (directive, expected) in [("img-src", "img-src 'self' data:"),
+        ("media-src", "media-src 'self'"), ("worker-src", "worker-src 'self'")] {
         let value = csp.split(';').map(str::trim)
             .find(|value| value.starts_with(&format!("{directive} "))).unwrap();
-        assert!(!value.contains("https:") && !value.contains("*"), "{value}");
+        assert_eq!(value, expected);
     }
     assert!(!csp.contains("'unsafe-inline'"));
     assert!(!csp.contains("'unsafe-eval'"));
@@ -5266,23 +5268,24 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     let upstream = wiremock::MockServer::start().await;
     let artifacts = SqliteArtifactStore::open(&f.cas_dir).unwrap();
     let queue = crate::store::open_prompt_queue_store(&f.cas_dir).unwrap();
-    for (id, mime, session) in [
-        ("art-image", "image/png", OPS_SESSION),
-        ("art-video", "video/mp4", OPS_SESSION),
-        ("art-pdf", "application/pdf", OPS_SESSION),
-        ("art-html", "text/html", OPS_SESSION),
-        ("art-foreign", "image/png", "another-session"),
+    for (id, mime, session, size) in [
+        ("art-image", "image/png", OPS_SESSION, 6),
+        ("art-video", "video/mp4", OPS_SESSION, 6),
+        ("art-pdf", "application/pdf", OPS_SESSION, 6),
+        ("art-html", "text/html", OPS_SESSION, 6),
+        ("art-large", "image/png", OPS_SESSION, cas_types::ARTIFACT_MAX_BYTES + 1),
+        ("art-foreign", "image/png", "another-session", 6),
     ] {
         artifacts.record_local(&NewArtifact {
             id: id.into(), task_id: OPS_TASK.into(), name: id.into(),
-            mime: mime.into(), size_bytes: 6, sha256: "a".repeat(64),
+            mime: mime.into(), size_bytes: size, sha256: "a".repeat(64),
         }).unwrap();
         artifacts.mark_uploaded(id, &format!("cloud-{id}")).unwrap();
         artifacts.mark_committed(id, None).unwrap();
         let row = queue.enqueue_with_session("supervisor", "operator", "media", session).unwrap();
         queue.stamp_operator_reply(row, "status", &[cas_types::ArtifactRef {
             artifact_id: id.into(), name: id.into(), mime: mime.into(),
-            size_bytes: 6, sha256: "a".repeat(64),
+            size_bytes: size, sha256: "a".repeat(64),
         }]).unwrap();
     }
     let mut candidate = fixture_session(OPS_SESSION);
@@ -5324,6 +5327,7 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         (OPS_SESSION, "art-video", StatusCode::OK),
         (OPS_SESSION, "art-pdf", StatusCode::OK),
         (OPS_SESSION, "art-html", StatusCode::NOT_FOUND),
+        (OPS_SESSION, "art-large", StatusCode::NOT_FOUND),
         (OPS_SESSION, "art-missing", StatusCode::NOT_FOUND),
         (OPS_SESSION, "art-foreign", StatusCode::NOT_FOUND),
         ("another-session", "art-image", StatusCode::NOT_FOUND),
@@ -5378,7 +5382,8 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), bytes);
     }
     for (id, expected) in [("art-image", StatusCode::OK), ("art-foreign", StatusCode::NOT_FOUND),
-        ("art-missing", StatusCode::NOT_FOUND), ("art-html", StatusCode::NOT_FOUND)] {
+        ("art-missing", StatusCode::NOT_FOUND), ("art-html", StatusCode::NOT_FOUND),
+        ("art-large", StatusCode::NOT_FOUND)] {
         let before = upstream.received_requests().await.unwrap().len();
         let uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/{id}/content");
         let (status, _) = f.call("GET", &uri, None).await;
@@ -5393,6 +5398,16 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         .body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(response.headers()["content-range"], "bytes */6");
+    assert_eq!(upstream.received_requests().await.unwrap().len(), before);
+    let auth_path = f.hub_root.join("auth.json");
+    let saved = std::fs::read(&auth_path).unwrap();
+    std::fs::write(&auth_path, b"not-json").unwrap();
+    let before = upstream.received_requests().await.unwrap().len();
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-image/content?t={}", tickets["art-image"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    std::fs::write(auth_path, saved).unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
     let post_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
     let now = chrono::Utc::now();

@@ -33553,6 +33553,37 @@ esac
                 && note.contains(&reverted)),
             "pre-anchor reviewed supersession must close: {result:?}"
         );
+        let MergeStateGateOutcome::ProceedWithNote(accepted) = result else {
+            unreachable!()
+        };
+        // GH #1401: a closed child's epic row must consume the accepted
+        // decision, including when a prior read cached the unreviewed loss.
+        task.status = TaskStatus::Closed;
+        let report = |task: &Task| {
+            let rows = collect_epic_branch_statuses(std::slice::from_ref(task), "main", p);
+            let rendered = render_epic_status_report("cas-epic", "main", &rows);
+            (rows.into_iter().next().unwrap(), rendered)
+        };
+        for notes in [
+            String::new(),
+            window.supervisor_override_reason.clone().unwrap(),
+            accepted.replace(&format!("anchor={anchor};"), &format!("anchor={introduction};")),
+            accepted.replace(&format!("superseding commits: {reverted};"),
+                &format!("superseding commits: {introduction};")),
+        ] {
+            task.notes = notes;
+            let (row, rendered) = report(&task);
+            assert!(row.dropped_paths.contains(&"analytics.vue".to_string()), "{rendered}");
+            assert!(row.blocks_epic_close(), "{rendered}");
+            assert!(rendered.contains("reachable anchor content is absent"), "{rendered}");
+        }
+        task.notes = accepted;
+        let (row, rendered) = report(&task);
+        assert!(row.dropped_paths.is_empty(), "{rendered}");
+        assert!(!row.blocks_epic_close(), "{rendered}");
+        let note = row.content_evolution_note.expect("accepted review remains visible");
+        assert!(note.contains(&anchor) && note.contains(&reverted), "{note}");
+        assert!(!rendered.contains("reachable anchor content is absent"), "{rendered}");
     }
 
     #[test]

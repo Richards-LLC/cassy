@@ -181,7 +181,13 @@ fn cas_7e24_duplicate_bodies_pass_and_breach_through_real_drains() {
             12000,
         )
         .unwrap();
-    assert_eq!(rows.rows.len(), 1, "actual recovery body counts twice");
+    assert_eq!(rows.rows.len(), 1, "recovery returns an unread reference");
+    assert!(rows.rows[0].reference_only);
+    assert_eq!(values(&conn).duplicate_body_reads, 0, "references do not repeat the body");
+    let named = queue.poll_named_for_recipient("reader", Some(SESSION), &[id]).unwrap();
+    assert_eq!(named.len(), 1);
+    assert_eq!(named[0].prompt, "body", "explicit named reads recover the actual body");
+    assert!(!named[0].reference_only);
     assert_eq!(values(&conn).duplicate_body_reads, 1);
     conn.execute("DELETE FROM prompt_queue WHERE id=?", [id])
         .unwrap();

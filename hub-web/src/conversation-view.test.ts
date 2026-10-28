@@ -11,6 +11,28 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
+  it("coalesces mount requests before paint and ignores one superseded by an immediate update", () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
+    onTestFinished(() => vi.unstubAllGlobals());
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element);
+    const update = vi.spyOn(view, "update");
+    history.reply(reply(1, "answer", "Ready before paint"), at(9, 0));
+    view.requestUpdate(); view.requestUpdate();
+    expect(update).not.toHaveBeenCalled();
+    for (const callback of frames.splice(0)) callback(0);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(view.element.textContent).toContain("Ready before paint");
+    view.requestUpdate();
+    view.update();
+    for (const callback of frames.splice(0)) callback(0);
+    expect(update).toHaveBeenCalledTimes(2);
+    view.requestUpdate(); view.dispose();
+    for (const callback of frames.splice(0)) callback(0);
+    expect(update).toHaveBeenCalledTimes(2);
+  });
   it("says Retry goes through once the session a held send waited for is live again (cas-d15c, cas-a355 N2)", () => {
     const history = new ConversationHistory();
     let live = false;

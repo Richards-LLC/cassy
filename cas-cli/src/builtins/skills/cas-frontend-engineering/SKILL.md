@@ -8,7 +8,7 @@ metadata:
 # Frontend engineering
 
 Use this skill for implementation craft. Read the approved concept brief and
-`DESIGN.md` before editing UI. `cas-ui-craft` owns visual direction and critique;
+the target `DESIGN.md` ([DESIGN.md first](../design-spec/references/design-md-first.md)) before editing UI. `cas-ui-craft` owns visual direction and critique;
 `cas-playwright-debug` and `cas-nuxt-playwright` own harness setup and debugging.
 This skill turns their intent into a maintainable, measurable implementation.
 

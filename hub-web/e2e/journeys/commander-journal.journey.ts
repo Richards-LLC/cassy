@@ -39,10 +39,10 @@ test("HUB-J12 a receipt in either tab settles both tabs without a duplicate retr
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     const owner = hub.sends.length ? hub : other;
-    owner.deliverLatest(PELICAN);
+    owner.queueLatest(PELICAN);
     for (const tab of [page, peer]) {
       await expect(tab.getByRole("log")).toContainText("One instruction, one delivery");
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(1);
@@ -91,9 +91,9 @@ test("HUB-J12 two tabs can explicitly retry an unconfirmed send with its origina
     await expect(page.locator("#conversation-connection")).toHaveText(" · Live");
   });
   await journey.stage("A late receipt settles both tabs and removes Retry", async () => {
-    (hub.sends.length ? hub : other).deliverLatest(PELICAN);
+    (hub.sends.length ? hub : other).queueLatest(PELICAN);
     for (const tab of [page, peer]) {
-      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Delivered");
+      await expect(tab.getByRole("log").locator(".conversation-delivery")).toContainText("Queued for supervisor");
       await expect(tab.getByRole("button", { name: "Retry sending", exact: true })).toHaveCount(0);
     }
     expect(hub.sends.length + other.sends.length).toBe(2);
@@ -309,11 +309,33 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
   await page.addInitScript(() => {
     const events: string[] = [];
     (window as unknown as { __receiptOrder: string[] }).__receiptOrder = events;
+    // Tag only a transaction that writes a reply row. The journal also opens
+    // readwrite transactions on "replies" to read and prune (a reconnect's
+    // restore, a journal read). Counting one of those as the reply's commit
+    // made this probe race (v3.82 merge queue: ["reply-commit","reply-commit"]).
+    const tagged = new WeakSet<IDBTransaction>();
+    const put = IDBObjectStore.prototype.put;
+    IDBObjectStore.prototype.put = function(this: IDBObjectStore, ...args: Parameters<IDBObjectStore["put"]>) {
+      const tx = this.transaction;
+      if (this.name === "replies" && !tagged.has(tx)) {
+        tagged.add(tx);
+        tx.addEventListener("complete", () => events.push("reply-commit"));
+      }
+      return put.apply(this, args);
+    };
+    // The regression, on every run: a restore read (readwrite on "replies",
+    // as the journal's read is) commits inside the measured window. Opened
+    // just before the reply's own write transaction, IndexedDB commits it
+    // first, so the old any-readwrite probe always saw two commits.
     const transact = IDBDatabase.prototype.transaction;
-    IDBDatabase.prototype.transaction = function(stores, mode, options) {
-      const tx = transact.call(this, stores, mode, options);
-      if (mode === "readwrite" && (typeof stores === "string" ? [stores] : [...stores]).includes("replies")) tx.addEventListener("complete", () => events.push("reply-commit"));
-      return tx;
+    IDBDatabase.prototype.transaction = function(this: IDBDatabase, stores: string | string[], mode?: IDBTransactionMode, options?: IDBTransactionOptions) {
+      const scope = typeof stores === "string" ? [stores] : [...stores];
+      if (mode === "readwrite" && scope.includes("replies") && scope.includes("blocks")) {
+        const restoreRead = transact.call(this, "replies", "readwrite");
+        restoreRead.objectStore("replies").getAll();
+        restoreRead.addEventListener("complete", () => events.push("restore-read"));
+      }
+      return transact.call(this, stores, mode, options);
     };
   });
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true });
@@ -336,11 +358,18 @@ test("HUB-J3 reply application ACK follows real IndexedDB commit and replay dedu
   let id = 0;
   await journey.stage("The reply is stored on this device before its application ACK", async () => {
     await journey.open(); await choose(page);
+    // cas-7ecc: the reply rides the conversation's socket, so it is said only
+    // once that socket is open (as the sibling parts below wait for it).
+    await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     await page.evaluate(() => { (window as unknown as { __receiptOrder: string[] }).__receiptOrder.length = 0; });
     id = hub.supervisorSays(PELICAN, "A durable reply on this device");
     await expect.poll(() => hub.persistedReplies.some((row) => row.notification_id === id)).toBe(true);
     expect((await journalRows(page, "replies")).filter((row) => row.reply?.notification_id === id)).toHaveLength(1);
-    expect(await page.evaluate(() => (window as unknown as { __receiptOrder: string[] }).__receiptOrder.slice(0, 2))).toEqual(["reply-commit", "application-ack"]);
+    // The reply's own commit comes first and its ACK after it; the forced
+    // restore read sits between or after them and is not the reply's commit.
+    const order = await page.evaluate(() => (window as unknown as { __receiptOrder: string[] }).__receiptOrder);
+    expect(order.filter((event) => event !== "restore-read").slice(0, 2)).toEqual(["reply-commit", "application-ack"]);
+    expect(order).toContain("restore-read");
     // cas-97d58 F05 (supersedes cas-e6d2's always-visible receipt): kept is the
     // quiet normal state, recorded on the bubble, never read out after every turn.
     await expect(page.getByRole("log").locator('[data-stored="true"]').filter({ hasText: "A durable reply on this device" })).toHaveCount(1);

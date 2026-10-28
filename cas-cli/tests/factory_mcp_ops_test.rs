@@ -575,6 +575,7 @@ fn coord_req(action: &str) -> CoordinationRequest {
         wake: None,
         in_reply_to: None,
         kind: None,
+        options: None,
         attachment: None,
         supersede_key: None,
         sticky: None,
@@ -3262,6 +3263,50 @@ async fn test_recycle_worker_refuses_dirty_worktree() {
 // =============================================================================
 // worker_status tests
 // =============================================================================
+
+#[tokio::test]
+async fn worker_status_usage_limit_names_each_provider() {
+    let _guard = EnvGuard::set(&[]);
+    let env = FactoryTestEnv::new();
+    let home = std::env::var("HOME").unwrap();
+    let reset_five = chrono::Utc::now() + chrono::Duration::hours(4);
+    let reset_week = chrono::Utc::now() + chrono::Duration::days(4);
+    let clone = env.cas_root.parent().unwrap().join("project");
+    let slug = clone.to_string_lossy().replace(['/', '.'], "-");
+    for cli in ["claude", "codex"] {
+        let id = env.register_worker_with_metadata(cli, HashMap::from([
+            ("worker_cli".into(), cli.into()),
+            ("clone_path".into(), clone.to_string_lossy().into()),
+        ]));
+        let mut agent = env.agent_store().get(&id).unwrap();
+        agent.cc_session_id = Some(format!("limit-{cli}"));
+        env.agent_store().update(&agent).unwrap();
+        let (path, body) = if cli == "claude" {
+            (PathBuf::from(&home).join(format!(".claude/projects/{slug}/limit-claude.jsonl")),
+             serde_json::json!({"type":"assistant","isApiErrorMessage":true,"error":"rate_limit","timestamp":"2026-10-27T12:00:00Z","message":{"content":[{"type":"text","text":"You've hit your limit"}]}}).to_string())
+        } else {
+            (PathBuf::from(&home).join(".codex/sessions/2026/10/27/rollout-limit-codex.jsonl"),
+             format!("{}\n{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"limit-codex","cwd":clone,"originator":"codex-tui","source":"cli"}}),
+                serde_json::json!({"timestamp":"2026-10-27T12:00:00Z","type":"event_msg","payload":{"type":"task_complete","error":"You've hit your usage limit","has_credits":false,"rate_limits":{"primary":{"used_percent":100,"window_minutes":300,"resets_at":reset_five.timestamp()},"secondary":{"used_percent":100,"window_minutes":10080,"resets_at":reset_week.timestamp()}}}})))
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+    let text = get_text(&env.service.factory_request(Parameters(factory_req("worker_status"))).await.unwrap());
+    for (cli, label) in [("claude", "Claude"), ("codex", "Codex")] {
+        let block = worker_status_block(&text, cli).expect("limited worker listed");
+        assert!(block.contains(&format!("[UNAVAILABLE: {label} usage limit]")), "{block}");
+        if cli == "claude" {
+            // pin: status must not fetch live usage or guess a reset from prose.
+            assert!(block.contains("5h: reset time unknown") && block.contains("weekly: reset time unknown"), "{block}");
+        } else {
+            for reset in [reset_five, reset_week] {
+                let stamp = reset.with_timezone(&chrono::Local).format("%H:%M").to_string();
+                assert!(block.contains(&stamp) && block.contains("(in "), "{block}");
+            }
+        }
+    }
+}
 
 #[tokio::test]
 async fn test_worker_status_empty() {
@@ -6082,6 +6127,18 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
             .expect("register stale agent");
     }
 
+    // cas-fe7d: host scans change between page requests (a stale temp root
+    // is reaped, a process exits). Stand in for that with checkouts whose
+    // gitdir is missing: listed for the first page, gone for the rest. Their
+    // lines must not shift the stale-agent rows between pages.
+    let vanishing: Vec<_> = (0..3)
+        .map(|index| env.cas_root.join("worktrees").join(format!("vanishing-{index}")))
+        .collect();
+    for checkout in &vanishing {
+        std::fs::create_dir_all(checkout).unwrap();
+        std::fs::write(checkout.join(".git"), "gitdir: ../missing-gitdir\n").unwrap();
+    }
+
     let default_req: FactoryRequest =
         serde_json::from_value(serde_json::json!({"action": "gc_report"})).unwrap();
     let default_report = env
@@ -6117,6 +6174,9 @@ async fn test_gc_report_default_is_bounded_and_pages_large_inventory() {
         );
         for (index, found) in found_agents.iter_mut().enumerate() {
             *found |= page_text.contains(&format!("stale-report-{index:03}-"));
+        }
+        for checkout in &vanishing {
+            let _ = std::fs::remove_dir_all(checkout);
         }
         let Some(next_offset) = page_text.lines().find_map(|line| {
             line.strip_prefix("Next offset: ")
@@ -8219,6 +8279,7 @@ fn coord_msg(
         wake: None,
         in_reply_to: None,
         kind: None,
+        options: None,
         attachment: None,
         supersede_key: None,
         sticky: None,
@@ -10798,6 +10859,9 @@ async fn rebind_branch_recovers_rewritten_delivery_cas_88c1() {
     ] {
         let _guard = EnvGuard::set(&[("CAS_FACTORY_SESSION", "session-88c1")]);
         let env = FactoryTestEnv::with_server_supervisor();
+        // cas-b403: a logged-in project, so the rebind writes through the
+        // production SyncingTaskStore rather than the bare SQLite store.
+        std::fs::write(env.cas_root.join("cloud.json"), r#"{"token":"test-token"}"#).unwrap();
         let worker = "rebind-worker";
         let path = init_pushed_worker_repo(&env, worker);
         let project = env.cas_root.parent().unwrap();

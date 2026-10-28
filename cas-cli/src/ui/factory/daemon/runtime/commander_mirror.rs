@@ -495,6 +495,7 @@ pub(super) fn scan_supervisor_replies(
                 device_id: device.to_owned(),
                 operator_label: None,
                 kind,
+                options: Vec::new(),
                 attachments: Vec::new(),
                 reply_to_session: None,
             };
@@ -652,6 +653,7 @@ mod tests {
             device_id: "phone".into(),
             operator_label: None,
             kind: crate::ui::factory::OperatorTurnKind::Answer,
+            options: Vec::new(),
             attachments: Vec::new(),
             reply_to_session: None,
         })

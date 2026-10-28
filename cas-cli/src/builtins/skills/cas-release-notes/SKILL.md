@@ -1,6 +1,6 @@
 ---
 name: cas-release-notes
-description: Use when a merge reaches staging or main, or when asked to draft or post release notes for the team or for customers, Slack updates or a release-notes rubric.
+description: Use when a merge reaches staging or main, or when asked to draft or post team release notes, Slack updates or a release-notes rubric; notes for customers or a client go to cas-customer-release-notes.
 metadata:
   managed_by: cas
 ---
@@ -28,14 +28,18 @@ Use the project's release rubric as the contract. The procedure is:
 3. **Gather the merge.** Read the merged change set, for example
    `gh pr view <n> --json title,body,commits,files`. Describe what changed for
    the person on the other side of the screen, not an inventory of touched
-   files. For each user-facing delivery, read its
-   `~/.cas/artifacts/<project-key>/<task-id>/qa/pairs/pairs.json` when it
-   exists. The template's before/after screenshots rule decides which images
-   go out, including for a project rubric copied before that rule existed.
+   files. Run `cas --json deliverable pairs --range <prev>..<new>` for the
+   released commit range. Use only its verified `pairs[]`: join `directory`
+   with `before.jpg` and `after.jpg`, and match `task_id` to the change being
+   described. Exit 1 can include good pairs alongside findings for other shots;
+   retain those findings and omit `unpaired[]`, unavailable and unlinked changes.
+   Never fabricate a missing side. The template's before/after screenshots rule
+   also applies to a project rubric copied before that rule existed.
 4. **Draft the messages from the rubric.** Follow its deploy-target label,
    audience labels, Was → Now format, thread count, reply count and Slack
    mrkdwn shape. Put one punch in each top-level message and the supporting
-   detail in its reply. Do not include internal ticket labels or
+   detail in its reply. Write in the target project's voice
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)). Do not include internal ticket labels or
    implementation process. Lay each message out with the
    [slack-formatting](../slack-formatting/SKILL.md) skill and pass its
    self-check: name no file unless it is attached to that message, and show
@@ -44,8 +48,14 @@ Use the project's release rubric as the contract. The procedure is:
    `docs/release-notes/<date>-<topic>-slack.md` before posting.
 6. **Post in rubric order** through [violet](../violet/SKILL.md),
    steps 3–6, marking each post `release_notes: true` with its `epic_id`
-   so the post-release gate reads the right check. It owns preflight, posting order, pacing, upload integrity and
-   failure handling. Publish only through the Violet hub; never use
+   so the post-release gate reads the right check. Attach each selected pair's
+   JPGs to the threaded reply describing that change, Before first, using
+   `--reply-file <directory>/<before.jpg> --reply-file <directory>/<after.jpg>`
+   after that reply's `--reply` argument (`cas violet thread`). Respect the ten
+   files per reply limit (five pairs); with no verified pair, attach nothing.
+   Name a capture file only in the reply that attaches it (Violet's attach rule).
+   Violet owns preflight, posting order, pacing, upload integrity and failure
+   handling. Publish only through the Violet hub; never use
    Claude.ai Slack or a personal Slack connector. If the
    hub cannot complete publication, report the measured failure with the
    partial receipts; never claim that it was posted.

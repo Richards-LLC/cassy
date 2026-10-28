@@ -36,12 +36,14 @@ mod qa_impact;
 pub(crate) mod qa_post_release;
 mod provider_default;
 mod release_report;
+pub mod deliverable;
 mod sweep;
 mod worktree;
 // `pub` so integration tests in `cas-cli/tests/` can reach
 // `cli::cloud::execute_team_push` (cas-1f44 T4). Internal; no stable API.
 pub mod cloud;
-mod config;
+// cas-f0ea0: pub(crate) so hook tests drive the operator write-roots path.
+pub(crate) mod config;
 mod config_tui;
 mod coordination;
 mod device;
@@ -62,7 +64,7 @@ mod init;
 pub(crate) mod project_files;
 pub mod integrate;
 pub mod interactive;
-mod limits;
+pub(crate) mod limits;
 pub(crate) mod accounts;
 mod list;
 pub(crate) mod mcp_cmd;
@@ -358,6 +360,10 @@ pub enum Commands {
     #[command(name = "release-report", hide = true)]
     ReleaseReport(ReleaseReportArgs),
 
+    /// Branded deliverables: resolve a project's brand from its DESIGN.md
+    #[command(subcommand)]
+    Deliverable(deliverable::DeliverableCommands),
+
     /// Manage upstream MCP servers
     #[command(subcommand)]
     Mcp(McpCommands),
@@ -480,6 +486,7 @@ fn auth_requirement(command: &Option<Commands>) -> AuthRequirement {
         | Commands::Changelog(_)
         | Commands::Release(_)
         | Commands::ReleaseReport(_)
+        | Commands::Deliverable(_)
         | Commands::Hook(_)
         | Commands::Factory(_)
         | Commands::Claude(_)
@@ -661,8 +668,20 @@ pub fn human_error_message(error: &anyhow::Error) -> String {
         .to_owned()
 }
 
-/// Run the CLI with the given arguments
+/// Read-only factory daemon admission, called before process-wide startup
+/// logging/telemetry and again for library callers of `run`.
+pub fn validate_process_startup(cli: &Cli) -> anyhow::Result<()> {
+    if let Some(Commands::Factory(args)) = &cli.command
+        && let Some(factory::FactoryCommands::Daemon { session, cwd, .. }) = &args.command
+    {
+        crate::ui::factory::validate_daemon_start(session, cwd)?;
+    }
+    Ok(())
+}
+
+/// Run the CLI with the given arguments.
 pub fn run(cli: Cli) -> anyhow::Result<()> {
+    validate_process_startup(&cli)?;
     let tracer_timer = std::time::Instant::now();
     let dev_tracing_enabled = initialize_dev_tracer();
     let command_name = get_command_name(&cli.command);
@@ -834,6 +853,7 @@ fn get_command_name(cmd: &Option<Commands>) -> String {
         Commands::Changelog(_) => "changelog".to_string(),
         Commands::Release(_) => "release".to_string(),
         Commands::ReleaseReport(_) => "release-report".to_string(),
+        Commands::Deliverable(_) => "deliverable".to_string(),
         Commands::Mcp(_) => "mcp".to_string(),
         Commands::Queue(_) => "queue".to_string(),
         Commands::Cloud(_) => "cloud".to_string(),
@@ -981,6 +1001,7 @@ fn run_command(cli: &Cli, cas_root: Option<&Path>) -> anyhow::Result<()> {
         Commands::Changelog(args) => changelog::execute(args, cli),
         Commands::Release(ReleaseCommands::Report(args)) => release_report::execute(args, cli),
         Commands::ReleaseReport(args) => release_report::execute(args, cli),
+        Commands::Deliverable(cmd) => deliverable::execute(cmd, cli),
         Commands::Mcp(cmd) => mcp_cmd::execute(cmd, cli, require_cas_root(cas_root)?),
         Commands::Queue(cmd) => queue::execute(cmd, cli),
         Commands::Cloud(cmd) => {
@@ -1158,7 +1179,8 @@ mod tests {
             "Directory receiving <version>.md, <version>.html, and (with --pdf) <version>.pdf",
             "Render a PDF with Playwright after rendering the HTML",
             "Re-fetch sources and replace the Markdown source, including a manual source",
-            "A standalone `release-latency.receipt` from `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run directory is read alongside ~/.cas/artifacts/release",
+            // pin: wrapped help must retain the configurable artifacts-root contract.
+            "A standalone `release-latency.receipt` from `scripts/release-latency-receipt.sh <tag> --run-dir <dir>`; its run directory is read alongside `<[factory] artifacts_root>/release`",
         ];
 
         for width in [80, 120] {

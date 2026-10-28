@@ -66,7 +66,23 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
     }
     let store = SqliteAgentStore::open(root)?;
     store.init()?;
-    for handoff in store.claim_supervisor_handoffs(successor)? {
+    let claimed = store.claim_supervisor_handoffs(successor)?;
+    // cas-d85c3: a phone message the predecessor never read belongs to the
+    // claiming successor. Re-check every claimed handoff, not just new ones,
+    // so a message left behind before this ran still moves; a moved row no
+    // longer matches, so repeats are no-ops.
+    let queue = crate::store::open_prompt_queue_store(root)?;
+    let mut rerouted = std::collections::HashMap::new();
+    for predecessor in store.supervisor_handoffs_claimed_by(successor)? {
+        let moved = queue.retarget_operator_rows_to_successor(
+            &predecessor.name,
+            predecessor.factory_session.as_deref(),
+            &successor.name,
+            successor.factory_session.as_deref(),
+        )?;
+        rerouted.insert(predecessor.id, moved);
+    }
+    for handoff in claimed {
         let dir = root.join("supervisor-handoffs");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join(format!("{}.json", handoff.id));
@@ -116,8 +132,15 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
                 detail.push_str(&line);
             }
         }
+        if let Some(moved) = rerouted.get(&handoff.id).filter(|ids| !ids.is_empty()) {
+            let ids: Vec<String> = moved.iter().map(|id| format!("#{id}")).collect();
+            detail.push_str(&format!(
+                "Unread operator messages re-routed to you: {}. Answer them with target=operator.\n",
+                ids.join(", ")
+            ));
+        }
         detail.push_str("Review the receipt and explicitly adopt owned epics. Worker rows are retirement-time evidence; verify current liveness before recovery.\n");
-        crate::store::open_prompt_queue_store(root)?.enqueue_idempotent(
+        queue.enqueue_idempotent(
             SOURCE,
             &successor.name,
             &detail,

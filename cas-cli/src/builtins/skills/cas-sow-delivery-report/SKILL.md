@@ -19,7 +19,9 @@ This skill adds only what an SOW delivery needs and reuses the rest:
   audience row and the client-deliverable type.
 - `cas-ui-craft`: concept brief, design language, rubric and visual QA.
 - `cas-qa-craft`: evidence from the real build and honest labels.
-- `cas-release-report/references/pdf.md`: the PDF check.
+- `cas deliverable finalize`: brand fill from `DESIGN.md`, single-file
+  inlining within the customer budget, client hygiene, print and the PDF
+  check, in one command.
 
 Nothing reaches the client or the client channel without the operator's
 explicit go. Client messages carry commitments the operator owns.
@@ -45,7 +47,8 @@ explicit go. Client messages carry commitments the operator owns.
    length, the round counts and the approval threshold are business terms, so
    do not infer them from code. Commit the file. Done when
    `grep -nE '<<[^>]+>>' docs/sow/DELIVERY.md` prints nothing.
-2. **Confirm the brand source.** Open the `DESIGN.md` that `DELIVERY.md` names.
+2. **Confirm the brand source.** Open the `DESIGN.md` that `DELIVERY.md` names
+   ([DESIGN.md first](../design-spec/references/design-md-first.md)).
    Compare its primary colour and font family with one live screen of the
    environment. If it is missing or disagrees, refresh it with `design-spec`
    first. A report branded from stale tokens looks foreign to the client. Done
@@ -76,8 +79,9 @@ explicit go. Client messages carry commitments the operator owns.
    threshold, small-SOW and PM-ping rules. Done when every item has an
    estimate, a scope call and an approval state, and every PM message those
    rules require is drafted.
-5. **Write the shot list** `shots.json`, using the format in
-   [scripts/capture.mjs](scripts/capture.mjs)'s header:
+5. **Write and commit the shot list** `docs/qa/shots.json`, an array of
+   `{ "id": "R1", "path": "/admin/dashboard/", "viewport": [1280, 800],
+   "ready": "main", "locator": "main", "mask": [".email"] }` objects:
    - one shot per Met or Partial requirement whose evidence is visual;
    - one *after* shot per round item.
 
@@ -96,46 +100,54 @@ explicit go. Client messages carry commitments the operator owns.
    reconstructed *before* misstates history. Done when every visual
    requirement and every round item has a shot id, and every round item has a
    *before* source or that label.
-6. **Capture headless with the project's QA login.** Run
-   `npm exec --yes --package=playwright -- node <skills-dir>/cas-sow-delivery-report/scripts/capture.mjs --shots shots.json --base <env-url> --out <shots-dir> [--login ...]`.
-   - `--login` reads the QA test account from the credentials file that
-     `DELIVERY.md` names and keeps the session in memory only. `--success-url`
-     is required with `--login`. Anchor it to the signed-in path, as in `^https://[^/]+/admin/`,
-     because an unanchored pattern also matches a sign-in URL that carries a
-     `returnUrl`.
-   - Never start interactive or third-party auth flows, such as OAuth consent,
-     `vercel login` or `gh auth`, and never create accounts. They act as the
-     operator. If the QA login fails, stop and report the failing step; the
-     script saves `login-failure.png`.
-   - Mask the client's personal data with each shot's `mask` selectors.
+6. **Capture through the deliverables core.** Configure `[qa.capture]` in
+   `.cas/config.toml`: `serve` with a `{port}` placeholder for local revisions,
+   or `base_url` for a deployed environment; `shots` names the committed list.
+   Set `credentials_env` to an environment-variable name whose value is the
+   readable QA credential-file path (`email:` and `password:` lines). Set
+   `login_path` and an anchored `success_url`, for example
+   `^https://[^/]+/admin/`, plus the project's form selectors. Never put the
+   account secret in config or a report. Keep the session in memory.
+   - Run `cas deliverable capture --task <task> --target <branch>` for a
+     merge-base/head pair from immutable checkouts in one bounded QA run.
+   - For production/staging, configure the environment and run
+     `cas deliverable capture --task <task> --side before`, then configure the
+     delivered environment and run the same command with `--side after`.
+     Both runs use the same shot IDs, framing and masks. Preserve the receipt
+     source; never label a deployed screenshot as a Git build.
+   - Without a catalog, the core runs affected browser checks at both revisions and
+     pairs their final-stage screenshots only when both runs pass.
+   - Mask personal data with `qa.capture.mask` or each shot's `mask`. A missing
+     requested mask fails capture. Auth failures produce a finding without an
+     unmasked failure screenshot. Follow the normal PM handoff for unavailable
+     evidence; never create an account or start third-party consent.
 
-   A shot that lands on a different path than it requested fails as
-   `redirected to …`, which is how a lost session shows. View every image.
-   Re-shoot any image that shows a loading state, an error toast, a dev
-   overlay, a logged-out page or empty data the requirement claims is
-   populated. Done when the script exits 0, `manifest.json` lists every shot
-   id and every image has been viewed.
+   Run `cas deliverable pairs --task <task>` to select verified complete pairs
+   from `<task-artifacts>/qa/pairs/pairs.json`. An unpaired capture is excluded.
+   View every image and re-shoot loading states, errors, logged-out screens or
+   empty data. Done when capture exits 0, every required shot has both sides
+   with matching framing/masks, and every image has been viewed.
 7. **Write the markdown**
    `docs/sow/<sow-slug>/reports/<date>-<sow-slug>-round-<n>.md` to
    [references/report-contract.md](references/report-contract.md). Done when
-   every DoD row and every round item appears exactly once and
-   `python3 <skills-dir>/cas-sow-delivery-report/scripts/check-sow.py hygiene <report.md>`
-   exits 0.
-8. **Brief, render and critique.** Write the `cas-ui-craft` brief. The default
-   hero is the one in report-contract.md. Render the HTML from
-   [references/report-skeleton.html](references/report-skeleton.html) with
-   the brand tokens as its header comment maps them, then make it a single
-   file:
-   `python3 <skills-dir>/cas-sow-delivery-report/scripts/inline-images.py <draft.html> <final.html>`.
-   Run the strict visual QA from the `cas-ui-craft` critique rubric. This is a
-   public surface, so distinctiveness, fit and hierarchy must each score at
-   least 4. Done when visual QA prints PASS and the scored table is in the
-   brief.
-9. **Print and check the PDF.** Run
-   `npm exec --yes --package=playwright -- node <skills-dir>/cas-sow-delivery-report/scripts/print-pdf.mjs <final.html> <out.pdf> [--author <report_author>]`,
-   then `python3 <skills-dir>/cas-release-report/scripts/check-pdf.py <out.pdf> <artifacts_dir>/pdf`.
-   Inspect every page PNG as `pdf.md` describes. Done when the receipt shows
-   zero bounds findings and you have viewed every page.
+   every DoD row and every round item appears exactly once.
+8. **Brief, render and finalize.** Write the `cas-ui-craft` brief. The default
+   hero is the one in report-contract.md. Fill a copy of
+   [references/report-skeleton.html](references/report-skeleton.html) with the
+   markdown's content, keeping its brand marker, then run
+   `cas deliverable finalize <draft.html> --audience customer --out <final.html> --pdf a4,letter --author <report_author> --check-dir <artifacts_dir>/pdf`.
+   It brands the page from the project's `DESIGN.md`, inlines every shot
+   within the customer budget (it names any pair it had to leave out), checks
+   the visible text for internal vocabulary, then prints A4 and Letter and
+   checks both. Exit 1 names each finding; fix the source, not the output.
+   Done when it exits 0.
+9. **Critique and view every page.** Run the strict visual QA from the
+   `cas-ui-craft` critique rubric on the final HTML. This is a public
+   surface, so distinctiveness, fit and hierarchy must each score at least 4.
+   Inspect every page PNG under `<artifacts_dir>/pdf` as
+   `cas-release-report/references/pdf.md` describes. Done when visual QA
+   prints PASS, the scored table is in the brief and you have viewed every
+   page.
 10. **Commit the round** in one commit:
     - `GAP-CHECK.md` and `ROUNDS.md`;
     - the markdown, brief, HTML and PDF;

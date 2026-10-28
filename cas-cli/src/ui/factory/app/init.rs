@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 
 use crate::config::Config;
 use crate::orchestration::names::generate_unique;
-use crate::store::find_cas_root;
+use crate::store::find_cas_root_from;
 use crate::ui::factory::app::{
     AutoPromptConfig, EpicFocusSource, EpicState, FactoryApp, FactoryConfig, epic_branch_for_state,
     preferred_epic_focus_from_session_metadata, queue_codex_worker_intro_prompt,
@@ -36,7 +36,8 @@ impl FactoryApp {
     pub fn new(config: FactoryConfig) -> anyhow::Result<Self> {
         use crate::worktree::GitOperations;
 
-        let cas_dir = find_cas_root()?;
+        super::super::session::validate_factory_project(&config.cwd)?;
+        let cas_dir = find_cas_root_from(&config.cwd)?;
 
         let (supervisor_name, worker_names) = if config.minions_theme
             && config.supervisor_name.is_none()

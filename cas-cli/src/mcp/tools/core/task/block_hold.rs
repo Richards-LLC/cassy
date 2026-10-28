@@ -1,7 +1,106 @@
 //! Structured provenance for non-dependency task holds.
 
 use cas_store::TaskStore;
-use cas_types::{Task, TaskBlockedHold};
+use cas_types::{Task, TaskAnsweredBlocker as AnsweredBlocker, TaskBlockedHold};
+
+/// Bind the active worker question without copying its prose into resume state.
+pub(crate) fn record_blocker_ask(
+    cas_dir: &std::path::Path, worker: &cas_types::Agent, task_id: &str, ask: &str,
+) -> Result<(), String> {
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let task = tasks.get(task_id).map_err(|e| e.to_string())?;
+    if worker.role != cas_types::AgentRole::Worker
+        || ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
+    { return Ok(()); }
+    use sha2::{Digest, Sha256};
+    let fingerprint = format!("{:x}", Sha256::digest(ask.as_bytes()));
+    tasks.patch_execution_state(task_id, &serde_json::json!({"blocker_ask": fingerprint}))
+        .map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Called only after a real registered supervisor's direct message commits.
+/// An unbound message cannot guess among multiple blocked tasks.
+pub(crate) fn record_supervisor_answer(
+    cas_dir: &std::path::Path, supervisor: &cas_types::Agent, worker: &cas_types::Agent,
+    task_id: Option<&str>, message_id: i64,
+) -> Result<(), String> {
+    if supervisor.role != cas_types::AgentRole::Supervisor || worker.role != cas_types::AgentRole::Worker
+        || supervisor.factory_session != worker.factory_session
+    { return Ok(()); }
+    let tasks = crate::store::open_task_store_local(cas_dir).map_err(|e| e.to_string())?;
+    let blocked = tasks.list(Some(cas_types::TaskStatus::Blocked)).map_err(|e| e.to_string())?;
+    let candidates: Vec<_> = blocked.iter().filter(|task| {
+        task_id.is_none_or(|id| task.id == id)
+            && [Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
+    }).collect();
+    let [task] = candidates.as_slice() else { return Ok(()); };
+    let Some(hold) = read(tasks.as_ref(), &task.id)? else { return Ok(()); };
+    let state = tasks.get_execution_state(&task.id).map_err(|e| e.to_string())?.unwrap_or_default();
+    let receipt = AnsweredBlocker {
+        worker: worker.id.clone(), supervisor: supervisor.id.clone(), reason: hold.reason,
+        ask: state.get("blocker_ask").and_then(serde_json::Value::as_str).map(str::to_owned), message_id,
+    };
+    tasks.patch_execution_state(&task.id, &serde_json::json!({"answered_blocker": receipt}))
+        .map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Positive, durable evidence only. New questions/holds, dependencies, changed
+/// owners and non-blocked task states retain their normal wake policy.
+pub(crate) fn answered_blocker_wait(
+    cas_dir: &std::path::Path, task_id: &str, recipient: &str,
+) -> Option<i64> {
+    let tasks = crate::store::open_task_store_local(cas_dir).ok()?;
+    let task = tasks.get(task_id).ok()?;
+    if task.status != cas_types::TaskStatus::Blocked || !tasks.get_blockers(task_id).ok()?.is_empty()
+        || !cas_store::ExternalTaskDependencyStore::open(cas_dir).ok()?
+            .list_blocking_for_task(task_id).ok()?.is_empty()
+    { return None; }
+    let state = tasks.get_execution_state(task_id).ok()??;
+    let receipt: AnsweredBlocker = serde_json::from_value(state.get("answered_blocker")?.clone()).ok()?;
+    let agents = crate::store::open_agent_store(cas_dir).ok()?;
+    let supervisor = agents.get(&receipt.supervisor).ok()?;
+    let worker = agents.get(&receipt.worker).ok()?;
+    if supervisor.role != cas_types::AgentRole::Supervisor || worker.role != cas_types::AgentRole::Worker
+        || ![supervisor.name.as_str(), supervisor.id.as_str(), "supervisor"].contains(&recipient)
+        || supervisor.factory_session != worker.factory_session
+        || ![Some(worker.name.as_str()), Some(worker.id.as_str())].contains(&task.assignee.as_deref())
+        || read(tasks.as_ref(), task_id).ok()??.reason != receipt.reason
+        || state.get("blocker_ask").and_then(serde_json::Value::as_str) != receipt.ask.as_deref()
+    { return None; }
+    Some(receipt.message_id)
+}
+
+pub(crate) fn worker_has_answered_blocker(
+    cas_dir: &std::path::Path, worker: &str, recipient: &str,
+) -> bool {
+    let Some(agents) = crate::store::open_agent_store(cas_dir).ok() else { return false; };
+    let Some(worker) = super::resolve_agent_identity(agents.as_ref(), worker) else { return false; };
+    let Some(tasks) = crate::store::open_task_store_local(cas_dir).ok() else { return false; };
+    let Some(assigned) = tasks.ids_by_assignees_and_statuses(&[&worker.name, &worker.id], &[
+        cas_types::TaskStatus::Open, cas_types::TaskStatus::InProgress, cas_types::TaskStatus::Blocked,
+        cas_types::TaskStatus::AwaitingMerge,
+    ]).ok() else { return false; };
+    !assigned.is_empty() && assigned.iter().all(|task| answered_blocker_wait(cas_dir, task, recipient).is_some())
+}
+
+/// Re-check queued alerts as well as newly emitted events. An answered row
+/// remains readable; only its wake is withdrawn.
+pub(crate) fn answered_blocker_alert(cas_dir: &std::path::Path, row: &cas_store::QueuedPrompt) -> bool {
+    if row.origin != Some(cas_store::QueueOrigin::Daemon) { return false; }
+    if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt) {
+        return envelope.new_status == cas_types::TaskStatus::Blocked
+            && answered_blocker_wait(cas_dir, &envelope.task_id, &row.target).is_some();
+    }
+    if cas_types::parse_worker_attention_envelope(&row.prompt).is_some()
+        && let Some(tag) = row.prompt.split('>').next()
+        && tag.contains("kind=\"worker_idle\"")
+        && let Some((_, worker)) = tag.split_once("worker=\"")
+        && let Some(worker) = worker.split('"').next()
+    {
+        return worker_has_answered_blocker(cas_dir, worker, &row.target);
+    }
+    false
+}
 
 /// Positive evidence that this recipient already owns the only recorded wait.
 /// Unknown state, independent holds and dependency blockers retain the alert.
@@ -43,9 +142,10 @@ pub(crate) fn owned_verification_wait(
     {
         return None;
     }
-    let is_wait = |reason: &str| {
-        reason.contains(&dispatch.id) && reason.to_ascii_lowercase().contains("verif")
-    };
+    // cas-16e1: a wait is the exact system-authored sentence for this
+    // dispatch, never any text that merely mentions it.
+    let wait = verification_wait_note(&dispatch.id);
+    let is_wait = |reason: &str| reason.trim() == wait;
     let hold = read(tasks.as_ref(), task_id).ok()?;
     if hold.as_ref().is_some_and(|hold| {
         hold.reason != "Task explicitly set to status=blocked." && !is_wait(&hold.reason)
@@ -54,10 +154,7 @@ pub(crate) fn owned_verification_wait(
     }
     // A new park starts a delivery cycle; old blocker notes cannot hold it.
     let notes = task.notes.rsplit("Task parked as awaiting_merge").next()?;
-    let blockers: Vec<_> = notes
-        .lines()
-        .filter_map(|line| line.split_once("🚫 BLOCKER").map(|(_, body)| body))
-        .collect();
+    let blockers = blocker_notes(notes);
     if blockers.iter().any(|reason| !is_wait(reason))
         || (!blockers.iter().any(|reason| is_wait(reason))
             && !hold.as_ref().is_some_and(|hold| is_wait(&hold.reason)))
@@ -65,6 +162,35 @@ pub(crate) fn owned_verification_wait(
         return None;
     }
     Some(dispatch.id)
+}
+
+/// cas-16e1: the one note a worker records to wait, blocked, on a pending
+/// verification dispatch without waking its supervisor.
+pub(crate) fn verification_wait_note(dispatch_id: &str) -> String {
+    format!("Verification required: exact dispatch {dispatch_id} must record a verdict before close.")
+}
+
+/// The full text of every blocker note, across all of its lines. A note
+/// entry starts at a `[YYYY-MM-DD HH:MM] ` line and runs to the next one.
+fn blocker_notes(notes: &str) -> Vec<String> {
+    let starts_entry = |line: &str| {
+        let bytes = line.as_bytes();
+        bytes.len() > 19 && bytes[0] == b'[' && bytes[17] == b']' && bytes[18] == b' '
+            && line[1..17].chars().all(|c| c.is_ascii_digit() || matches!(c, '-' | ' ' | ':'))
+    };
+    let mut entries: Vec<String> = Vec::new();
+    for line in notes.lines() {
+        match entries.last_mut() {
+            Some(entry) if !starts_entry(line) => {
+                entry.push('\n');
+                entry.push_str(line);
+            }
+            _ => entries.push(line.to_string()),
+        }
+    }
+    entries.into_iter()
+        .filter_map(|entry| entry.get(19..)?.strip_prefix("🚫 BLOCKER").map(|body| body.trim().to_string()))
+        .collect()
 }
 
 /// Read the hold that controls whether dependency auto-unblock may reopen a task.
@@ -116,4 +242,44 @@ pub(crate) fn record_auto_unblock_skipped(task: &mut Task, reason: &str) {
         task.notes.push_str(&note);
     }
     task.updated_at = chrono::Utc::now();
+}
+
+#[cfg(test)]
+mod tests {
+    use cas_store::TaskStore;
+    use cas_types::{Agent, AgentRole, TaskStatus};
+
+    /// cas-16e1: only the exact wait sentence, read across the whole note,
+    /// keeps a verification wait quiet; a blocker that mentions the dispatch
+    /// while asking for something else keeps alerts armed.
+    #[test]
+    fn only_the_whole_wait_note_is_a_quiet_verification_wait_cas_16e1() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let repo = tempfile::tempdir().unwrap();
+        let cas_dir = crate::store::init_cas_dir(repo.path()).unwrap();
+        crate::store::open_task_store_local(&cas_dir).unwrap()
+            .add(&cas_types::Task::new("cas-9efb-test".into(), "verification wait".into())).unwrap();
+        let lead = Agent::new_with_role("lead-id".into(), "lead".into(), AgentRole::Supervisor);
+        crate::store::open_agent_store(&cas_dir).unwrap().register(&lead).unwrap();
+        let dispatch = cas_store::create_verification_dispatch(
+            &cas_dir, "cas-9efb-test", "merge-w", "lead-id",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        ).unwrap();
+        let store = crate::store::open_task_store_local(&cas_dir).unwrap();
+        let wait = super::verification_wait_note(&dispatch.id);
+        for (note, quiet) in [
+            (wait.clone(), true),
+            (format!("{wait}\nAlso restore the staging database credentials."), false),
+            (format!("Verification of {} is stuck; I need the staging credentials.", dispatch.id), false),
+        ] {
+            let mut task = store.get("cas-9efb-test").unwrap();
+            task.status = TaskStatus::Blocked;
+            task.notes = format!("[2026-10-26 21:30] 🚫 BLOCKER {note}");
+            store.update(&task).unwrap();
+            assert_eq!(
+                super::owned_verification_wait(&cas_dir, "cas-9efb-test", "lead-id").is_some(), quiet,
+                "{note}"
+            );
+        }
+    }
 }

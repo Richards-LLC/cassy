@@ -156,7 +156,7 @@ export async function runFixtureVisualQa({ artifactDir = defaultArtifactDir, bro
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (/browser|chrom(?:e|ium)|executable/i.test(detail)) {
-        throw new Error(`${detail}\nInstall Chromium with: npm exec --yes --package=playwright -- playwright install chromium`);
+        throw new Error(`${detail}\nInstall Chromium from hub-web with: npm exec -- playwright install chromium`);
       }
       throw error;
     }

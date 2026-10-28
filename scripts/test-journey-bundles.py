@@ -41,10 +41,10 @@ class BundleTests(unittest.TestCase):
         }))
         return directory
 
-    def fold(self, suite_exit=0):
+    def fold(self, suite_exit=0, commit="a" * 40):
         actions = '1. 0:00.1 Expect "toHaveText" 2ms'
         with patch.object(bundles, "trace_actions", return_value=actions), contextlib.redirect_stdout(io.StringIO()):
-            return bundles.main([str(self.artifacts), "tree", "commit", str(suite_exit), "hub", "1.63"])
+            return bundles.main([str(self.artifacts), "tree", commit, str(suite_exit), "hub", "1.63"])
 
     def test_refuses_overwritten_result_with_stale_stage_screenshots(self):
         # A previous longer attempt left one screenshot beyond this passing result.
@@ -100,6 +100,22 @@ class BundleTests(unittest.TestCase):
         for ident in ["HUB-J13", "HUB-J14", "HUB-J15", "HUB-J16"]:
             self.assertEqual(rows.count(f"| {ident} |"), 1)
         self.assertIn("| HUB-J13 | start a new session | PASS |", rows)
+
+    def test_doc_only_rebundle_keeps_the_executed_trace_and_its_revision_cas_167c(self):
+        main = self.receipt("HUB-J5", "reply by typing")
+        executed, documented = "a" * 40, "b" * 40
+        self.assertEqual(self.fold(commit=executed), 0)
+        trace = main / "trace.zip"
+        ran_at = trace.stat().st_mtime_ns
+        # A documentation-only commit rebundles the same run: no browser, so
+        # the trace already sits at its canonical path.
+        self.assertEqual(self.fold(commit=documented), 0)
+        data = json.loads((main / "bundle.json").read_text())
+        self.assertEqual(data["files"]["trace"], "trace.zip")
+        self.assertEqual(data["files"]["trace_actions"], "trace-actions.txt")
+        self.assertEqual(data["head_sha"], documented)
+        self.assertEqual(data["executed_head_sha"], executed)
+        self.assertEqual(trace.stat().st_mtime_ns, ran_at)
 
     def test_failed_part_makes_the_whole_journey_fail(self):
         main = self.receipt("HUB-J13", "start a new session")

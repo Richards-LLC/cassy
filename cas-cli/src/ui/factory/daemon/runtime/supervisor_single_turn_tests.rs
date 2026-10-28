@@ -580,6 +580,33 @@ async fn cas_3f90_inline_peer_retains_the_shared_inbox_label() {
     assert!(typed.contains("[peer supervisor]"), "{typed:?}");
 }
 
+/// cas-bf20: on 2026-10-26 a hub-verified phone send to an idle Claude
+/// supervisor was parked as a "quiet supervisor event" and never typed; the
+/// supervisor ended 67 minutes later without seeing it. The operator's own
+/// message must start the idle supervisor's turn.
+#[tokio::test(flavor = "current_thread")]
+async fn cas_bf20_verified_commander_send_wakes_an_idle_supervisor() {
+    if !fixture_child("cas_bf20_verified_commander_send_wakes_an_idle_supervisor") {
+        return;
+    }
+    let _env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture().await;
+    let body = "Go ahead with the migration";
+    let attribution = crate::ui::factory::protocol::MessageAttribution {
+        device_id: Some("fc76b6df".into()),
+        credential_id: Some("b7cd4206".into()),
+        device_label: Some("Android Chrome".into()),
+        operator_label: Some("Daniel".into()),
+        controller_origin: Some("https://hub.petrastella.io".into()),
+        request_id: Some("d6b3978c".into()),
+        scopes: vec!["message:send".into()],
+        operator_verified: true,
+    };
+    let supervisor = daemon.app.supervisor_name().to_string();
+    daemon.enqueue_attributed_message(&supervisor, body, None, false, None, &attribution).unwrap();
+    typed_once(&root, &mut daemon, body).await;
+}
+
 
 #[tokio::test(flavor = "current_thread")]
 async fn cas_bc4d_directed_batches_preserve_budget_and_legacy_guards() {

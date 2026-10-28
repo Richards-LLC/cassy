@@ -17,3 +17,10 @@
 | Craft | 4 | The 80- and 120-column runs top out at 71 cells; each finding and remedy stays on one line. |
 | Theme safety | 5 | Dark, light, both Solarized palettes, `NO_COLOR`, and `LC_ALL=C` pass. |
 | Machine contract | 5 | The JSON run emits one document with full profile paths and detail text. |
+
+## Clean-home account resolution
+
+An absent implicit main profile keeps its home-relative path and copyable
+`cas claude login main` / `cas codex login main` remedy. Explicit unknown
+selectors keep the registry refusal and login command; readiness never creates
+an account folder. The original first-two-lines and JSON contracts above apply.

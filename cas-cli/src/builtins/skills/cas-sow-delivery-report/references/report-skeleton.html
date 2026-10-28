@@ -1,19 +1,14 @@
 <!DOCTYPE html>
 <!--
   cas-sow-delivery-report skeleton. Copy it beside the report markdown, then:
-  1. Replace the :root tokens with the project's DESIGN.md tokens. Each token
-     here is a design-spec role: copy the value of the same-named key under
-     DESIGN.md's front-matter `colors:` (bg, surface, line, line-strong, ink,
-     ink-muted, verdict, good, warning; surface-hero from the hero or sunk
-     surface, verdict-soft from a tint of verdict). Fonts come from its
-     `typography:` (display or h1 → --font-display, body1 → --font-body) and
-     DELIVERY.md → fonts, embedded as @font-face data URIs; radius from
-     `rounded:` card. Keep the role names; add the brand's own names only as
-     aliases. A light-only DESIGN.md drops the dark block.
+  1. Leave the brand marker in <style> as it is: `cas deliverable finalize
+     --audience customer` fills it from the project's DESIGN.md (colours by
+     design-spec role, display/body/mono faces, radii) and refuses a project
+     without one. Only layout tokens (--container, --radius) live here.
   2. Replace the example content (a fictional "Northwind analytics" SOW) with
      the markdown's content. Keep every data-section marker and the order.
-  3. Keep image src values relative (shots/<id>.jpg). scripts/inline-images.py
-     turns them into data URIs to make the single-file report. Leave images
+  3. Keep image src values relative (shots/<id>.jpg). `cas deliverable
+     finalize` turns them into data URIs to make the single-file report. Leave images
      eager: a lazy image below the fold is blank in full-page captures and print.
 -->
 <html lang="en">
@@ -22,28 +17,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Northwind analytics SOW: delivery report, round 2 (2026-10-20)</title>
 <style>
-:root {
-  color-scheme: light dark;
-  /* Brand tokens: replace from DESIGN.md (role names from design-spec). */
-  --bg: #F7F4EE; --surface: #FFFFFF; --surface-hero: #F1E7DD;
-  --line: #DAD3C7; --line-strong: #8F8371;
-  --ink: #1B1D24; --ink-muted: #5A5F6E;
-  --verdict: #2E3A9F; --verdict-soft: #DDE1F7;
-  --good: #226845; --warning: #7F5504;
-  --font-display: "Iowan Old Style", Palatino, Georgia, serif;
-  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --container: 1120px; --radius: 10px;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #15161B; --surface: #1D1F26; --surface-hero: #262229;
-    --line: #3A3C46; --line-strong: #8A8E9C;
-    --ink: #F2EFE9; --ink-muted: #B4B7C2;
-    --verdict: #AEB8F5; --verdict-soft: #2B3160;
-    --good: #7FCFA1; --warning: #E7B866;
-  }
-}
+/*cas:brand*/
+:root { --container: 1120px; --radius: var(--radius-card, 10px); }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 400 17px/1.55 var(--font-body); }
 a { color: var(--verdict); }

@@ -58,6 +58,8 @@ pub struct EvidenceContext<'a> {
     /// authenticated runs may stand in for a local build when local auth is
     /// impossible. Empty means local builds only.
     pub deployed_origins: &'a [String],
+    /// Capture is configured (including invalid configuration); unavailable remains an escape.
+    pub capture_configured: bool,
     /// Configured registry and this delivery's attributed files, for rebind coverage.
     pub rebind_scope: Option<(&'a crate::config::QaConfig, &'a [String])>,
 }
@@ -87,6 +89,8 @@ pub struct BundleReceipt {
     pub passed_expects: usize,
     /// Verified documentation-only changes from the bundle to the delivery.
     pub rebound_paths: Option<Vec<String>>,
+    /// Nonblocking capture setup guidance for projects without qa.capture.
+    pub advisories: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +107,10 @@ struct Manifest {
     visual_change: bool,
     #[serde(default)]
     visual_qa_status: String,
+    #[serde(default)]
+    pairs_status: String,
+    #[serde(default)]
+    pairs_reason: String,
     files: ManifestFiles,
     #[serde(default)]
     critique_score: std::collections::BTreeMap<String, i64>,
@@ -187,6 +195,9 @@ struct EvidenceCell {
 #[derive(Debug, Deserialize)]
 struct CellCapture {
     png: String,
+    jpg: String,
+    sha256: String,
+    jpg_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,6 +209,8 @@ struct EvidencePairs {
     pairs: Vec<EvidenceCell>,
     #[serde(default)]
     unpaired: Vec<EvidenceCell>,
+    #[serde(default)]
+    findings: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -211,6 +224,7 @@ fn validate_pairs(
     bundle_dir: &Path,
     relative: &str,
     head: &str,
+    status: &str,
 ) -> Result<PairFiles, EvidenceRefusal> {
     let repair = "capture AFTER evidence for every BEFORE cell, retain baseline-only cells in unpaired[], and regenerate files.pairs; only a recorded exact-tip qa_waive or supervisor_override can waive coverage";
     let refuse = |problem: String| EvidenceRefusal::new(problem, repair);
@@ -225,6 +239,38 @@ fn validate_pairs(
     if pairs.schema != 1 || pairs.task_id != ctx.task_id || pairs.head_sha != head {
         return Err(refuse(
             "files.pairs must use schema 1 and match bundle task_id/head_sha".into(),
+        ));
+    }
+    for cell in &pairs.pairs {
+        if cell.before.is_none() || cell.after.is_none() {
+            return Err(refuse(format!(
+                "files.pairs paired cell {} needs both BEFORE and AFTER captures",
+                cell.id
+            )));
+        }
+    }
+    for cell in &pairs.unpaired {
+        if cell.before.is_some() == cell.after.is_some() {
+            return Err(refuse(format!(
+                "files.pairs unpaired cell {} needs exactly one capture side",
+                cell.id
+            )));
+        }
+    }
+    let consistent = match status {
+        "complete" => {
+            !pairs.pairs.is_empty() && pairs.unpaired.is_empty() && pairs.findings.is_empty()
+        }
+        "partial" => {
+            (!pairs.pairs.is_empty() || !pairs.unpaired.is_empty())
+                && (!pairs.unpaired.is_empty() || !pairs.findings.is_empty())
+        }
+        "unavailable" => pairs.pairs.is_empty(),
+        _ => false,
+    };
+    if !consistent {
+        return Err(refuse(
+            "pairs_status disagrees with files.pairs pairs[]/unpaired[]/findings[]".into(),
         ));
     }
     let mut before = std::collections::BTreeMap::new();
@@ -272,15 +318,63 @@ fn validate_pairs(
     ] {
         for (id, capture) in cells {
             let key = format!("pairs.{phase}[{id}]");
-            let file = resolve_bundle_file(dir, &key, &capture.png)?;
-            if !std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
-                return Err(refuse(format!("files.{key} must name a nonempty capture")));
+            for (kind, relative, expected) in [
+                ("png", &capture.png, &capture.sha256),
+                ("jpg", &capture.jpg, &capture.jpg_sha256),
+            ] {
+                let key = format!("{key}.{kind}");
+                let file = resolve_bundle_file(dir, &key, relative)?;
+                if !std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() > 0) {
+                    return Err(refuse(format!("files.{key} must name a nonempty capture")));
+                }
+                if expected.len() != 64
+                    || crate::deliverable::pairs::digest(&file).ok().as_ref() != Some(expected)
+                {
+                    return Err(refuse(format!(
+                        "files.{key} bytes do not match their SHA-256"
+                    )));
+                }
+                listed.push((key, file));
             }
-            listed.push((key, file));
         }
     }
     files.current.push(("pairs".into(), path));
     Ok(files)
+}
+
+/// Shared by normal bundle validation and the cited-bundle probe used by batch close.
+fn pair_declaration(
+    ctx: &EvidenceContext<'_>,
+    visual_change: bool,
+    has_pairs: bool,
+    status: &str,
+    reason: &str,
+) -> Result<Vec<String>, EvidenceRefusal> {
+    let mut advisories = Vec::new();
+    let capture_command = format!("cas deliverable capture --task {} --side both", ctx.task_id);
+    let unavailable = status == "unavailable"
+        && !reason.trim().is_empty()
+        && !reason.chars().any(char::is_control);
+    if has_pairs && status == "unavailable" && !unavailable {
+        return Err(EvidenceRefusal::new(
+            "pairs_status unavailable needs a one-line reason in pairs_reason",
+            format!(
+                "run {capture_command}, or record pairs_status=unavailable with a reasoned pairs_reason"
+            ),
+        ));
+    }
+    if visual_change && !has_pairs && !unavailable {
+        if ctx.capture_configured {
+            return Err(EvidenceRefusal::new(
+                "missing files.pairs for visual_change with qa.capture configured",
+                format!(
+                    "run {capture_command} and cite files.pairs, or record pairs_status=unavailable with a one-line pairs_reason"
+                ),
+            ));
+        }
+        advisories.push(format!("Before/after pairs advisory: qa.capture is not configured; configure it and run {capture_command}, or record pairs_status=unavailable with pairs_reason."));
+    }
+    Ok(advisories)
 }
 
 /// Probe optional citations for declared comparisons, including deferred proof.
@@ -302,10 +396,26 @@ pub(crate) fn validate_cited_pair_coverage(
     let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return Ok(false);
     };
-    let Some(relative) = manifest
+    let relative = manifest
         .pointer("/files/pairs")
-        .filter(|value| !value.is_null())
-    else {
+        .filter(|value| !value.is_null());
+    pair_declaration(
+        ctx,
+        manifest
+            .get("visual_change")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        relative.is_some(),
+        manifest
+            .get("pairs_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        manifest
+            .get("pairs_reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+    )?;
+    let Some(relative) = relative else {
         return Ok(false);
     };
     let relative = relative.as_str().ok_or_else(|| missing_key("pairs"))?;
@@ -318,6 +428,10 @@ pub(crate) fn validate_cited_pair_coverage(
         path.parent().expect("manifest directory"),
         relative,
         head,
+        manifest
+            .get("pairs_status")
+            .and_then(|value| value.as_str())
+            .unwrap_or(""),
     )
     .map(|_| true)
 }
@@ -523,8 +637,12 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
             resolve_bundle_file(&bundle_dir, "cells", relative)?,
         ));
     }
+    let advisories = pair_declaration(
+        ctx, manifest.visual_change, files.pairs.is_some(),
+        &manifest.pairs_status, &manifest.pairs_reason,
+    )?;
     let pair_files = files.pairs.as_deref()
-        .map(|relative| validate_pairs(ctx, &bundle_dir, relative, &manifest.head_sha))
+        .map(|relative| validate_pairs(ctx, &bundle_dir, relative, &manifest.head_sha, &manifest.pairs_status))
         .transpose()?.unwrap_or_default();
     listed.extend(pair_files.current);
     for suffix in POLISH_RENDERS {
@@ -845,6 +963,7 @@ pub fn validate_bundle(ctx: &EvidenceContext<'_>) -> Result<BundleReceipt, Evide
         head_sha: manifest.head_sha,
         passed_expects: summary.passed,
         rebound_paths,
+        advisories,
     })
 }
 
@@ -2653,6 +2772,7 @@ pub fn run_close_gate_with_write_dir(
                 short(&receipt.head_sha),
                 receipt.passed_expects
             ));
+            pass.notes.extend(receipt.advisories);
             if let Some(paths) = receipt.rebound_paths {
                 pass.notes.push(format!(
                     "QA evidence rebind: {} -> {}; product inputs and selected QA coverage unchanged; changed paths: {}.",

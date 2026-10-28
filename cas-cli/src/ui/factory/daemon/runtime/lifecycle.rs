@@ -91,6 +91,7 @@ fn page_operator_for_idle_supervisor(
         device_id: "*".to_string(),
         operator_label: None,
         kind: crate::ui::factory::OperatorTurnKind::Blocker,
+        options: Vec::new(),
         attachments: Vec::new(),
         reply_to_session: None,
     }) {
@@ -346,6 +347,13 @@ pub(super) fn enqueue_worker_delivery_stalled_relay(
     )
 }
 
+pub(super) fn enqueue_usage_limit_switch_relay(
+    cas_dir: &std::path::Path, worker: &str, occurrence: &str, detail: &str, switch_queued: bool,
+) -> WorkerAttentionRelayOutcome {
+    enqueue_worker_attention_relay_inner(cas_dir, "worker_unavailable", worker, None, None,
+        |_| detail.to_owned(), occurrence, None, &[], !switch_queued).0
+}
+
 /// Surface a terminal harness-side refusal even when its MCP child continues
 /// heartbeating. The evidence is collected from the harness artifact, not
 /// inferred from heartbeat age.
@@ -455,6 +463,7 @@ pub(super) fn enqueue_folded_worker_deaths_relay(
         &occurrence,
         None,
         &folded_incidents,
+        true,
     );
     FoldedRelayAttempt {
         outcome,
@@ -562,6 +571,7 @@ pub(super) fn redrive_folded_worker_deaths_relay(
         occurrence,
         None,
         &folded_incidents,
+        true,
     )
     .0
 }
@@ -1229,7 +1239,7 @@ fn enqueue_worker_attention_relay_detail_with_key(
     stable_key: Option<&str>,
 ) -> WorkerAttentionRelayOutcome {
     enqueue_worker_attention_relay_inner(
-        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[],
+        cas_dir, kind, worker, task_id, elapsed_secs, detail, occurrence, stable_key, &[], true,
     )
     .0
 }
@@ -1278,6 +1288,7 @@ fn enqueue_worker_attention_relay_inner(
     occurrence: &str,
     stable_key: Option<&str>,
     folded_incidents: &[String],
+    needs_recovery: bool,
 ) -> (WorkerAttentionRelayOutcome, bool, bool, Option<String>) {
     use crate::mcp::tools::core::task::lifecycle::supervisor_push::{
         LIFECYCLE_WAKE_SOURCE_PREFIX, resolve_notice_recipient,
@@ -1315,6 +1326,7 @@ fn enqueue_worker_attention_relay_inner(
         "factory_session": factory_session,
         "occurrence": occurrence,
         "folded_incidents": folded_incidents,
+        "needs_recovery": needs_recovery,
     })
     .to_string();
     // cas-26c8: a folded multi-worker death replaces Critical worker_died
@@ -1377,8 +1389,13 @@ fn enqueue_worker_attention_relay_inner(
         .and_then(crate::harness_policy::agent_tool_prefix)
         .unwrap_or("");
     let detail = detail(prefix);
+    let recovery = if needs_recovery {
+        format!("\nRun `{prefix}factory action=worker_status` and reassign or recover the worker as needed.")
+    } else {
+        String::new()
+    };
     let mut body = format!(
-        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}\nRun `{prefix}factory action=worker_status` and reassign or recover the worker as needed.\n</worker-attention>"
+        "<worker-attention kind=\"{kind}\" worker=\"{worker}\" notification_id=\"{notification_id}\">\n{detail}{recovery}\n</worker-attention>"
     );
     // cas-207e: ready tasks or merges waiting on an actionable-idle
     // supervisor are a blocker, not routine: idle workers burn wall clock.
@@ -1930,9 +1947,14 @@ mod worker_attention_tests {
             },
         );
 
+        let _ = enqueue_usage_limit_switch_relay(&cas_dir, "switched", "episode-2",
+            "Worker switched, task cas-held: usage limit; queued account switch old -> next. Worktree, branch and task bindings kept.", true);
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 4, "a persisted occurrence replays idempotently");
+        assert_eq!(rows.len(), 5, "a persisted occurrence replays idempotently");
+        let switched = rows.iter().find(|row| row.prompt.contains("old -> next")).unwrap();
+        // pin: a successfully queued switch must not ask the supervisor to recover it.
+        assert!(!switched.prompt.contains("reassign or recover"), "{}", switched.prompt);
         assert!(rows.iter().all(|row| {
             row.target == "supervisor"
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
@@ -3054,6 +3076,10 @@ mod worker_attention_tests {
 
 impl FactoryDaemon {
     pub fn new(config: DaemonConfig) -> anyhow::Result<Self> {
+        crate::ui::factory::session::validate_daemon_start(
+            &config.session_name,
+            &config.factory_config.cwd,
+        )?;
         // Get initial terminal size (default for daemon without terminal)
         let (cols, rows) = (120, 40);
 

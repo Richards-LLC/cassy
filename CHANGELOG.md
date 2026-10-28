@@ -7,6 +7,251 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.84.0] - 2026-10-27
+
+### Added — every subscription named, listed and picked for you
+
+- **One account list** — Was: Claude and Codex accounts were separate folder
+  scans named `main`, `alt` or a typo, with no single view of usage. → Now:
+  `cas accounts list` (and `--json`) shows every Claude and Codex subscription by
+  email, with plan, login state, 5h and weekly use, reset times, and flags for
+  duplicates, never-logged-in folders and rejected logins. Usage is fetched
+  within one 4-second deadline; unavailable usage reads "usage unknown".
+- **Pickers name accounts by email** — Was: `cas claude` and `cas codex` listed
+  folder names, so two folders sharing one login looked unrelated. → Now: rows
+  read `email (alias)`, the original account is listed before its duplicates,
+  and `main`, `alt` and email folder names still launch. A displayed email
+  launches its folder; an ambiguous email lists the aliases to choose from; an
+  unknown name is refused, creates no folder, and points to `cas <provider> login`.
+- **A recommended account** — Was: the operator chose an account by memory. →
+  Now: the account that resets soonest with room left is marked "recommended",
+  with its reason, and the picker cursor starts on it. Any account stays
+  selectable and nothing launches before Enter. Idle accounts count as unused;
+  accounts over the threshold (`accounts.threshold`, default 90%), disabled,
+  duplicate, logged-out or with no usage data are not recommended, and each says
+  why. `accounts.selection` chooses `soonest-reset` (default) or `most-headroom`.
+  Commander's New session sheet preselects and marks the same account, and a
+  worker spawned without `config_dir` uses it, naming the account and reason in
+  its receipt.
+- **Remove, rename, disable and enable** — Was: a mistyped or retired account
+  folder could not be removed from Cassy. → Now: `cas accounts remove` (with a
+  default-no confirmation, or `--yes`), `rename`, `disable` and `enable` act on a
+  folder alias or email. `main` and accounts in use by a running session are
+  refused. Shared items linked into the base stay intact. Removing an account
+  also removes its symlink aliases, and disabling either spelling of an aliased
+  account disables both.
+- **A new login leaves nothing behind** — Was: a cancelled or failed
+  `cas claude login <name>` left a seeded folder that looked like an account. →
+  Now: a login is staged and only becomes an account when it succeeds. The same
+  login already present asks before reusing it, and the same email with a
+  different account becomes `email-2`. Stale staging folders are swept on the
+  next login without blocking it.
+- **Absolute reset times everywhere** — Was: usage showed a relative time or only
+  a percentage. → Now: `cas accounts list`, the pickers, `cas limits`, Commander's
+  account sheet, `worker_status` and limit notices read like
+  `resets Tue 14:00 (in 6h)` in local time, with the date when it is not today or
+  tomorrow, and `(in 1d 23h)` for longer waits. An already-reset window reads
+  "reset, usage unknown until next session"; `cas limits --compact` stays one
+  line and ends `+N more` when it overflows.
+- **Shared links repaired** — Was: an account folder recreated after
+  `cas accounts link` silently lost its shared commands, skills and settings. →
+  Now: `cas doctor` reports account link drift in one row, `cas doctor --fix`
+  restores the links with a backup, and every launch checks and restores the
+  chosen account's shared links before starting.
+- **A worker that hits its usage limit restarts on the next account** — Was: a
+  limited worker stopped until someone switched it by hand. → Now: the factory
+  restarts it once per limit episode on the next recommended account, resuming
+  its task in the same worktree and branch, and tells the supervisor which
+  account it moved to. When no account is eligible, the notice says when the
+  first one will be ("no eligible account until …"). A switch error still sends
+  one notice that names the error. The supervisor itself is never switched.
+  `worker_status` labels Claude and Codex limits correctly.
+
+### Changed
+
+- **`cas limits --json` reset times** — Was: `reset_at` was local display text.
+  → Now: it is an RFC3339 UTC instant, like `cas accounts list --json`.
+- **Folders named `old` or `backup`** — Was: `~/.codex-old` or `~/.claude-backup`
+  were hidden as scratch folders. → Now: they are listed as accounts. Name a
+  backup with a dotted suffix, e.g. `~/.claude-x.backup`, to keep it hidden.
+- **Playwright 1.64.1** — Was: Commander's browser tests pinned Playwright 1.63.
+  → Now: they run on 1.64.1.
+
+### Fixed
+
+- **macOS Claude usage** — Was: Claude usage on macOS read only
+  `.credentials.json`, so Keychain-backed logins showed no usage. → Now: usage
+  reads the account's macOS Keychain credential first, without printing it, and
+  falls back to the file.
+- **Remove on older hosts** — Was: `cas accounts remove` failed with a raw SQL
+  error on a host whose Cassy database predates newer agent columns or the known
+  repositories table. → Now: it proceeds on those layouts; a corrupt or unreadable
+  database still refuses with `Run: cas update`.
+
+### Upgrade notes
+
+- After installing, run `cas doctor --fix` to restore shared links on account
+  folders recreated after `cas accounts link`.
+- Removing an account is a hard delete after confirmation; there is no backup copy.
+
+## [3.83.0] - 2026-10-27
+
+### Fixed
+
+- Commander phone messages wake an idle supervisor, including short approvals,
+  instead of waiting for unrelated activity.
+- Commander sends get their own bounded two-second store wait, so brief write
+  contention or an exhausted loop budget does not immediately report “Not sent”.
+- An unread, verified phone message addressed to an ended supervisor moves once
+  to its successor. Messages already seen by the predecessor stay with it.
+- Two people can send through one hub without taking terminal input control.
+  Leaving releases control held by that person; live receipts and history keep
+  each sender's name. Read-only conversations explain whom to ask for Send access.
+- After a supervisor replacement or hub restart, Commander retires the old
+  connection, retries subscriptions refused during the catalog gap, and counts
+  the attached phone again without a page reload.
+- Supervisor answers are saved to the operator thread while Commander is
+  reconnecting. A temporarily empty device count reports held delivery;
+  reattach recovers the same reply instead of losing it before it is queued.
+- Newly paired devices load unread replies and their conversation-list previews
+  before the conversation is opened.
+- Delivery receipts distinguish a durable queue entry from delivery to the
+  supervisor. Replayed receipts and history do not move delivered or replied
+  messages backwards.
+- The working indicator requires current unanswered activity. An idle supervisor
+  no longer appears to be working just because it remains connected.
+- Ask choices survive live replies and conversation history, so the phone keeps
+  the offered one-tap answers.
+- Recovered connections clear their outage attention item. A fleet change still
+  refreshes the catalog when it overlaps a heartbeat whose read fails.
+- New session includes projects with a live session even if they are not in the
+  project registry. Folder paths are shown only with session-read permission,
+  and session names use the same validation as the CLI.
+- Committed installation pairings write their pairing audit row. Reconnection
+  audit rows include the hub's machine identity, so their origin is attributable.
+- Refused Commander sends leave a daemon log and a correlated hub outcome.
+  History reads do not create send audit rows, and audited client references
+  are bounded.
+- No-code completion stays tied to its reviewed revision when the checkout is
+  reused for another change. Branch recovery writes through the supported
+  guarded store update.
+- Release reports use and name the configured artifacts root instead of assuming
+  the default location; embedded receipt references remain portable.
+- Visual QA waits for visible images to decode before resting and journey
+  screenshots. Broken or timed-out images produce a finding instead of a blank
+  capture marked PASS, including when visual exceptions are configured.
+- Journey evidence bundles keep the originating task identity in nested output,
+  preserve a moved trace on a documentation-only rebundle, and name the revision
+  that actually ran.
+- Styled terminal bullets fall back to ASCII in C locales, keeping diagnostics
+  readable without a visual exception.
+- Invalid daemon socket paths or store ownership are refused before startup
+  registers a session, preventing a partial start.
+- Review-wait alerts recognize the full recorded hold, unchanged not-ready
+  deliveries wait for the settled retry, and delivery anchors remain on origin.
+
+### Changed
+
+- Downloads is writable by default (the configured Linux downloads folder, or
+  `~/Downloads`), and user-level `factory.write_roots` joins each project's
+  allowed folders through the existing safety checks.
+- Configured visual capture requires declared, complete before/after pairs.
+  Capture diagnostics explain selector, mask and budget problems within an
+  80-column terminal, and reused dependencies stay clean in private captures.
+
+### Added
+
+- Pairing codes can be sent through the phone's share sheet, with a clipboard
+  fallback and the approval command and expiry included.
+- Branded deliverables can capture immutable revisions through the journey or
+  catalog path, including opt-in masks and goal receipts. Verified pairs check
+  image integrity and framing before use; managed project guidance advertises
+  the available report and customer-note commands.
+- Release notes select verified before/after JPGs from the released commit range
+  and attach them to the reply describing the change. Release reports accept
+  `Pair: <task-id>/<shot-id>` alongside explicit `Before:`/`After:` captures;
+  missing or incomplete evidence shows no image.
+
+## [3.82.0] - 2026-10-26
+
+### Added — every report, page and note wears the target project's DESIGN.md
+
+- One rule, `design-spec/references/design-md-first.md`, now governs every
+  human-facing output an agent produces: resolve the target project's
+  `DESIGN.md` (tokens, type, mark, voice), create one through `design-spec`
+  when it is missing, and record `design: <path>@<revision>` at close. Worker
+  and supervisor guidance, the close gate and every craft and report skill
+  link it instead of restating their own fallbacks.
+
+### Added — `cas deliverable brand` and `cas deliverable finalize`
+
+- `cas deliverable brand` resolves a project's brand: the `DESIGN.md` named
+  by `docs/deliverables/PROFILE.md`, else the one nearest `--surface`, the
+  root one, or a single nested one such as `apps/frontend/DESIGN.md`,
+  following `inherits:`. CSS sources with `maps:` are inlined; otherwise the
+  design-spec `colors`, `typography` and `rounded` values are used, and the
+  receipt names the fallback font stack when no local `.woff2` exists. A
+  customer deliverable with no `DESIGN.md` exits 1 with a finding instead of
+  wearing the default brand.
+- `cas deliverable finalize` turns a draft HTML into the deliverable in one
+  call: it fills the brand, inlines local images within a per-audience
+  budget (about 120 KB per image; over budget, the lowest-priority
+  before/after pair is left out whole and named), checks the visible text
+  for the audience (customer output refuses ticket labels, PR numbers,
+  process words, tool names, local URLs, credentials and home paths), prints
+  A4 and Letter and checks both PDFs. A refused deliverable is not written.
+  Exit 0 is pass, 1 a finding, 2 a usage or environment error.
+- `cas release report` and the SOW delivery report now finish through
+  `finalize`; `cas release report --pdf` checks the A4 and Letter PDFs and
+  needs PyMuPDF. `cas release report --audience customer` is available. The
+  SOW skill's own print and inline scripts are gone, and `check-sow.py` keeps
+  only the gap check.
+
+### Added — feature reports and customer release notes
+
+- `cas-feature-report` builds a branded feature report with real
+  before/after views through `finalize`; `cas-html-reports` now routes
+  feature reports to it.
+- `cas-customer-release-notes` builds a client's release notes from its
+  `docs/deliverables/PROFILE.md` and its own `DESIGN.md`, as HTML and A4 and
+  Letter PDFs that pass customer hygiene. `cas-release-notes` now covers team
+  notes and hands customer notes to it.
+
+### Added — Commander counts journey use, and QA reads it
+
+- Commander counts how often each journey's defining act happens, as
+  per-day action totals with no session, project, machine or message
+  content, and sends them only to the operator's paired machines. Each hub
+  keeps the highest count per device, day and action, so a repeated post
+  never double counts, and a machine that comes online takes its counts at
+  once.
+- `cas qa journeys --traffic [--days N] [--write]` turns those counts into
+  per-journey traffic shares, and the post-release check names the affected
+  journeys to watch first, highest share first.
+- `[qa.capture]` configuration (`cas config list --section qa.capture`)
+  describes how to serve and capture a project for QA: target or serve
+  command, shots, viewports, masks, budgets and an anchored login whose
+  credentials are named by an environment variable, never stored.
+
+### Fixed — factory deliveries return to their workers instead of stalling
+
+- A parked delivery that hits a merge conflict returns Open to its assignee
+  with the conflicting paths and one notice, so the worker can resolve and
+  re-deliver directly.
+- After a merge, an enforced registry or documentation upkeep gate returns
+  the task to its assignee with the gate's text instead of leaving it
+  stranded.
+- A blocked worker's alerts stay quiet once the supervisor answers that
+  blocker (`kind=answer` or a reply to it), and re-arm only on a new question
+  or hold; an unrelated ping no longer silences them.
+- 3.81 follow-ups: a declined or not-ready lane settles until its refs
+  change, a parked anchor never advances to a commit origin lacks, and a
+  failed hold restore or close record is named in the result.
+- `gc_report` detail pages keep every stale-agent row while host scans
+  change between page requests.
+- Capped worker checks stay warm, and Zig is resolved from the shared
+  checkout in linked worktrees.
+
 ## [3.81.0] - 2026-10-26
 
 ### Added

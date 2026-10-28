@@ -84,6 +84,19 @@ function transport(multiplex = false) {
   };
 }
 
+// Keep the real signer, but let event delivery get ahead of its asynchronous
+// completion deterministically instead of relying on a loaded host (cas-33167).
+function pauseSigning(): () => void {
+  const sign = crypto.subtle.sign.bind(crypto.subtle);
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  vi.spyOn(crypto.subtle, "sign").mockImplementation(async (...args) => {
+    await gate;
+    return sign(...args);
+  });
+  return release;
+}
+
 class TransportSocket {
   static readonly OPEN = 1;
   static readonly CONNECTING = 0;
@@ -172,7 +185,7 @@ describe("Commander live connection lifecycle", () => {
     await second;
     writer.receive({ MessageQueued: { client_ref: clientRef, notification_id: 99, target: "supervisor", stamped: true } });
     const send = history.events.find(event => event.kind === "send");
-    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(true);
+    expect(send?.kind === "send" && history.showsDeliveryStatus(send.value)).toBe(true);
     expect(TransportSocket.instances).toHaveLength(1);
     expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
     expect(writer.sent.map(frame => JSON.parse(frame)).filter(frame => frame.SendMessage?.client_ref === clientRef)).toHaveLength(2);
@@ -278,7 +291,7 @@ describe("Commander live connection lifecycle", () => {
     const accepted = change === "same pairing" || change === "stale attach";
     expect(queued).toHaveBeenCalledTimes(accepted ? 1 : 0);
     const send = history.events.find(event => event.kind === "send");
-    expect(send?.kind === "send" && history.showsDelivered(send.value)).toBe(accepted || change === "already confirmed");
+    expect(send?.kind === "send" && history.showsDeliveryStatus(send.value)).toBe(accepted || change === "already confirmed");
     if (accepted || change === "already confirmed") expect(send?.kind === "send" && send.value.notificationId).toBe(99);
     expect(history.events.filter(event => event.kind === "send")).toHaveLength(1);
     expect(connection.attachSnapshot("session-a")?.phase).toBe(phase);
@@ -331,12 +344,120 @@ describe("Commander live connection lifecycle", () => {
     await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
+    const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i });
     await vi.waitFor(() => expect(events).toHaveLength(100));
+    releaseSigning();
     const manual = Array.from({ length: 10 }, () => connection.refreshSessions().catch(() => {}));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
     connection.stop();
     await Promise.all(manual);
+  });
+  it("refreshes a fleet change after an overlapping heartbeat's older catalog (cas-66ea)", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    let latest: string | undefined;
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("heartbeat-fleet-change"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+
+    // Freeze the heartbeat's response at the HTTP boundary, before Stop changes
+    // the catalog. Signing, event delivery and refresh coalescing stay real.
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const response = await fetchNow(input, init);
+      if (new URL(String(input)).pathname === "/v1/sessions" && !held) {
+        held = true;
+        await pending;
+      }
+      return response;
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(held).toBe(true));
+    hub.catalogRevision(2);
+    hub.event({ kind: "fleet_changed", session: "session-a" });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    expect(latest).toBe("catalog-1");
+    release();
+
+    // The event must obtain a post-change catalog without another heartbeat.
+    await vi.waitFor(() => expect(latest).toBe("catalog-2"));
+  });
+  it("refreshes a fleet change even when the overlapping heartbeat's read fails (cas-1966)", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    let latest: string | undefined;
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("heartbeat-fleet-change-failed"), () => {}, event => events.push(event), sessions => { latest = sessions[0]?.name; });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+
+    // The heartbeat's catalog read is in flight when Stop changes the fleet,
+    // and then fails on a flaky network.
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let fail!: () => void;
+    const pending = new Promise<void>(resolve => { fail = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/sessions" && !held) {
+        held = true;
+        await pending;
+        throw new TypeError("Failed to fetch");
+      }
+      return fetchNow(input, init);
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(held).toBe(true));
+    hub.catalogRevision(2);
+    hub.event({ kind: "fleet_changed", session: "session-a" });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    fail();
+
+    // The drained read's failure must not cost the fresh read.
+    await vi.waitFor(() => expect(latest).toBe("catalog-2"));
+  });
+  it("ends the stream without a fresh read when the drained heartbeat read is refused for auth (cas-1966)", async () => {
+    const hub = transport();
+    hub.catalogRevision(1);
+    const events: Record<string, unknown>[] = [];
+    const connection = supervisor(await storedMachine("heartbeat-fleet-change-refused"), () => {}, event => events.push(event));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const stream = hub.streams.at(-1)!.signal;
+
+    // The heartbeat's catalog read is in flight when the fleet changes, and
+    // the hub then refuses the pairing.
+    const fetchNow = globalThis.fetch;
+    let held = false;
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/sessions" && !held) {
+        held = true;
+        await pending;
+      }
+      return fetchNow(input, init);
+    });
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    await vi.waitFor(() => expect(held).toBe(true));
+    const catalogReads = () => hub.requests.filter(row => row.path === "/v1/sessions").length;
+    const before = catalogReads();
+    let readsAtEnd: number | undefined;
+    stream.addEventListener("abort", () => { readsAtEnd = catalogReads(); }, { once: true });
+    hub.event({ kind: "fleet_changed", session: "session-a" });
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    hub.refusePairing(true);
+    release();
+
+    await vi.waitFor(() => expect(stream.aborted).toBe(true));
+    expect(readsAtEnd! - before).toBe(1);
   });
   it.each([false, true])("coalesces 100 events in 1s with fresh final catalog (multiplex=%s, cas-b55b)", async (multiplex) => {
     const hub = transport(multiplex);
@@ -391,9 +512,11 @@ describe("Commander live connection lifecycle", () => {
     connection.start(); await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
     const before = hub.requests.filter(row => row.path === "/v1/sessions").length;
     hub.stallRefresh(true);
+    const releaseSigning = pauseSigning();
     for (let i = 1; i <= 100; i++) hub.event({ kind: "session_added", sequence: i, revision: 0 });
     await vi.waitFor(() => expect(events).toHaveLength(100));
-    expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1);
+    releaseSigning();
+    await vi.waitFor(() => expect(hub.requests.filter(row => row.path === "/v1/sessions").length - before).toBe(1));
   });
   it("resyncs gaps, accepts replay revisions, and resets on a new epoch (cas-2b3a5)", async () => {
     const hub = transport();
@@ -1010,8 +1133,47 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().phase).toBe("backoff");
     const streams = hub.streams.length;
     recovered.receive({ channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } });
-    await vi.waitFor(() => expect(hub.streams).toHaveLength(streams + 1), { timeout: 250, interval: 10 });
-    expect(connection.snapshot().phase).toBe("live");
+    // Opening the event response precedes the recovery catalog read and the
+    // live transition; wait for the public outcome as well as the new stream.
+    await vi.waitFor(() => {
+      expect(hub.streams).toHaveLength(streams + 1);
+      expect(connection.snapshot().phase).toBe("live");
+    }, { timeout: 250, interval: 10 });
+  });
+
+  it.each(["session_not_found", "daemon_offline"])("reattaches after a replacement is absent between Closed and session_added (%s, cas-d53c)", async (code) => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    const connection = supervisor(await storedMachine("replacement-gap"));
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const welcome = { channel: "pty:session-a", message: { Welcome: { state: { panes: [] } } } };
+    socket.receive(welcome);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    const subscriptions = () => socket.sent.map(frame => JSON.parse(frame))
+      .filter(frame => frame.channel === "pty:session-a" && frame.subscribe);
+
+    socket.receive({ channel: "pty:session-a", closed: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(subscriptions()).toHaveLength(2);
+    // The real catalog has removed the old daemon but not yet found its replacement.
+    socket.receive({ channel: "pty:session-a", error: { code } });
+    socket.receive({ channel: "events", event: { kind: "session_added", session: "session-a", sequence: 1 } });
+    expect(connection.hasLiveAttach("session-a")).toBe(false);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(subscriptions()).toHaveLength(3);
+    socket.receive(welcome);
+    expect(connection.hasLiveAttach("session-a")).toBe(true);
+    expect(TransportSocket.instances).toHaveLength(1);
+    expect(connection.send("session-a", { SendMessage: { target: "supervisor", text: "The replacement is here" } })).toBe(true);
   });
 
   it("keeps multiplexed latency absent until the matching health pong arrives", async () => {

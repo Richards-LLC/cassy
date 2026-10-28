@@ -1063,7 +1063,6 @@ fn release_report_bundle_is_complete_for_every_harness() {
     let files = [
         "SKILL.md",
         "references/brief-template.md",
-        "references/default-tokens.json",
         "references/exemplar.md",
         "references/pdf.md",
         "references/template.html",
@@ -1099,7 +1098,6 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
         for file in [
             "SKILL.md",
             "references/brief-template.md",
-            "references/default-tokens.json",
             "references/exemplar.md",
             "references/pdf.md",
             "references/template.html",
@@ -1147,13 +1145,20 @@ fn release_report_fresh_builtin_sync_installs_runnable_bundle() {
             "references/handoff.md",
             "references/report-contract.md",
             "references/report-skeleton.html",
-            "scripts/capture.mjs",
-            "scripts/print-pdf.mjs",
-            "scripts/inline-images.py",
             "scripts/check-sow.py",
         ] {
             assert!(sow.join(file).is_file(), "missing installed sow {file}");
             println!("installed {directory}/skills/cas-sow-delivery-report/{file}");
+        }
+        // cas-d1dc: customer release notes install beside them.
+        let notes = destination.join("skills/cas-customer-release-notes");
+        for file in [
+            "SKILL.md",
+            "references/PROFILE-template.md",
+            "references/notes-contract.md",
+            "references/notes-skeleton.html",
+        ] {
+            assert!(notes.join(file).is_file(), "missing installed customer notes {file}");
         }
         let gap_check = fixture.path().join("GAP-CHECK.md");
         fs::write(&gap_check, "| R# | SOW | Status | Evidence | Owner |\n| --- | --- | --- | --- | --- |\n| R1 | \"Export.\" | Gap | not built | us |\n").unwrap();

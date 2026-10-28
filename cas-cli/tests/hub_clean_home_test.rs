@@ -2861,6 +2861,7 @@ fn hub_service_status_readiness_fits_80_columns_cas_0252() {
             .as_str()
             .unwrap();
         assert!(detail.contains(&home.path().join(profile).display().to_string()));
+        assert!(!home.path().join(profile).exists(), "readiness must not create {profile}");
     }
     assert_eq!(
         readiness

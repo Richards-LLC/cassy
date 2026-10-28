@@ -10,6 +10,51 @@ pub struct Receipt {
     pub window_mins: u32,
     pub interval_mins: u32,
     pub runs: Vec<Run>,
+    /// Display only (cas-0b3d): the release's affected live journeys, highest
+    /// registry traffic share first, captured at start. Never a gate condition.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watch_first: Vec<RankedJourney>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankedJourney {
+    pub id: String,
+    pub name: String,
+    pub share_pct: Option<f64>,
+}
+
+/// Affected live journeys of `sha` against its first parent, in the change
+/// impact's order: highest traffic share first, unmeasured last.
+pub fn rank_release_journeys(project_root: &std::path::Path, qa: &crate::config::QaConfig, sha: &str) -> anyhow::Result<Vec<RankedJourney>> {
+    let base = crate::qa_impact::io::resolve_ref(project_root, &format!("{sha}^1"))?;
+    let changes = crate::qa_impact::io::changes_for_diff(project_root, &base, Some(sha))?;
+    let impact = crate::qa_impact::analyze(project_root, qa, &changes, Some(&base), Some(sha))?;
+    Ok(impact
+        .journeys
+        .into_iter()
+        .filter(|journey| journey.status == "live")
+        .map(|journey| RankedJourney { id: journey.id, name: journey.name, share_pct: journey.share_pct })
+        .collect())
+}
+
+/// One line naming what to watch first, or None when nothing was captured.
+pub fn watch_first_line(journeys: &[RankedJourney]) -> Option<String> {
+    const SHOWN: usize = 6;
+    if journeys.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = journeys
+        .iter()
+        .take(SHOWN)
+        .map(|j| match j.share_pct {
+            Some(share) => format!("{} {} ({share}%)", j.id, j.name),
+            None => format!("{} {} (unmeasured)", j.id, j.name),
+        })
+        .collect();
+    if journeys.len() > SHOWN {
+        parts.push(format!("+{} more", journeys.len() - SHOWN));
+    }
+    Some(format!("Watch first, by traffic share: {}", parts.join("; ")))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +145,51 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// cas-0b3d: the release's affected journeys come back in measured-share
+    /// order (the change impact's ranking), unmeasured last, for display.
+    #[test]
+    fn release_journeys_rank_by_traffic_share() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "qa@example.test"]);
+        git(&["config", "user.name", "QA"]);
+        let journey = |id: &str, file: &str, share: &str| {
+            format!("  - id: {id}\n    name: Journey {id}\n    status: live\n    entry: {{url: /, trigger: Open}}\n    steps: [Go]\n    owners: ['{file}']\n    invariants: [FLOW]\n    traffic: {{share_pct: {share}, basis: counted actions}}\n")
+        };
+        let registry = format!(
+            "version: 1\nupdated: '2026-10-26'\nsurfaces: ['src/**']\ninvariants:\n  FLOW: {{statement: Arrived, check: Read state}}\njourneys:\n{}{}{}",
+            journey("rare", "src/a.ts", "10"),
+            journey("unmeasured", "src/b.ts", "null"),
+            journey("common", "src/c.ts", "60"),
+        );
+        fs::create_dir_all(root.join("docs/qa")).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("docs/qa/journeys.yaml"), registry).unwrap();
+        for file in ["a", "b", "c"] {
+            fs::write(root.join(format!("src/{file}.ts")), "one").unwrap();
+        }
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        for file in ["a", "b", "c"] {
+            fs::write(root.join(format!("src/{file}.ts")), "two").unwrap();
+        }
+        git(&["commit", "-qam", "release"]);
+        let sha = git(&["rev-parse", "HEAD"]);
+        let ranked = rank_release_journeys(root, &crate::config::QaConfig::default(), &sha).unwrap();
+        let ids: Vec<_> = ranked.iter().map(|j| j.id.as_str()).collect();
+        assert_eq!(ids, ["common", "rare", "unmeasured"]);
+        assert_eq!(
+            watch_first_line(&ranked).unwrap(),
+            "Watch first, by traffic share: common Journey common (60%); rare Journey rare (10%); unmeasured Journey unmeasured (unmeasured)"
+        );
+    }
+
     #[test]
     fn qa_post_release_verdict_sequences() {
         let start = DateTime::parse_from_rfc3339("2026-10-21T00:00:00Z")
@@ -149,6 +239,7 @@ mod tests {
                 started_at: start,
                 window_mins: 30,
                 interval_mins: 15,
+                watch_first: Vec::new(),
                 runs: outputs
                     .into_iter()
                     .enumerate()
@@ -385,6 +476,15 @@ pub fn start(cas_root: &Path, epic: &str, sha: &str) -> Result<Receipt> {
             receipt_path(cas_root, epic)?.with_file_name(format!("{epic}-{}.history", current.sha));
         fs::write(previous, serde_json::to_vec_pretty(&current)?)?;
     }
+    // Best effort and display only: a release outside a Git checkout, or
+    // with no registry, simply names nothing to watch first.
+    let watch_first = cas_root
+        .parent()
+        .and_then(|root| {
+            let qa = Config::load(cas_root).ok()?.qa();
+            rank_release_journeys(root, &qa, sha).ok()
+        })
+        .unwrap_or_default();
     let receipt = Receipt {
         epic: epic.into(),
         sha: sha.to_ascii_lowercase(),
@@ -392,6 +492,7 @@ pub fn start(cas_root: &Path, epic: &str, sha: &str) -> Result<Receipt> {
         window_mins: config.window_mins,
         interval_mins: config.interval_mins,
         runs: Vec::new(),
+        watch_first,
     };
     save(cas_root, &receipt)?;
     let _ = fs::remove_file(receipt_path(cas_root, epic)?.with_extension("armed"));
@@ -464,8 +565,14 @@ pub fn gate(cas_root: &Path, epic: &Task, release_notes: bool) -> Option<String>
     } else {
         "failed"
     };
+    let watch = load(cas_root, &epic.id)
+        .ok()
+        .flatten()
+        .and_then(|receipt| watch_first_line(&receipt.watch_first))
+        .map(|line| format!(" {line}."))
+        .unwrap_or_default();
     Some(format!(
-        "{}: epic {} check {progress}. Run `cas qa post-release start --epic {} --sha <release-sha>` and wait for clean, or record an operator decision note `{OVERRIDE_MARKER} <operator's words>` (valid 6 hours).",
+        "{}: epic {} check {progress}. Run `cas qa post-release start --epic {} --sha <release-sha>` and wait for clean, or record an operator decision note `{OVERRIDE_MARKER} <operator's words>` (valid 6 hours).{watch}",
         if release_notes {
             format!("RELEASE NOTES BLOCKED (post_release_{state})")
         } else {

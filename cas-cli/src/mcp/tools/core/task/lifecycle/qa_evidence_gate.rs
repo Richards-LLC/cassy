@@ -460,6 +460,7 @@ pub(crate) fn qa_evidence_close_gate_for_paths(
         delivered_head: &head,
         notes: &notes,
         deployed_origins: &qa.deployed_origins,
+        capture_configured: qa.capture.as_ref().is_some_and(|capture| capture.is_configured().unwrap_or(true)),
         rebind_scope: changed.as_deref().map(|files| (&qa, files)),
     };
     let tier = evidence_tier(&reasons, terminal_render);
@@ -721,7 +722,7 @@ mod tests {
             repo: temp.path(),
             delivered_head: "",
             notes: &task.notes,
-            deployed_origins: &[], rebind_scope: None,
+            deployed_origins: &[], capture_configured: false, rebind_scope: None,
         };
         let error = run_close_gate_with_write_dir(&ctx, EvidenceTier::Ledger { terminal_qa: false }, &["demo".into()], &[], &scoped).unwrap_err();
         let (problem, next) = error.split_once("Next: ").unwrap();
@@ -1021,7 +1022,7 @@ mod tests {
         std::fs::write(artifacts.join("LEDGER.md"), &transcript).unwrap();
         let ctx = EvidenceContext {
             task_id: &task.id, task_artifacts_dir: &artifacts, repo,
-            delivered_head: &head, notes: "", deployed_origins: &[], rebind_scope: None,
+            delivered_head: &head, notes: "", deployed_origins: &[], capture_configured: false, rebind_scope: None,
         };
         let missing = run_close_gate_with_write_dir(&ctx, tier, &reasons, &[], &artifacts)
             .expect_err("the contract comparison is required, even when it has no differences");

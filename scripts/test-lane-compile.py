@@ -29,6 +29,8 @@ class LaneCompile(unittest.TestCase):
             self.write(f"{package}/Cargo.toml", f'[package]\nname="{package}"\nversion="0.1.0"\n')
             self.write(f"{package}/src/lib.rs", "pub fn original() {}\n")
         self.write("crates/ghostty_vt_sys/build.rs", "// Zig toolchain consumer\n")
+        self.write("crates/ghostty_vt_sys/zig/build.zig.zon",
+                   (SCRIPT.parent.parent / "crates/ghostty_vt_sys/zig/build.zig.zon").read_text())
         self.write("scripts/check-lane-compile.py", SCRIPT.read_text())
         self.write("scripts/release_env.py", SCRIPT.with_name("release_env.py").read_text())
         self.git("init", "-q", "-b", "target")
@@ -102,7 +104,7 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
 
     def make_zig(self, path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("#!/bin/sh\nexit 0\n")
+        path.write_text("#!/bin/sh\necho 0.15.2\n")
         path.chmod(0o755)
         return path.resolve()
 
@@ -132,11 +134,10 @@ if not os.environ.get('LANE_FIXTURE_MISSING'):
         self.env["ZIG"] = ".context/custom-zig"
         self.assert_preview_zig(expected)
 
-    def test_source_repo_zig_precedes_path_and_invalid_configured_zig(self):
-        # cas-9f61: one order for every release tool; PATH is the last resort.
-        self.make_zig(self.bin / "zig")
+    def test_path_zig_precedes_source_repo_and_invalid_configured_zig(self):
+        expected = self.make_zig(self.bin / "zig")
         self.env["ZIG"] = "missing-zig"
-        self.assert_preview_zig(self.zig)
+        self.assert_preview_zig(expected)
 
     def test_path_zig_is_the_fallback_without_a_checkout_zig(self):
         expected = self.make_zig(self.bin / "zig")

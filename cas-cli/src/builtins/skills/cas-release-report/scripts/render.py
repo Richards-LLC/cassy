@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import subprocess
+import time
 from urllib.parse import quote, urlsplit
 
 REFERENCE_DIR = Path(__file__).resolve().parent.parent / 'references'
@@ -154,8 +156,42 @@ class Captures:
     names why. Paths are absolute or relative to the project root.
     """
 
-    def __init__(self, project_root):
+    def __init__(self, project_root, cas_bin='cas'):
         self.root, self.pairs = Path(project_root), 0
+        self.cas_bin, self.receipts = cas_bin, {}
+        self.lookup_deadline = time.monotonic() + 30
+
+    def resolve(self, reference):
+        # Reuse the shared manifest reader's project namespace, legacy fallback,
+        # capture lock and digest validation. Exit 1 can still carry valid pairs
+        # alongside findings for other shots; never promote unpaired[].
+        identity = r'[A-Za-z0-9][A-Za-z0-9_.-]{0,119}'
+        if not re.fullmatch(identity + '/' + identity, reference):
+            raise ValueError('Pair: needs <task-id>/<shot-id>')
+        task, shot = reference.split('/')
+        if task not in self.receipts:
+            self.receipts[task] = None
+            try:
+                remaining = self.lookup_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError('pair lookup budget exhausted')
+                result = subprocess.run([str(self.cas_bin), '--json', 'deliverable', 'pairs',
+                                         '--root', str(self.root.resolve()), '--task', task],
+                                        cwd=self.root, capture_output=True, text=True,
+                                        timeout=min(10, remaining))
+                if result.returncode not in (0, 1):
+                    raise ValueError('pair reader failed for ' + task)
+                receipt = json.loads(result.stdout)
+                if receipt.get('schema') != 'cas.deliverable.pairs/1':
+                    raise ValueError('unsupported pair receipt')
+                self.receipts[task] = receipt['pairs']
+            except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError) as error:
+                raise ValueError('cannot resolve Pair: ' + reference + ': ' + str(error)) from error
+        for pair in self.receipts[task] or []:
+            if pair['task_id'] == task and pair['id'] == shot:
+                directory = Path(pair['directory'])
+                return str(directory / pair['before']['png']), str(directory / pair['after']['png'])
+        raise ValueError('no complete verified Pair: ' + reference)
 
     def image(self, path):
         file = Path(path) if Path(path).is_absolute() else self.root / path
@@ -169,7 +205,17 @@ class Captures:
             raise ValueError('capture is not a PNG, JPEG or WebP image: ' + path)
         return 'data:' + kind + ';base64,' + base64.b64encode(data).decode()
 
-    def pair(self, title, before, after):
+    def pair(self, title, before, after, reference=None):
+        if reference:
+            try:
+                if before or after:
+                    raise ValueError('use Pair: or explicit Before:/After: for a change')
+                if self.pairs >= CAPTURE_PAIRS:
+                    raise ValueError(f'more than {CAPTURE_PAIRS} capture pairs')
+                before, after = self.resolve(reference)
+            except ValueError as error:
+                warn(str(error) + '; showing no captures for "' + title + '"')
+                return ''
         if not before and not after:
             return ''
         if not (before and after):
@@ -199,125 +245,21 @@ def groups(source, captures=None):
         if items[0].strip():
             result.append(simple(items[0]))
         for j in range(1, len(items), 2):
-            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(?:\n\nBefore: (\S+))?(?:\n\nAfter: (\S+))?(\n\nSource:.*)?\s*', items[j + 1], re.S)
+            match = re.fullmatch(r'\s*Was: (.*?)\n\nNow: (.*?)(?:\n\nPair: (\S+))?(?:\n\nBefore: (\S+))?(?:\n\nAfter: (\S+))?(\n\nSource:.*)?\s*', items[j + 1], re.S)
             if not match:
                 raise ValueError('change needs Was/Now paragraphs: ' + items[j])
-            was, now, before, after, trailing = match.groups()
-            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div>' + captures.pair(items[j].strip(), before, after) + '</article>')
+            was, now, reference, before, after, trailing = match.groups()
+            result.append('<article class="change"><h4>' + inline(items[j]) + '</h4><div class="pair"><p class="was"><span class="state">Was</span>' + inline(was.strip()) + '</p><p class="now"><span class="state">Now</span>' + inline(now.strip()) + '</p></div>' + captures.pair(items[j].strip(), before, after, reference) + '</article>')
             if trailing:
                 result.append(simple(trailing))
         result.append('</div></section>')
     return '\n'.join(result)
 
 
-def merge_tokens(base, override):
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            merge_tokens(base[key], value)
-        else:
-            base[key] = value
-
-
-def token_json(project_root, token_path):
-    tokens = json.loads((REFERENCE_DIR / 'default-tokens.json').read_text())
-    candidates = [project_root / 'design-tokens.json', project_root / 'docs/design/design-tokens.json']
-    selected = token_path or next((p for p in candidates if p.is_file()), None)
-    if selected:
-        merge_tokens(tokens, json.loads(selected.read_text()))
-    def colors(scheme):
-        values = []
-        for key, token in tokens['color'][scheme].items():
-            if key.startswith('$'):
-                continue
-            value = token['$value']
-            if not re.fullmatch(r'[a-z][a-z0-9-]*', key) or not re.fullmatch(r'#[0-9a-fA-F]{6}|rgba?\([0-9.,% ]+\)', value):
-                raise ValueError('color tokens must use named roles and hex or numeric rgb/rgba values')
-            values.append('--' + key + ':' + value)
-        return ';'.join(values)
-    fonts = []
-    for key in ('display', 'body', 'mono'):
-        family = tokens['typography']['family'][key]['$value']
-        if not isinstance(family, list) or not family or any(not re.fullmatch(r'[A-Za-z0-9 _-]+', f) for f in family):
-            raise ValueError('font family tokens must be nonempty arrays of local font names')
-        fonts.append('--font-' + key + ':' + ','.join('"' + f + '"' if ' ' in f else f for f in family))
-    light, dark, fonts = colors('light'), colors('dark'), ';'.join(fonts)
-    return (':root{' + light + ';' + fonts + ';color-scheme:light dark}\n'
-            '@media(prefers-color-scheme:dark){:root{' + dark + '}}\n'
-            '@media print{:root{' + light + ';color-scheme:light}}')
-
-
-DARK_SCHEME = re.compile(r'@media\s*\(\s*prefers-color-scheme\s*:\s*dark\s*\)')
-FONT_FILE = re.compile(r'url\("(\./[\w./-]+\.woff2)"\)')
-
-
-def design_md(project_root):
-    """Tokens a project's DESIGN.md names: its CSS `source` files and `maps` roles.
-
-    Returns None unless DESIGN.md lists at least one existing .css source and
-    a maps block of `role: "--variable"` entries. The CSS is inlined as-is
-    (relative .woff2 faces become data URIs), so it may hold only custom
-    properties, @media/selector blocks and @font-face rules: no network URL
-    and no markup. Each role becomes `--role: var(--variable)`.
-    """
-    path = project_root / 'DESIGN.md'
-    if not path.is_file():
-        return None
-    text = path.read_text(encoding='utf-8')
-    if not text.startswith('---\n') or '\n---\n' not in text[4:]:
-        return None
-    head = text[4:text.index('\n---\n', 4)]
-    source = re.search(r'^source:\s*\[(.*)\]\s*$', head, re.M)
-    maps = re.search(r'^maps:\n((?:[ \t]+.*\n?)+)', head, re.M)
-    if not source or not maps:
-        return None
-    sheets = [project_root / item.strip() for item in source.group(1).split(',') if item.strip().endswith('.css')]
-    sheets = [sheet for sheet in sheets if sheet.is_file()]
-    if not sheets:
-        return None
-    roles = re.findall(r'^\s+([a-z][a-z0-9-]*):\s*"?(--[a-z][\w-]*)"?\s*$', maps.group(1), re.M)
-    if not roles:
-        return None
-    css = []
-    for sheet in sheets:
-        content = sheet.read_text(encoding='utf-8')
-        def font(match):
-            face = (sheet.parent / match.group(1)).resolve()
-            if not face.is_file() or face.stat().st_size > 400_000:
-                raise ValueError('DESIGN.md font source missing or too large: ' + match.group(1))
-            return 'url("data:font/woff2;base64,' + base64.b64encode(face.read_bytes()).decode() + '")'
-        content = FONT_FILE.sub(font, content)
-        if '</' in content or '@import' in content or re.search(r'url\(\s*(?!["\']?data:)', content):
-            raise ValueError('DESIGN.md CSS sources may hold only tokens and local font faces: ' + sheet.name)
-        # Print is always the light set: a dark-scheme block applies on screen only.
-        css.append(DARK_SCHEME.sub('@media screen and (prefers-color-scheme: dark)', content))
-    # A role named like its variable is already defined; aliasing it would be a cycle.
-    aliases = ';'.join('--' + role + ':var(' + name + ')' for role, name in roles if '--' + role != name)
-    mark = re.search(r'^brand-mark:\s*(\S+\.svg)\s*$', head, re.M)
-    mark_uri = ''
-    if mark and (project_root / mark.group(1)).is_file():
-        mark_uri = 'data:image/svg+xml;base64,' + base64.b64encode((project_root / mark.group(1)).read_bytes()).decode()
-    return '\n'.join(css) + '\n:root{' + aliases + '}', mark_uri
-
-
-def token_css(project_root, token_path):
-    """Return (CSS, brand-mark data URI): explicit --tokens JSON first, then
-    the project's DESIGN.md sources, then design-tokens.json, then defaults."""
-    if not token_path:
-        try:
-            found = design_md(project_root)
-        except ValueError as error:
-            # A downstream project's DESIGN.md source the report cannot carry
-            # offline must not stop its release report: say so and fall back.
-            warn(str(error) + '; using design-tokens.json or the bundled defaults')
-            found = None
-        if found:
-            return found
-    return token_json(project_root, token_path), ''
-
-
-def render(source, *, project_root=Path('.'), tokens=None, source_href='source.md',
-           pdf_href='report.pdf', emphasis='', footer='Release report'):
-    """Return standalone HTML; callers may write it or hand it to Chromium."""
+def render(source, *, project_root=Path('.'), source_href='source.md',
+           pdf_href='report.pdf', emphasis='', footer='Release report', cas_bin='cas'):
+    """Return HTML whose brand markers `cas deliverable` fills; this script
+    holds no brand code. `cas release report` renders, fills and writes it."""
     # The CLI assembler records machine-readable release metadata in a small
     # YAML front matter block.  Keep the renderer's fixed Markdown contract
     # unchanged after that block so hand-authored exemplar sources remain
@@ -413,16 +355,13 @@ def render(source, *, project_root=Path('.'), tokens=None, source_href='source.m
             raise ValueError('glance table needs measure, value and definition')
         label, value, definition = row
         stats.append('<div class="stat"><span class="stat-value">' + inline(value) + '</span><span class="stat-label">' + inline(label) + '</span><p>' + inline(definition) + '</p></div>')
-    captures = Captures(project_root)
-    token_style, mark = token_css(Path(project_root), Path(tokens) if tokens else None)
+    captures = Captures(project_root, cas_bin)
     rendered_verdict = inline(verdict)
     if emphasis:
         if emphasis not in verdict:
             raise ValueError('emphasis must be an exact substring of the verdict')
         rendered_verdict = rendered_verdict.replace(escape(emphasis), '<em>' + escape(emphasis) + '</em>', 1)
     values = dict(TITLE=inline(title), DATE=inline(date), VERDICT=rendered_verdict,
-                  TOKENS=token_style,
-                  MARK=('<img class="mark" src="' + mark + '" alt="" width="32" height="32">') if mark else '',
                   MAP_HEIGHT=y, MAP_TOTAL=total, MAP_CLAIM=inline(claim),
                   MAP_DESCRIPTION=escape(', '.join(description) + '. Each filled circle represents one ' + unit + '. Total ' + str(total) + '.'),
                   MAP_ROWS='\n'.join(svg), MAP_LEGEND=escape(legend), MAP_UNIT=escape('CHANGES' if by_change else 'ISSUES CLOSED'),
@@ -444,7 +383,7 @@ def main():
     parser.add_argument('source', type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--project-root', default=Path('.'), type=Path)
-    parser.add_argument('--tokens', type=Path)
+    parser.add_argument('--cas-bin', default='cas', help='Cassy executable for verified Pair: lookup')
     parser.add_argument('--pdf-href')
     parser.add_argument('--source-href')
     parser.add_argument('--emphasis', default='')
@@ -452,9 +391,9 @@ def main():
     args = parser.parse_args()
     try:
         output = render(args.source.read_text(encoding='utf-8'), project_root=args.project_root,
-                        tokens=args.tokens, source_href=args.source_href or quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
+                        source_href=args.source_href or quote(os.path.relpath(args.source.resolve(), args.output.resolve().parent)),
                         pdf_href=args.pdf_href or quote(args.output.with_suffix('.pdf').name),
-                        emphasis=args.emphasis, footer=args.footer)
+                        emphasis=args.emphasis, footer=args.footer, cas_bin=args.cas_bin)
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(output, encoding='utf-8')
     except (ValueError, KeyError, OSError, TypeError) as error:

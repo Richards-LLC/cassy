@@ -4911,7 +4911,7 @@ auth = "env:{token}"
         let original = "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-mcp\"\n";
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         let fixture_root = env.home().to_path_buf();
-        for mode in ["foreign", "registered", "explicit", "none"] {
+        for mode in ["foreign", "registered", "explicit", "none", "malformed"] {
             let home = fixture_root.join(mode);
             fs::create_dir_all(&home).unwrap();
             env.set("HOME", &home);
@@ -4931,7 +4931,19 @@ auth = "env:{token}"
                     let account = home.join(name);
                     fs::create_dir_all(&account).unwrap();
                     fs::write(account.join("auth.json"), "{}").unwrap();
-                    symlink(&base, account.join("config.toml")).unwrap();
+                    if mode == "malformed" {
+                        fs::write(
+                            account.join("config.toml"),
+                            if name == ".codex-a@example.com" {
+                                "[broken\n"
+                            } else {
+                                original
+                            },
+                        )
+                        .unwrap();
+                    } else {
+                        symlink(&base, account.join("config.toml")).unwrap();
+                    }
                     expected.push(account.join("config.toml"));
                 }
             }
@@ -4954,6 +4966,38 @@ auth = "env:{token}"
                 ..test_args()
             };
             let paths = MachinePaths::from_env(&ProcessEnv).unwrap();
+            if mode == "malformed" {
+                assert!(
+                    existing_machine_env_names(&paths, &args.url).is_ok(),
+                    "one malformed account must not abort credential lookup"
+                );
+            }
+            if mode == "registered" {
+                let no_harness = run(
+                    &VioletArgs {
+                        no_harness: true,
+                        ..args.clone()
+                    },
+                    None,
+                    &paths,
+                    &ProcessEnv,
+                    &FakeProbe(live_tools()),
+                )
+                .unwrap();
+                let skipped: Vec<_> = no_harness
+                    .harnesses
+                    .iter()
+                    .filter(|entry| entry.harness == "codex")
+                    .collect();
+                assert_eq!(skipped.len(), 2, "{skipped:?}");
+                for (entry, account) in skipped.iter().zip(["a", "b"]) {
+                    assert_eq!(entry.state, WriteState::Skipped);
+                    let note = entry.note.as_deref().unwrap_or_default();
+                    assert!(note.contains("--no-harness"), "{entry:?}");
+                    assert!(note.contains(&format!(".codex-{account}@example.com")), "{entry:?}");
+                }
+                assert_eq!(fs::read_to_string(&base).unwrap(), original);
+            }
             let report = run(&args, None, &paths, &ProcessEnv, &FakeProbe(live_tools())).unwrap();
             assert!(
                 !home.join(".codex").exists(),
@@ -4994,6 +5038,32 @@ auth = "env:{token}"
                     report.harnesses
                 );
                 continue;
+            }
+            if mode == "malformed" {
+                let bad = &expected[0];
+                let healthy = &expected[1];
+                // pin: a skipped malformed account config must remain byte-for-byte untouched.
+                assert_eq!(fs::read_to_string(bad).unwrap(), "[broken\n");
+                // pin: healthy accounts must receive Codex's named Violet table.
+                assert!(fs::read_to_string(healthy).unwrap().contains("[mcp_servers.violet]"));
+                let skipped = report.harnesses.iter().find(|entry| {
+                    entry.harness == "codex" && entry.path.as_deref() == Some(bad.as_path())
+                }).unwrap();
+                assert_eq!(skipped.state, WriteState::Skipped);
+                let note = skipped.note.as_deref().unwrap_or_default();
+                assert!(note.contains("warning"), "{skipped:?}");
+                assert!(note.contains(".codex-a@example.com"), "{skipped:?}");
+                continue;
+            }
+            if mode == "registered" {
+                let codex: Vec<_> = report.harnesses.iter().filter(|entry| entry.harness == "codex").collect();
+                assert_eq!(codex.len(), 2, "{codex:?}");
+                for (entry, account) in codex.iter().zip(["a", "b"]) {
+                    assert_eq!(entry.path.as_deref(), Some(base.as_path()));
+                    let note = entry.note.as_deref().unwrap_or_default();
+                    assert!(note.contains(&format!(".codex-{account}@example.com")), "{entry:?}");
+                    assert!(note.contains(&base.display().to_string()), "{entry:?}");
+                }
             }
             for config in expected {
                 let written = fs::read_to_string(&config).unwrap();

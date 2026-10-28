@@ -276,7 +276,7 @@ function scheduleConversationLayout(): void {
 
 /** cas-d043 H10: which edges of the rail have rows beyond them, for glass.css's edge fades. */
 function markRailEdges(rail: Element | null = document.querySelector(".conversation-context")): void {
-  if (!(rail instanceof HTMLElement)) return;
+  if (!(rail instanceof HTMLElement) || (phoneLayout() && !contextSheetOpen())) return;
   rail.toggleAttribute("data-more-above", rail.scrollTop > 1);
   rail.toggleAttribute("data-more-below", rail.scrollHeight - rail.scrollTop - rail.clientHeight > 1);
 }
@@ -4532,7 +4532,7 @@ function renderAttention(): void {
       return session ? [projectTitle(session.project_dir), session.supervisor].filter(Boolean).join(" · ") || undefined : undefined;
     },
   });
-  markRailEdges();
+  scheduleConversationLayout();
   // After the panel is drawn, so the sheet can hand focus back into it (cas-a5c6).
   syncConversationAttention(selectedSession ? coalesceAttention(visibleAttention).length : 0);
 }
@@ -5117,7 +5117,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.append(row);
   }
   contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
-  markRailEdges();
+  scheduleConversationLayout();
   if (!contextProgress) {
     const empty = document.createElement("p");
     empty.className = "status-empty";

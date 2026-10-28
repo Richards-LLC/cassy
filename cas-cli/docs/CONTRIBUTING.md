@@ -1436,7 +1436,12 @@ use `coordination action=message_status` to inspect handoff and recipient eviden
 For a gated message, status distinguishes a **held inbox** (a successful Teams
 write; surfaces at the next tool call or turn start without expiring while the
 recipient remains in the session) from a **delivery retry** (no held handoff
-recorded; transport retry budget still applies, including operator drafts).
+recorded; transport failures spend the retry budget). A protected operator draft,
+pending submit or settling urgent inject is a recoverable readiness hold: it
+spends neither transport retries nor re-nudges and is re-offered when the pane
+becomes input-ready, with a two-minute durable recheck as a restart fallback.
+Default status and doctor warnings allow pending relays sixty seconds to arrive;
+explicit detailed status also lists fresh holds and their blocking cause.
 A fresh transport reservation clears any older inbox deferral before injecting,
 so a worker that changes harness cannot have its PTY delivery replayed by a hook.
 The actual primary channel decides whether a handoff can be held: a missing

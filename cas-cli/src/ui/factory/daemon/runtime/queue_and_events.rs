@@ -3662,13 +3662,18 @@ pub(super) fn record_undelivered_relay_alerts(
     let mut alerts = Vec::new();
     for queued in candidates {
         let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
-        let (summary, message) = undelivered_relay_operator_alert(
+        let (summary, mut message) = undelivered_relay_operator_alert(
             &queued,
             envelope.as_ref(),
             supervisor_name,
             supervisor_harness,
             now,
         );
+        if let Ok(Some(report)) = queue.message_delivery_report(queued.id) {
+            if let Some(detail) = report.pending_detail {
+                message.push_str(&format!(" Current delivery hold: {detail}."));
+            }
+        }
         let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
             schema_version: 2,
             reply_to: None,
@@ -7674,9 +7679,18 @@ impl FactoryDaemon {
             mut wake_deferred,
             prior_copy_unread,
             nudge_only,
+            renudge_granted,
             urgent_wake_probe_opened,
             delivery_started_at_utc,
         } = delivery;
+        // A safety deferral is not a transport attempt. The in-flight owner
+        // prevents duplicate attempts until completion, including urgent
+        // settles where the operator starts a draft after the turn break.
+        if renudge_granted && !inject_result.as_ref().is_ok_and(|report|
+            report.outcome == cas_mux::InjectOutcome::DeferredComposerDirty)
+        {
+            self.reserve_renudge_attempt(queued.id);
+        }
         if inject_result.as_ref().is_ok_and(|report| report.outcome == cas_mux::InjectOutcome::Delivered)
             && !wake_deferred && !message_senders.is_empty() {
             self.queue_jobs.stamp(self.app.cas_dir(),queued.id,&queued.target,
@@ -7694,7 +7708,7 @@ impl FactoryDaemon {
             self.finish_direct_delivery(super::inject_commands::DirectDelivery {
                 queued: member, pane_target: pane_target.clone(), generation,
                 message_batch: Vec::new(), message_senders: Vec::new(), wake_deferred,
-                prior_copy_unread, nudge_only, urgent_wake_probe_opened: false, delivery_started_at_utc,
+                prior_copy_unread, nudge_only, renudge_granted: false, urgent_wake_probe_opened: false, delivery_started_at_utc,
             },report);
         }
         let target = &queued.target;
@@ -7801,6 +7815,22 @@ impl FactoryDaemon {
                     target_agent = %pane_target,
                     "prompt_queue message remains durable pending a clean composer"
                 );
+                let detail = if self.app.mux.pane_composer_dirty(&pane_target) {
+                    "composer protected: operator draft is unsubmitted"
+                } else if self.app.mux.pane_submit_pending(&pane_target) {
+                    "composer protected: pending submit for an earlier payload"
+                } else if self.app.mux.inject_pending(&pane_target) {
+                    if self.urgent_injects.owners.values().any(|owner| matches!(owner,
+                        super::inject_commands::UrgentInject::NormalRow { delivery, .. }
+                            if delivery.pane_target == pane_target)) {
+                        "composer protected: pending payload write completion"
+                    } else {
+                        "composer protected: urgent inject is still settling"
+                    }
+                } else {
+                    "composer protected: input readiness changed during delivery; rechecking"
+                };
+                self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                 self.queue_jobs.stamp(
                     self.app.cas_dir(),
                     queued.id,
@@ -7811,7 +7841,7 @@ impl FactoryDaemon {
                     // Park durably; the independent relay watchdog still
                     // alerts the operator while this pane cannot accept input.
                     super::prompt_queue_jobs::QueueStamp::ParkBusy {
-                        detail: "composer protected: operator draft or prior injection/submit still pending".into(),
+                        detail: detail.into(),
                         recheck_at: chrono::Utc::now()
                             + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
                     },
@@ -7823,7 +7853,7 @@ impl FactoryDaemon {
                         &queued.target,
                         &pane_target,
                         "deferred",
-                        Some("composer protected: operator draft or prior injection/submit still pending".to_string()),
+                        Some(detail.to_string()),
                     );
                 }
             }
@@ -8435,7 +8465,7 @@ impl FactoryDaemon {
             .insert(target.to_string(), Instant::now());
     }
 
-    /// Re-offer a parked inline row only when the pane becomes input-ready
+    /// Re-offer a parked inline or composer-held row when the pane becomes input-ready
     /// or a newer turn completion arrives. No queue/store work is repeated
     /// on the 100ms busy polls; ParkBusy's existing deadline survives restart.
     fn retry_ready_inline_rows(&mut self) {
@@ -10198,9 +10228,6 @@ impl FactoryDaemon {
                         super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},
                     }
                 }
-                if renudge_granted {
-                    self.reserve_renudge_attempt(queued.id);
-                }
                 tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
                     target_agent = %pane_target, "Attempting prompt injection to '{}': {}", target,
                     queued.prompt.chars().take(50).collect::<String>());
@@ -10261,6 +10288,7 @@ impl FactoryDaemon {
                                         wake_deferred: false,
                                         prior_copy_unread,
                                         nudge_only,
+                                        renudge_granted,
                                         urgent_wake_probe_opened: false,
                                         delivery_started_at_utc,
                                     }),
@@ -10417,9 +10445,6 @@ impl FactoryDaemon {
                         );
                         match self.app.mux.begin_inject(&pane_target, &payload) {
                             Ok(cas_mux::InjectStart::Started(ticket)) => {
-                                if inline_supervisor_body {
-                                    self.reserve_renudge_attempt(queued.id);
-                                }
                                 self.urgent_injects.owners.insert(ticket,
                                     super::inject_commands::UrgentInject::NormalRow {
                                         inline_supervisor: inline_supervisor_body,
@@ -10427,7 +10452,7 @@ impl FactoryDaemon {
                                             message_batch, message_senders: facts.message_senders.clone(),
                                             queued: queued.clone(), pane_target: pane_target.clone(),
                                             generation: inject_generation, wake_deferred: false,
-                                            prior_copy_unread, nudge_only, urgent_wake_probe_opened: false,
+                                            prior_copy_unread, nudge_only, renudge_granted: renudge_granted || inline_supervisor_body, urgent_wake_probe_opened: false,
                                             delivery_started_at_utc,
                                         }),
                                     });
@@ -10481,6 +10506,7 @@ impl FactoryDaemon {
                         wake_deferred,
                         prior_copy_unread,
                         nudge_only,
+                        renudge_granted,
                         urgent_wake_probe_opened: false,
                         delivery_started_at_utc,
                     },

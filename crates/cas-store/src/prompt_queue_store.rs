@@ -1550,6 +1550,73 @@ fn split_quiet_marker(text: &str) -> (bool, String) {
 pub const RECEIVED_HISTORY_SCAN_CAP: usize = 2_000;
 
 impl SqlitePromptQueueStore {
+    fn read_undelivered_lifecycle_relays(
+        &self,
+        limit: usize,
+        include_recent_holds: bool,
+    ) -> Result<Vec<UndeliveredLifecycleRelay>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        // `transport_delivered_at IS NULL` is the whole test for "never
+        // arrived" — it is stamped only by `mark_transport_delivered` /
+        // a fully successful broadcast. Pending relays older than 60 seconds
+        // must be visible before their retry budget is exhausted. Explicit
+        // readiness holds are included immediately only for detailed inspection.
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, source, target, summary, highest_stage, last_pending_reason,
+                    last_pending_detail, factory_session, created_at, processed_at, prompt,
+                    next_attempt_at,
+                    (SELECT alert.id FROM prompt_queue alert
+                     WHERE alert.dedupe_key = '{RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX}' || prompt_queue.id
+                     LIMIT 1)
+             FROM prompt_queue
+             WHERE transport_delivered_at IS NULL
+               AND acked_at IS NULL
+               AND source LIKE 'lifecycle-wake:%'
+               AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
+                    OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
+                        AND (created_at <= ? OR (? AND last_pending_reason IN ('gated_not_ready', 'awaiting_busy_recipient')))))
+               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)
+             ORDER BY id DESC
+             LIMIT ?"
+        ))?;
+        let cutoff = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
+        let rows = stmt.query_map(params![cutoff, include_recent_holds, limit as i64], |row| {
+            let created_at: String = row.get(8)?;
+            let processed_at: Option<String> = row.get(9)?;
+            let reason: Option<String> = row.get(5)?;
+            Ok(UndeliveredLifecycleRelay {
+                prompt_id: row.get(0)?,
+                source: row.get(1)?,
+                target: row.get(2)?,
+                summary: row.get(3)?,
+                prompt: row.get(10)?,
+                stage: row
+                    .get::<_, Option<String>>(4)?
+                    .unwrap_or_else(|| DeliveryStage::Enqueued.as_str().to_string()),
+                reason: reason.as_deref().and_then(PendingReason::parse),
+                detail: row.get(6)?,
+                factory_session: row.get(7)?,
+                created_at: DateTime::parse_from_rfc3339(&created_at)
+                    .map(|ts| ts.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                processed_at: processed_at.and_then(|ts| {
+                    DateTime::parse_from_rfc3339(&ts)
+                        .ok()
+                        .map(|ts| ts.with_timezone(&Utc))
+                }),
+                next_attempt_at: row.get::<_, Option<String>>(11)?
+                    .as_deref().and_then(Self::parse_datetime),
+                operator_alert_id: row.get(12)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+
     /// A local terminal task is positive evidence that its action alert expired.
     fn terminal_relay_task_status(
         tx: &ImmediateTx<'_>,
@@ -3429,6 +3496,15 @@ pub trait PromptQueueStore: Send + Sync {
         &self,
         limit: usize,
     ) -> Result<Vec<UndeliveredLifecycleRelay>>;
+
+    /// Explicit detailed inspection includes fresh readiness holds without
+    /// promoting normal busy-recipient waits into diagnostic warnings.
+    fn list_undelivered_lifecycle_relays_with_holds(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<UndeliveredLifecycleRelay>> {
+        self.list_undelivered_lifecycle_relays(limit)
+    }
 
     /// Durably reconcile terminal lifecycle relays for tasks that can no
     /// longer need supervisor action.  The forensic prompt row and its final
@@ -9112,65 +9188,14 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         &self,
         limit: usize,
     ) -> Result<Vec<UndeliveredLifecycleRelay>> {
-        let conn = crate::shared_db::lock_connection(&self.conn)?;
-        // `transport_delivered_at IS NULL` is the whole test for "never
-        // arrived" — it is stamped only by `mark_transport_delivered` /
-        // a fully successful broadcast. Pending relays older than 60 seconds
-        // must be visible before their retry budget is exhausted. Explicit
-        // readiness holds are visible immediately (GH #1400).
-        let mut stmt = conn.prepare(&format!(
-            "SELECT id, source, target, summary, highest_stage, last_pending_reason,
-                    last_pending_detail, factory_session, created_at, processed_at, prompt,
-                    next_attempt_at,
-                    (SELECT alert.id FROM prompt_queue alert
-                     WHERE alert.dedupe_key = '{RELAY_OPERATOR_ESCALATION_DEDUPE_PREFIX}' || prompt_queue.id
-                     LIMIT 1)
-             FROM prompt_queue
-             WHERE transport_delivered_at IS NULL
-               AND acked_at IS NULL
-               AND source LIKE 'lifecycle-wake:%'
-               AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
-                    OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
-                        AND (created_at <= ? OR last_pending_reason IN ('gated_not_ready', 'awaiting_busy_recipient'))))
-               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)
-             ORDER BY id DESC
-             LIMIT ?"
-        ))?;
-        let cutoff = (Utc::now() - chrono::Duration::seconds(60)).to_rfc3339();
-        let rows = stmt.query_map(params![cutoff, limit as i64], |row| {
-            let created_at: String = row.get(8)?;
-            let processed_at: Option<String> = row.get(9)?;
-            let reason: Option<String> = row.get(5)?;
-            Ok(UndeliveredLifecycleRelay {
-                prompt_id: row.get(0)?,
-                source: row.get(1)?,
-                target: row.get(2)?,
-                summary: row.get(3)?,
-                prompt: row.get(10)?,
-                stage: row
-                    .get::<_, Option<String>>(4)?
-                    .unwrap_or_else(|| DeliveryStage::Enqueued.as_str().to_string()),
-                reason: reason.as_deref().and_then(PendingReason::parse),
-                detail: row.get(6)?,
-                factory_session: row.get(7)?,
-                created_at: DateTime::parse_from_rfc3339(&created_at)
-                    .map(|ts| ts.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
-                processed_at: processed_at.and_then(|ts| {
-                    DateTime::parse_from_rfc3339(&ts)
-                        .ok()
-                        .map(|ts| ts.with_timezone(&Utc))
-                }),
-                next_attempt_at: row.get::<_, Option<String>>(11)?
-                    .as_deref().and_then(Self::parse_datetime),
-                operator_alert_id: row.get(12)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row?);
-        }
-        Ok(out)
+        self.read_undelivered_lifecycle_relays(limit, false)
+    }
+
+    fn list_undelivered_lifecycle_relays_with_holds(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<UndeliveredLifecycleRelay>> {
+        self.read_undelivered_lifecycle_relays(limit, true)
     }
 
     fn reconcile_terminal_lifecycle_relays(&self) -> Result<usize> {
@@ -9194,7 +9219,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                AND source LIKE 'lifecycle-wake:%'
                AND (highest_stage IN ('suppressed', 'dropped', 'abandoned')
                     OR (COALESCE(highest_stage, 'enqueued') IN ('enqueued', 'selected', 'gated')
-                        AND (created_at <= ? OR last_pending_reason IN ('gated_not_ready', 'awaiting_busy_recipient'))))
+                        AND created_at <= ?))
                AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen WHERE seen.prompt_id = prompt_queue.id)",
             params![(Utc::now() - chrono::Duration::seconds(60)).to_rfc3339()],
             |row| row.get(0),
@@ -11760,6 +11785,8 @@ mod tests {
             conn.execute("INSERT INTO prompt_queue_recipient_seen (prompt_id, recipient, seen_at) VALUES (?, 'supervisor', ?)",
                 params![seen, Utc::now().to_rfc3339()]).unwrap();
         }
+        assert_eq!(store.list_undelivered_lifecycle_relays_with_holds(10).unwrap()
+            .iter().map(|row| row.prompt_id).collect::<Vec<_>>(), vec![fresh, pending]);
         let rows = store.list_undelivered_lifecycle_relays(10).unwrap();
         assert_eq!(
             rows.iter().map(|row| row.prompt_id).collect::<Vec<_>>(),

@@ -33,6 +33,8 @@ pub(crate) struct DirectDelivery {
     pub(crate) wake_deferred: bool,
     pub(crate) prior_copy_unread: bool,
     pub(crate) nudge_only: bool,
+    /// Charge cadence only after this attempt reports a non-composer outcome.
+    pub(crate) renudge_granted: bool,
     pub(crate) urgent_wake_probe_opened: bool,
     /// Wall-clock floor for the normal-delivery watchdog (cas-ac97).
     pub(crate) delivery_started_at_utc: chrono::DateTime<chrono::Utc>,

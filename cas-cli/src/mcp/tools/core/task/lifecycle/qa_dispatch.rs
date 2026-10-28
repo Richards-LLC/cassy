@@ -2994,14 +2994,18 @@ mod stale_anchor_rebind_tests_cas_00eb {
         let unnamed = git(repo, &["rev-parse", "HEAD"]);
         git(repo, &["checkout", "-q", "main"]);
         let tasks = open_task_store(&repo.join(".cas")).unwrap();
-        for (branch, tip, expected) in [
-            (WORKER_TASK_BRANCH, &rebased, &rebased),
-            ("factory/worker", &rebased, &rebased),
-            ("factory/worker", &unnamed, &f.anchor),
+        for (parked_branch, branch, tip, expected) in [
+            (WORKER_TASK_BRANCH, WORKER_TASK_BRANCH, &rebased, &rebased),
+            ("factory/worker", "factory/worker", &rebased, &rebased),
+            ("factory/worker", "factory/worker", &unnamed, &f.anchor),
+            // A handoff retains the old branch's anchor for record_park.
+            (WORKER_TASK_BRANCH, "factory/worker", &rebased, &f.anchor),
         ] {
+            let mut task = f.task.clone();
+            task.deliverables.parked_branch = Some(parked_branch.into());
             let parking = f.core.advance_commit_time_anchor_before_park(
                 tasks.as_ref(),
-                &f.task,
+                &task,
                 repo,
                 "main",
                 Some(branch),

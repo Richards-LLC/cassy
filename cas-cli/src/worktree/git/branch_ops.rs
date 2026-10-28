@@ -1133,6 +1133,23 @@ impl GitOperations {
             }
         };
         let mut cmd = Command::new("git");
+        // A relative filesystem remote is relative to the receiver's
+        // checkout. Preserve that destination when moving the hook's cwd,
+        // without rewriting shared repository configuration.
+        if let Ok(urls) = Command::new("git")
+            .args(["remote", "get-url", "--push", "--all", "origin"])
+            .current_dir(&self.repo_root)
+            .output()
+            && urls.status.success()
+        {
+            for url in String::from_utf8_lossy(&urls.stdout).lines() {
+                if Path::new(url).is_relative()
+                    && let Ok(path) = self.repo_root.join(url).canonicalize()
+                {
+                    cmd.args(["-c", &format!("url.{}.insteadOf={url}", path.display())]);
+                }
+            }
+        }
         cmd.args([
             "push",
             "origin",

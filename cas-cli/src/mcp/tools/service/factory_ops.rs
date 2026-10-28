@@ -19906,7 +19906,7 @@ effort = "high"
         }
         let prior_entries = status_codex_rollout_entries(&root).count();
         let archive_budget = STATUS_ROLLOUT_ENTRIES.saturating_sub(prior_entries);
-        assert!(archive_budget > 0 && archive_budget < 300, "fixture cap must split the 300-file day");
+        assert!(archive_budget > 1 && archive_budget < 300, "fixture cap must split the 300-file day");
         for i in 0..300 {
             let path = archive.join(format!("rollout-{i:03}.jsonl"));
             std::fs::write(&path, "{}\n").unwrap();
@@ -19916,10 +19916,17 @@ effort = "high"
         let old_sample = std::fs::read_dir(&archive).unwrap().take(archive_budget)
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let skipped_newest = (0..300).rev().take(archive_budget)
+        let newest_candidates = (0..300).rev().take(archive_budget)
             .map(|i| format!("rollout-{i:03}.jsonl"))
-            .find(|name| name != "rollout-299.jsonl" && !old_sample.contains(name))
-            .expect("fixture must have a newest-name candidate outside filesystem-order sampling");
+            .filter(|name| name != "rollout-299.jsonl")
+            .collect::<Vec<_>>();
+        let skipped_newest = newest_candidates.iter()
+            .find(|name| !old_sample.contains(*name))
+            // Some filesystems already enumerate this prefix newest-first.
+            // Keep that valid layout as a control instead of panicking.
+            .or_else(|| newest_candidates.iter().find(|name| old_sample.contains(*name)))
+            .expect("fixture must contain a newest-name candidate")
+            .clone();
         let newest_path = archive.join(&skipped_newest);
         std::fs::write(&newest_path, serde_json::json!({"rate_limits": {
             "primary": {"window_minutes":300,"resets_at":now.timestamp()+3600},

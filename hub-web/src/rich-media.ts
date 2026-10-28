@@ -7,7 +7,8 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
   const document = viewport.ownerDocument;
   let refreshed = false;
   let resume: { time: number; playing: boolean } | undefined;
-  const fallback = () => {
+  const fallback = (waiting = false) => {
+    viewport.dataset.previewState = waiting ? "waiting" : "failed";
     const text = document.createElement("p"); text.textContent = "Preview unavailable. Open the file below."; viewport.replaceChildren(text);
   };
   const attempt = async (): Promise<void> => {
@@ -15,7 +16,9 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
       if (!viewport.isConnected) return;
       const result = await fetchView();
       if (!viewport.isConnected) return;
-      if (!result?.ok || result.view.artifact_id !== file.artifact_id) { fallback(); return; }
+      if (!result) { fallback(true); return; }
+      if (!result.ok) { fallback(result.status === 408 || result.status === 429 || result.status >= 500); return; }
+      if (result.view.artifact_id !== file.artifact_id) { fallback(); return; }
       const url = new URL(result.view.url);
       const loopback = url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
       if (url.protocol !== "https:" && !loopback || url.username || url.password) { fallback(); return; }
@@ -31,7 +34,7 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
             const probe = await fetch(url, { headers: { Range: "bytes=0-0" }, credentials: "omit", referrerPolicy: "no-referrer", cache: "no-store" });
             unauthorized = probe.status === 401;
             await probe.body?.cancel();
-          } catch { fallback(); return; }
+          } catch { fallback(true); return; }
         }
         if (!viewport.isConnected) { fallback(); return; }
         if (expired() || unauthorized) {
@@ -46,6 +49,7 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
         try {
           const { pdfPreview } = await import("./rich-pdf");
           await pdfPreview(viewport, url.href, file.name);
+          if (viewport.isConnected) viewport.dataset.previewState = "ready";
         } catch (error) { await failed(typeof (error as { status?: unknown })?.status === "number" ? (error as { status: number }).status : 0); }
         return;
       }
@@ -69,8 +73,9 @@ export async function loadMedia(viewport: HTMLElement, file: ArtifactRef, fetchV
       media.addEventListener("error", () => { void failed(); }, { once: true });
       media.src = url.href;
       viewport.replaceChildren(media);
+      viewport.dataset.previewState = "ready";
       if (restart) void restart.play().catch(() => { /* Native controls remain available. */ });
-    } catch { fallback(); }
+    } catch { fallback(true); }
   };
   await attempt();
 }

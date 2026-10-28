@@ -27,7 +27,7 @@ import { NoticePersistence, isOperatorNotice, NOTICE_KIND, noticeFingerprint, no
 import { REFUSED_SEE_ABOVE, refusalSentence, refusal } from "./refusal";
 import { installAttentionObjects } from "./attention-objects";
 import { clearTransientAttachmentNotes, installAttachmentSheet, restateAttachmentNotes, setAttachmentNote } from "./attachment-sheet";
-import { inlineAttachment } from "./rich-attachment";
+import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
 import { artifactFailureFollowsConnection, artifactFailureIsAboutTheFile, artifactIdFromHref, artifactIsLocalOnly, artifactLinkFor, artifactOpenFailure, openArtifact, type ArtifactMachineReach } from "./artifact-open";
 import { applyActionAvailability, arrangeConversationShell, contextSheetWhere, ensureConversationStage, rawOutputDrawerMarkup, type ConversationRegions, bindKeyboardViewport, conversationAttentionBadge, keyboardViewportHeight, conversationListState, conversationNoMatchText, conversationSearchPlaceholder, conversationSkeletonMarkup, KEYBOARD_HINT_MEDIA_QUERY, fitConversationHost } from "./conversation-shell";
 import { clockLabel } from "./thread-model";
@@ -175,7 +175,8 @@ installAttachmentSheet((sheet, file, context) => {
   if (!entry) return sheet;
   const separator = entry[0].indexOf(":");
   const machineId = entry[0].slice(0, separator), session = entry[0].slice(separator + 1);
-  return inlineAttachment(sheet, file, async () => connections.get(machineId)?.artifactPreview(session, file.artifact_id));
+  const available = () => connectionStates.get(machineId)?.phase === "live";
+  return inlineAttachment(sheet, file, async () => available() ? connections.get(machineId)?.artifactPreview(session, file.artifact_id) : undefined, { machineId, available });
 });
 const conversationHistories = new Map<string, ConversationHistory>();
 /**
@@ -713,7 +714,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       if (state.phase === "live") lastLiveAt.set(machine.id, Date.now());
       // cas-c808 QA F01: a card that said the machine couldn't be reached
       // must not keep saying so once it is back.
-      if (state.phase === "live" && !wasLive) clearTransientAttachmentNotes(document, machine.id);
+      if (state.phase === "live" && !wasLive) {
+        clearTransientAttachmentNotes(document, machine.id);
+        retryAttachmentPreviews(document, machine.id);
+      }
       // Journey F28: a card that said the machine is connected says what the
       // header says once it is not.
       else restateAttachmentNotes(document, machine.id);
@@ -794,7 +798,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
         void restorePaneControlThenFlush(machine, session);
-        if (!attachWasLive) clearTransientAttachmentNotes(document, machine.id);
+        if (!attachWasLive) {
+          clearTransientAttachmentNotes(document, machine.id);
+          retryAttachmentPreviews(document, machine.id);
+        }
         // The socket is back: its transport alarm is history, not attention.
         resolveAttention(`${machine.id}:${session}:session_transport`);
         // cas-d53c: a replacement daemon can reuse this session name. Its

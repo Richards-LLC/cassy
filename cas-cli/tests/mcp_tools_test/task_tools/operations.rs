@@ -382,8 +382,11 @@ async fn task_read_default_start_preserves_complete_advisories() {
             parked.assignee = Some("test-agent".into());
             parked.deliverables.factory_branch_anchor = Some(tip.clone());
             store.add(&parked).unwrap();
+            std::fs::write(cas_dir.join("config.toml"), r#"[project]
+canonical_id = "start-read-fixture"
+"#).unwrap();
             task.deliverables.work_target = Some(cas::types::WorkTarget {
-                repo_selector: root.display().to_string(),
+                repo_selector: "project:start-read-fixture".into(),
                 target_branch: "main".into(),
             });
             store.add(&task).unwrap();

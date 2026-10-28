@@ -3282,7 +3282,7 @@ fn concurrent_worktree_merges_publish_and_retry_against_origin_cas_f438() {
     let hook = hooks.join("pre-push");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
     std::fs::write(&hook, format!(
-        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n git -C {} push origin refs/heads/epic/race:refs/heads/epic/race || exit 1\nfi\n",
+        "#!/bin/sh\nif mkdir {} 2>/dev/null; then\n (unset $(git rev-parse --local-env-vars); git -C {} push origin refs/heads/epic/race:refs/heads/epic/race) || exit 1\nfi\n",
         quote(&hooks.join("peer-pushed")), quote(&peer)
     )).unwrap();
     std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();

@@ -91,6 +91,10 @@ fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
 
 /// Read text/image user input without treating tool results as operator input.
 fn claude_prompt(value: &Value) -> Option<String> {
+    if value.pointer("/message/content").and_then(Value::as_array)
+        .is_some_and(|blocks| blocks.iter().any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))) {
+        return None;
+    }
     value.pointer("/message/content").and_then(Value::as_str)
         .map(str::to_owned)
         .or_else(|| text_blocks(value, "/message/content", "text"))
@@ -1422,11 +1426,13 @@ mod tests {
                 // provenance. It must not become another operator bubble.
                 values.push(serde_json::json!({"timestamp":now.to_rfc3339(),"type":"user","uuid":"projection",
                     "message":{"role":"user","content":[{"type":"text","text":question}]}}));
+                values.push(serde_json::json!({"timestamp":now.to_rfc3339(),"type":"user","uuid":"tool-result",
+                    "message":{"role":"user","content":[{"type":"tool_result","content":"private output"},{"type":"text","text":"Generated tool context"}]}}));
             }
             let (temp, root, queue) = terminal_session(values.clone());
             let agents = SqliteAgentStore::open(&root).unwrap();
             let mut supervisor = agents.get("supervisor-id").unwrap();
-            supervisor.metadata.insert("supervisor_cli".into(), cli.to_string());
+            supervisor.metadata.insert("supervisor_cli".into(), cli.backend().name().to_owned());
             agents.update(&supervisor).unwrap();
             let path = if cli == cas_mux::SupervisorCli::Claude {
                 let directory = temp.path().join("account/projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
@@ -1443,7 +1449,7 @@ mod tests {
             );
             scan(&mut state);
             scan(&mut state);
-            assert_eq!(state.operator_messages.len(), 1, "{cli}: live input before final answer");
+            assert_eq!(state.operator_messages.len(), 1, "{cli:?}: live input before final answer");
             assert_eq!(state.operator_messages[0].text, question);
             assert_eq!(state.operator_messages[0].operator_label.as_deref(), Some("Terminal"));
             assert_eq!(state.operator_messages[0].device_id, "terminal");
@@ -1451,7 +1457,7 @@ mod tests {
             assert!(!state.operator_messages[0].stamped);
             for device in ["phone", "desktop"] {
                 let rows = queue.conversation_history("factory-1", device, None, 50).unwrap();
-                assert_eq!(rows.len(), 1, "{cli}: terminal input is owed before any assistant answer");
+                assert_eq!(rows.len(), 1, "{cli:?}: terminal input is owed before any assistant answer");
                 assert_eq!(rows[0].source, "terminal");
                 assert_eq!(rows[0].prompt, question);
                 assert_eq!(rows[0].created_at, now);

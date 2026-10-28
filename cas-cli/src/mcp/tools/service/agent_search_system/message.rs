@@ -5823,7 +5823,7 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(full.contains("/proof/task-b/qa/bundle.json"));
         // pin: Git's changed-file entry is preserved byte-for-byte on expansion.
         assert!(full.contains("A\ttask-b.txt"));
-        assert!(row.prompt.len() < review.len() / 2, "queued evidence should be bounded by a pointer");
+        assert!(row.prompt.len() < review.len() / 2);
 
     }
 

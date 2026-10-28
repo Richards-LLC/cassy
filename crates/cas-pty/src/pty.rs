@@ -151,6 +151,17 @@ pub const SUPERVISOR_CONTRACT_ELEMENTS: &[ContractElement] = &[
         markers: &["act on the injected signal", "do not poll"],
         all: true,
     },
+    // cas-752f: "reply via coordination message" read as "reply to every
+    // update"; Codex sent 9.8 messages per merge vs 2.6 for Claude, and each
+    // reply invites another wake.
+    ContractElement {
+        id: "reply-only-when-needed",
+        markers: &[
+            "only when the sender needs an answer, an action or a verdict",
+            "never acknowledge a receipt or a status",
+        ],
+        all: true,
+    },
     ContractElement {
         id: "user-instructions-voice",
         markers: &["user-level instructions", "govern voice and style"],

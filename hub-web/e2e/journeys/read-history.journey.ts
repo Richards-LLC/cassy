@@ -42,7 +42,7 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
             const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
             const counts: number[] = [];
             for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-              for (const match of text.textContent!.matchAll(/\S+/g)) {
+              for (const match of text.textContent!.matchAll(/[\p{L}\p{N}]+/gu)) {
                 const range = document.createRange();
                 range.setStart(text, match.index!); range.setEnd(text, match.index! + match[0].length);
                 counts.push(range.getClientRects().length);

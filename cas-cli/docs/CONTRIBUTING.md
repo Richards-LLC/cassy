@@ -2831,6 +2831,17 @@ Platform support: macOS: compile-checked and launch-tested; suite runs on Linux.
    launch smoke on the packaged macOS archive. It then creates the annotated
    tag `vx.y.z` and the GitHub release (`release-publish.sh`), whose notes end
    with the release timer, and dispatches the install-path proof.
+   After publication, a separate `deploy-hub` job uploads that tag's
+   `hub-web/dist` to Vercel `cas-hub-static` in `richards-llc`, without a
+   rebuild. It discovers the current deployment through the live domain,
+   skips an unchanged dist tree, verifies anonymous bytes before promotion
+   and on the domain afterward, and restores the previous deployment if
+   promotion or verification fails. The `hub-deployment.json` release asset
+   records the source tag/commit/tree, deployment IDs, verification times
+   and outcome; failed checks also retain a workflow artifact. Authentication
+   uses the repo secret `VERCEL_HUB_TOKEN`, passed through the CLI environment.
+   This job cannot delay main or release publication. If it fails after
+   publication, rerun the failed job; do not republish the existing release.
 7. The supervisor host installs on publish: `scripts/install-on-publish.sh
    --install` sets up a systemd user timer once per host. Every minute it
    compares the latest release with `cas --version`, runs
@@ -2846,6 +2857,7 @@ branch, `gh workflow run release-prebuild.yml --ref <branch>` followed by
 `gh workflow run release.yml --ref <branch>` runs the whole path against a
 throwaway `dryrun-` prerelease that it deletes at the end; `cas update` never
 sees a prerelease.
+Dry runs never run the hosted hub job or send any Vercel requests.
 
 The release train and gate scripts (`release-train.sh`, `release-gate.sh`) stay
 on disk while hosts still run binaries that call them; the release path above

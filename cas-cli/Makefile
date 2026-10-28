@@ -245,6 +245,8 @@ test-ci-tiers:
 	cd .. && ./scripts/test-check-operator-launch.sh
 	cd .. && ./scripts/test-release.sh
 	cd .. && ./scripts/test-release-publish.sh
+	cd .. && ./scripts/test-verify-hub-dist.sh
+	cd .. && python3 scripts/test-deploy-hub-release.py
 	cd .. && ./scripts/test-install-on-publish.sh
 	cd .. && ./scripts/test-release-published-receipt.sh
 	cd .. && python3 scripts/test-release-completion.py

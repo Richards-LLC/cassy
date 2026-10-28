@@ -101,6 +101,9 @@ export const RECONNECT_AFTER_MISSED_HEARTBEATS = 4;
  */
 export const MACHINE_RETRY_CEILING_MS = 3_000;
 
+/** Session attaches retain their own backoff while a daemon is unavailable. */
+export const SESSION_RETRY_CEILING_MS = 10_000;
+
 /** How long a health ping on the machine socket may go unanswered when the
  * page has reason to doubt it (back online, woken, network changed). */
 export const SOCKET_PROBE_TIMEOUT_MS = 3_000;

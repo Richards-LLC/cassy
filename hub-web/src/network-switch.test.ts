@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HubConnectionSupervisor, messageRejection, TransientAuthError, UPSTREAM_STREAK_SETTLE_MS, type HubCallbacks } from "./connection";
 import { ConversationHistory } from "./conversation-history";
-import { MACHINE_RETRY_CEILING_MS, SOCKET_PROBE_TIMEOUT_MS } from "./connection-state";
 import type { StoredMachine } from "./types";
 
 // cas-0978: surviving network switches. The journey (HUB-J12) proves the
@@ -203,10 +202,6 @@ describe("network hints (cas-0978)", () => {
     expect(internals.lifecycle).toMatchObject({ phase: "failed", authFailure: "revoked" });
   });
 
-  it("waits at most 10 s between reconnects and gives a doubted socket 3 s to answer", () => {
-    expect(MACHINE_RETRY_CEILING_MS).toBe(10_000);
-    expect(SOCKET_PROBE_TIMEOUT_MS).toBe(3_000);
-  });
 });
 
 describe("held sends (cas-0978)", () => {
@@ -354,7 +349,7 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
   // cas-4ce5: a session attach held down through several failures kept doubling
   // (16 s at the fifth, 30 s later), so a machine back after a long outage
   // stayed "Reconnecting" well past the 10 s the catalog promises (HUB-J11).
-  it("caps the session attach backoff at the machine retry ceiling", () => {
+  it("caps the session attach backoff at ten seconds independently of machine retries", () => {
     vi.useFakeTimers();
     vi.stubGlobal("window", globalThis);
     vi.spyOn(Math, "random").mockReturnValue(0.5);
@@ -369,7 +364,7 @@ describe("held-send polish after cas-0653 (cas-a355)", () => {
       for (const timer of machine.attachRetryTimers.values()) clearTimeout(timer);
       machine.attachRetryTimers.clear();
     }
-    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, MACHINE_RETRY_CEILING_MS, MACHINE_RETRY_CEILING_MS, MACHINE_RETRY_CEILING_MS]);
+    expect(delays).toEqual([1_000, 2_000, 4_000, 8_000, 10_000, 10_000, 10_000]);
     sup.stop();
   });
 

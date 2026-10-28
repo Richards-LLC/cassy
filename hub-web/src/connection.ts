@@ -18,6 +18,7 @@ import {
   DEGRADED_AFTER_MISSED_HEARTBEATS,
   HEARTBEAT_INTERVAL_MS,
   MACHINE_RETRY_CEILING_MS,
+  SESSION_RETRY_CEILING_MS,
   RECONNECT_AFTER_MISSED_HEARTBEATS,
   SOCKET_PROBE_TIMEOUT_MS,
   stageFailureDetail,
@@ -1615,10 +1616,10 @@ export class HubConnectionSupervisor {
   private scheduleAttach(session: string): void {
     if (!this.desired || this.attachRetryTimers.has(session)) return;
     const attempt = this.socketAttempts.get(session) ?? 0;
-    // Capped like the machine connection's retry (cas-4ce5): a session held
+    // Capped independently of the machine connection's retry: a session held
     // down for a while must not wait 16–30 s to notice its machine is back.
     // HUB-J11 promises attempts at most 10 s apart.
-    const delay = Math.min(MACHINE_RETRY_CEILING_MS, backoffDelay(attempt));
+    const delay = Math.min(SESSION_RETRY_CEILING_MS, backoffDelay(attempt));
     this.socketAttempts.set(session, attempt + 1);
     const failed = this.attachLifecycles.get(session);
     this.transitionAttach(session, "backoff", failed?.stage ?? "dialing", { reason: failed?.reason, retryInMs: delay });

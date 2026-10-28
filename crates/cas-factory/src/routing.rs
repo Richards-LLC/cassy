@@ -684,8 +684,9 @@ pub fn resolve_lane_from_registry(
 
         let default_identity = recipe_route_identity(recipe, "default");
         // A retired/logged-out ~/.codex does not describe the registered
-        // account homes. Accept only fresh evidence for this exact route,
-        // and carry the proven home into the spec used by auth preflight.
+        // account homes. Accept only fresh evidence for this exact route.
+        // This proves the recipe can run; account selection belongs to the
+        // requester-aware spawn recommender, not this map's key ordering.
         let identity = if recipe.harness == SupervisorCli::Codex
             && !snapshot
                 .status_at(&default_identity, now_ms)
@@ -728,11 +729,7 @@ pub fn resolve_lane_from_registry(
                             .unwrap_or("capability is unavailable")
                     )]
                 };
-                let mut decision = routing_decision(lane_name, recipe_id, recipe, warning);
-                if identity.account_profile != "default" {
-                    decision.spec.config_dir = Some(identity.account_profile.clone());
-                }
-                return Ok(decision);
+                return Ok(routing_decision(lane_name, recipe_id, recipe, warning));
             }
             CapabilityAvailability::Unavailable => {
                 let reason = status
@@ -2026,7 +2023,7 @@ candidates = ["primary", "fallback"]
         );
         let decision = resolve_lane_from_registry("test", &snapshot, &registry).unwrap();
         assert_eq!(decision.recipe_id, "primary");
-        assert_eq!(decision.spec.config_dir.as_deref(), Some("/accounts/codex"));
+        assert!(decision.spec.config_dir.is_none(), "capability evidence must not choose the billed account");
         assert!(
             decision.warnings.is_empty(),
             "another account is still the primary recipe"

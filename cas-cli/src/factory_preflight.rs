@@ -980,10 +980,14 @@ pub fn collect_live_capability_snapshot() -> cas_factory::CapabilitySnapshot {
     let deadline = Deadline::after(COLLECTION_BUDGET);
     let default_versions = probe_default_harness_versions(deadline);
     let receipts = harness_conformance_receipts().unwrap_or_default();
-    // Lane mode asks whether a recipe can run on any registered account.
+    // A selected requester account retains priority. Only an unscoped lane
+    // asks whether a recipe can run on any registered account.
     // Keep each observation keyed by its real CODEX_HOME; doctor/preflight
     // still describe only their specifically selected account.
-    let codex_accounts = dirs::home_dir()
+    let codex_accounts = account_dir_for_harness(Harness::CodexCli)
+        .is_none()
+        .then(dirs::home_dir)
+        .flatten()
         .and_then(|home| crate::accounts::discover(crate::accounts::Provider::Codex, &home).ok())
         .unwrap_or_default()
         .into_iter()
@@ -1848,25 +1852,39 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         if let Some(home) = std::env::var_os("CAS_09FE_CAPABILITY_CHILD") {
-            let account = PathBuf::from(home).join(".codex-usable@example.test");
+            let home = PathBuf::from(home);
+            let account = home.join(".codex-z-requester@example.test");
             let snapshot = collect_live_capability_snapshot();
             let decision = cas_factory::resolve_lane("standard", &snapshot)
                 .expect("a logged-out default must not hide a usable registered Codex account");
             assert_eq!(decision.spec.cli, cas_mux::SupervisorCli::Codex);
             assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.1-sol"));
             assert_eq!(decision.spec.effort, Some(cas_mux::Effort::High));
-            assert_eq!(
-                decision.spec.config_dir.as_deref(),
-                account.to_str(),
-                "the account proven available must reach the worker's auth preflight"
+            assert!(
+                decision.spec.config_dir.is_none()
+                    || decision.spec.config_dir.as_deref() == account.to_str(),
+                "lane routing must preserve the requester's account, even when another usable account sorts first: {:?}",
+                decision.spec.config_dir
             );
             assert!(decision.warnings.is_empty());
 
-            std::fs::remove_file(account.join("auth.json")).unwrap();
-            assert!(
-                cas_factory::resolve_lane("standard", &collect_live_capability_snapshot()).is_err(),
-                "a registered directory without a usable login must not activate the lane"
-            );
+            if std::env::var_os("CODEX_HOME").is_none() {
+                assert!(
+                    decision.spec.config_dir.is_none(),
+                    "the shared recommender chooses the unscoped account"
+                );
+                for name in [
+                    ".codex-z-requester@example.test",
+                    ".codex-usable@example.test",
+                ] {
+                    std::fs::remove_file(home.join(name).join("auth.json")).unwrap();
+                }
+                assert!(
+                    cas_factory::resolve_lane("standard", &collect_live_capability_snapshot())
+                        .is_err(),
+                    "registered directories without usable logins cannot activate a lane"
+                );
+            }
             return;
         }
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1885,24 +1903,33 @@ mod tests {
         let account = env.home().join(".codex-usable@example.test");
         std::fs::create_dir_all(&account).unwrap();
         std::fs::write(account.join("auth.json"), "{}").unwrap();
+        let requester = env.home().join(".codex-z-requester@example.test");
+        std::fs::create_dir_all(&requester).unwrap();
+        std::fs::write(requester.join("auth.json"), "{}").unwrap();
 
         // Keep the fake CLI on this child's PATH, never the process-global PATH.
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args([
+        for selected in [Some(&requester), None] {
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command.args([
                 "--exact",
                 "factory_preflight::tests::standard_lane_uses_registered_codex_accounts_cas_09fe",
                 "--nocapture",
             ])
             .env("CAS_09FE_CAPABILITY_CHILD", env.home())
-            .env("PATH", &bin)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+            .env("PATH", &bin);
+            if let Some(selected) = selected {
+                command.env("CODEX_HOME", selected);
+            } else {
+                command.env_remove("CODEX_HOME");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     fn healthy_facts() -> PreflightFacts {

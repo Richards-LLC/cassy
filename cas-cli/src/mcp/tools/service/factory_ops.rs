@@ -1522,23 +1522,29 @@ fn spawn_worker_entries_len(raw: Option<&str>) -> Result<Option<usize>, String> 
 }
 
 /// Fill only unresolved worker accounts. The queue persists the selected directory;
-/// the receipt explains the choice even when no account is eligible.
+/// the receipt explains the choice even when no account is eligible. A Codex
+/// lane keeps its requester's account; unscoped slots use the shared policy.
 fn recommend_spawn_accounts(
-    specs: &mut [cas_mux::WorkerSpec], policy: &crate::config::AccountsConfig,
+    specs: &mut [cas_mux::WorkerSpec], lane_request: bool, policy: &crate::config::AccountsConfig,
     now: chrono::DateTime<chrono::Utc>,
     mut collect: impl FnMut(crate::accounts::Provider) -> std::io::Result<Vec<crate::account_registry::Account>>,
 ) -> String {
     let mut notices = Vec::new();
+    let unresolved = |spec: &cas_mux::WorkerSpec| {
+        spec.config_dir.is_none()
+            && !(lane_request && spec.cli == cas_mux::SupervisorCli::Codex
+                && spec.requester_config_dir.as_deref().is_some_and(|dir| !dir.trim().is_empty()))
+    };
     for (provider, cli) in [(crate::accounts::Provider::Claude, cas_mux::SupervisorCli::Claude),
         (crate::accounts::Provider::Codex, cas_mux::SupervisorCli::Codex)] {
-        if !specs.iter().any(|s| s.cli == cli && s.config_dir.is_none()) { continue }
+        if !specs.iter().any(|s| s.cli == cli && unresolved(s)) { continue }
         let accounts = match collect(provider) {
             Ok(rows) => rows,
             Err(error) => { notices.push(format!("{} recommendation unavailable: {error}; using default/inherited account", provider.name())); continue },
         };
         let selection = crate::account_selection::recommend(&accounts, provider, now, policy);
         if let Some(recommended) = selection.recommended {
-            for spec in specs.iter_mut().filter(|s| s.cli == cli && s.config_dir.is_none()) {
+            for spec in specs.iter_mut().filter(|s| s.cli == cli && unresolved(s)) {
                 if let Some(inherited) = spec.requester_config_dir.as_deref() {
                     notices.push(format!("{} recommended over inherited {inherited}", provider.name()));
                 }
@@ -2984,7 +2990,7 @@ impl CasService {
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
-        let account_selection_notice = recommend_spawn_accounts(&mut specs, &account_policy, chrono::Utc::now(), |provider| {
+        let account_selection_notice = recommend_spawn_accounts(&mut specs, req.lane.is_some(), &account_policy, chrono::Utc::now(), |provider| {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
@@ -15633,7 +15639,7 @@ mod tests {
             let mut requester = base.clone(); requester.requester_config_dir = Some("/requester/account".into());
             specs.extend([base, explicit, requester]);
         }
-        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
             let mut idle = crate::account_selection::tests::row(provider, "chosen", 6, 59.0, 0.0);
             idle.windows.remove(0);
             Ok(vec![idle, crate::account_selection::tests::row(provider, "later", 48, 0.0, 0.0)])
@@ -15652,7 +15658,7 @@ mod tests {
         assert!(preflight_codex_config_dir(specs[3].config_dir.as_deref().unwrap()).unwrap_err().contains("auth.json"));
         specs[0].config_dir = None;
         specs[0].requester_config_dir = Some("/fallback/account".into());
-        let fallback = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+        let fallback = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
             let mut row = crate::account_selection::tests::row(provider, "full", 6, 100.0, 100.0);
             row.login_state = crate::account_registry::LoginState::LoggedIn;
             Ok(vec![row])
@@ -15672,7 +15678,7 @@ mod tests {
         }
         specs[0].config_dir = None;
         specs[3].config_dir = None;
-        let receipt = recommend_spawn_accounts(&mut specs, &Default::default(), now, |provider| {
+        let receipt = recommend_spawn_accounts(&mut specs, false, &Default::default(), now, |provider| {
             let mut rows = crate::account_registry::discover_with(provider, home.path(), false,
                 |_, _| crate::account_registry::LoginState::LoggedIn)?;
             for row in &mut rows {
@@ -15691,6 +15697,24 @@ mod tests {
             assert!(receipt.contains(&format!("{} recommended account=later", provider.name())));
         }
         assert_eq!(specs[0].requester_config_dir.as_deref(), Some("/fallback/account"));
+
+        // Lane requests retain an inherited Codex account even when the
+        // shared recommender would prefer a different subscription.
+        let provider = crate::accounts::Provider::Codex;
+        let mut lane_specs = build_lane_spawn_specs(2, "standard", None, None,
+            &cas_factory::CapabilitySnapshot::default()).unwrap().0;
+        lane_specs[0].requester_config_dir = Some("/fixture/.codex-a-low".into());
+        let receipt = recommend_spawn_accounts(&mut lane_specs, true, &Default::default(), now, |p| {
+            assert_eq!(p, provider);
+            Ok(vec![crate::account_selection::tests::row(p, "a-low", 6, 84.0, 0.0),
+                crate::account_selection::tests::row(p, "z-headroom", 6, 34.0, 0.0)])
+        });
+        assert!(lane_specs[0].config_dir.is_none(), "a lane must not override the requester's account");
+        assert_eq!(lane_specs[0].requester_config_dir.as_deref(), Some("/fixture/.codex-a-low"));
+        assert_eq!(lane_specs[1].config_dir.as_deref(), Some("/fixture/.codex-z-headroom"),
+            "without a requester, use shared quota policy rather than path order");
+        assert!(receipt.contains("codex recommended account=z-headroom") && receipt.contains("66% left"),
+            "account substitution must name the recommended account and headroom: {receipt}");
     }
 
     #[test]

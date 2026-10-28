@@ -16,7 +16,7 @@ export function releaseHeader(document: Document, epic: ReleaseEpic | undefined)
   const meta = document.createElement("p"); meta.className = "release-meta";
   const rate = Number.isFinite(progress.merges_per_hour) && progress.merges_per_hour >= 0 ? `${progress.merges_per_hour.toLocaleString(undefined, { maximumFractionDigits: 1 })} merges/hour` : "Merge rate not reported";
   const last = progress.last_merged_at ? new Date(progress.last_merged_at) : undefined;
-  meta.textContent = `${rate} · ${last && Number.isFinite(last.getTime()) ? `Last merge ${last.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "No merge reported yet"}`;
+  meta.textContent = `${rate} · ${last && Number.isFinite(last.getTime()) ? `Last merge ${last.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "Last merge not reported"}`;
   header.append(count, bar, meta);
   return header;
 }

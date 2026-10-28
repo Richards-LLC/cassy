@@ -654,11 +654,9 @@ fn next_typed(typed: &mut String) -> Option<TypedAhead> {
     let Some(end) = typed.find(['\n', TYPED_EOF]) else {
         return (!typed.is_empty()).then(|| TypedAhead::Partial(std::mem::take(typed)));
     };
-    let mut line: String = typed.drain(..=end).collect();
-    if line.ends_with(TYPED_EOF) {
-        line.pop();
-    }
-    Some(TypedAhead::Line(line))
+    let line: String = typed.drain(..=end).collect();
+    // EOF ends the answer unsent, even after an unfinished line.
+    Some(TypedAhead::Line(if line.ends_with(TYPED_EOF) { String::new() } else { line }))
 }
 
 /// How an edited answer ended.
@@ -668,9 +666,9 @@ pub(crate) enum EditedLine {
 }
 
 /// Finish an unfinished typed-ahead line with the reader that already holds
-/// it, in raw mode, so the shown prefix stays editable: Backspace, Ctrl-U,
-/// Enter, Ctrl-D on an empty line (EOF) and Ctrl-C keep their terminal
-/// meaning. `stop` is polled every 50 ms for signals delivered meanwhile.
+/// it, in raw mode, so the shown prefix stays editable: Backspace, Ctrl-U and
+/// Enter edit and send it, Ctrl-D is EOF (an empty, cancelling answer) and
+/// Ctrl-C interrupts. `stop` is polled every 50 ms for signals delivered meanwhile.
 pub(crate) fn edit_typed_line(prefix: String, mut stop: impl FnMut() -> bool) -> Result<EditedLine> {
     use crossterm_inquire::event::{self, Event};
     use std::io::Write;
@@ -731,7 +729,7 @@ fn edit_key(line: &mut String, key: crossterm_inquire::event::KeyEvent) -> LineE
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('c') if control => return LineEdit::Interrupt,
-        KeyCode::Char('d') if control && line.is_empty() => return LineEdit::Done(String::new()),
+        KeyCode::Char('d') if control => return LineEdit::Done(String::new()),
         KeyCode::Char('u') if control => line.clear(),
         KeyCode::Enter => return LineEdit::Done(format!("{line}\n")),
         KeyCode::Backspace => {
@@ -1116,12 +1114,16 @@ mod tests {
         // An unfinished line stays editable at the question.
         assert_eq!(next_typed(&mut typed), Some(TypedAhead::Partial("n".into())));
         assert_eq!(next_typed(&mut typed), None);
+        for queued in [key(KeyCode::Char('y')), ctrl('d')] {
+            assert!(queue_key(&mut typed, queued).is_continue());
+        }
+        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Line(String::new())));
         assert!(queue_key(&mut typed, ctrl('c')).is_break());
         // The question's editor continues that same line discipline.
         let mut line = "n".to_string();
         assert!(matches!(edit_key(&mut line, key(KeyCode::Backspace)), LineEdit::Pending));
-        assert!(matches!(edit_key(&mut line, ctrl('d')), LineEdit::Done(eof) if eof.is_empty()));
         line.push('y');
+        assert!(matches!(edit_key(&mut line, ctrl('d')), LineEdit::Done(eof) if eof.is_empty()));
         assert!(matches!(edit_key(&mut line, key(KeyCode::Enter)), LineEdit::Done(answer) if answer == "y\n"));
         assert!(matches!(edit_key(&mut line, ctrl('c')), LineEdit::Interrupt));
     }

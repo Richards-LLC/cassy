@@ -72,7 +72,7 @@ Run the [intake gate](../cas-supervisor/references/intake.md) on every request; 
 
 ## During Coordination
 
-Read `cas-supervisor` for authoritative task acceptance and the inbox/typed-wake policy.
+The supervisor core in your developer instructions covers signal triage and survives compaction, so after a compaction continue from it; do not re-read this checklist or `cas-supervisor`. Open a `cas-supervisor` reference only for epic planning, releases, worker recovery or an unfamiliar refusal.
 
 Reporting style: [reporting-and-routing.md](../cas-supervisor/references/reporting-and-routing.md).
 

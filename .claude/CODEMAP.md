@@ -10,7 +10,7 @@
 - `cas-cli/` - executable composition, CLI, MCP server, hooks and factory terminal UI.
 - `crates/` - shared Rust libraries and terminal bindings.
 - `contrib/` - installable shell helpers and their tests.
-- `docs/` - architecture, design briefs, QA journeys, operations and release records.
+- `docs/` - architecture, design briefs, QA journeys, operations, investigation notes (`docs/notes/`) and release records.
 - `fixtures/`, `homebrew/` - retrieval parity baselines and Homebrew packaging helpers.
 - `hub-web/` - Commander Vite/TypeScript application and browser journeys.
 - `slack-bridge/` - TypeScript Slack routing and per-user daemon.
@@ -121,7 +121,7 @@
 - `cas-cli/src/qa_post_release.rs`, `cas-cli/src/cli/qa_post_release.rs`, `cas-cli/src/qa_pass/`, `cas-cli/src/qa_evidence.rs`, `cas-cli/src/config/upkeep.rs` - release observations, independent QA, trace rebinds and upkeep gates.
 - `crates/cas-store/src/agent_store/continuity.rs` - retirement snapshots, process evidence, end causes and successor claims.
 - `crates/cas-store/src/prompt_queue_store.rs`, `crates/cas-store/src/accepted_proposal_store.rs` - durable prompts and proposal ownership.
-- `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas, memory maintenance and temporal retrieval.
+- `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas (captured harness payloads in `hooks/fixtures/`), memory maintenance and temporal retrieval.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/history/` - composed retrieval and Git-history search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - Commander startup, conversation state and reply grants.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - machine streams, recovery and session subscriptions.

@@ -127,6 +127,88 @@ fn event(daemon: &FactoryDaemon, body: &str) -> i64 {
     enqueue(daemon, "lifecycle-wake:ci-red-run:factory/test:abc", body, cas_store::QueueOrigin::Daemon)
 }
 
+/// GH #1400: a protected draft is a recoverable hold, even beyond the
+/// transport retry budget. The independent operator lane must still work.
+#[tokio::test(flavor = "current_thread")]
+async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft() {
+    if !fixture_child("codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft") {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    let (root, mut daemon) = fixture_for(cas_mux::SupervisorCli::Codex).await;
+    env.set("CAS_FACTORY_SESSION", &daemon.session_name);
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let name = daemon.app.supervisor_name().to_string();
+    let draft = "operator draft: keep this text";
+    daemon.app.mux.get(&name).unwrap()
+        .deliver_user_input(draft.as_bytes(), cas_mux::UserInputKind::KeyStream).await.unwrap();
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    // Use the production typed-relay producer, not a hand-written envelope.
+    assert!(matches!(super::lifecycle::enqueue_supervisor_unread_relay(
+        &cas, "waiting-worker", 1400, 1,
+    ), super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. }));
+    let relay = queue.peek_all(10).unwrap().into_iter()
+        .find(|row| row.source.starts_with("lifecycle-wake:worker-attention:")).unwrap();
+    assert!(relay.prompt.contains("kind=\"supervisor_unread\""));
+    let id = relay.id;
+    let conn = rusqlite::Connection::open(cas.join("cas.db")).unwrap();
+    // Advance durable time, never sleep through a 15-minute retry window.
+    conn.execute(
+        "UPDATE prompt_queue SET created_at=?1, first_attempt_at=?1, delivery_attempts=119 WHERE id=?2",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(16)).to_rfc3339(), id],
+    ).unwrap();
+    daemon.process_prompt_queue().await.unwrap();
+    settle_injected_writes(&mut daemon).await;
+    let report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(report.stage, cas_store::DeliveryStage::Gated, "protected draft must not abandon a relay: {report:?}");
+    assert!(report.delivered_at.is_none() && report.confirmed_at.is_none());
+    assert!(queue.queued_prompt(id).unwrap().unwrap().processed_at.is_none());
+    let (attempts, next): (i64, Option<String>) = conn.query_row(
+        "SELECT delivery_attempts,next_attempt_at FROM prompt_queue WHERE id=?", [id],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    assert_eq!(attempts, 119, "a pre-write safety hold spends no transport attempts");
+    assert!(next.is_some(), "the durable hold must schedule its next check");
+    super::queue_and_events::escalate_undelivered_supervisor_relays(
+        &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
+    );
+    let alerts = queue.peek_operator_replies(&daemon.session_name, 10).unwrap();
+    assert_eq!(alerts.len(), 1, "one durable escalation outside the blocked supervisor pane");
+    let held = queue.list_undelivered_lifecycle_relays(10).unwrap()
+        .into_iter().find(|row| row.prompt_id == id).unwrap();
+    assert!(held.next_attempt_at.is_some());
+    assert_eq!(held.operator_alert_id, Some(alerts[0].id));
+    let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&alerts[0].prompt).unwrap();
+    assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+    assert!(super::queue_and_events::escalate_undelivered_supervisor_relays(
+        &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
+    ).is_empty(), "escalation survives repeated sweeps without duplicates");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while std::fs::read_to_string(root.path().join("input")).unwrap() != draft {
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("only the operator's draft reaches the PTY while held");
+    assert!(daemon.app.mux.get(&name).unwrap().is_composer_dirty());
+    // Only an explicit operator action clears the draft. The next durable
+    // check can now submit the original body exactly once.
+    daemon.app.mux.get(&name).unwrap()
+        .deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
+    conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
+        rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
+    // Advancing the durable check alone does not advance the typed relay's
+    // daemon-local re-nudge clock. Model the same elapsed hold on both.
+    let held_for = (held.next_attempt_at.unwrap() - report.wake_attempt_at.unwrap())
+        .to_std().unwrap();
+    if let Some(last) = daemon.lifecycle_redelivery_attempts.get_mut(&id) {
+        *last -= held_for;
+    }
+    typed_once(&root, &mut daemon, "1 message addressed to you has gone unread").await;
+    settle_injected_writes(&mut daemon).await;
+    let delivered = queue.message_delivery_report(id).unwrap().unwrap();
+    assert!(delivered.delivered_at.is_some());
+    assert!(delivered.confirmed_at.is_none(), "PTY submit is not an observed Codex model turn");
+}
+
 /// A task-lifecycle wake body for a freshly stored task.
 fn lifecycle_body(daemon: &FactoryDaemon, status: cas_types::TaskStatus, transition: &str, old: &str, notification: u32, text: &str) -> String {
     let mut task = cas_types::Task::new(format!("cas-{notification}"), text.into());

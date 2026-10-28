@@ -809,6 +809,22 @@ struct LockedState<'a> {
     state: PersistedState,
     _file_lock: AuthFileLock<'a>,
     _gate: MutexGuard<'a, ()>,
+    _timing: LockTiming,
+}
+
+/// Microsecond observations for the auth lock wait/hold histograms.
+struct LockTiming {
+    started: std::time::Instant,
+    acquired: std::time::Instant,
+}
+
+impl Drop for LockTiming {
+    fn drop(&mut self) {
+        tracing::debug!(target: "cas::hub::auth::timing",
+            lock_wait_us = self.acquired.duration_since(self.started).as_micros() as u64,
+            lock_hold_us = self.acquired.elapsed().as_micros() as u64,
+            "hub auth lock histogram observation");
+    }
 }
 
 impl Deref for LockedState<'_> {
@@ -1797,6 +1813,7 @@ impl AuthStore {
     }
 
     fn lock(&self) -> Result<LockedState<'_>> {
+        let started = std::time::Instant::now();
         let gate = self
             .0
             .gate
@@ -1804,6 +1821,7 @@ impl AuthStore {
             .map_err(|_| anyhow::anyhow!("hub auth state poisoned"))?;
         self.0.lock_file.lock_exclusive()?;
         let file_lock = AuthFileLock(&self.0.lock_file);
+        let acquired = std::time::Instant::now();
         let target = self.0.root.join("auth.json");
         let state = if target.exists() {
             secure_regular_file(&target)?;
@@ -1815,10 +1833,12 @@ impl AuthStore {
             state,
             _file_lock: file_lock,
             _gate: gate,
+            _timing: LockTiming { started, acquired },
         })
     }
 
     fn persist(&self, state: &PersistedState) -> Result<()> {
+        let started = std::time::Instant::now();
         let target = self.0.root.join("auth.json");
         let temporary = self.0.root.join(format!(
             ".auth.{}.{}.tmp",
@@ -1827,7 +1847,9 @@ impl AuthStore {
         ));
         write_private_file(&temporary, &serde_json::to_vec_pretty(state)?, true)?;
         fs::rename(&temporary, &target)?;
-        secure_regular_file(&target)
+        secure_regular_file(&target)?;
+        tracing::debug!(target: "cas::hub::auth::timing", persist_us = started.elapsed().as_micros() as u64, "hub auth persist histogram observation");
+        Ok(())
     }
 }
 

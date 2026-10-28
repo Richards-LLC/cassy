@@ -94,17 +94,20 @@ describe("notice application receipts", () => {
     const persistence = new NoticePersistence();
     const reply = watchdog({ source: "relay-watchdog", subject: 7 });
     let release!: () => void;
+    let started!: () => void;
+    const writing = new Promise<void>(resolve => { started = resolve; });
     let writes = 0;
     let current = true;
     const acknowledgements: number[] = [];
     const ack = () => { acknowledgements.push(reply.notification_id); };
     const first = persistence.keep("atlas:s", reply, async () => {
       writes += 1;
+      started();
       await new Promise<void>(resolve => { release = resolve; });
     }, async () => current, ack);
     // A history repeat cannot bypass the live frame's uncommitted write.
     const repeat = persistence.keep("atlas:s", reply, async () => { writes += 1; }, async () => current, ack);
-    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    await writing;
     expect(writes).toBe(1); expect(acknowledgements).toEqual([]);
     current = false; release();
     await Promise.all([first, repeat]);

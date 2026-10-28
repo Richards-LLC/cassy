@@ -427,10 +427,11 @@ pub(crate) fn queue_approved_verification_close_retry(
             status => format!("task {} is {status}", task.id),
         }));
     }
-    if let AutoUnblockWorkerTarget::Skipped(reason) = auto_unblock_worker_target(cas_root, task)? {
-        return Ok(ApprovedCloseRetry::NotQueued(reason));
-    }
-    let queued = queue_assignee_notice(cas_root, task, |worker_name| {
+    let worker_name = match auto_unblock_worker_target(cas_root, task)? {
+        AutoUnblockWorkerTarget::Worker(worker_name) => worker_name,
+        AutoUnblockWorkerTarget::Skipped(reason) => return Ok(ApprovedCloseRetry::NotQueued(reason)),
+    };
+    let prompt_id = enqueue_worker_notice(cas_root, &worker_name, |worker_name| {
         (
             format!("verification-approved-close:{dispatch_id}:worker:{worker_name}"),
             format!(
@@ -440,13 +441,7 @@ pub(crate) fn queue_approved_verification_close_retry(
             format!("Verification approved: retry close {}", task.id),
         )
     })?;
-    Ok(match queued {
-        Some(prompt_id) => ApprovedCloseRetry::Queued(prompt_id),
-        None => ApprovedCloseRetry::NotQueued(format!(
-            "task {} has no live assigned worker",
-            task.id
-        )),
-    })
+    Ok(ApprovedCloseRetry::Queued(prompt_id))
 }
 
 /// cas-7fc3: the outcome of queueing a worker close retry after an approved
@@ -611,15 +606,24 @@ fn queue_assignee_notice(
     let AutoUnblockWorkerTarget::Worker(worker_name) = auto_unblock_worker_target(cas_root, task)? else {
         return Ok(None);
     };
+    enqueue_worker_notice(cas_root, &worker_name, content).map(Some)
+}
+
+/// Enqueue one idempotent prompt for an already-resolved live worker.
+fn enqueue_worker_notice(
+    cas_root: &Path,
+    worker_name: &str,
+    content: impl FnOnce(&str) -> (String, String, String),
+) -> Result<i64, String> {
     let queue = crate::store::open_prompt_queue_store(cas_root)
         .map_err(|error| format!("worker notice queue open failed: {error}"))?;
     let factory_session = std::env::var("CAS_FACTORY_SESSION")
         .ok()
         .filter(|session| !session.trim().is_empty());
-    let (key, prompt, summary) = content(&worker_name);
+    let (key, prompt, summary) = content(worker_name);
     let result = queue.enqueue_idempotent(
         "supervisor",
-        &worker_name,
+        worker_name,
         &prompt,
         factory_session.as_deref(),
         Some(&summary),
@@ -632,7 +636,7 @@ fn queue_assignee_notice(
         | cas_store::EnqueueIdempotentResult::AlreadyExists(id) => id,
     };
     crate::ui::factory::daemon::runtime::delivery::wake_daemon_after_enqueue(cas_root);
-    Ok(Some(prompt_id))
+    Ok(prompt_id)
 }
 
 /// Truthful repair guidance after task mutation succeeded but lifecycle push failed.
@@ -2034,6 +2038,31 @@ mod tests {
         assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
         assert_eq!(queue.peek_all(10).unwrap().len(), 2);
 
+        // An ordinary blocker answered before this dispatch was requested
+        // ("need credentials") belongs to an earlier cycle and must not
+        // disqualify the retry the current wait is waiting for.
+        let dispatch = cas_store::create_verification_dispatch(
+            temp.path(),
+            "cas-verdict-answered",
+            "wait-worker-id",
+            "supervisor-id",
+            chrono::Utc::now() + chrono::Duration::minutes(10),
+        )
+        .unwrap();
+        let mut answered = Task::new("cas-verdict-answered".into(), "No-code artifact delivery".into());
+        answered.status = TaskStatus::Blocked;
+        answered.assignee = Some("wait-worker".into());
+        answered.notes = format!(
+            "[2026-01-02 09:00] 🚫 BLOCKER Need hub credentials before publishing.\n[{}] 🚫 BLOCKER {}",
+            dispatch.requested_at.format("%Y-%m-%d %H:%M"),
+            crate::mcp::tools::core::task::block_hold::verification_wait_note(&dispatch.id),
+        );
+        tasks.add(&answered).unwrap();
+        let retried =
+            queue_approved_verification_close_retry(temp.path(), &answered, &dispatch.id).unwrap();
+        assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3);
+
         let held = blocked("cas-verdict-held", "Waiting on the operator's decision about scope.");
         let refused =
             queue_approved_verification_close_retry(temp.path(), &held, "vdispatch-held").unwrap();
@@ -2042,7 +2071,7 @@ mod tests {
         };
         assert!(reason.contains("blocked by a hold other than the verification wait"), "{reason}");
         assert!(!reason.contains("no live assigned worker"), "{reason}");
-        assert_eq!(queue.peek_all(10).unwrap().len(), 2);
+        assert_eq!(queue.peek_all(10).unwrap().len(), 3);
     }
 
     #[test]

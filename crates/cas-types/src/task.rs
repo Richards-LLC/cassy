@@ -1385,6 +1385,28 @@ pub struct Task {
 }
 
 impl Task {
+    /// Resolve the current factory lane while preserving an explicit integration base.
+    /// A target replaces a recorded lane only when both retain this epic's id.
+    pub fn effective_epic_branch(&self) -> Option<&str> {
+        let names_lane =
+            |branch: &str| branch.starts_with("epic/") && branch.ends_with(&format!("-{}", self.id));
+        let branch = self
+            .branch
+            .as_deref()
+            .map(str::trim)
+            .filter(|b| !b.is_empty());
+        let target = self
+            .deliverables
+            .work_target
+            .as_ref()
+            .map(|target| target.target_branch.trim())
+            .filter(|b| !b.is_empty());
+        match (branch, target) {
+            (Some(branch), Some(target)) if names_lane(branch) && names_lane(target) => Some(target),
+            _ => branch.or(target.filter(|target| target.starts_with("epic/"))),
+        }
+    }
+
     /// Create a new task with the given ID and title
     pub fn new(id: String, title: String) -> Self {
         let now = Utc::now();

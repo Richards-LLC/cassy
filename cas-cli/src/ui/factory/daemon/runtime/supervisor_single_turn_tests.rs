@@ -175,6 +175,22 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     ).unwrap();
     assert_eq!(attempts, 119, "a pre-write safety hold spends no transport attempts");
     assert!(next.is_some(), "the durable hold must schedule its next check");
+    // Advance both retry clocks through more holds than the actual re-nudge
+    // budget. No PTY attempt occurs while the operator keeps this draft.
+    for _ in 0..25 {
+        conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
+        if let Some(last) = daemon.lifecycle_redelivery_attempts.get_mut(&id) {
+            *last -= Duration::from_secs(120);
+        }
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+    }
+    assert_eq!(daemon.lifecycle_redelivery_counts.get(&id).copied().unwrap_or(0), 0,
+        "protected composer holds must never spend the re-nudge budget");
+    let held_report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(held_report.stage, cas_store::DeliveryStage::Gated, "{held_report:?}");
+    assert!(held_report.pending_detail.as_deref().unwrap().contains("operator draft"));
     super::queue_and_events::escalate_undelivered_supervisor_relays(
         &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
     );
@@ -186,6 +202,7 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     assert_eq!(held.operator_alert_id, Some(alerts[0].id));
     let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&alerts[0].prompt).unwrap();
     assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+    assert!(payload.message.contains("operator draft"), "alert must name the blocker: {}", payload.message);
     assert!(super::queue_and_events::escalate_undelivered_supervisor_relays(
         &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
     ).is_empty(), "escalation survives repeated sweeps without duplicates");
@@ -199,15 +216,8 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     // check can now submit the original body exactly once.
     daemon.app.mux.get(&name).unwrap()
         .deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
-    conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
-        rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
-    // Advancing the durable check alone does not advance the typed relay's
-    // daemon-local re-nudge clock. Model the same elapsed hold on both.
-    let held_for = (held.next_attempt_at.unwrap() - report.wake_attempt_at.unwrap())
-        .to_std().unwrap();
-    if let Some(last) = daemon.lifecycle_redelivery_attempts.get_mut(&id) {
-        *last -= held_for;
-    }
+    // Leave the durable hold deadline and re-nudge clock untouched: becoming
+    // input-ready must re-offer immediately, not wait two more minutes.
     typed_once(&root, &mut daemon, "1 message addressed to you has gone unread").await;
     settle_injected_writes(&mut daemon).await;
     let delivered = queue.message_delivery_report(id).unwrap().unwrap();

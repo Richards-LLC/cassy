@@ -28,6 +28,19 @@ fn branch_update_work_target(
     }
 }
 
+fn refresh_epic_lane_binding(task: &mut Task) {
+    if task.task_type == TaskType::Epic
+        && task
+            .branch
+            .as_deref()
+            .is_some_and(|branch| !branch.trim().is_empty())
+    {
+        let branch = super::repo_context::effective_epic_branch(task).map(str::to_string);
+        if branch.is_some() {
+            task.branch = branch;
+        }
+    }
+}
 fn last_recorded_close_blocker(cas_root: &std::path::Path, task_id: &str) -> Option<String> {
     let events = crate::store::open_event_store(cas_root).ok()?
         .list_by_type(cas_types::EventType::WorkerVerificationBlocked, 512).ok()?;
@@ -343,14 +356,11 @@ pub(crate) fn resolve_assignment_freshness_branch(
     task_store: &dyn cas_store::TaskStore,
     task: &Task,
 ) -> Option<String> {
-    if let Some(target_branch) = task
-        .deliverables
-        .work_target
-        .as_ref()
-        .map(|target| target.target_branch.trim())
-        .filter(|branch| !branch.is_empty())
+    let parent_epic = task_store.get_parent_epic(&task.id).ok().flatten();
+    if let Some(target) = super::repo_context::effective_task_work_target(task, parent_epic.as_ref())
+        && !target.target_branch.trim().is_empty()
     {
-        return Some(target_branch.to_string());
+        return Some(target.target_branch);
     }
 
     if task.task_type == TaskType::Epic {
@@ -1181,6 +1191,7 @@ impl CasCore {
             }
 
             task.deliverables.work_target = corrected_target.clone();
+            refresh_epic_lane_binding(&mut task);
             if !proof_targets_fix && !risk_fix && !methodology_fix {
                 // cas-3b42: only this explicit clear makes a missing target
                 // a reviewed one (GH #1167); a new target ends it.
@@ -1705,6 +1716,7 @@ impl CasCore {
             } else {
                 task.deliverables.work_target = branch_only_target;
             }
+            refresh_epic_lane_binding(&mut task);
             changes.push("work_target");
         }
 
@@ -2004,7 +2016,11 @@ impl CasCore {
                 if let Err(message) = crate::qa_batch::ensure_deferred_close(&self.cas_root, &task, None, None) {
                     return Ok(Self::tool_error(message));
                 }
-                let close_repo_context = match task.deliverables.work_target.as_ref() {
+                let parent_epic = task_store.get_parent_epic(&task.id).map_err(|error| {
+                    Self::error(ErrorCode::INTERNAL_ERROR, format!("Failed to resolve effective task target: {error}"))
+                })?;
+                let effective_target = super::repo_context::effective_task_work_target(&task, parent_epic.as_ref());
+                let close_repo_context = match effective_target.as_ref() {
                     Some(target) => Some(
                         super::repo_context::resolve_repo_context(&self.cas_root, target).map_err(
                             |message| McpError {

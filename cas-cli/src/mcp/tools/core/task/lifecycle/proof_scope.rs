@@ -311,6 +311,24 @@ pub(crate) fn guard_task_proof_scope(
     if locked_fields.is_empty() {
         return Ok(());
     }
+    let target_remedy = if matches!(
+        operation,
+        ProofScopeOperation::TaskUpdate {
+            target_repo_supplied: true,
+            ..
+        } | ProofScopeOperation::TaskUpdate {
+            target_branch_supplied: true,
+            ..
+        }
+    ) {
+        format!(
+            " To repair a renamed delivery target, ask a live registered supervisor to run `{}task action=update id={} target_branch=<current-epic-lane> proof_scope_fix=true reason=\"repair target after epic rename\"`. This audits and invalidates the old proof cycle; ordinary close proofs still apply.",
+            crate::mcp::tools::core::guidance::supervisor_prefix(),
+            task.id
+        )
+    } else {
+        String::new()
+    };
     let methodology_remedy = if let ProofScopeOperation::TaskUpdate { request, .. } = operation
         && let Some(methodology) = request.execution_note.as_deref()
         && crate::mcp::tools::types::validate_execution_note(Some(methodology)).is_ok()
@@ -341,11 +359,12 @@ pub(crate) fn guard_task_proof_scope(
                 }
             };
             Err(reject(format!(
-                "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}{}",
+                "DELIVERY PROOF SCOPE LOCKED: task {} has an active exact verification/delivery proof boundary. Refusing review-relevant update fields [{}]. Append progress with notes only. {}{}{}",
                 task.id,
                 locked_fields.join(", "),
                 remediation,
                 methodology_remedy,
+                target_remedy,
             )))
         }
         Err(reason) => Err(reject(format!(

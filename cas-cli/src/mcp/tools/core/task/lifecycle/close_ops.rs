@@ -9033,7 +9033,7 @@ impl CasCore {
             && let Some(epic) = parent_epic.as_ref()
             && !epic.is_terminal()
             && let (Some(epic_branch), Some(target)) = (
-                epic.branch.as_deref(),
+                crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic),
                 epic.deliverables.work_target.as_ref(),
             )
         {
@@ -9056,6 +9056,7 @@ impl CasCore {
                     &epic.id,
                     epic_branch,
                     integration_branch,
+                    epic.deliverables.epic_branch_origin.as_ref(),
                 ) {
                     close_notes.record(&mut task, &note);
                 }
@@ -17413,17 +17414,7 @@ pub(crate) fn effective_close_work_target(
     task: &Task,
     parent_epic: Option<&Task>,
 ) -> Option<cas_types::WorkTarget> {
-    parent_epic
-        .and_then(|epic| {
-            (task.task_type != TaskType::Epic)
-                .then(|| {
-                    crate::mcp::tools::core::task::repo_context::default_child_work_target_from_epic(
-                        task, epic,
-                    )
-                })
-                .flatten()
-        })
-        .or_else(|| task.deliverables.work_target.clone())
+    crate::mcp::tools::core::task::repo_context::effective_task_work_target(task, parent_epic)
 }
 
 /// cas-7efe: the single, authoritative parent-branch resolution policy for
@@ -18991,6 +18982,7 @@ fn advance_clean_epic_after_child_integration(
     epic_id: &str,
     epic_branch: &str,
     integration_branch: &str,
+    created_as: Option<&cas_types::EpicBranchOrigin>,
 ) -> Option<String> {
     use std::process::Command;
 
@@ -18999,6 +18991,12 @@ fn advance_clean_epic_after_child_integration(
         || !is_safe_git_refname(integration_branch)
     {
         return None;
+    }
+
+    if !created_as.is_some_and(|origin| origin.branch == epic_branch) {
+        return Some(format!(
+            "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id}; no factory creation provenance for the current lane. No refs advanced or pushed; child close remains valid."
+        ));
     }
 
     fetch_parent_branch_best_effort(repo_path, epic_branch);
@@ -19053,6 +19051,24 @@ fn advance_clean_epic_after_child_integration(
                 ),
             },
         );
+    }
+
+    // Closing advances an existing shared lane, never recreates a deleted one.
+    match crate::worktree::GitOperations::new(repo_path.to_path_buf())
+        .observe_epic_publication(epic_branch, None)
+        .remote
+    {
+        Ok(Some(true)) => {}
+        Ok(_) => {
+            return Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 REFUSED epic={epic_id}; current lane is absent on origin; automatic resurrection refused. No refs advanced or pushed; child close remains valid."
+            ));
+        }
+        Err(error) => {
+            return Some(format!(
+                "decision: CAS_EPIC_ADVANCEMENT_V1 FAILED_REMOTE epic={epic_id}; {error}. Child close remains valid; no refs advanced or pushed."
+            ));
+        }
     }
 
     let push = Command::new("git")
@@ -19115,7 +19131,6 @@ fn advance_clean_epic_after_child_integration(
         )),
     }
 }
-
 /// Return the fetched remote epic tip only when it contains the integration
 /// commit a losing concurrent closer intended to publish.  This narrow check
 /// makes a rejected non-force push idempotent without treating an unrelated
@@ -26461,7 +26476,11 @@ mod merge_state_gate_tests {
             p,
             &["remote", "add", "origin", bare.path().to_str().unwrap()],
         );
-        git(p, &["push", "-q", "origin", "main:epic/new-target"]);
+        git(p, &["branch", "epic/previous-cas-new-parent", "main"]);
+        git(
+            p,
+            &["push", "-q", "origin", "main:epic/current-cas-new-parent"],
+        );
         let branch = "factory/retarget-worker-cas-retarget";
         git(p, &["checkout", "-q", "-b", branch]);
         std::fs::write(p.join("delivery.rs"), "// cas-retarget delivery\n").unwrap();
@@ -26505,31 +26524,38 @@ mod merge_state_gate_tests {
         store.add(&task).unwrap();
         for (id, target) in [
             ("cas-old-parent", "main"),
-            ("cas-new-parent", "epic/new-target"),
+            ("cas-new-parent", "epic/current-cas-new-parent"),
         ] {
             let mut epic = Task::new(id.into(), "Parent epic".into());
             epic.task_type = TaskType::Epic;
+            if id == "cas-new-parent" {
+                epic.branch = Some("epic/previous-cas-new-parent".into());
+            }
             epic.deliverables.work_target = Some(WorkTarget {
                 repo_selector: "project:cas-retarget-fixture".into(),
                 target_branch: target.into(),
             });
             store.add(&epic).unwrap();
         }
-        let service = CasService::new(core, None);
+        let supervisor_service = CasService::new(core, None);
         for request in [
             serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
             serde_json::json!({"action":"dep_remove", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
             serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-new-parent", "dep_type":"parent"}),
-            serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/new-target"}),
+            serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/current-cas-new-parent"}),
         ] {
-            let response = service
+            let response = supervisor_service
                 .task(Parameters(serde_json::from_value(request).unwrap()))
                 .await
                 .unwrap();
             assert_ne!(response.is_error, Some(true), "{response:?}");
         }
-        assert!(!git_ref_exists(p, "epic/new-target"));
-        assert!(!git_commit_is_ancestor(p, &tip, "origin/epic/new-target"));
+        assert!(!git_ref_exists(p, "epic/current-cas-new-parent"));
+        assert!(!git_commit_is_ancestor(
+            p,
+            &tip,
+            "origin/epic/current-cas-new-parent"
+        ));
         agents
             .register(&Agent::new_with_role(
                 "retarget-worker-id".into(),
@@ -26538,10 +26564,18 @@ mod merge_state_gate_tests {
             ))
             .unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
-        let worker = CasCore::with_daemon(root, None, None);
+        let worker = CasCore::with_daemon(root.clone(), None, None);
         worker.set_agent_id_for_testing("retarget-worker-id".into());
         let service = CasService::new(worker, None);
-        let response = service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"close", "id":task.id, "reason":"ready for review"})).unwrap())).await.unwrap();
+        let response = service
+            .task(Parameters(
+                serde_json::from_value(
+                    serde_json::json!({"action":"close", "id":task.id, "reason":"ready for review"}),
+                )
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
         assert_eq!(
             store.get(&task.id).unwrap().status,
             TaskStatus::AwaitingMerge,
@@ -26549,6 +26583,98 @@ mod merge_state_gate_tests {
         );
         assert_eq!(response.is_error, Some(true));
         assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.contains("MERGE REQUIRED"))));
+        let message = format!("{response:?}");
+        assert!(
+            message.contains("epic/current-cas-new-parent")
+                && !message.contains("epic/previous-cas-new-parent"),
+            "close must name the same effective target as show: {message}"
+        );
+
+        // A previously inherited child target also follows the renamed lane.
+        let mut parked = store.get(&task.id).unwrap();
+        parked
+            .deliverables
+            .work_target
+            .as_mut()
+            .unwrap()
+            .target_branch = "epic/previous-cas-new-parent".into();
+        store.update(&parked).unwrap();
+        let shown = service
+            .task(Parameters(
+                serde_json::from_value(
+                    serde_json::json!({"action":"show", "id":task.id, "brief":true}),
+                )
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        let shown = format!("{shown:?}");
+        assert!(
+            shown.contains("Target: project:cas-retarget-fixture @ epic/current-cas-new-parent"),
+            "{shown}"
+        );
+        let epic = store.get("cas-new-parent").unwrap();
+        let target = effective_close_work_target(&parked, Some(&epic)).unwrap();
+        assert_eq!(target.target_branch, "epic/current-cas-new-parent");
+        git(
+            p,
+            &[
+                "push",
+                "-q",
+                "origin",
+                &format!("{tip}:refs/heads/epic/current-cas-new-parent"),
+            ],
+        );
+        let outcome =
+            run_factory_branch_merge_gate(&parked, &base_req(&task.id), &target.target_branch, p);
+        assert!(
+            matches!(
+                outcome,
+                MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)
+            ),
+            "merged delivery must pass the renamed target's ancestry gate: {outcome:?}"
+        );
+
+        // A frozen delivery target is repaired explicitly by its supervisor.
+        let update = serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/current-cas-new-parent"});
+        let refused = service
+            .task(Parameters(serde_json::from_value(update.clone()).unwrap()))
+            .await
+            .unwrap_err();
+        assert!(refused.message.contains("proof_scope_fix"), "{refused:?}");
+        let mut repair = update;
+        repair["proof_scope_fix"] = serde_json::json!(true);
+        repair["reason"] = serde_json::json!("repair inherited target after epic rename");
+        let refused = service
+            .task(Parameters(serde_json::from_value(repair.clone()).unwrap()))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message.contains("live registered supervisor"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            store.get(&task.id).unwrap().deliverables.work_target,
+            parked.deliverables.work_target
+        );
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let repaired = supervisor_service
+            .task(Parameters(serde_json::from_value(repair).unwrap()))
+            .await
+            .unwrap();
+        assert_ne!(repaired.is_error, Some(true), "{repaired:?}");
+        let repaired = store.get(&task.id).unwrap();
+        assert_eq!(repaired.status, TaskStatus::Open);
+        assert_eq!(
+            repaired.deliverables.work_target.unwrap().target_branch,
+            "epic/current-cas-new-parent"
+        );
+        let updated = supervisor_service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"update", "id":"cas-new-parent", "target_branch":"epic/current-cas-new-parent"})).unwrap())).await.unwrap();
+        assert_ne!(updated.is_error, Some(true), "{updated:?}");
+        assert_eq!(
+            store.get("cas-new-parent").unwrap().branch.as_deref(),
+            Some("epic/current-cas-new-parent")
+        );
     }
 
     /// cas-44e93: a per-task factory branch pushed once (`pushed`), with a
@@ -27096,6 +27222,25 @@ mod merge_state_gate_tests {
         }
     }
 
+    fn advance_recorded_epic(
+        repo: &std::path::Path,
+        id: &str,
+        branch: &str,
+        integration: &str,
+    ) -> Option<String> {
+        advance_clean_epic_after_child_integration(
+            repo,
+            id,
+            branch,
+            integration,
+            Some(&cas_types::EpicBranchOrigin {
+                branch: branch.into(),
+                host: "fixture".into(),
+                device_id: None,
+            }),
+        )
+    }
+
     #[test]
     fn child_integration_advances_clean_epic_locally_and_on_origin() {
         let bare = tempfile::tempdir().unwrap();
@@ -27118,7 +27263,7 @@ mod merge_state_gate_tests {
         let integration_tip = head_sha(p);
         git(p, &["push", "-q", "origin", "main"]);
 
-        let note = advance_clean_epic_after_child_integration(p, "cas-epic", "epic/clean", "main")
+        let note = advance_recorded_epic(p, "cas-epic", "epic/clean", "main")
             .expect("a behind epic must produce an advancement audit note");
         assert!(note.contains("ADVANCED"), "{note}");
         assert_eq!(
@@ -27133,6 +27278,26 @@ mod merge_state_gate_tests {
         assert_ne!(
             original_epic_tip,
             resolve_branch_sha(p, "epic/clean").unwrap()
+        );
+
+        git(p, &["push", "-q", "origin", "--delete", "epic/clean"]);
+        git(p, &["fetch", "-q", "--prune", "origin"]);
+        let retained_tip = resolve_branch_sha(p, "epic/clean");
+        commit_file_at(p, "later.rs", "// later\n", "2026-08-15T02:01:00Z");
+        git(p, &["push", "-q", "origin", "main"]);
+        let note = advance_recorded_epic(p, "cas-epic", "epic/clean", "main").unwrap();
+        assert!(note.contains("REFUSED"), "{note}");
+        assert_eq!(resolve_branch_sha(p, "epic/clean"), retained_tip);
+        let observed = git_command(
+            p,
+            &["ls-remote", "--heads", "origin", "refs/heads/epic/clean"],
+        )
+        .output()
+        .unwrap();
+        assert!(observed.status.success());
+        assert!(
+            observed.stdout.is_empty(),
+            "close must never resurrect a deleted lane"
         );
     }
 
@@ -27158,7 +27323,7 @@ mod merge_state_gate_tests {
         );
 
         let note =
-            advance_clean_epic_after_child_integration(p, "cas-epic", "epic/diverged", "main")
+            advance_recorded_epic(p, "cas-epic", "epic/diverged", "main")
                 .expect("divergence must be reported rather than silently skipped");
         assert!(
             note.contains("REFUSED") && note.contains("not auto-merge"),
@@ -27191,7 +27356,7 @@ mod merge_state_gate_tests {
         commit_file_at(p, "landed.rs", "// landed\n", "2026-08-15T02:00:00Z");
 
         let note =
-            advance_clean_epic_after_child_integration(p, "cas-epic", "epic/offline", "main")
+            advance_recorded_epic(p, "cas-epic", "epic/offline", "main")
                 .expect("remote failure must return an audit note, not an error");
         assert!(
             note.contains("FAILED_REMOTE") && note.contains("Child close remains valid"),

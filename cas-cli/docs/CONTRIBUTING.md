@@ -1436,7 +1436,12 @@ use `coordination action=message_status` to inspect handoff and recipient eviden
 For a gated message, status distinguishes a **held inbox** (a successful Teams
 write; surfaces at the next tool call or turn start without expiring while the
 recipient remains in the session) from a **delivery retry** (no held handoff
-recorded; transport retry budget still applies, including operator drafts).
+recorded; transport failures spend the retry budget). A protected operator draft,
+pending submit or settling urgent inject is a recoverable readiness hold: it
+spends neither transport retries nor re-nudges and is re-offered when the pane
+becomes input-ready, with a two-minute durable recheck as a restart fallback.
+Default status and doctor warnings allow pending relays sixty seconds to arrive;
+explicit detailed status also lists fresh holds and their blocking cause.
 A fresh transport reservation clears any older inbox deferral before injecting,
 so a worker that changes harness cannot have its PTY delivery replayed by a hook.
 The actual primary channel decides whether a handoff can be held: a missing
@@ -2913,6 +2918,16 @@ short freshness-unavailable note. Its uncertainty survives daemon and inbox
 revalidation, so cached source refs cannot suppress it as already landed.
 Unsafe source refnames still refuse. Local-merge tasks and repositories without
 origin retain their local source authority.
+
+Renaming an epic's lane keeps the immutable epic ID in the factory branch name.
+Task display, close, worktree merge, spawn and sync resolve inherited previous
+names to that epic's current lane, without redirecting an unrelated explicit
+repository or branch pin. First publication requires creation provenance for
+that exact current name; close never recreates a lane deleted from origin.
+To repair a proof-locked target, a live registered supervisor can use
+`task action=update id=<task> target_branch=<current-epic-lane> proof_scope_fix=true reason="repair target after epic rename"`.
+This audits and invalidates the old proof cycle and reopens the task; workers
+cannot use this recovery, and ordinary close proofs still apply.
 
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`

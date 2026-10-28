@@ -310,7 +310,7 @@ async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_d
             .to_string(),
         )
         .unwrap();
-        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-bundle: {}", bundle.display());
+        task.notes = format!("[now] 🧪 PLATFORM_PROOF qa-review-bundle: {}", bundle.display());
         tasks.update(&task).unwrap();
         let now = chrono::Utc::now();
         cas_store::open_qa_pass(

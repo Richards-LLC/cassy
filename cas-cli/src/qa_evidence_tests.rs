@@ -901,7 +901,9 @@ fn listed_files_may_not_escape_the_bundle() {
 #[test]
 fn newest_citation_wins() {
     let notes = "qa-bundle: /a/old/bundle.json\n[later] qa-bundle: `/a/new/bundle.json`.\n\
-                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json";
+                 [reviewer] qa-bundle: /a/independent-qa/round-1/bundle.json\n\
+                 [legacy reviewer] qa-bundle: /qa-task/qa/bundle.json (independent QA round 1, passed)\n\
+                 [reviewer] qa-review-bundle: /other-qa-task/qa/bundle.json";
     assert_eq!(
         cited_bundle_path(notes).as_deref(),
         Some("/a/new/bundle.json"),

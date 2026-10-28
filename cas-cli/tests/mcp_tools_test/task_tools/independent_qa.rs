@@ -621,7 +621,7 @@ async fn rejection_returns_the_delivery_and_approval_unlocks_merge_and_close() {
     assert!(approved.contains("APPROVAL"), "{approved}");
     assert!(
         tasks.get(&task_id).unwrap().notes.contains(&format!(
-            "PLATFORM_PROOF qa-bundle: {}",
+            "PLATFORM_PROOF qa-review-bundle: {}",
             repo.join("round-2").join("bundle.json").display()
         )),
         "the approved round's bundle is cited on the delivery"

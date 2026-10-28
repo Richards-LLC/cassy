@@ -937,7 +937,8 @@ pub(crate) fn validate_round_evidence(
             return Ok(("api-evidence:", transcript));
         }
     }
-    validate_round_bundle(ledger_path, pass, verdict).map(|path| ("qa-bundle:", path))
+    validate_round_bundle(ledger_path, pass, verdict)
+        .map(|path| (crate::qa_evidence::REVIEW_BUNDLE_CITATION, path))
 }
 
 /// Bind an independent web bundle to the round. Rejections need no visual pass.

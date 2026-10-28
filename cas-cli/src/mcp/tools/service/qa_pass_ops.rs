@@ -126,8 +126,8 @@ impl CasService {
         // cas-2ee2: the verdict turns the GitHub required check green or red.
         crate::qa_pass::github_gate::publish_pass_status(&cas_root, &pass);
 
-        // Cite the round's bundle on the delivery the same way an
-        // implementer cites its own (`note_type=platform_proof`).
+        // Keep the round's evidence on the delivery with its own citation
+        // role; it must never replace the implementer's producer bundle.
         if let Ok(store) = self.inner.open_task_store() {
             let note = format!(
                 "[{}] 🧪 PLATFORM_PROOF {citation} {} (independent QA round {}, {})",

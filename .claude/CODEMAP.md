@@ -130,6 +130,7 @@
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - machine streams, recovery and session subscriptions.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - paged history, receipt progress, unopened conversation previews and windowed thread rendering.
 - `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts` - lazy safe Markdown diagrams and unified diffs.
+- `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css` - reusable fenced-source header with literal-source Copy feedback and per-block Wrap, retained around rich previews.
 - `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - reserved inline media, lifecycle and PDF first-page pixels.
 - `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts` - scoped release/task ledger, server merge metrics and accessible device-local context width.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, collapsed supervisor work and live worker timelines.
@@ -150,6 +151,7 @@
 
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, explicit `cas-cli/tests/` harnesses and `cas-cli/tests/integration/` modules.
 - `hub-web/scripts/rich-content-visual-qa.mjs`, `hub-web/e2e/journeys/rich-content.journey.ts` - four-view rich-content polish and browser proof.
+- `hub-web/scripts/code-frame-visual-qa.mjs` - strict code-frame light/dark, desktop/phone captures and accessibility media-mode evidence.
 - `hub-web/scripts/conversation-open-perf.mjs`, `hub-web/e2e/journeys/conversation-open.perf.ts`, `hub-web/e2e/conversation-perf.config.ts` - conversation-open performance measurement.
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright and `scripts/journey-eval.sh` affected selection.
 - **Two-machine Commander rig:** `scripts/qa-rig/commander-two-machine/` (`rig.sh` start/stop/status/pair, `browser.mjs` saved paired profile, README) for real soundwave + prowl QA.

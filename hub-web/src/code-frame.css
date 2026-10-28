@@ -1,0 +1,72 @@
+.code-frame {
+  min-width: 0;
+  max-width: 100%;
+  margin-block-start: var(--space-2);
+  border: var(--line-width) solid var(--line-subtle);
+  border-radius: var(--radius-pane);
+  background: var(--sheet-bg);
+  color: var(--ink);
+}
+.code-frame-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-block-end: var(--line-width) solid var(--line-subtle);
+}
+.code-frame-label {
+  flex: 1 1 8ch;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink-mid);
+  font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-mono);
+}
+.code-frame-actions { display: flex; flex: none; gap: var(--space-1); }
+.code-frame-actions button {
+  min-height: var(--button-height);
+  padding-inline: var(--space-2);
+  background: var(--sheet-bg);
+  color: var(--ink);
+  font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui);
+}
+.code-frame-actions button[aria-pressed="true"] { background: var(--bg-active); color: var(--color-action); }
+.code-frame-content { min-width: 0; max-width: 100%; }
+/* Scoped specificity overrides the legacy thread, pinned ask and inbox pre. */
+.code-frame .code-frame-content pre.markdown-code {
+  max-width: 100%;
+  margin: 0;
+  padding: var(--space-3);
+  border-radius: 0 0 var(--radius-pane) var(--radius-pane);
+  background: var(--sheet-bg);
+  color: var(--ink);
+  font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-mono);
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  overflow-x: auto;
+}
+.code-frame[data-wrap="true"] .code-frame-content pre,
+.code-frame[data-wrap="true"] .diff-line {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  min-width: 0;
+}
+.code-frame[data-wrap="true"] .diff-line > :last-child { min-width: 0; }
+.code-frame-status:not(:empty) {
+  display: block;
+  padding: var(--space-2) var(--space-3);
+  color: var(--ink-mid);
+  font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui);
+  overflow-wrap: anywhere;
+}
+.code-frame-content > :is(.rich-diagram, .rich-diff) { margin-block-start: 0; }
+.code-frame pre:focus-visible { outline: var(--focus-ring-width) solid var(--color-focus); outline-offset: calc(-1 * var(--focus-ring-width)); }
+@media (max-width: 53rem) {
+  .code-frame-actions button { min-height: var(--rail-item-min); min-width: var(--rail-item-min); }
+}
+@media print {
+  .code-frame-actions, .code-frame-status { display: none; }
+  .code-frame .code-frame-content pre.markdown-code { white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible; }
+}

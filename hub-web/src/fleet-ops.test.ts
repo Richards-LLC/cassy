@@ -218,6 +218,14 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const asked = taskControls(document, { ...context(CONTROL), asked: new Map([["cas-1999", 1]]) }, parked)!;
     expect(asked.querySelector(".fleet-ops-asked")?.textContent).toBe("Asked 2m ago");
     expect(asked.querySelector(".fleet-ops-ask")?.textContent).toBe("Ask again");
+    // A close gate can keep an integrated delivery parked. Neither screen
+    // size may offer another merge, even if its preview was already open.
+    for (const phone of [false, true]) {
+      for (const evidence of [{ delivery_state: "merged" as const }, { merge_check_pending: true }]) {
+        const controls = taskControls(document, { ...context(CONTROL, state), phone }, { ...parked, ...evidence });
+        expect(controls?.querySelector("button")).toBeFalsy();
+      }
+    }
   });
 
   it("offers Assign… on a ready task with the idle workers, and the header's Add worker… and Focus epic…", () => {

@@ -16580,6 +16580,41 @@ mod tests {
         );
     }
 
+    /// Informational deliveries cannot need a reply, even before a recipient
+    /// reads them. Terminal task evidence must also be checked again at bounce.
+    #[test]
+    fn supervisor_noise_stall_replay_preserves_only_actionable_messages() {
+        let (temp, store) = create_test_store();
+        register_bounce_sender(&store, "supervisor", "factory-a");
+        register_bounce_sender(&store, "done-worker", "factory-a");
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-done".into(), "delivery".into());
+        task.assignee = Some("done-worker".into());
+        tasks.add(&task).unwrap();
+        let mut quiet_ids = Vec::new();
+        for body in [
+            format!("{QUIET_MESSAGE_MARKER}\nMerged and closed by Cassy: cas-done"),
+            format!("[CAS reply: #1]\n{QUIET_MESSAGE_MARKER}\nreceived"),
+        ] {
+            quiet_ids.push(store.enqueue_with_session("supervisor", "done-worker", &body, "factory-a").unwrap());
+        }
+        let typed = store.enqueue_with_session("supervisor", "done-worker", "receipt", "factory-a").unwrap();
+        store.conn.lock().unwrap().execute("UPDATE prompt_queue SET kind='receipt' WHERE id=?", [typed]).unwrap();
+        quiet_ids.push(typed);
+        let done = store.enqueue_with_session("supervisor", "done-worker", "Retry close cas-done", "factory-a").unwrap();
+        let fresh = store.enqueue_with_session("supervisor", "done-worker", "Start cas-new-assignment", "factory-a").unwrap();
+        assert_eq!(candidate_ids(&store), vec![done, fresh], "receipts must never raise an alarm");
+        task.status = TaskStatus::Closed;
+        tasks.update(&task).unwrap();
+        assert_eq!(candidate_ids(&store), vec![fresh], "a fresh assignment survives terminal prior work");
+        for id in quiet_ids.into_iter().chain([done]) {
+            assert_eq!(store.enqueue_delivery_stalled_bounce(id, "factory-a", "stalled", "stalled").unwrap(), None,
+                "atomic bounce must reject informational/terminal row {id}");
+        }
+        assert!(store.enqueue_delivery_stalled_bounce(fresh, "factory-a", "stalled", "stalled").unwrap().is_some());
+    }
+
     /// cas-913c: the supervisor's messages are stored under the `supervisor`
     /// alias, while its agent row carries its generated name. Requiring an
     /// agent row named after the source excluded every supervisor→worker

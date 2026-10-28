@@ -436,10 +436,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         ))
         .await
         .unwrap_err();
-    assert!(
-        override_attempt.message.contains("ARTIFACT_PROOF"),
-        "{override_attempt:?}"
-    );
+    assert!(override_attempt.message.contains("ARTIFACT_PROOF"), "{override_attempt:?}");
     let agents = cas::store::open_agent_store(&peer.path().join(".cas")).unwrap();
     let mut recipient = cas::types::Agent::new(
         "proof-recipient-id".to_string(),
@@ -448,12 +445,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     recipient.heartbeat();
     agents.register(&recipient).unwrap();
     let holder = format!("test-session-{}", std::process::id());
-    assert!(
-        agents
-            .try_claim(&task.id, &holder, 600, None)
-            .unwrap()
-            .is_success()
-    );
+    assert!(agents.try_claim(&task.id, &holder, 600, None).unwrap().is_success());
     let before_transfer = open_task_store(&peer.path().join(".cas"))
         .unwrap()
         .get(&task.id)
@@ -503,9 +495,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .to_string();
     let owner_tasks = open_task_store(&owner.path().join(".cas")).unwrap();
     owner_tasks.add(&synced).unwrap();
-    owner_tasks
-        .append_trusted_note(&task.id, &published_proof)
-        .unwrap();
+    owner_tasks.append_trusted_note(&task.id, &published_proof).unwrap();
     std::fs::write(owner.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
     assert!(
         cas_store::SqliteArtifactStore::open(&owner.path().join(".cas"))

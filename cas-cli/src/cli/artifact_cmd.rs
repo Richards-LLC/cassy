@@ -163,6 +163,7 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
     let artifact = &outcome.artifact;
     let (storage, detail) = match &outcome.disposition {
         PublishDisposition::Committed { .. } => ("committed", None),
+        PublishDisposition::CommittedMetadataUnavailable { reason } => ("committed", Some(reason.clone())),
         PublishDisposition::StorageNotLive { reason } => ("not_live", Some(reason.clone())),
         PublishDisposition::NotLoggedIn => ("not_logged_in", None),
         PublishDisposition::UploadFailed { reason } => ("upload_failed", Some(reason.clone())),
@@ -177,6 +178,7 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
         "status": artifact.status,
         "storage": storage,
         "storage_detail": detail,
+        "metadata_state": outcome.disposition.metadata_state(),
         "cloud_url": artifact.cloud_url,
         "source": outcome.source.display().to_string(),
     })
@@ -209,15 +211,12 @@ fn print_publish(outcome: &PublishOutcome) {
         PublishDisposition::StorageNotLive { .. } | PublishDisposition::NotLoggedIn => {
             println!("  -> cas artifact show {}", artifact.id);
         }
-        PublishDisposition::Committed { .. } => {}
+        PublishDisposition::Committed { .. } | PublishDisposition::CommittedMetadataUnavailable { .. } => {}
     }
 }
 
 fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {
-    let store = SqliteArtifactStore::open(cas_root).context("opening the artifact store")?;
-    let Some(artifact) = store.get(&args.id)? else {
-        anyhow::bail!("no artifact {}", args.id);
-    };
+    let artifact = crate::artifacts::proof::lookup(cas_root, None, &args.id)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&artifact)?);

@@ -118,7 +118,7 @@ impl CasCore {
         })
         .await
         .map_err(internal)?
-        .map_err(internal)?;
+        .map_err(metadata_error)?;
         Ok(Self::success(format!(
             "Fetched {}\npath: {}\nsha256: {}\nsize_bytes: {}",
             artifact.id,
@@ -133,13 +133,8 @@ impl CasCore {
         Parameters(req): Parameters<ArtifactRequest>,
     ) -> Result<CallToolResult, McpError> {
         let id = required(&req.id, "artifact show requires 'id'")?;
-        let store = self.open_artifact_store()?;
-        let Some(artifact) = store.get(&id).map_err(internal)? else {
-            return Err(Self::error(
-                ErrorCode::INVALID_PARAMS,
-                format!("No artifact {id}"),
-            ));
-        };
+        let artifact = crate::artifacts::proof::lookup(&self.cas_root, None, &id)
+            .map_err(metadata_error)?;
         Ok(Self::success(render_detail(&artifact)))
     }
 
@@ -177,6 +172,21 @@ fn internal(error: impl std::fmt::Display) -> McpError {
     CasCore::error(ErrorCode::INTERNAL_ERROR, error.to_string())
 }
 
+fn metadata_error(error: anyhow::Error) -> McpError {
+    if let Some(missing) = error.downcast_ref::<crate::artifacts::proof::MetadataUnavailable>() {
+        return McpError {
+            code: ErrorCode::INVALID_PARAMS,
+            message: Cow::from(error.to_string()),
+            data: Some(serde_json::json!({
+                "state": "metadata_unavailable",
+                "artifact_id": missing.artifact_id,
+                "task_id": missing.task_id,
+            })),
+        };
+    }
+    internal(error)
+}
+
 /// Build the upload client, or `None` when this installation has no cloud
 /// credentials — a supported state, reported in the response rather than
 /// failing the call.
@@ -188,7 +198,7 @@ fn render_publish(outcome: &PublishOutcome) -> String {
     let artifact = &outcome.artifact;
     let verdict = if outcome.disposition.is_committed() { "Published" } else { "Local-only artifact" };
     let mut out = format!(
-        "{verdict} {}\n\nartifact_id: {}\nname: {}\nmime: {}\nsize_bytes: {}\nsha256: {}\nstatus: {}\nstorage: {}\n",
+        "{verdict} {}\n\nartifact_id: {}\nname: {}\nmime: {}\nsize_bytes: {}\nsha256: {}\nstatus: {}\nstorage: {}\nmetadata_state: {}\n",
         artifact.id,
         artifact.id,
         artifact.name,
@@ -197,6 +207,7 @@ fn render_publish(outcome: &PublishOutcome) -> String {
         artifact.sha256,
         artifact.status,
         outcome.disposition.summary(),
+        outcome.disposition.metadata_state(),
     );
     if let Some(url) = &artifact.cloud_url {
         out.push_str(&format!("cloud_url: {url}\n"));

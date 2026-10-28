@@ -7,6 +7,29 @@ use std::path::{Path, PathBuf};
 
 const MARKER: &str = "ARTIFACT_PROOF: ";
 
+/// A missing local pointer says nothing about whether Cloud has the bytes.
+#[derive(Debug, thiserror::Error)]
+#[error("artifact_metadata_unavailable: metadata for {artifact_id} is unavailable on this machine; sync the task or ask the publisher to attach its committed reference. Cloud bytes have not been checked")]
+pub struct MetadataUnavailable {
+    pub artifact_id: String,
+    pub task_id: Option<String>,
+}
+
+/// Share every successful publication through the existing trusted task-note
+/// transport, including publications that did not request a prose proof note.
+pub(crate) fn record_published(cas_root: &Path, artifact: &PublishedArtifact) -> anyhow::Result<()> {
+    validate(artifact, &artifact.task_id)?;
+    let tasks = crate::store::open_task_store(cas_root)?;
+    let note = format!(
+        "[{}] Published artifact {}\n{MARKER}{}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        artifact.id,
+        serde_json::to_string(artifact)?
+    );
+    tasks.append_trusted_note(&artifact.task_id, &note)?;
+    Ok(())
+}
+
 pub fn contains_proof_marker(note: &str) -> bool {
     note.lines().any(|line| line.starts_with("ARTIFACT_PROOF:"))
 }
@@ -182,6 +205,50 @@ fn from_notes(notes: &str, id: &str, task_id: &str) -> anyhow::Result<Option<Pub
     Ok(found)
 }
 
+/// Resolve metadata before attempting any byte transfer. Show and fetch share
+/// this reader so a synced reference is inspectable before its first download.
+pub fn lookup(
+    cas_root: &Path,
+    task_id: Option<&str>,
+    id: &str,
+) -> anyhow::Result<PublishedArtifact> {
+    let store = SqliteArtifactStore::open(cas_root)?;
+    let local = store.get(id)?;
+    if task_id.is_none() {
+        if let Some(artifact) = local {
+            return Ok(artifact);
+        }
+    }
+    let tasks = crate::store::open_task_store_local(cas_root)?;
+    let mut found = None;
+    if let Some(task_id) = task_id {
+        let task = tasks.get(task_id)?;
+        found = from_notes(&task.notes, id, task_id)?;
+        if let (Some(reference), Some(local)) = (&found, &local) {
+            anyhow::ensure!(same_artifact(reference, local), "artifact ledger conflicts with proof reference");
+        }
+        found = found.or(local);
+        if let Some(artifact) = &found {
+            anyhow::ensure!(artifact.task_id == task_id, "artifact belongs to another task");
+        }
+    } else {
+        // Match task-reader visibility, including accepted project proposals.
+        let scope = crate::mcp::tools::core::task::ProjectScope::current(cas_root);
+        for task in tasks.list(None)?.into_iter().filter(|task| scope.shows(task)) {
+            if let Some(reference) = from_notes(&task.notes, id, &task.id)? {
+                if let Some(previous) = &found {
+                    anyhow::ensure!(same_artifact(previous, &reference), "conflicting proof artifact references for {id}");
+                }
+                found = Some(reference);
+            }
+        }
+    }
+    found.ok_or_else(|| MetadataUnavailable {
+        artifact_id: id.to_string(),
+        task_id: task_id.map(str::to_string),
+    }.into())
+}
+
 /// Download through the existing verified artifact path, save atomically,
 /// and import into the existing ledger so show/list and close citations work.
 fn fetch(
@@ -253,10 +320,7 @@ pub fn fetch_task(
     id: &str,
 ) -> anyhow::Result<(PublishedArtifact, PathBuf)> {
     let store = SqliteArtifactStore::open(cas_root)?;
-    let task = crate::store::open_task_store(cas_root)?.get(task_id)?;
-    let artifact = from_notes(&task.notes, id, task_id)?
-        .or(store.get(id)?)
-        .ok_or_else(|| anyhow::anyhow!("no published proof artifact {id} on task {task_id}"))?;
+    let artifact = lookup(cas_root, Some(task_id), id)?;
     validate(&artifact, task_id)?;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let base =

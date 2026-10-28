@@ -1761,7 +1761,9 @@ fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
     let saved: toml::Value = toml::from_str(&std::fs::read_to_string(project.join("config.toml")).unwrap()).unwrap();
     assert!(saved.get("qa").is_none(), "saving another section must not pin inherited QA defaults");
     std::fs::write(host.join("config.toml"), "[qa]\nmode = \"per_task\"\nindependent_pass = false\nevidence_gate = false\n").unwrap();
-    assert_eq!(Config::load(&project).unwrap().get("qa.mode").as_deref(), Some("per_task"));
+    let inherited = Config::load(&project).unwrap();
+    assert_eq!(inherited.get("qa.mode").as_deref(), Some("per_task"));
+    assert!(inherited.list().contains(&("qa.mode".into(), "per_task".into())));
     std::fs::write(project.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = true\n").unwrap();
     let overridden = Config::load(&project).unwrap();
     assert_eq!(overridden.get("qa.mode").as_deref(), Some("batch"));
@@ -1787,7 +1789,7 @@ fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
     assert_eq!(capture.base_url, "http://localhost:3000");
     assert_eq!(capture.ready_path, "/ready");
     assert!(!reloaded.qa().independent_pass);
-    std::fs::write(host.join("config.toml"), "[qa]\ntelemetry_sweep='scripts/sweep.sh'\npreflight_env_files=['USER_ENV']\n").unwrap();
+    std::fs::write(host.join("config.toml"), "[qa]\ntelemetry_sweep='scripts/sweep.sh'\npreflight_env_files=['USER_ENV']\n[qa.post_release]\ncommand='echo healthy'\n").unwrap();
     let mut loaded = Config::load(&nested).unwrap();
     loaded.set("qa.telemetry_sweep", "").unwrap();
     loaded.set("qa.preflight_env_files", "").unwrap();
@@ -1795,4 +1797,5 @@ fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
     let reloaded = Config::load(&nested).unwrap();
     assert!(reloaded.qa().telemetry_sweep.is_none());
     assert!(reloaded.qa().preflight_env_files.is_empty());
+    assert_eq!(crate::qa_post_release::configured(&nested).unwrap().command, "echo healthy");
 }

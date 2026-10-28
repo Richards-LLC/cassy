@@ -199,7 +199,14 @@ pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
     qa.independent_pass
         && task.task_type != TaskType::Epic
         && !task.labels.iter().any(|label| label == QA_PASS_LABEL)
-        && passes.iter().any(|pass| !pass.is_withdrawn())
+        && passes.iter().filter(|pass| !pass.is_withdrawn()).max_by_key(|pass| pass.round)
+            .is_some_and(|latest| {
+                // A logged waiver completes the per-task obligation in batch
+                // mode. Older rounds must not recreate it for the next tip;
+                // a newer explicit request still binds. Batch evidence debt
+                // is enforced separately and cannot be waived here.
+                qa.mode != crate::config::QaMode::Batch || latest.state != QaPassState::Waived
+            })
 }
 
 /// cas-5c38 (GH #999): an operations/artifact task (`execution_note=no-code`)

@@ -1412,10 +1412,18 @@ pub(super) fn merge_tip_content_presence(
                     // Prove ownership up to its first parent before carrying
                     // that content to the unchanged destination on target.
                     if let Some((first, renamed)) = exact_anchor_rename(repo, merge_tip, &path)
+                        && git_commit_is_ancestor(repo, commit, &first)
                         && git_diff_is_empty(repo, merge_tip, &target_ref, &renamed) == Some(true)
                         && matches!(
                             super::delivery_content_presence_in_parent_for_paths(
                                 repo, commit, &first, Some(std::slice::from_ref(&path)), false,
+                            ),
+                            DeliveryContentPresence::Present { .. }
+                                | DeliveryContentPresence::Superseded { .. }
+                        )
+                        && matches!(
+                            super::delivery_content_presence_in_parent_for_paths(
+                                repo, merge_tip, &target_ref, Some(std::slice::from_ref(&renamed)), false,
                             ),
                             DeliveryContentPresence::Present { .. }
                                 | DeliveryContentPresence::Superseded { .. }

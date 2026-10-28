@@ -33478,6 +33478,13 @@ esac
         let dropped = outcome();
         assert!(matches!(&dropped, MergeStateGateOutcome::Reject(reason)
             if reason.contains("DELIVERY CONTENT DROPPED")), "{dropped:?}");
+        // Matching bytes after lost ownership are still not delivery.
+        std::fs::write(p.join(new), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        git(p, &["add", new]);
+        git(p, &["commit", "-qm", "unrelated recreation of migration"]);
+        let recreated = outcome();
+        assert!(matches!(&recreated, MergeStateGateOutcome::Reject(reason)
+            if reason.contains("DELIVERY CONTENT DROPPED")), "{recreated:?}");
     }
 
     /// GH #1160: the final sync anchor comes after two migration renames and

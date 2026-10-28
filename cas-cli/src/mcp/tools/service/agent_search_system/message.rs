@@ -6661,9 +6661,14 @@ mod cas_89e1_post_merge_message_type_tests {
         agents.update(&supervisor).unwrap();
         core.set_agent_id_for_testing(supervisor.id.clone());
         let queue = crate::store::open_prompt_queue_store(&root).unwrap();
-        let long = "Complete delivery evidence. ".repeat(250);
+        let long = "Complete delivery evidence. ".repeat(110);
         let id = queue.enqueue_with_session("worker-a", "supervisor-a", &long, "factory-a").unwrap();
         let untouched = queue.enqueue_with_session("worker-a", "supervisor-a", "Another request", "factory-a").unwrap();
+        let held = queue.surface_for_recipient_within_budget(
+            "supervisor-a", Some("factory-a"), cas_store::HookDrain::Unseen, 1, 1_000,
+        ).unwrap();
+        assert!(held.rows.is_empty());
+        assert_eq!(held.over_budget.first().map(|(row, _)| *row), Some(id));
         let service = gh_1171_service(&core);
         let response = response_text(service.inbox_poll(serde_json::from_value(serde_json::json!({
             "action":"inbox_poll", "notification_id":id, "limit":1

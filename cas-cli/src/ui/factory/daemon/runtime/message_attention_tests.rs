@@ -148,7 +148,7 @@ impl Fixture {
                 serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}],"internal_chat_message_metadata_passthrough":{"turn_id":"consumed"}}}),
             ])
         } else {
-            let slug = self.root.path().to_string_lossy().replace('/', "-");
+            let slug = self.root.path().to_string_lossy().replace(['/', '.'], "-");
             (account.join(format!("projects/{slug}/{session_id}.jsonl")), vec![
                 serde_json::json!({"timestamp":now.to_rfc3339(),"type":"user","message":{"role":"user","content":text}}),
             ])
@@ -1375,7 +1375,7 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
         assert!(report.confirmed_at.is_none(), "consumption is not explicit acknowledgement");
         // pin: supervisor_unread names its oldest unread notification in this wire field.
         assert!(alarms.iter().any(|r| r.prompt.contains(&format!("message {unread},"))), "{cli}: the other transport-only message must still alarm");
-        assert_eq!(f.queue.message_delivery_report(unread).unwrap().unwrap().recipient_receipt, Some(cas_store::SurfacingSource::TransportDelivered));
+        assert_eq!(f.queue.message_delivery_report(unread).unwrap().unwrap().recipient_receipt, Some(cas_store::SurfacingSource::TransportClaimed));
         assert!(f.queue.poll_unseen_for_recipient(SUPERVISOR, Some(SESSION), 10).unwrap().iter().all(|r| r.id != id));
     }
 }

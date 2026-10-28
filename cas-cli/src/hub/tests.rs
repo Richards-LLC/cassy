@@ -5944,9 +5944,27 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
 fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     use crate::ui::factory::{SessionManager, create_metadata};
     use crate::ui::factory::SessionEndOutcome;
-    let _env = crate::test_support::TestEnvGuard::temp_home();
+    use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+    let env = crate::test_support::TestEnvGuard::temp_home();
+    let project = env.home().join("ended-project");
+    let cas_root = init_cas_dir(&project).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"ended-catalog-project\"\n").unwrap();
+    let account = env.home().join("recorded-claude");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(account.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"ended@example.test"}}"#).unwrap();
+    let agents = SqliteAgentStore::open(&cas_root).unwrap();
+    agents.init().unwrap();
+    let mut agent = cas_types::Agent::new("ended-supervisor".into(), "supervisor-a".into());
+    agent.role = cas_types::AgentRole::Supervisor;
+    agent.factory_session = Some("ended-session".into());
+    agent.metadata.extend([
+        ("supervisor_cli".into(), "claude".into()),
+        ("supervisor_account_harness".into(), "claude".into()),
+        ("supervisor_account_dir".into(), account.to_string_lossy().into_owned()),
+    ]);
+    agents.register(&agent).unwrap();
     let manager = SessionManager::new();
-    let mut metadata = create_metadata("ended-session", std::process::id(), "supervisor-a", &[], None, None, Some(4173));
+    let mut metadata = create_metadata("ended-session", std::process::id(), "supervisor-a", &[], None, project.to_str(), Some(4173));
     metadata.created_at = "2026-10-28T15:00:00Z".into();
     manager.save_metadata(&metadata).unwrap();
     let outcome = SessionEndOutcome {
@@ -5957,6 +5975,10 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     manager.record_ended(&metadata.name, outcome.clone()).unwrap();
     let rows = LocalSessionReadModel::default().list_sessions().unwrap();
     assert_eq!(rows[0].ended, Some(outcome.clone()));
+    assert_eq!(rows[0].harness.as_deref(), Some("claude"));
+    assert_eq!(rows[0].account_email.as_deref(), Some("ended@example.test"));
+    assert_eq!(rows[0].project.as_deref(), Some("ended-catalog-project"));
+    assert_eq!(rows[0].machine_online, Some(false));
     manager.remove_metadata(&metadata.name).unwrap();
     assert!(manager.list_sessions_read_only().unwrap().is_empty());
     let rows = super::server::supervisor_sessions(LocalSessionReadModel::default().list_sessions().unwrap(), false);
@@ -5965,10 +5987,15 @@ fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
     assert_eq!(rows[0].liveness, DaemonLiveness::StaleMetadata);
     assert_eq!(rows[0].workers, vec!["worker-c"]);
     assert_eq!(rows[0].supervisor, "supervisor-a");
+    assert_eq!(rows[0].harness.as_deref(), Some("claude"));
+    assert_eq!(rows[0].account_email.as_deref(), Some("ended@example.test"));
+    assert_eq!(rows[0].project.as_deref(), Some("ended-catalog-project"));
+    assert_eq!(rows[0].machine_online, Some(false));
     assert!(rows[0].ws_port.is_none());
     metadata.created_at = "2026-10-28T16:00:00Z".into();
     manager.save_metadata(&metadata).unwrap();
     let rows = LocalSessionReadModel::default().list_sessions().unwrap();
     assert_eq!(rows.len(), 1);
     assert!(rows[0].ended.is_none());
+    assert_eq!(rows[0].machine_online, Some(true));
 }

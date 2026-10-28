@@ -1144,6 +1144,7 @@ async function addAttention(machine: StoredMachine, session: string | undefined,
 /** Raise, keep or retire the attention item for one system notice (cas-e829). */
 const noticePersistence = new NoticePersistence();
 function applyOperatorNotice(machine: StoredMachine, session: string, reply: OperatorReply & { at?: string }, frameFence?: CredentialFence): Promise<void> {
+  if (reply.session !== undefined && reply.session !== session) return Promise.resolve();
   const fence = frameFence ?? credentialFence(machine);
   const current = async () => {
     const installed = (await catalog.snapshot()).machines.find(item => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);

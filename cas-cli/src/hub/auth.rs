@@ -593,9 +593,9 @@ struct PersistedState {
     generation_highwater: BTreeMap<String, u64>,
     pairings: Vec<PairingRecord>,
     devices: Vec<DeviceSession>,
-    #[serde(default, skip_serializing)]
+    #[serde(default, serialize_with = "serialize_empty_records")]
     tickets: Vec<TicketRecord>,
-    #[serde(default, skip_serializing)]
+    #[serde(default, serialize_with = "serialize_empty_records")]
     dpop_jtis: Vec<ReplayRecord>,
     source_attempts: Vec<SourceAttempt>,
     leases: BTreeMap<String, LeaseRecord>,
@@ -603,6 +603,12 @@ struct PersistedState {
     account_challenges: Vec<account::AccountChallenge>,
     #[serde(default)]
     account_bindings: Vec<account::AccountBinding>,
+}
+
+// Keep the empty legacy keys readable by an older CLI during a hub upgrade;
+// the process-local capabilities themselves never reach disk.
+fn serialize_empty_records<S: serde::Serializer, T>(_: &[T], serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_seq(std::iter::empty::<()>())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

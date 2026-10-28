@@ -218,7 +218,12 @@ impl BatchWriter {
             }
             file = Self::open_log(&path)?;
         }
-        file.write_all(bytes)?;
+        let offset = file.metadata()?.len();
+        if let Err(error) = file.write_all(bytes) {
+            // Do not leave a partial JSON record in front of the next append.
+            let _ = file.set_len(offset);
+            return Err(error.into());
+        }
         if self.pending.is_none() {
             self.pending = Some(file);
         }

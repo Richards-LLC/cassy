@@ -81,6 +81,10 @@ impl DerefMut for CachedWrite<'_> {
 fn keep_volatile(next: &mut PersistedState, previous: &PersistedState, keep_leases: bool) {
     if keep_leases {
         next.leases = previous.leases.clone();
+        // A durable revocation must release the former controller immediately.
+        next.leases.retain(|_, lease| next.devices.iter().any(|device| {
+            device.device_id == lease.device_id && device.revoked_at.is_none()
+        }));
     }
     next.tickets = previous.tickets.clone();
     next.dpop_jtis = previous.dpop_jtis.clone();

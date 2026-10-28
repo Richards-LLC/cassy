@@ -2370,6 +2370,9 @@ fn hub_auth_startup_compacts_legacy_tickets_and_keeps_devices() {
     let compact: serde_json::Value = serde_json::from_slice(&compact).unwrap();
     assert_eq!(compact["devices"], devices);
     assert_eq!(compact["pairings"], pairings);
+    // pin: older CLI versions require these legacy array keys to exist.
+    assert_eq!(compact["tickets"], serde_json::json!([]));
+    assert_eq!(compact["dpop_jtis"], serde_json::json!([]));
     let before = std::fs::read(&path).unwrap();
     let ticket = reopened.issue_ws_ticket(&context, "fixture", "/attach", now).unwrap();
     reopened.consume_ws_ticket(&ticket.ticket, "https://controller.example", "fixture", "/attach", now).unwrap();
@@ -3219,6 +3222,11 @@ fn h4_lease_04_two_devices_observe_one_controller_expiry_release_and_admin_takeo
             .is_none(),
         "expired leases stop enabling every viewer"
     );
+    let cli = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    cli.revoke_device(&phone.device_id, now).unwrap();
+    assert!(auth.acquire_lease(&laptop, "factory-a", now).is_ok(),
+        "a CLI revocation immediately releases the cached controller lease");
+
 }
 
 #[test]

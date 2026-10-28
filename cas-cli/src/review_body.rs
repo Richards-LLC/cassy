@@ -183,9 +183,9 @@ pub(crate) fn relay_evidence_manifest(cas_root: &Path, task_id: &str, body: &str
         }, &path)?.artifact,
     };
     let read = if artifact.status == "committed" {
-        format!("artifact action=fetch task_id={task_id} id={}", artifact.id)
-    } else { format!("read file {} (local evidence)", path.display()) };
-    Ok(format!("Evidence manifest: {}\nFull evidence: {read}", artifact.id))
+        format!("Evidence manifest: artifact action=fetch task_id={task_id} id={}", artifact.id)
+    } else { format!("Evidence manifest: {} (local). Read file {}", artifact.id, path.display()) };
+    Ok(read)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<String> {

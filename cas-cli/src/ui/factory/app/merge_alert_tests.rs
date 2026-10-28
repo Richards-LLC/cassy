@@ -358,6 +358,9 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         // pin: the supervisor merges directly without a worker relay.
         assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
         assert!(f.app.refresh_prompt_for_delivery(prompt));
+        // Routing is production intent; localized wording cannot turn a green delivery red.
+        prompt.text = prompt.text.replacen("READY TO MERGE", "Merge delivery now", 1);
+        assert!(prompt.is_merge_ready());
         // The actual director producer, park relay and manual worker request
         // must reserve one shared wake, including before a task can park.
         let session = "readiness-fixture";

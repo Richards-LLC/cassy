@@ -155,6 +155,11 @@ async fn test_search_with_content() {
             "risk": "none", "door": "two-way"
         })).unwrap())).await.unwrap();
     }
+    let memories = SqliteStore::open(&_temp.path().join(".cas")).unwrap();
+    for index in 0..10 {
+        memories.add(&Entry::new(format!("bounded-memory-{index}"),
+            format!("boundedreceipt evidence {index}: {}", "context details ".repeat(30)))).unwrap();
+    }
     let service = cas::mcp::tools::service::CasService::new(service, None);
     for action in ["search", "context"] {
         let request: SearchContextRequest = serde_json::from_value(serde_json::json!({

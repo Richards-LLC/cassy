@@ -4846,7 +4846,7 @@ impl FactoryDaemon {
         // A green delivery has one durable reservation shared with later park
         // and manual merge requests. Never bypass that queue via direct PTY or
         // native inbox transport. Red/unknown decision prompts keep their lane.
-        if prompt.merge_alert.is_some() && prompt.text.starts_with("READY TO MERGE") {
+        if prompt.is_merge_ready() {
             let cas_dir = self.app.cas_dir().to_path_buf();
             let session = self.session_name.clone();
             store_worker.submit("director merge readiness", move || {

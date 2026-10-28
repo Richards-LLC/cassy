@@ -627,6 +627,13 @@ pub struct Prompt {
     pub durable_retry: bool,
 }
 
+impl Prompt {
+    pub(crate) fn is_merge_ready(&self) -> bool {
+        self.merge_alert.is_some() && self.text.starts_with("READY TO MERGE")
+    }
+}
+
+
 /// Last-mile predicate for a prompt that has already survived event-level
 /// revalidation. The caller supplies a snapshot loaded immediately before
 /// transport injection, not the earlier batch snapshot. Epic occurrence

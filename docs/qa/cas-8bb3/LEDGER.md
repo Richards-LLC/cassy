@@ -75,7 +75,7 @@ Expected for every table cell: words stay whole (including Daniel and C2), prose
 | None added or changed in the table path | conversation-view.ts renderBody; markdown-renderer.ts appendInline; styles.css .evi | Table content renders immediately and owns horizontal overflow; no hidden timing threshold. | Yes | — |
 | OPENING_MOTION_DELAY_MS (unchanged, outside table path) | conversation-view.ts:1180 | Existing conversation-opening indicator; unrelated to table content. | Not assessed in this table QA; no new claim | — |
 
-Search for MIN_, MAX_, _MINUTES, _MS, _SECS, THRESHOLD, GRACE, DEBOUNCE and RETRY in the touched source files finds only existing connection-state imports and the existing opening-motion threshold. No table-path threshold is present; no control timing changed.
+Search for `MIN_`, `MAX_`, `_MINUTES`, `_MS`, `_SECS`, `THRESHOLD`, `GRACE`, `DEBOUNCE` and `RETRY` in the touched source files finds only existing connection-state imports and the existing opening-motion threshold. No table-path threshold is present; no control timing changed.
 
 ## Contradictions
 

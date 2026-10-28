@@ -29,6 +29,8 @@ fn needs_full_recovery(row: &QueuedPrompt) -> bool {
         || row.source.starts_with("verification-dispatch:")
         || row.source.starts_with("lifecycle-wake:ci-red-run:")
         || row.source.starts_with("lifecycle-wake:worker-attention:")
+        || row.prompt.contains("<cas-blocker ")
+        || row.prompt.contains("<cas-merge-request>")
         || cas_types::parse_lifecycle_envelope(&row.prompt).is_some_and(|event| {
             matches!(
                 event.transition.as_deref(),
@@ -291,10 +293,27 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
-        let critical_body = "Unresolved critical instruction";
-        for (urgent, priority) in [
-            (true, NotificationPriority::Normal),
-            (false, NotificationPriority::Critical),
+        for (critical_body, urgent, priority) in [
+            (
+                "Unresolved critical instruction",
+                true,
+                NotificationPriority::Normal,
+            ),
+            (
+                "Unresolved critical instruction",
+                false,
+                NotificationPriority::Critical,
+            ),
+            (
+                "<cas-blocker worker=\"supervisor\">Need a decision</cas-blocker>",
+                false,
+                NotificationPriority::Normal,
+            ),
+            (
+                "<cas-merge-request>{\"task_id\":\"cas-fixture\"}</cas-merge-request>",
+                false,
+                NotificationPriority::Normal,
+            ),
         ] {
             let id = store
                 .enqueue_urgent(

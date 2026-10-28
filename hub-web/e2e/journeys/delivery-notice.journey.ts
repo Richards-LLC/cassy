@@ -1,4 +1,4 @@
-import { test, expect, expectWholeFocusRing, RECEIPTS, settle } from "./journey";
+import { test, expect, expectWholeFocusRing, RECEIPTS, settle, journeyPart } from "./journey";
 import { join } from "node:path";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
@@ -296,7 +296,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 });
 
 // More than one daemon batch, absent from the bounded conversation history.
-test("HUB-J15 pending attention notices drain once across reconnect", async ({ page, journey }) => {
+test("HUB-J15 pending attention notices drain once across reconnect", journeyPart, async ({ page, journey }) => {
   const pending = Array.from({ length: 12 }, (_, index) => ({
     ...notice(20_000 + index, journeyStamp(-60_000)),
     notice: { source: "relay-watchdog", subject: 10_000 + index, resolved: index === 11 },

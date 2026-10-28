@@ -1,6 +1,6 @@
+// @vitest-environment jsdom
 import { planSupervisorSend } from "./supervisor-message";
 import { visibleCatalog, sessionReachable } from "./worker-visibility";
-// @vitest-environment jsdom
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

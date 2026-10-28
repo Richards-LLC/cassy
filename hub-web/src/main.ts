@@ -4154,7 +4154,7 @@ function render(captureDraft = true): void {
     commandPaletteOpen,
     pairingView,
   };
-  const signatureTail = JSON.stringify([selectedHubSession?.ended, selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
+  const signatureTail = JSON.stringify([selectedHubSession?.project_dir, infoItems.length > 0, launchAvailability()]);
   const signature = shellSignature(signatureParts) + signatureTail;
   const active = document.activeElement;
   // Focus anywhere inside the open palette counts as composing too: a rebuild

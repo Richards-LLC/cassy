@@ -17,6 +17,7 @@ pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
 mod merge_queue_proof;
+mod verified_delivery;
 mod merged_verification;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
@@ -8478,6 +8479,29 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+        // A resolved approval owns its exact correction head, even if the
+        // previous rejected anchor already landed and its preservation ref
+        // still points there. Track only an attributed, receipted pushed fix.
+        let reviewed_delivery = if close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic
+            && has_delivery_to_measure(&task)
+            && (close_repo_verified || worker_worktree_path.is_some())
+        {
+            let reviewed = match verified_delivery::current(&self.cas_root, &task) {
+                Ok(reviewed) => reviewed,
+                Err(error) => return Ok(Self::tool_error(error)),
+            };
+            if let Some(reviewed) = reviewed.as_ref() {
+                let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
+                match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed) {
+                    Ok(Some(current)) => task = current,
+                    Ok(None) => {}
+                    Err(error) => return Ok(Self::tool_error(error)),
+                }
+            }
+            reviewed
+        } else { None };
+
         // cas-ba4a: a task parked for merge answers for its recorded anchor,
         // not for the mutable factory ref or the worktree HEAD, which may
         // already carry the worker's next task or a force-push. The live tip
@@ -8994,6 +9018,14 @@ impl CasCore {
 
                     return Ok(Self::tool_error(msg));
                 }
+            }
+
+            // Exact approved B must land, even when legacy branch selection
+            // or patch-equivalence admitted its earlier merged anchor A.
+            if let Some(reviewed) = reviewed_delivery.as_ref()
+                && let Some(refusal) = reviewed.merge_refusal(&close_project_root, &task, &resolved_parent_branch)
+            {
+                return Ok(Self::tool_error(refusal));
             }
 
             // cas-619f backstop: the delivery is integrated. A user-facing
@@ -15171,6 +15203,11 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// `None` when none of the recorded candidates resolves. A released task
 /// retains its recorded delivery even though it no longer has an assignee.
 pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
+    if let Some(branch) = task.assignee.as_deref().and_then(|assignee|
+        verified_delivery::tracked_correction_branch(repo_path, task, assignee))
+    {
+        return Some(branch);
+    }
     let unique = task_delivery_branch_candidates(task);
     unique
         .iter()
@@ -15304,6 +15341,19 @@ pub(crate) fn resolve_close_delivery_branch(
     task: &Task,
     assignee: &str,
 ) -> Result<String, String> {
+    // A reviewed correction can resume the actual worker lane while a stale
+    // preservation ref still names A. The recorded B boundary wins over that
+    // ref only when the ref cannot carry B; a later task still cannot replace
+    // a parked source whose tip has moved beyond its immutable anchor.
+    if let Some(parked) = verified_delivery::tracked_correction_branch(repo_path, task, assignee)
+    {
+        let mut measured = task.clone();
+        if let Some(start) = measured.deliverables.factory_branch_start.as_mut() {
+            start.branch = parked.clone();
+        }
+        return Ok(task_attribution::started_delivery(repo_path, &measured)?
+            .map(|delivery| delivery.branch).unwrap_or(parked));
+    }
     // GH #1353: older starts recorded the reusable lane before the worker
     // cut its own per-task branch. That lane may still back another task's
     // open PR. Measure the task lane, keeping the original base and all
@@ -27862,6 +27912,7 @@ mod merge_state_gate_tests {
         assert!(text.contains("MERGE REQUIRED") && text.contains(&b), "{text}");
         assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
         assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
+        assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));
         assert_eq!(rev_parse_local(p, &format!("origin/{preserved}")), a);
         git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge correction B"]);
         git(p, &["push", "-q", "origin", "main"]);

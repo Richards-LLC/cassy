@@ -109,6 +109,7 @@
 - `cas-cli/src/mcp/tools/core/task/lifecycle/` - start/close, evidence gates, epic lanes and merged-delivery closure.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/repository_proof.rs` - delivery anchors, worktree-keyed receipts and immutable introducing-merge review boundaries.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/merge_queue_proof.rs` - audited supervisor reuse of successful merge-group CI receipts for exact landed trees containing a delivery.
+- `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/verified_delivery.rs` - exact approved-head containment and tracking of reviewed corrections beyond an earlier merged delivery.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/merge_close.rs`, `cas-cli/src/mcp/tools/core/workflow/verification_tools.rs` - green-merge parking, verdict-driven close/reopen and held-close restoration.
 - `cas-cli/src/mcp/tools/core/task/rebind.rs` - supervisor approval and audited rebinding of a worker's replacement delivery branch.
 - `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/delivery_evolution.rs`, `cas-cli/src/mcp/tools/core/task/lifecycle/close_ops/evidence_only.rs` - surviving content, reference-history proof and net evidence-only diffs.

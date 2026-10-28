@@ -533,7 +533,7 @@ fn classify_branch_ci_response(_branch: &str, sha: &str, output: GhApiOutput) ->
     }
 
     // cas-5132: a re-push cancels a check and starts it again at the same
-    // SHA. Per check name, the latest non-cancelled run is the verdict; a
+    // SHA. Per check name, the newest completed non-cancelled run is the verdict; a
     // check whose every run was cancelled is superseded (awaiting its
     // rerun), never red.
     let (runs, superseded) = select_latest_check_runs(runs);
@@ -647,7 +647,7 @@ fn check_run_failed(run: &serde_json::Value) -> bool {
 
 /// cas-e845 / cas-ae6a: whether a `ci_completed` wake must keep waiting on a
 /// commit's check-runs. It shares merge admission's per-check rules (latest
-/// non-cancelled run per name; the same unfinished and red predicates), so a
+/// completed non-cancelled run per name; the same unfinished and red predicates), so a
 /// wake never fires while one of those checks is still running. A failed
 /// check settles at once, as admission answers CI RED. A check whose runs were
 /// all cancelled has no rerun at this SHA: admission waits for one before it
@@ -658,8 +658,10 @@ pub(crate) fn check_runs_still_running(runs: &[serde_json::Value]) -> bool {
         && latest.into_iter().any(check_run_unfinished)
 }
 
-/// The verdict-bearing run of each check: the newest (by id) non-cancelled
-/// run per name. Unnamed runs pass through. Returns whether any check had
+/// The verdict-bearing run of each check: the newest completed non-cancelled
+/// run per name, falling back to its newest unfinished run. A queued duplicate
+/// at the same SHA cannot erase a completed verdict. Unnamed runs pass through.
+/// Returns whether any check had
 /// only cancelled runs (superseded by a rerun that has not appeared yet).
 fn select_latest_check_runs(runs: &[serde_json::Value]) -> (Vec<&serde_json::Value>, bool) {
     let cancelled = |run: &serde_json::Value| {
@@ -685,7 +687,8 @@ fn select_latest_check_runs(runs: &[serde_json::Value]) -> (Vec<&serde_json::Val
         let same = runs
             .iter()
             .filter(|other| other.get("name").and_then(serde_json::Value::as_str) == Some(name));
-        match same.filter(|run| !cancelled(run)).max_by_key(|run| id(run)) {
+        match same.filter(|run| !cancelled(run))
+            .max_by_key(|run| (!check_run_unfinished(run), id(run))) {
             Some(run) => latest.push(run),
             None => superseded = true,
         }

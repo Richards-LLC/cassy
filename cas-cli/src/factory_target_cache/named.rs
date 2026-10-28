@@ -1,6 +1,42 @@
 //! Exact-path inspection must not depend on unrelated cache inventory.
 use super::*;
 
+#[cfg(all(test, target_os = "linux"))]
+thread_local! {
+    static PROCESS_FIXTURE: std::cell::RefCell<Option<(PathBuf, PathBuf)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn fixture_process_root(cas_root: &Path) -> Option<PathBuf> {
+    PROCESS_FIXTURE.with(|fixture| {
+        fixture
+            .borrow()
+            .as_ref()
+            .filter(|(root, _)| root == cas_root)
+            .map(|(_, proc)| proc.clone())
+    })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+struct ProcessFixture(Option<(PathBuf, PathBuf)>);
+
+#[cfg(all(test, target_os = "linux"))]
+impl ProcessFixture {
+    fn new(root: &Path, proc: &Path) -> Self {
+        Self(
+            PROCESS_FIXTURE
+                .with(|fixture| fixture.replace(Some((root.to_path_buf(), proc.to_path_buf())))),
+        )
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+impl Drop for ProcessFixture {
+    fn drop(&mut self) {
+        PROCESS_FIXTURE.with(|fixture| fixture.replace(self.0.take()));
+    }
+}
+
 /// Derive only an exact worker target in this store's managed namespace.
 /// No directory inventory, wildcard expansion or ownership adoption occurs.
 pub(super) fn worktree(cas_root: &Path, path: &Path) -> Option<PathBuf> {
@@ -538,6 +574,15 @@ mod tests {
     #[tokio::test]
     async fn legacy_exact_mcp_routes_preserve_scope_and_destructive_guards() {
         let (_env, cas, unrelated, _task, _policy) = fixture();
+        let proc_root = cas.parent().unwrap().join("proc-fixture");
+        let process = proc_root.join("123");
+        fs::create_dir_all(process.join("fd")).unwrap();
+        fs::write(process.join("stat"), "123 (fixture process) S 0 0 0 0 0 0").unwrap();
+        std::os::unix::fs::symlink("/unrelated", process.join("cwd")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/program", process.join("exe")).unwrap();
+        fs::write(process.join("cmdline"), b"program\0").unwrap();
+        fs::write(process.join("maps"), b"").unwrap();
+        let _process_fixture = ProcessFixture::new(&cas, &proc_root);
         let config = format!(
             "{}target_cache_min_idle_secs = 60\n",
             fs::read_to_string(cas.join("config.toml")).unwrap()
@@ -614,10 +659,22 @@ mod tests {
             assert_eq!(alias_report["reclaimed_bytes"], 0);
             let output = target.join("debug/output");
             let handle = fs::File::open(&output).unwrap();
+            std::os::unix::fs::symlink(&output, process.join("fd/3")).unwrap();
             let live = legacy_mcp_request(&service, target, false).await;
             assert_eq!(live["reclaimed_bytes"], 0);
             assert_eq!(live["caches"][0]["disposition"], "live_process", "{live}");
             drop(handle);
+            fs::remove_file(process.join("fd/3")).unwrap();
+            fs::remove_file(process.join("maps")).unwrap();
+            fs::create_dir(process.join("maps")).unwrap();
+            let opaque = legacy_mcp_request(&service, target, false).await;
+            assert_eq!(opaque["reclaimed_bytes"], 0);
+            assert_eq!(
+                opaque["caches"][0]["disposition"], "indeterminate",
+                "{opaque}"
+            );
+            fs::remove_dir(process.join("maps")).unwrap();
+            fs::write(process.join("maps"), b"").unwrap();
             fs::write(&output, b"regenerable").unwrap();
             let recent = legacy_mcp_request(&service, target, false).await;
             assert_eq!(recent["reclaimed_bytes"], 0);

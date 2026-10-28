@@ -503,8 +503,16 @@ pub fn cleanup_selected_with_opt_in(
     live_worktree_roots: &[PathBuf],
     reclaim_unknown_target: Option<&Path>,
 ) -> io::Result<()> {
+    // Real MCP-route tests supply a /proc filesystem fixture at the OS
+    // boundary. Production has no request, environment or global override.
+    #[cfg(all(test, target_os = "linux"))]
+    let fixture_proc = named::fixture_process_root(cas_root);
+    #[cfg(all(test, target_os = "linux"))]
+    let proc_root = fixture_proc.as_deref().unwrap_or(Path::new("/proc"));
+    #[cfg(not(all(test, target_os = "linux")))]
+    let proc_root = Path::new("/proc");
     cleanup_selected_using(cas_root, report, policy, live_worktree_roots,
-        reclaim_unknown_target, Path::new("/proc"))
+        reclaim_unknown_target, proc_root)
 }
 
 fn cleanup_selected_using(

@@ -692,12 +692,16 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
             agents.release_lease(&task.id, &replacement.id).unwrap();
         }
         if allowed {
-            // Cleanup also proves the supervisor retains authority on the red run.
-            let cleanup = env
-                .call(serde_json::json!({"action":"server_stop", "id":id}))
-                .await;
-            assert!(!cleanup.contains("MCP_ERROR"), "{cleanup}");
-            assert!(result.contains("Stopped server"), "{label}: {result}");
+            // Clean up on the red path only. Re-stopping an already reaped
+            // wrapper without a cgroup correctly refuses unverifiable legacy
+            // descendants (as on macOS); it is not an ownership failure.
+            let cleanup = if result.contains("Stopped server") {
+                String::new()
+            } else {
+                env.call(serde_json::json!({"action":"server_stop", "id":id})).await
+            };
+            assert!(result.contains("Stopped server"), "{label}: {result}; cleanup: {cleanup}");
+            assert!(!pid_alive(extract_pid(&started)), "{label} left its owned server alive");
         } else {
             assert!(
                 result.contains("workers may stop only servers they started"),

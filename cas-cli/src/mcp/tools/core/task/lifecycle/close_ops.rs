@@ -6851,6 +6851,20 @@ impl CasCore {
         parent_branch: &str,
         measured_branch: Option<&str>,
         measured_tip: Option<&str>,
+    ) -> Task {
+        self.advance_commit_time_anchor_before_park_with_receipt(
+            task_store, task, repo_path, parent_branch, measured_branch, measured_tip, None,
+        )
+    }
+
+    fn advance_commit_time_anchor_before_park_with_receipt(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
         explicit_receipt: Option<&str>,
     ) -> Task {
         let mut parking = task.clone();
@@ -8916,7 +8930,7 @@ impl CasCore {
                     // cas-749f: close must not park a receipt absent from
                     // the source the supervisor will actually merge.
                     let parking = if task.status != TaskStatus::AwaitingMerge {
-                        self.advance_commit_time_anchor_before_park(
+                        self.advance_commit_time_anchor_before_park_with_receipt(
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, measured_branch.as_deref(), anchor.as_deref(),
                             req.commit_receipt.as_deref(),

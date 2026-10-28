@@ -20,7 +20,8 @@ export type Session = {
   supervisor: string;
   project_dir: string;
   workers: string[];
-  liveness: "live";
+  liveness: "live" | "stale_metadata";
+  ended?: import("../../src/types").SessionEndOutcome;
   dormant?: boolean;
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;

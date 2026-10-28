@@ -6759,6 +6759,21 @@ impl CasCore {
         recorded: &str,
         tip: Option<&str>,
     ) -> bool {
+        self.tip_is_own_task_lineage_with_receipt(
+            task_store, task, repo_path, measured_branch, recorded, tip, false,
+        )
+    }
+
+    fn tip_is_own_task_lineage_with_receipt(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        measured_branch: Option<&str>,
+        recorded: &str,
+        tip: Option<&str>,
+        explicit_final_tip: bool,
+    ) -> bool {
         let (Some(branch), Some(tip)) = (measured_branch, tip) else {
             return false;
         };
@@ -6797,7 +6812,7 @@ impl CasCore {
                 })
                 && git_commit_is_ancestor(repo_path, recorded, tip)
                 && own_lane_subjects(repo_path, task, recorded, tip).is_ok_and(|subjects| {
-                    !subjects.is_empty()
+                    (explicit_final_tip || !subjects.is_empty())
                         && subjects.iter().all(|subject| message_references_task(subject, &task.id))
                 })
         });
@@ -6837,10 +6852,36 @@ impl CasCore {
         measured_branch: Option<&str>,
         measured_tip: Option<&str>,
     ) -> Task {
+        self.advance_commit_time_anchor_before_park_with_receipt(
+            task_store, task, repo_path, parent_branch, measured_branch, measured_tip, None,
+        )
+    }
+
+    fn advance_commit_time_anchor_before_park_with_receipt(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo_path: &std::path::Path,
+        parent_branch: &str,
+        measured_branch: Option<&str>,
+        measured_tip: Option<&str>,
+        explicit_receipt: Option<&str>,
+    ) -> Task {
         let mut parking = task.clone();
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
             return parking;
         };
+        // A handoff to a different branch is handled by record_park, which
+        // retains the old branch and anchor together. Pre-advancing here
+        // would make it retain the new tip as the old branch's history.
+        if task.deliverables.parked_branch.as_deref().zip(measured_branch)
+            .is_some_and(|(parked, measured)| {
+                parked.strip_prefix("origin/").unwrap_or(parked)
+                    != measured.strip_prefix("origin/").unwrap_or(measured)
+            })
+        {
+            return parking;
+        }
         let Some(tip) = measured_tip
             .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
         else {
@@ -6848,13 +6889,28 @@ impl CasCore {
         };
         let (target, _) = preferred_live_target_ref_for_delivery(repo_path, parent_branch, task.delivery_mode);
         let advance = if git_commit_is_ancestor(repo_path, recorded, &tip) {
-            self.tip_is_own_task_lineage(
+            // GH #1389: a final target-sync merge can add no non-merge task
+            // subjects after the commit-time anchor. A worker's explicit
+            // receipt still identifies that pushed final branch tip; the
+            // attribution check below must continue to vet its first-parent
+            // path, imported target and sibling lease boundary.
+            let named_final_tip = explicit_receipt
+                .and_then(|receipt| current_factory_branch_receipt_for_identity(repo_path, task, receipt))
+                .is_some_and(|receipt| receipt == tip)
+                && measured_branch.is_some_and(|branch| {
+                    task.assignee.as_deref().is_some_and(|assignee| {
+                        branch.strip_prefix("origin/").unwrap_or(branch)
+                            == close_measured_factory_branch(repo_path, task, assignee)
+                    })
+                });
+            self.tip_is_own_task_lineage_with_receipt(
                 task_store,
                 task,
                 repo_path,
                 measured_branch,
                 recorded,
                 measured_tip,
+                named_final_tip,
             ) && parked_anchor_advance_with_target_is_attributable(
                 repo_path,
                 recorded,
@@ -6881,12 +6937,50 @@ impl CasCore {
         )
         .is_some()
         {
+            if !parking.deliverables.historical_factory_branch_anchors.iter()
+                .any(|known| known.eq_ignore_ascii_case(recorded))
+            {
+                parking.deliverables.historical_factory_branch_anchors.push(recorded.to_string());
+            }
             parking.deliverables.factory_branch_anchor =
                 advanced.deliverables.factory_branch_anchor;
             parking.notes = advanced.notes;
             // Keep the original store clock for the guarded park below.
         }
         parking
+    }
+
+    /// Reject an explicit old or target-side receipt before QA or merge-state
+    /// gates can use it to measure a different head from the current delivery.
+    fn stale_fresh_park_receipt_refusal(
+        &self,
+        task_store: &dyn cas_store::TaskStore,
+        task: &Task,
+        repo: &std::path::Path,
+        parent_branch: &str,
+        receipt: &str,
+    ) -> Option<String> {
+        if task.status == TaskStatus::AwaitingMerge { return None; }
+        let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
+        let assignee = task.assignee.as_deref()?;
+        let branch = close_measured_factory_branch(repo, task, assignee);
+        let tip = resolve_branch_sha(repo, &branch)?;
+        let receipt_sha = resolve_task_commit_receipt_sha(repo, receipt).ok()?;
+        if receipt_sha == tip || !git_commit_is_ancestor(repo, &receipt_sha, &tip)
+            || !git_commit_is_ancestor(repo, recorded, &tip)
+            || unpushed_delivery_tip(repo, &branch, &tip, task.delivery_mode).is_some()
+        {
+            return None;
+        }
+        let (target, _) = preferred_live_target_ref_for_delivery(repo, parent_branch, task.delivery_mode);
+        (self.tip_is_own_task_lineage_with_receipt(
+            task_store, task, repo, Some(&branch), recorded, Some(&tip), true,
+        ) && parked_anchor_advance_with_target_is_attributable(
+            repo, recorded, &tip, &task.id,
+            self.sibling_lease_boundary(task_store, task), &target,
+        )).then(|| format!(
+            "PARK REFUSED: commit_receipt {receipt_sha} names a prior or unrelated head; the current pushed attributable tip of this task is {tip}. Retry close with commit_receipt={tip}. No anchor or QA round changed."
+        ))
     }
 
     /// A fresh park binds the current task delivery, including a rebase whose
@@ -8582,6 +8676,14 @@ impl CasCore {
         } else {
             None
         };
+        if let Some(receipt) = req.commit_receipt.as_deref()
+            && let Some(refusal) = self.stale_fresh_park_receipt_refusal(
+                task_store.as_ref(), &task, &close_project_root,
+                &resolved_parent_branch, receipt,
+            )
+        {
+            return Ok(Self::tool_error(refusal));
+        }
         let delivery_receipt = req.commit_receipt.as_deref().or(parked_head.as_deref());
 
         // cas-a94f: empty attribution alone is ambiguous (cas-6b46). Only
@@ -8885,9 +8987,10 @@ impl CasCore {
                     // cas-749f: close must not park a receipt absent from
                     // the source the supervisor will actually merge.
                     let parking = if task.status != TaskStatus::AwaitingMerge {
-                        self.advance_commit_time_anchor_before_park(
+                        self.advance_commit_time_anchor_before_park_with_receipt(
                             task_store.as_ref(), &task, &close_project_root,
                             &resolved_parent_branch, measured_branch.as_deref(), anchor.as_deref(),
+                            req.commit_receipt.as_deref(),
                         )
                     } else { task.clone() };
                     let park_anchor = if task.status == TaskStatus::AwaitingMerge {

@@ -1,8 +1,10 @@
+import type { SessionEndOutcome } from "./types";
 import { appSwitcherMarkup, projectExplorerLinkMarkup } from "./app-switcher";
 import { cloudBrand, cloudBrandSwitcher, escapeHtml, projectTitle } from "./cloud-brand";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 
 export interface ConversationShellModel {
+  ended?: SessionEndOutcome;
   supervisor?: string;
   projectDir?: string;
   host?: string;
@@ -158,7 +160,7 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   const project = projectTitle(model.projectDir);
   const supervisor = model.supervisor || "Supervisor unavailable";
   const title = project ?? supervisor;
-  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
+  return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status">${model.ended ? " · Ended" : ""}</span></span></div></div></header>`;
 }
 
 /** Attachments use the authenticated hub upload API before the durable message send. */
@@ -515,6 +517,7 @@ export function arrangeConversationShell(document: Document, model: Conversation
     if (regions.grid) shell.querySelector("#conversation-pane-slot")!.append(regions.grid);
     if (regions.composer) {
       dressComposer(regions.composer, model.supervisor, projectTitle(model.projectDir));
+      syncEndedComposer(regions.composer, model.ended);
       shell.querySelector("#conversation-composer-slot")!.append(regions.composer);
     }
     if (regions.status) shell.querySelector("#conversation-status-slot")!.append(regions.status);
@@ -584,4 +587,34 @@ export function bindKeyboardViewport(window: KeyboardViewportWindow): () => void
   visual.addEventListener("scroll", sync);
   sync();
   return () => { visual.removeEventListener("resize", sync); visual.removeEventListener("scroll", sync); applyKeyboardViewport(window.document, undefined); };
+}
+
+/** One factual terminal turn, using the browser's local clock and time zone. */
+export function sessionEndSummary(ended: SessionEndOutcome): string {
+  const at = new Date(ended.at);
+  const time = Number.isFinite(at.getTime())
+    ? at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true, timeZoneName: "short" })
+    : "an unknown time";
+  const reason = ended.reason === "prompt_input_exit" || ended.reason === "exit" ? "/exit"
+    : ended.reason === "unknown" ? "reason unknown" : ended.reason;
+  const count = ended.workers_stopped.length;
+  return `Supervisor and ${count} worker${count === 1 ? "" : "s"} stopped at ${time} · ${reason}`;
+}
+
+export const SESSION_ENDED_GUIDANCE = "This session ended. Choose New session to start or resume a supervisor.";
+
+/** Preserve the draft while making a terminal destination impossible to send to. */
+export function syncEndedComposer(root: ParentNode, ended: SessionEndOutcome | undefined): void {
+  const send = root.querySelector<HTMLButtonElement>("#message-send");
+  const status = root.querySelector<HTMLElement>("#message-status");
+  if (send) send.disabled = Boolean(ended);
+  if (status && ended) {
+    status.hidden = false;
+    status.dataset.sessionEnded = "true";
+    status.textContent = SESSION_ENDED_GUIDANCE;
+  } else if (status?.dataset.sessionEnded) {
+    delete status.dataset.sessionEnded;
+    status.textContent = "";
+    status.hidden = true;
+  }
 }

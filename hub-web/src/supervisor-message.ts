@@ -1,3 +1,4 @@
+import { SESSION_ENDED_GUIDANCE } from "./conversation-shell";
 import type { HubSession, Scope } from "./types";
 
 export function supervisorTarget(session: HubSession | undefined): string | undefined {
@@ -50,6 +51,7 @@ export function sendsOnEnter(event: ComposerKeyEvent): boolean {
 export type SupervisorSendBlock =
   | "empty"
   | "no-session"
+  | "ended"
   | "no-supervisor"
   | "unsupported-hub"
   | "missing-scope";
@@ -59,6 +61,7 @@ export type SupervisorSendPlan =
   | { kind: "blocked"; block: SupervisorSendBlock; reason: string };
 
 export interface SupervisorSendContext {
+  readonly ended?: boolean;
   readonly text: string;
   readonly machineLabel: string | undefined;
   readonly session: string | undefined;
@@ -91,6 +94,7 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
   if (!context.machineLabel || !context.session) {
     return { kind: "blocked", block: "no-session", reason: "Choose a paired machine and a live session before sending a message." };
   }
+  if (context.ended) return { kind: "blocked", block: "ended", reason: SESSION_ENDED_GUIDANCE };
   if (!context.daemonAttach) {
     return {
       kind: "blocked",

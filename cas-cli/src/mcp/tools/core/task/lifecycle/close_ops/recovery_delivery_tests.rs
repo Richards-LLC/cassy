@@ -380,6 +380,76 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
     assert_eq!(rounds[0].branch, BRANCH);
 }
 
+/// GH #1389: the first final close must use the pushed receipt, even when a
+/// commit hook saved its predecessor before the worker synchronized the target.
+#[tokio::test]
+async fn first_close_explicit_final_receipt_binds_qa_and_merge_request_gh1389() {
+    let mut env = TestEnvGuard::temp_home();
+    let mut f = fixture(&mut env);
+    // The final target-sync merge also carries the worker's last source
+    // correction. Prior-head QA is therefore stale, not source-equivalent.
+    std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(&f.worker_path, &["add", "footer.css"]);
+    git(&f.worker_path, &["commit", "--amend", "-q", "--no-edit"]);
+    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
+    let cas_dir = f.dir.path().join(".cas");
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut task = tasks.get(TASK).unwrap();
+    task.deliverables.parked_branch = None;
+    task.deliverables.historical_factory_branch_anchors.clear();
+    tasks.update(&task).unwrap();
+
+    let unrelated = git(f.dir.path(), &["rev-parse", "main"]);
+    for (label, receipt) in [("prior head", &f.predecessor), ("unrelated target", &unrelated)] {
+        let output = text(f.core.cas_task_close(Parameters(TaskCloseRequest {
+            id: TASK.into(),
+            reason: Some(format!("{label} receipt must refuse")),
+            commit_receipt: Some(receipt.clone()),
+            no_delivery: None,
+            supervisor_override: None,
+            stranded_branch_override: None,
+            legacy_bypass_code_review: None,
+            search_manifest: None,
+        })).await.unwrap());
+        assert!(output.contains("REJECTED") || output.contains("REFUSED"), "{label}: {output}");
+        let unchanged = tasks.get(TASK).unwrap();
+        assert_eq!(unchanged.status, TaskStatus::InProgress, "{label}: {output}");
+        assert_eq!(unchanged.deliverables.factory_branch_anchor.as_deref(), Some(f.predecessor.as_str()));
+        assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+    }
+
+    let parked = close(&f).await;
+    assert_eq!(parked.deliverables.parked_branch.as_deref(), Some(BRANCH));
+    assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(f.final_tip.as_str()));
+    let rounds = cas_store::list_qa_passes(&cas_dir, TASK).unwrap();
+    assert_eq!(rounds.len(), 1);
+    assert_eq!(rounds[0].bound_head, f.final_tip);
+
+    let service = crate::mcp::CasService::new(f.core, None);
+    let request = serde_json::from_value(serde_json::json!({
+        "action": "message", "target": "supervisor", "task_id": TASK,
+        "summary": "Merge final delivery", "message": "Merge the final pushed receipt",
+        "merge_request": true,
+    })).unwrap();
+    let output = text(service.coordination(Parameters(request)).await.unwrap());
+    assert!(!output.contains("RE-PARK"), "{output}");
+    let rows = crate::store::open_prompt_queue_store(&cas_dir).unwrap().poll_all(50).unwrap();
+    assert!(rows.iter().any(|row| {
+        crate::prompt_revalidation::parse_merge_request_envelope(&row.prompt)
+            .is_some_and(|envelope| envelope.task_id == TASK && envelope.branch_tip == f.final_tip)
+    }), "{output}");
+
+    cas_store::waive_qa_pass(
+        &cas_dir, TASK, "supervisor-session", WORKER, BRANCH,
+        &f.predecessor, "reviewed predecessor only", chrono::Utc::now(),
+    ).unwrap();
+    let supervisor = CasCore::with_daemon(cas_dir, None, None);
+    supervisor.set_agent_id_for_testing("supervisor-session".into());
+    let refusal = supervisor.independent_qa_merge_refusal(TASK, WORKER, f.dir.path());
+    assert!(refusal.is_some(), "prior-head QA must not approve the final receipt");
+}
+
 /// GH #1355: a pushed target-sync merge is the new park boundary, even
 /// when the saved start base arrived through that merge rather than B.
 #[tokio::test]

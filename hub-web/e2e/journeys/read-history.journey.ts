@@ -82,6 +82,75 @@ test("HUB-J4 prose tables keep words readable and render inline markdown", journ
   }
 });
 
+test("HUB-J4 headings and labeled caveats stay distinct from actionable cards", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  hub.supervisorSays(PELICAN, [
+    "# Release is ready", "## Evidence", "### Checks", "The reviewed build passed.",
+    "> [!NOTE]", "> **Read** the [receipt](https://example.org/receipt).", ">", "> The evidence stays available.", "",
+    "> [!WARNING]", "> Keep `rollback` available.", "",
+    "> [!CAUTION]", "> <script>unsafe()</script> is literal; [unsafe](javascript:run) stays text.", "",
+    "Ordinary prose continues here.",
+  ].join("\n"));
+  const bubble = page.getByRole("log").locator(".bub").filter({ hasText: "Release is ready" });
+  await expect(bubble).toBeVisible();
+  const modes = [
+    { name: "light", colorScheme: "light", forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" },
+    { name: "dark", colorScheme: "dark", forcedColors: "none", reducedMotion: "no-preference", contrast: "no-preference" },
+    { name: "forced-colors", colorScheme: "light", forcedColors: "active", reducedMotion: "no-preference", contrast: "no-preference" },
+  ] as const;
+  const cells = [
+    ...[1280, 390].flatMap(width => modes.map(mode => ({ width, ...mode }))),
+    { width: 390, ...modes[0], name: "reduced-motion", reducedMotion: "reduce" as const },
+    { width: 390, ...modes[0], name: "contrast-more", contrast: "more" as const },
+  ];
+  for (const { width, name, ...media } of cells) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia(media);
+    await journey.stage(`Read heading hierarchy and caveats at ${width} in ${name}`, async () => {
+      await bubble.scrollIntoViewIfNeeded();
+      if (name === "forced-colors") expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
+      if (name === "reduced-motion") expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
+      if (name === "contrast-more") expect(await page.evaluate(() => matchMedia("(prefers-contrast: more)").matches)).toBe(true);
+      if (process.env.HIERARCHY_QA) {
+        mkdirSync(process.env.HIERARCHY_QA, { recursive: true });
+        await bubble.screenshot({ path: `${process.env.HIERARCHY_QA}/hierarchy-${width}-${name}.png` });
+        writeFileSync(`${process.env.HIERARCHY_QA}/hierarchy.html`, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style><body><main class="thread"><div class="bub">${await bubble.innerHTML()}</div></main></body></html>`);
+      }
+      expect.soft(await bubble.getByRole("heading", { level: 1, name: "Release is ready" }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("heading", { level: 2, name: "Evidence" }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("heading", { level: 3, name: "Checks" }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("complementary", { name: "Note", exact: true }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("complementary", { name: "Warning", exact: true }).count()).toBe(1);
+      expect.soft(await bubble.getByRole("complementary", { name: "Caution", exact: true }).count()).toBe(1);
+      expect.soft(await bubble.locator("script, button, [role=alert], [role=status], .obj, .ask, .blocker").count()).toBe(0);
+      expect.soft(await bubble.getByRole("link").count()).toBe(1);
+      expect.soft(await bubble.locator("code").allTextContents()).toEqual(["rollback"]);
+      expect.soft(await bubble.locator(":scope > p").last().textContent()).toBe("Ordinary prose continues here.");
+      const layout = await bubble.evaluate(node => {
+        const headings = [...node.querySelectorAll<HTMLElement>(".markdown-heading")].map(h => parseFloat(getComputedStyle(h).fontSize));
+        const caveats = [...node.querySelectorAll<HTMLElement>(".markdown-callout")].map(c => ({
+          background: getComputedStyle(c).backgroundColor,
+          border: getComputedStyle(c).borderInlineStartStyle,
+          width: parseFloat(getComputedStyle(c).borderInlineStartWidth),
+        }));
+        return { headings, caveats, width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth };
+      });
+      expect.soft(layout.headings[0]).toBeGreaterThan(layout.headings[1] ?? Infinity);
+      expect.soft(layout.headings[1]).toBeGreaterThan(layout.headings[2] ?? Infinity);
+      expect.soft(layout.caveats).toHaveLength(3);
+      for (const caveat of layout.caveats) {
+        expect.soft(caveat.background).toMatch(/^rgba\([\d, ]+, 0\)$/);
+        expect.soft(caveat.border).toBe("solid");
+        expect.soft(caveat.width).toBeGreaterThan(0);
+      }
+      expect.soft(layout.scroll).toBe(layout.width);
+    });
+  }
+});
+
 function historyWorld(): DoubleOptions {
   return {
     machines: [ATLAS],

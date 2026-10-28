@@ -228,7 +228,7 @@ it("groups a served image thumbnail and a failed preview with their own file car
   for (const sender of [false, true]) {
     const file = { ...brief, artifact_id: `thumbnail-${sender}`, name: "Screenshot.png", mime: "image/png" };
     const sheet = renderAttachmentSheet(document, file, sender ? "you" : "supervisor");
-    const root = inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: "https://files.example/screenshot.png" } }), { openPreview: sender });
+    const root = inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: "https://files.example/screenshot.png" } }));
     document.body.append(root);
     try {
       await vi.waitFor(() => expect(root.querySelector("img")).not.toBeNull());

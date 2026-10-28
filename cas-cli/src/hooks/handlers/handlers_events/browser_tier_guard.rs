@@ -3,6 +3,12 @@
 use cas_core::hooks::types::HookInput;
 
 fn selected(args: &[String]) -> bool {
+    if args
+        .iter()
+        .any(|arg| arg == "--full" || arg.starts_with("--full="))
+    {
+        return false;
+    }
     let mut i = 0;
     let mut targeted = false;
     while i < args.len() {
@@ -91,6 +97,7 @@ fn selected(args: &[String]) -> bool {
             let Some(stem) = [
                 ".spec.ts",
                 ".spec.mjs",
+                ".spec.cjs",
                 ".spec.js",
                 ".spec.tsx",
                 ".journey.ts",
@@ -201,6 +208,6 @@ pub(super) fn denial(input: &HookInput) -> Option<&'static str> {
     }
     let command = input.tool_input.as_ref()?.get("command")?.as_str()?;
     unfiltered(command, 0).then_some(
-        "BROWSER TEST TIER: workers and QA run affected journeys. Use scripts/journey-eval.sh <task-artifact-dir> (default affected, four workers), or --affected <base>. For iteration/control use a named spec or canonical --grep journey IDs; preserve original failures. Full/unfiltered browser suites are supervisor-only at epic assembly and in the merge queue; --full is refused here."
+        "BROWSER TEST TIER: workers and QA run affected journeys. For iteration/control use a named spec (for example: npx playwright test tests/example.spec.cjs --workers=1) or canonical --grep journey IDs; preserve original failures. Where available, use scripts/journey-eval.sh <task-artifact-dir> (default affected, four workers), or --affected <base>. Full/unfiltered browser suites are supervisor-only at epic assembly and in the merge queue; --full is refused here."
     )
 }

@@ -1746,11 +1746,25 @@ fn shipped_issues_check(
             );
         }
     };
+    let default_ref_prefix = format!("{repo}#");
+    let default_lookup_failed = report.unchecked.iter().any(|reference| {
+        reference
+            .get(..default_ref_prefix.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&default_ref_prefix))
+    });
     let mut check = if report.shipped.is_empty() {
+        // An empty shipped list only proves absence in repositories whose
+        // lookups succeeded; don't attribute it to an unchecked default repo.
+        let message = if default_lookup_failed {
+            "no open issue in the checked repositories has all of its referencing tasks shipped"
+                .to_string()
+        } else {
+            format!("no open {repo} issue has all of its referencing tasks shipped")
+        };
         Check::new(
             NAME,
             CheckStatus::Ok,
-            format!("no open {repo} issue has all of its referencing tasks shipped"),
+            message,
         )
     } else {
         Check::new(
@@ -7253,6 +7267,41 @@ mod tests {
         let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
         assert!(
             check.message.starts_with("skipped: no GitHub repository"),
+            "{}",
+            check.message
+        );
+
+        struct DefaultUnavailable;
+        impl crate::issue_reconcile::IssueStates for DefaultUnavailable {
+            fn open_issues(&self, repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                if repo.eq_ignore_ascii_case("Richards-LLC/cassy") {
+                    Err("default repository unavailable".into())
+                } else {
+                    Ok(std::collections::HashSet::new())
+                }
+            }
+        }
+        let mut foreign = crate::types::Task::new(
+            "cas-foreign".into(),
+            "foreign/repo#42: fix".into(),
+        );
+        foreign.status = crate::types::TaskStatus::Closed;
+        foreign.deliverables.factory_branch_anchor = Some("bbb222".into());
+        let check = shipped_issues_check(&[tasks[0].clone(), foreign], repo, &DefaultUnavailable, &tags);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("no open issue in the checked repositories")
+                && check.message.contains("Richards-LLC/cassy#1158")
+                && check.message.contains("default repository unavailable"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("no open Richards-LLC/cassy issue"),
             "{}",
             check.message
         );

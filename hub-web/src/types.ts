@@ -31,7 +31,16 @@ export interface PairingInstallIdentity {
   generation: number;
 }
 
+export interface SessionEndOutcome {
+  at: string;
+  reason: string;
+  workers_stopped: string[];
+  orphans: string[];
+  unverified?: string[];
+}
+
 export interface HubSession {
+  ended?: SessionEndOutcome;
   name: string;
   project_dir?: string;
   supervisor: string;

@@ -293,6 +293,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     reply(62, 61, ['## Pass two is green', '', '**All 14 targets passed** with *one recorded flake*.', '', '- `cargo check` stayed green', '- Review the [receipt](https://example.com/reports/pass-two).', '  - No retry was needed', '', '1. Tagged gabber-studio v2.4.1', '2. Pushed the release branch.', '', 'Every pack:', '', '| pack | cases | result |', '| --- | --- | --- |', '| core | 412 | pass |', '| ui | 388 | pass |', '| net | 211 | pass |', '| store | 174 | pass |', '| hooks | 96 | pass |', '| mcp | 143 | pass |', '| hub | 260 | pass |', '| cli | 318 | 1 flake |'].join('\n'), 'answer', at(9, 30));
     reply(63, 61, 'Tagged gabber-studio v2.4.1 and pushed.', 'receipt', at(9, 31));
     working = true;
+  } else if (state === 'conversation-code-frames') {
+    reply(91, null, '# Source ready to copy\n\nThe source stays literal. Turn on Wrap to read long lines here.\n\n```ts src/example.ts\nconst message = "<script>&amp;雪 ' + 'long_source_'.repeat(18) + '";  \n\tconsole.log(message);\n```\n\n~~~unknown\nUnknown languages stay readable.\n~~~', 'answer', at(9, 44));
   } else if (state === 'conversation-rich-content') {
     // Visual fixture only: transport, decode and unavailable states are HUB-J22.
     installAttachmentSheet((sheet, file) => {
@@ -307,7 +309,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     // Polish fixture; upload, ticket, reload and second-device behavior is HUB-J24.
     installAttachmentSheet((sheet, file) => {
       if (state === 'conversation-attachment-failure') return inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: new URL('/attachment-preview-missing.png', location.href).href } }));
-      const root = inlineAttachment(sheet, file, () => new Promise(() => {}), { openPreview: true });
+      const root = inlineAttachment(sheet, file, () => new Promise(() => {}));
       const viewport = root.querySelector<HTMLElement>('.rich-media');
       if (viewport) {
         const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;

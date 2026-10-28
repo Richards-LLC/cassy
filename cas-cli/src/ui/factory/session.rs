@@ -17,6 +17,24 @@ use std::path::{Path, PathBuf};
 
 mod socket_cleanup;
 
+/// Confirmed teardown outcome retained after active metadata is removed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SessionEndOutcome {
+    pub at: String,
+    pub reason: String,
+    pub workers_stopped: Vec<String>,
+    pub orphans: Vec<String>,
+    /// Missing ownership evidence must never count as a successful stop.
+    #[serde(default)]
+    pub unverified: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct EndedSession {
+    pub metadata: SessionMetadata,
+    pub ended: SessionEndOutcome,
+}
+
 /// Directory for factory session data
 const SESSIONS_DIR: &str = "sessions";
 /// Directory for factory logs (under ~/.cas)
@@ -357,6 +375,38 @@ impl SessionManager {
         metadata.cas_root = Some(cas_dir.to_string_lossy().to_string());
         self.save_metadata(&metadata)?;
         Ok(metadata)
+    }
+
+    /// Separate from active discovery, so a receipt never becomes a daemon candidate.
+    pub(crate) fn record_ended(&self, name: &str, ended: SessionEndOutcome) -> std::io::Result<()> {
+        if !valid_session_name(name) {
+            return Err(std::io::Error::other("invalid session name"));
+        }
+        let metadata = self.load_metadata(&self.sessions_dir.join(format!("{name}.json")))?;
+        let receipt = EndedSession { metadata, ended };
+        let dir = self.sessions_dir.join("ended");
+        fs::create_dir_all(&dir)?;
+        let temporary = tempfile::NamedTempFile::new_in(&dir)?;
+        serde_json::to_writer(temporary.as_file(), &receipt)?;
+        temporary.as_file().sync_all()?;
+        temporary.persist(dir.join(format!("{name}.json")))?;
+        Ok(())
+    }
+
+    pub(crate) fn ended_sessions(&self) -> std::io::Result<Vec<EndedSession>> {
+        let entries = match fs::read_dir(self.sessions_dir.join("ended")) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut receipts: Vec<EndedSession> = entries.filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()?.to_str()? != "json" { return None; }
+            serde_json::from_slice(&fs::read(path).ok()?).ok()
+        }).collect();
+        receipts.sort_by(|a, b| b.ended.at.cmp(&a.ended.at));
+        receipts.truncate(100);
+        Ok(receipts)
     }
 
     /// Save session metadata

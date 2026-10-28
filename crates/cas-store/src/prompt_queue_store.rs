@@ -3245,11 +3245,14 @@ pub trait PromptQueueStore: Send + Sync {
     fn mark_transport_delivered(&self, prompt_id: i64) -> Result<()>;
 
     /// One authenticated device committed the reply locally. Never marks read.
-    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
+    /// Returns whether this receipt closed the row's delivery lane (its
+    /// addressee, or one viewer of an unaddressed row, while still pending).
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool>;
 
     /// Attention-only application receipt. Authoritative daemon provenance
     /// fences it from conversation replies; persistence never marks read.
-    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()>;
+    /// Returns whether this receipt closed the row, as for replies.
+    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool>;
 
     /// Broadcast outcome for `all_workers` (attempted/succeeded/failed counts).
     ///
@@ -8709,11 +8712,11 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         })
     }
 
-    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+    fn record_operator_reply_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool> {
         self.persist_operator_receipt(prompt_id, factory_session, device_id, false)
     }
 
-    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<()> {
+    fn record_operator_notice_persisted(&self, prompt_id: i64, factory_session: &str, device_id: &str) -> Result<bool> {
         self.persist_operator_receipt(prompt_id, factory_session, device_id, true)
     }
 

@@ -7605,8 +7605,12 @@ impl FactoryDaemon {
         device_id: &str,
     ) -> anyhow::Result<()> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)?;
-        self.queue_jobs.operator_reply_retries.clear();
+        // cas-59da: only a receipt that closes the row proves its addressee
+        // is reachable. A non-addressee's stored receipt leaves the row
+        // pending; clearing the backoff then re-forwarded it every tick.
+        if queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)? {
+            self.queue_jobs.operator_reply_retries.clear();
+        }
         Ok(())
     }
 
@@ -7616,8 +7620,9 @@ impl FactoryDaemon {
         device_id: &str,
     ) -> anyhow::Result<()> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        queue.record_operator_notice_persisted(notification_id, &self.session_name, device_id)?;
-        self.queue_jobs.operator_reply_retries.clear();
+        if queue.record_operator_notice_persisted(notification_id, &self.session_name, device_id)? {
+            self.queue_jobs.operator_reply_retries.clear();
+        }
         Ok(())
     }
 

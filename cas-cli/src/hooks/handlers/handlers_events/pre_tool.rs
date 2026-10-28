@@ -7645,7 +7645,7 @@ mod workspace_contract_tests {
             assert_ne!(status, "deny", "{allowed}: {reason}");
         }
         for operation in [
-            "set factory.write_roots /x",
+            r#"set factory.write_roots "~/x""#,
             "grant-write --task cas-1234 --path /x --reason example",
             "revoke-write --task cas-1234 --path /x",
         ] {

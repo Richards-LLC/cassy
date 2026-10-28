@@ -380,15 +380,17 @@ fn write_codex_account_fixture(account: &std::path::Path, models: &[&str]) {
             "fetched_at": chrono::Utc::now(),
             "client_version": "0.0.0-test",
             "models": models.iter().map(|slug| serde_json::json!({"slug": slug})).collect::<Vec<_>>(),
-        }).to_string(),
-    ).expect("write synthetic Codex model catalogue");
+        })
+        .to_string(),
+    )
+    .expect("write synthetic Codex model catalogue");
 }
 
 /// Run one availability-sensitive integration test in its own process.
 ///
-/// The production probe reads process HOME/PATH internally, so a per-Command
-/// environment can reach it only when the whole service call runs in this
-/// child. The parent test process never mutates PATH.
+/// The production probe reads HOME/PATH and the requesting account selectors,
+/// so the whole service call runs in a child with a synthetic account and
+/// model catalogue. The parent test process never mutates PATH.
 fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // libtest names include the suite module in a grouped integration harness.
     // Strip the binary crate name; keep standalone and nested-module support.
@@ -403,14 +405,15 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     });
     std::fs::create_dir(&bin_dir).expect("create isolated child PATH");
 
+    let account = home.path().join(".codex");
     if matches!(state, IsolatedCodexState::Available) {
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
 
-        let auth = home.path().join(".codex/auth.json");
-        std::fs::create_dir_all(auth.parent().expect("auth parent"))
-            .expect("create fake codex auth directory");
-        std::fs::write(auth, "{}").expect("write fake codex auth marker");
+        write_codex_account_fixture(
+            &account,
+            &[cas::config::STOCK_WORKER_MODEL, "o3", "o4-mini"],
+        );
     }
 
     let output = std::process::Command::new(
@@ -423,7 +426,10 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // factory build probe deterministic in this process too.
     .env("CAS_FACTORY_BUILD_GUARD", "off")
     .env("HOME", home.path())
+    .env("CODEX_HOME", &account)
+    .env("XDG_CONFIG_HOME", home.path().join(".config"))
     .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
+    .env_remove("CLAUDE_SECURESTORAGE_CONFIG_DIR")
     .env("PATH", &bin_dir)
     .output()
     .expect("spawn isolated Codex integration test");
@@ -10034,7 +10040,10 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
     rejected.model = Some(unlisted.into());
     let error = env.service.factory_request(Parameters(rejected)).await
         .expect_err("an unlisted model must still be refused");
-    assert!(error.message.contains(unlisted) && error.message.contains("models_cache.json"), "{error}");
+    assert!(
+        error.message.contains(unlisted) && error.message.contains("models_cache.json"),
+        "{error}"
+    );
     let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
     assert!(error.message.contains(expected_account.to_str().unwrap()), "{error}");
     assert_eq!(env.spawn_queue().peek(10).expect("peek after refusal").len(), 2);

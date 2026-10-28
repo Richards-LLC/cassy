@@ -1978,6 +1978,7 @@ dialog form > *,
 :where(.thread, .pinned-ask, .operator-inbox-bubble) h1.markdown-heading { font-size: var(--fs-lg); }
 :where(.thread, .pinned-ask, .operator-inbox-bubble) h2.markdown-heading { font-size: var(--fs-md); }
 :where(.thread, .pinned-ask, .operator-inbox-bubble) h3.markdown-heading { font-size: var(--fs-base); }
+:where(.thread, .pinned-ask, .operator-inbox-bubble) :is(.markdown-heading, .markdown-callout-label) strong { font-weight: inherit; }
 :where(.thread, .pinned-ask, .operator-inbox-bubble) .markdown-heading:first-child { margin-top: 0; }
 /* Authored caveats are unfilled prose, never actionable attention cards. */
 :where(.thread, .pinned-ask, .operator-inbox-bubble) .markdown-callout {

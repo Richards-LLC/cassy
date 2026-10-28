@@ -74,6 +74,8 @@ inode-bound inspection, and the existing native/build/Cargo/lifetime guards.
 An indeterminate or incomplete named scan, a changed inode, recent writes or
 overlapping durable evidence refuses reclamation. Named destructive revalidation
 also has an eight-second scan budget; it never widens into general GC.
+Embedded logs, receipts and other non-Cargo top-level entries also retain the
+target; preserve them through the existing target-retirement protocol first.
 
 This named operation invokes only the existing target-cache admission and
 quarantine pipeline. It deletes no checkout source or artifact evidence, reaps

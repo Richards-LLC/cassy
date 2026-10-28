@@ -148,6 +148,30 @@ pub(super) fn validate_opt_in(
         let metadata = entry
             .metadata()
             .map_err(|error| refuse(&error.to_string()))?;
+        // Retirement preserves everything outside Cargo's build roots. A
+        // narrow reclaim cannot discard those logs/receipts as build output.
+        if entry.depth() == 1
+            && !matches!(
+                entry.file_name().to_str(),
+                Some(
+                    "debug"
+                        | "release"
+                        | "doc"
+                        | "package"
+                        | "tmp"
+                        | ".rustc_info.json"
+                        | "CACHEDIR.TAG"
+                )
+            )
+            && entry.file_name() != owner_marker()
+            && !(entry.file_type().is_dir()
+                && (entry.path().join("debug/.cargo-lock").is_file()
+                    || entry.path().join("release/.cargo-lock").is_file()))
+        {
+            return Err(refuse(
+                "named cache contains non-Cargo evidence; preserve it through target retirement first",
+            ));
+        }
         if entry.file_type().is_symlink()
             || !unknown::owned_by_caller(&metadata)
             || matches!(
@@ -347,6 +371,23 @@ mod tests {
         fs::write(cas.join("config.toml"), config_with_evidence).unwrap();
         preserved(&attempt(policy, &[], false));
         fs::write(cas.join("config.toml"), config).unwrap();
+        let target_stamp =
+            filetime::FileTime::from_last_modification_time(&fs::metadata(&target).unwrap());
+        for relative in ["worker-check.log", "nextest/junit.xml", "receipts.json"] {
+            let evidence = target.join(relative);
+            fs::create_dir_all(evidence.parent().unwrap()).unwrap();
+            fs::write(&evidence, b"durable proof").unwrap();
+            for entry in WalkDir::new(&target).contents_first(true) {
+                filetime::set_file_mtime(entry.unwrap().path(), target_stamp).unwrap();
+            }
+            preserved(&attempt(policy, &[], false));
+            assert_eq!(fs::read(&evidence).unwrap(), b"durable proof");
+            fs::remove_file(&evidence).unwrap();
+            if evidence.parent() != Some(target.as_path()) {
+                fs::remove_dir(evidence.parent().unwrap()).unwrap();
+            }
+            filetime::set_file_mtime(&target, target_stamp).unwrap();
+        }
         let mut report = inspect_named(&cas, policy, &target, &[], false).unwrap();
         cleanup_selected_using(
             &cas,

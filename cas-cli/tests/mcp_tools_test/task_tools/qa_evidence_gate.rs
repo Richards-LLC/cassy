@@ -245,6 +245,53 @@ async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
     let recorded = extract_text(service.verification(Parameters(request)).await.unwrap());
     assert!(recorded.contains("APPROVAL"), "{recorded}");
 
+    // cas-2850: the canonical qa_record verdict must travel with the task,
+    // rather than making a second host dispatch the same review again.
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let mut published = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
+    published.origin_project = Some("qa-peer-project".into());
+    published.updated_at += chrono::Duration::hours(1);
+    let server = MockServer::start().await;
+    for endpoint in ["/api/sync/pull", "/api/teams/qa-peer-team/sync/pull"] {
+        Mock::given(method("GET")).and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [published], "pulled_at": "2026-10-28T12:00:00Z",
+                "team_id": "qa-peer-team", "status": "ok"
+            }))).mount(&server).await;
+    }
+    for team in [false, true] {
+        let peer = tempfile::tempdir().unwrap();
+        let root = cas::store::init_cas_dir(peer.path()).unwrap();
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"qa-peer-project\"\n").unwrap();
+        let tasks = cas::store::open_task_store_local(&root).unwrap();
+        let queue = std::sync::Arc::new(cas::cloud::SyncQueue::open(&root).unwrap());
+        queue.init().unwrap();
+        let syncer = cas::cloud::CloudSyncer::new_for_project(queue, cas::cloud::CloudConfig {
+            endpoint: server.uri(), token: Some("test-token".into()), ..Default::default()
+        }, cas::cloud::CloudSyncerConfig::default(), "qa-peer-project".into(), &root);
+        let entries = cas::store::open_store_local(&root).unwrap();
+        let rules = cas::store::open_rule_store_local(&root).unwrap();
+        let skills = cas::store::open_skill_store_local(&root).unwrap();
+        let result = if team {
+            syncer.pull_team("qa-peer-team", "qa-peer-project", &*entries, &*tasks, &*rules, &*skills)
+        } else {
+            syncer.pull(&*entries, &*tasks, &*rules, &*skills,
+                &*cas::store::open_spec_store(&root).unwrap(),
+                &*cas::store::open_event_store(&root).unwrap(),
+                &*cas::store::open_prompt_store(&root).unwrap(),
+                &*cas::store::open_file_change_store(&root).unwrap(),
+                &*cas::store::open_commit_link_store(&root).unwrap())
+        }.unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let received = tasks.get(TASK).unwrap();
+        let rounds = cas_store::list_qa_passes(&root, TASK).unwrap();
+        let gate = cas::qa_pass::merge_gate(&received, &cas::config::QaConfig::default(), &rounds, &head);
+        assert!(gate.is_ok(), "team={team}: the real QA gate lost the peer verdict: {gate:?}");
+        assert_eq!(rounds.len(), 1, "the peer must retain the existing round");
+        assert_eq!(rounds[0].qa_task_id.as_deref(), Some(qa_task.as_str()));
+    }
+
     git(&fx.repo, &["checkout", "-q", "main"]);
     git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);
     git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);

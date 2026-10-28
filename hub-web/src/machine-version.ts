@@ -22,10 +22,10 @@ export function isNewerRelease(current: string | undefined, latest: string | und
   return installed.prerelease;
 }
 
-export function machineVersionMarkup(runtime: string | undefined, latest?: string): string {
+export function machineVersionMarkup(runtime: string | undefined, latest?: string, unknownLabel = "Version unknown"): string {
   const known = typeof runtime === "string" && runtime && runtime !== "unknown";
   const update = isNewerRelease(runtime, latest);
-  return `<span class="machine-version"><span class="machine-version-installed">${known ? `Cassy ${escapeHtml(runtime)}` : "Version unknown"}</span>${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
+  return `<span class="machine-version"><span class="machine-version-installed">${known ? `Cassy ${escapeHtml(runtime)}` : escapeHtml(unknownLabel)}</span>${update ? ` <span class="machine-version-update">Update available → ${escapeHtml(latest!.replace(/^v/, ""))}</span>` : ""}</span>`;
 }
 
 /** Persist attempts as well as successes: offline reloads never hammer GitHub.

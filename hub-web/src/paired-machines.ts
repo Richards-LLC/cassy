@@ -169,7 +169,7 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
     const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.cause ?? row.connection, '.paired-machine-seen': row.lastSeen };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
     const runtime = node.querySelector('.paired-machine-runtime')!;
-    const versionMarkup = machineVersionMarkup(row.runtime, row.latestRelease);
+    const versionMarkup = machineVersionMarkup(row.runtime, row.latestRelease, row.connected ? 'Version unknown' : 'Version unknown until it connects');
     if (runtime.innerHTML !== versionMarkup) runtime.innerHTML = versionMarkup;
     renderFleetPermissions(node, row, options);
     if (options.installations) {

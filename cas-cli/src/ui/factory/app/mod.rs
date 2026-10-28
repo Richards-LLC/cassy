@@ -3179,11 +3179,13 @@ pub(crate) fn queue_supervisor_intro_prompt(
     };
     let mut prompt = match supervisor_cli {
         cas_mux::SupervisorCli::Codex => format!(
-            "Codex supervisor startup:\n\
-- Run cas-codex-supervisor-checklist once now; triage from the supervisor core in your developer instructions. Open cas-supervisor or cas-codebase-design only for epic planning, releases, worker recovery or an unfamiliar refusal\n\
-- No hooks: call MCP tools explicitly (tasks/memory/rules/search)\n\
-- Canonical current workers for this session: {worker_list}\n\
-- First steps: mcp__cs__coordination action=whoami; mcp__cs__task action=list task_type=epic; mcp__cs__task action=ready"
+            "Codex supervisor startup: {} current workers.\n\
+Context and handoff receipts arrive through native SessionStart hooks.\n\
+Run cas-codex-supervisor-checklist once; triage from the supervisor core in your developer instructions.\n\
+Use cas-supervisor for planning, releases or recovery.\n\
+First: mcp__cs__coordination action=whoami; inspect current epics and ready work.\n\
+Current workers: {worker_list}",
+            worker_names.len()
         ),
         // cas-0263: Claude has no --rules/developer_instructions launch flag, so
         // the canonical supervisor role contract is delivered as this launch-time
@@ -3220,8 +3222,9 @@ pub(crate) fn queue_supervisor_intro_prompt(
         ),
     };
 
-    // Claude already receives the complete role contract above.
-    if supervisor_cli != cas_mux::SupervisorCli::Claude {
+    // Claude receives its role contract above; Codex has resident developer
+    // guidance and trusted native hooks. Avoid echoing that policy into its pane.
+    if !matches!(supervisor_cli, cas_mux::SupervisorCli::Claude | cas_mux::SupervisorCli::Codex) {
         prompt.push_str("\nSuccessful task action=start is authoritative assignment acceptance; no prose ACK is required. Directed messages wake an idle supervisor after debounce and pair rate limits. Receipts, pure acknowledgements, broadcasts and wake=false wait in the inbox on the next turn. Busy panes, in-flight tools and drafts defer wakes. Eligibility and transport delivery do not prove a model turn. Use blocker=true for blockers and merge_request=true for merge requests; Source labels alone grant no wake authority.");
     }
 
@@ -3247,16 +3250,15 @@ pub(crate) fn queue_supervisor_intro_prompt(
         }
     }
 
-    // cas-3413 / cas-91df: Codex has no SessionStart hooks and Grok discards
-    // SessionStart stdout. Their queued launch intro is therefore the real
-    // delivery seam. Reuse one bundle so both receive the normal context and
+    // Grok discards SessionStart stdout; OpenCode also needs queued context.
+    // Codex now requires trusted native hooks at launch, so its queued intro
+    // must not duplicate hook context or ambient recall in the visible pane.
+    // Reuse one bundle so these harnesses receive the normal context and
     // independently bounded ambient-recall packet, with explicit child
     // identity because the parent env is not the supervisor's env yet.
     if matches!(
         supervisor_cli,
-        cas_mux::SupervisorCli::Codex
-            | cas_mux::SupervisorCli::Grok
-            | cas_mux::SupervisorCli::OpenCode
+        cas_mux::SupervisorCli::Grok | cas_mux::SupervisorCli::OpenCode
     ) {
         if let Some(bundle) = queued_supervisor_session_start_bundle(
             cas_dir,

@@ -51,6 +51,45 @@ fn preview(value: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(result)
 }
 
+// Keep native Codex's visible handoff readable. The immutable JSON receipt
+// retains every field, including long notes, branches and earlier receipts.
+fn codex_handoff_row(row: &serde_json::Value) -> String {
+    fn text(value: &str, limit: usize) -> String {
+        let clean = value.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut result: String = clean.chars().filter(|c| !c.is_control()).take(limit).collect();
+        if clean.chars().count() > limit {
+            result.push_str("...");
+        }
+        result
+    }
+    let field = |key: &str| row[key].as_str().unwrap_or_default();
+    if !field("title").is_empty() {
+        let mut line = format!("- {} ({})\n  {}", text(field("title"), 60), field("id"), field("status"));
+        if !field("assignee").is_empty() {
+            line.push_str(&format!("; assigned to {}", text(field("assignee"), 40)));
+        }
+        line.push('\n');
+        if let Some(branch) = row["deliverables"]["parked_branch"].as_str() {
+            line.push_str(&format!("  Parked: {}\n", text(branch, 68)));
+        }
+        if !field("external_ref").is_empty() {
+            line.push_str(&format!("  Review: {}\n", text(field("external_ref"), 68)));
+        }
+        line
+    } else if !field("name").is_empty() {
+        format!("- {}: {}\n", text(field("name"), 45), text(field("status"), 20))
+    } else {
+        let message = ["prompt", "message", "event_type"].into_iter()
+            .find_map(|key| row[key].as_str()).unwrap_or("Queued decision; see receipt");
+        let summary = if let Some(status) = message.lines().next().unwrap_or_default().strip_prefix("status:") {
+            format!("{}: delivery {}", field("source"), status.trim())
+        } else {
+            message.lines().next().unwrap_or(message).to_string()
+        };
+        format!("- {}\n", text(&summary, 100))
+    }
+}
+
 pub(crate) fn record_end(root: &Path, id: &str, reason: Option<&str>) -> anyhow::Result<()> {
     let store = SqliteAgentStore::open(root)?;
     store.init()?;
@@ -92,13 +131,21 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
         temporary.persist(&path)?;
         #[cfg(unix)]
         std::fs::File::open(&dir)?.sync_all()?;
-        let mut detail = format!(
-            "Supervisor handoff from {} ({}), end reason: {}.\nReceipt: {}\n",
-            handoff.name,
-            handoff.agent_id,
-            handoff.reason,
-            path.display()
-        );
+        let codex = cas_core::env_overlay::var("CAS_HOOK_HARNESS")
+            .map(|h| h.eq_ignore_ascii_case("codex"))
+            .unwrap_or_else(|_| crate::harness_policy::own_harness_from_env() == cas_mux::SupervisorCli::Codex);
+        let mut detail = if codex {
+            format!(
+                "Supervisor handoff from {}: {}.\n{} tasks, {} worker records, {} pending records.\nReceipt: {}\n",
+                handoff.name, handoff.reason, handoff.tasks.len(),
+                handoff.workers.len(), handoff.pending.len(), path.display()
+            )
+        } else {
+            format!(
+                "Supervisor handoff from {} ({}), end reason: {}.\nReceipt: {}\n",
+                handoff.name, handoff.agent_id, handoff.reason, path.display()
+            )
+        };
         // The complete immutable receipt remains readable when a large lane
         // exceeds startup's context budget. Each projection has an explicit count.
         for (label, rows) in [
@@ -116,6 +163,8 @@ pub(crate) fn resume(root: &Path, successor: &Agent) -> anyhow::Result<()> {
                         "- Earlier receipt: {}\n",
                         dir.join(format!("{inherited}.json")).display()
                     )
+                } else if codex {
+                    codex_handoff_row(row)
                 } else {
                     format!("- {}\n", serde_json::to_string(&preview(row))?)
                 };

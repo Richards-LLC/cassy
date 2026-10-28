@@ -1026,6 +1026,7 @@ mod supervisor_handoff_tests {
         // Reopen through the real startup handler after the predecessor was deleted.
         env.set("CAS_AGENT_ROLE", "supervisor");
         env.set("CAS_AGENT_NAME", "successor");
+        env.set("CAS_HOOK_HARNESS", "codex");
         let start = HookInput { session_id: "successor-id".into(), ..Default::default() };
         let output = handle_session_start(&start, Some(&root)).unwrap();
         let value = serde_json::to_value(&output).unwrap();

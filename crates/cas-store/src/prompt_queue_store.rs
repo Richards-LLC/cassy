@@ -2939,6 +2939,13 @@ pub trait PromptQueueStore: Send + Sync {
         source: SurfacingSource,
     ) -> Result<()>;
 
+    /// Record positively transcript-correlated consumption only if the complete
+    /// expected row still matches. Revalidation and promotion must be atomic;
+    /// other adapters fail closed rather than infer a body read from transport.
+    fn record_transcript_consumed(&self, _expected: &QueuedPrompt) -> Result<bool> {
+        Ok(false)
+    }
+
     /// The daemon's transport handed `recipient` its copy (cas-786a6 review
     /// M2): the transport receipt, marked delivered so a restart never
     /// releases it as an orphaned claim.
@@ -13593,6 +13600,32 @@ mod tests {
             "the unread COUNT must agree with the drain, or worker_status \
              reports phantom mail"
         );
+    }
+
+    #[test]
+    fn cas_ad3d_atomic_consumption_revalidates_the_row_and_preserves_named_poll() {
+        for case in ["current", "replaced", "named poll"] {
+            let (_temp, store) = create_test_store();
+            let id = store.enqueue_with_session("worker", "supervisor", "Review delivery", "session").unwrap();
+            let expected = store.queued_prompt(id).unwrap().unwrap();
+            if case == "replaced" {
+                assert!(store.rewrite_pending(id, "Different request", None).unwrap());
+            }
+            assert!(store.claim_recipient_transport(id, "supervisor").unwrap());
+            if case == "named poll" {
+                assert_eq!(store.poll_named_for_recipient("supervisor", Some("session"), &[id]).unwrap().len(), 1);
+                store.settle_polled_rows(&["supervisor".into()], &[(id, "named full body rendered".into())]).unwrap();
+            }
+            let changed = store.record_transcript_consumed(&expected).unwrap();
+            assert_eq!(changed, case == "current", "{case}");
+            let source = store.recipient_receipt(id, "supervisor").unwrap();
+            assert_eq!(source, Some(match case {
+                "current" => SurfacingSource::ObservedWake,
+                "replaced" => SurfacingSource::TransportClaimed,
+                _ => SurfacingSource::InboxPoll,
+            }), "{case}");
+            assert!(store.message_delivery_report(id).unwrap().unwrap().confirmed_at.is_none());
+        }
     }
 
     /// cas-b8ce — the receipt must not become a way to lose mail.

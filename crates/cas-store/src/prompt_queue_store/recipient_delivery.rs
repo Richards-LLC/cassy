@@ -181,7 +181,8 @@ mod tests {
             1,
             "budget the notice, not the old body"
         );
-        assert!(!reference.rows[0].prompt.contains("Named details"));
+        assert!(!reference.rows[0].prompt.contains(body.trim()));
+        // pin: a delivery reference must distinguish surfacing from acknowledgement.
         assert!(reference.rows[0].prompt.contains("not acknowledged"));
         assert_eq!(
             store.recipient_receipt(id, "worker-a").unwrap(),
@@ -231,7 +232,7 @@ mod tests {
         let named = store
             .poll_named_for_recipient("worker-a", None, &[id])
             .unwrap();
-        assert!(!named[0].prompt.contains("Named details"));
+        assert!(!named[0].prompt.contains(body.trim()));
         assert!(named[0].prompt.contains("acknowledged"));
         assert!(
             store
@@ -278,6 +279,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
+        let critical_body = "Unresolved critical instruction";
         for (urgent, priority) in [
             (true, NotificationPriority::Normal),
             (false, NotificationPriority::Critical),
@@ -286,7 +288,7 @@ mod tests {
                 .enqueue_urgent(
                     "supervisor",
                     "worker-a",
-                    "Unresolved critical instruction",
+                    critical_body,
                     None,
                     None,
                     Some(priority),
@@ -328,7 +330,7 @@ mod tests {
             let named = store
                 .poll_named_for_recipient("worker-a", None, &[id])
                 .unwrap();
-            assert!(!named[0].prompt.contains("Unresolved critical instruction"));
+            assert!(!named[0].prompt.contains(critical_body));
         }
         let id = store
             .enqueue("supervisor", "all_workers", "Shared instruction")
@@ -341,6 +343,39 @@ mod tests {
             None,
             "ACK before read invents no observation"
         );
+        assert!(
+            !store.claim_recipient_transport(id, "worker-a").unwrap(),
+            "an acknowledged copy cannot acquire a new transport claim"
+        );
+        let claimed = store
+            .enqueue_with_session("supervisor", "all_workers", "Pending pointer", "s")
+            .unwrap();
+        assert!(
+            store
+                .claim_recipient_transport(claimed, "worker-a")
+                .unwrap()
+        );
+        store
+            .acknowledge_for_recipients(claimed, &["worker-a".into()], None)
+            .unwrap();
+        assert!(
+            !store
+                .claim_teams_body_fallback(claimed, "worker-a")
+                .unwrap()
+        );
+        assert!(
+            store
+                .teams_pointer_fallback_candidates(
+                    "s",
+                    &["worker-a".into()],
+                    Utc::now() - chrono::Duration::hours(1),
+                    Utc::now() + chrono::Duration::seconds(1),
+                    10
+                )
+                .unwrap()
+                .is_empty()
+        );
+
         assert!(
             store
                 .poll_unseen_for_recipient("worker-a", None, 10)

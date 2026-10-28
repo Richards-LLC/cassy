@@ -5807,10 +5807,12 @@ impl SqlitePromptQueueStore {
                     OR acked_via IS NULL OR acked_via <> 'explicit_ack')
                AND (highest_stage IS NULL OR highest_stage NOT IN
                     ('dropped', 'suppressed', 'abandoned'))
+               AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_ack ack
+                   WHERE ack.prompt_id = prompt_queue.id AND ack.recipient = ?)
              ON CONFLICT(prompt_id, recipient) DO UPDATE SET
                 seen_at = excluded.seen_at, source = excluded.source
              WHERE prompt_queue_recipient_seen.source = 'transport_delivered'",
-            params![recipient, token.seen_at(), prompt_id, recipient],
+            params![recipient, token.seen_at(), prompt_id, recipient, recipient],
         )?;
         if changed == 1 {
             tx.execute(
@@ -7365,6 +7367,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 AND (seen.recipient = q.target OR q.target = 'all_workers')
                 AND q.urgent = 0
                 AND (q.target = 'all_workers' OR q.acked_at IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_ack ack
+                    WHERE ack.prompt_id = q.id AND ack.recipient = seen.recipient)
                 AND seen.teams_body_fallback_at IS NULL
                 AND (q.highest_stage IS NULL
                      OR q.highest_stage NOT IN {TERMINAL_NON_DELIVERY_STAGES})
@@ -7402,6 +7406,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     AND recipient = ?
                     AND teams_body_fallback_at IS NULL
                     AND source IN ('transport_claimed', 'transport_delivered')
+                    AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_ack ack
+                        WHERE ack.prompt_id = prompt_queue_recipient_seen.prompt_id
+                          AND ack.recipient = prompt_queue_recipient_seen.recipient)
                     AND EXISTS (
                         SELECT 1 FROM prompt_queue q
                          WHERE q.id = prompt_queue_recipient_seen.prompt_id

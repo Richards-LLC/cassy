@@ -2341,6 +2341,7 @@ fn declared_system_b_merge_target(
 
     let epic = epic?;
     if let Some(branch) = crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic)
+        .filter(|_| epic.branch.as_deref().is_some_and(|branch| !branch.trim().is_empty()))
     {
         return Some(ResolvedSystemBMergeTarget {
             branch: branch.to_string(),

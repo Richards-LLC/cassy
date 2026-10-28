@@ -169,13 +169,19 @@ fn blocked_only_by_verification_wait_inner(
     let is_wait = |reason: &str| reason.trim() == wait;
     let hold = read(tasks.as_ref(), task_id).ok()?;
     if hold.as_ref().is_some_and(|hold| {
-        hold.reason != "Task explicitly set to status=blocked." && !is_wait(&hold.reason)
+        hold.reason != "Task explicitly set to status=blocked."
+            && !is_any_verification_wait_note(&hold.reason)
     }) {
         return Some(false);
     }
     // A new park starts a delivery cycle; old blocker notes cannot hold it.
     let notes = task.notes.rsplit("Task parked as awaiting_merge").next()?;
-    let blockers = blocker_notes(notes);
+    // cas-7fc3: a wait note for an earlier dispatch (one a rejected verdict
+    // ended) belongs to a finished verification cycle, not to a live hold.
+    let blockers: Vec<String> = blocker_notes(notes)
+        .into_iter()
+        .filter(|reason| is_wait(reason) || !is_any_verification_wait_note(reason))
+        .collect();
     Some(
         !(blockers.iter().any(|reason| !is_wait(reason))
             || (!blockers.iter().any(|reason| is_wait(reason))
@@ -187,6 +193,16 @@ fn blocked_only_by_verification_wait_inner(
 /// verification dispatch without waking its supervisor.
 pub(crate) fn verification_wait_note(dispatch_id: &str) -> String {
     format!("Verification required: exact dispatch {dispatch_id} must record a verdict before close.")
+}
+
+/// Whether `reason` is exactly a [`verification_wait_note`] for some single
+/// dispatch id, as opposed to free text that merely mentions one.
+fn is_any_verification_wait_note(reason: &str) -> bool {
+    reason
+        .trim()
+        .strip_prefix("Verification required: exact dispatch ")
+        .and_then(|rest| rest.strip_suffix(" must record a verdict before close."))
+        .is_some_and(|id| !id.is_empty() && !id.contains(char::is_whitespace))
 }
 
 /// The full text of every blocker note, across all of its lines. A note

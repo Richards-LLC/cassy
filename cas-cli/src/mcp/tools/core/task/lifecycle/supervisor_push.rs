@@ -2018,6 +2018,22 @@ mod tests {
         // pin: the retry prompt must name the task whose wait was approved.
         assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wait now"));
 
+        // A wait note left by an earlier, rejected dispatch A belongs to a
+        // finished cycle and must not disqualify the approval of dispatch B.
+        let mut restarted = Task::new("cas-verdict-restart".into(), "No-code artifact rework".into());
+        restarted.status = TaskStatus::Blocked;
+        restarted.assignee = Some("wait-worker".into());
+        restarted.notes = format!(
+            "[2026-10-27 14:00] 🚫 BLOCKER {}\n[2026-10-27 15:00] 🚫 BLOCKER {}",
+            crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-rejected-a"),
+            crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-current-b"),
+        );
+        tasks.add(&restarted).unwrap();
+        let retried =
+            queue_approved_verification_close_retry(temp.path(), &restarted, "vdispatch-current-b").unwrap();
+        assert!(matches!(retried, ApprovedCloseRetry::Queued(_)), "{retried:?}");
+        assert_eq!(queue.peek_all(10).unwrap().len(), 2);
+
         let held = blocked("cas-verdict-held", "Waiting on the operator's decision about scope.");
         let refused =
             queue_approved_verification_close_retry(temp.path(), &held, "vdispatch-held").unwrap();
@@ -2026,7 +2042,7 @@ mod tests {
         };
         assert!(reason.contains("blocked by a hold other than the verification wait"), "{reason}");
         assert!(!reason.contains("no live assigned worker"), "{reason}");
-        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+        assert_eq!(queue.peek_all(10).unwrap().len(), 2);
     }
 
     #[test]

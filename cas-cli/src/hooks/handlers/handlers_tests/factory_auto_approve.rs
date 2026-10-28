@@ -273,10 +273,16 @@ fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account
             None => env.remove("CLAUDE_CONFIG_DIR"),
         }
         let active = config.unwrap_or(&default);
-        let resolved = if config.is_some() { &canonical } else { &default };
+        let resolved = if config.is_some() {
+            &canonical
+        } else {
+            &default
+        };
         let inactive = if config.is_some() { &default } else { &account };
         let memory = |root: &std::path::Path, project_slug: &str| {
-            root.join("projects").join(project_slug).join("memory/note.md")
+            root.join("projects")
+                .join(project_slug)
+                .join("memory/note.md")
         };
         for role in ["supervisor", "worker"] {
             set_role_env(&mut env, Some(role));
@@ -292,7 +298,8 @@ fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account
                 let out = handle_pre_tool_use(&input, Some(&cas_root)).expect("handler ok");
                 let expected_allow = role == "supervisor" && active_memory;
                 assert_eq!(
-                    allow_reason(&out).is_some(), expected_allow,
+                    allow_reason(&out).is_some(),
+                    expected_allow,
                     "role={role}, active={active:?}, target={path:?}: {out:?}"
                 );
                 if !expected_allow {

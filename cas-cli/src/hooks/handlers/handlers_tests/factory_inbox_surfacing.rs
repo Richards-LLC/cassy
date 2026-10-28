@@ -1764,12 +1764,19 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     assert_eq!(polled.len(), 2);
     store.ack(acked_id).unwrap();
     let same_turn = worker.tool_call();
-    assert!(!same_turn.contains(kept.as_str()) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+    assert!(!same_turn.contains(kept.trim()) && !same_turn.contains(acked), "{first_turn}{same_turn}");
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let next_turn = worker.take_turn("continuing my work");
     println!("AFE0_FIXTURE input_body_bytes={} repeat_hook_bytes={}", kept.len(), next_turn.len());
-    assert_eq!(next_turn.matches(kept.as_str()).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
+    // Durable diagnostics for replaying this synthetic fixture on the base
+    // and treatment with the same capped test command.
+    let report_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target");
+    std::fs::create_dir_all(&report_dir).unwrap();
+    std::fs::write(report_dir.join("afe0-fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
+        "input_body_bytes": kept.len(), "repeat_hook_bytes": next_turn.len(), "rendered": next_turn
+    })).unwrap()).unwrap();
+    assert_eq!(next_turn.matches(kept.trim()).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
     assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
     assert_eq!(
@@ -1782,7 +1789,7 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     );
 
     let after = worker.take_turn("still working");
-    assert!(!after.contains(kept.as_str()) && !after.contains("[not acknowledged]"), "once: {after}");
+    assert!(!after.contains(kept.trim()) && !after.contains("[not acknowledged]"), "once: {after}");
 }
 
 /// cas-6ccb: a Claude Teams member's next turn may be a teammate-message

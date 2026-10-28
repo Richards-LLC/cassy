@@ -313,7 +313,8 @@ pub enum HookDrain<'a> {
 /// cas-1f0c: the result of a budgeted hook drain.
 #[derive(Debug, Clone, Default)]
 pub struct BudgetedSurface {
-    /// Rows receipted `hook_surfaced`; the caller must render each in full.
+    /// Renderable bodies and bounded references. Only full bodies acquire a
+    /// `hook_surfaced` receipt; references carry `reference_only=true`.
     pub rows: Vec<QueuedPrompt>,
     /// `(id, cost)` of eligible rows left unread because they did not fit.
     pub over_budget: Vec<(i64, usize)>,
@@ -669,6 +670,11 @@ CREATE TABLE IF NOT EXISTS prompt_queue_recipient_ack (
     reply_prompt_id INTEGER,
     PRIMARY KEY (prompt_id, recipient)
 );
+
+CREATE TRIGGER IF NOT EXISTS prompt_queue_recipient_ack_prune
+AFTER DELETE ON prompt_queue BEGIN
+    DELETE FROM prompt_queue_recipient_ack WHERE prompt_id = OLD.id;
+END;
 
 CREATE INDEX IF NOT EXISTS idx_prompt_queue_recipient_seen_recipient
     ON prompt_queue_recipient_seen(recipient, prompt_id);
@@ -8094,9 +8100,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
     fn recipient_delivery(&self, prompt_id: i64, recipient: &str) -> Result<Option<RecipientDelivery>> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
-        let Some(row) = Self::queued_prompt_on_conn(&conn, prompt_id)? else { return Ok(None); };
+        let tx = conn.unchecked_transaction()?;
+        let Some(row) = Self::queued_prompt_on_conn(&tx, prompt_id)? else { return Ok(None); };
         if row.target != recipient && row.target != "all_workers" { return Ok(None); }
-        Self::recipient_delivery_on_conn(&conn, row, recipient, false).map(Some)
+        let delivery = Self::recipient_delivery_on_conn(&tx, row, recipient, false)?;
+        tx.commit()?;
+        Ok(Some(delivery))
     }
 
     fn ack(&self, prompt_id: i64) -> Result<()> {

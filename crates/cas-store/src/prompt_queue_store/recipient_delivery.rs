@@ -94,7 +94,8 @@ impl SqlitePromptQueueStore {
                      (prompt_id,recipient,settled_at,disposition,reply_prompt_id)
                      VALUES (?1,?2,?3,?4,?5)
                      ON CONFLICT(prompt_id,recipient) DO UPDATE SET
-                       disposition = excluded.disposition,
+                       disposition = CASE WHEN prompt_queue_recipient_ack.reply_prompt_id IS NOT NULL
+                           THEN 'answered' ELSE excluded.disposition END,
                        reply_prompt_id = COALESCE(excluded.reply_prompt_id, reply_prompt_id)",
                     params![prompt_id, recipient, now,
                         if reply_prompt_id.is_some() { "answered" } else { "acknowledged" }, reply_prompt_id],
@@ -150,6 +151,14 @@ mod tests {
         assert!(!named[0].prompt.contains("Named details"));
         assert!(named[0].prompt.contains("acknowledged"));
         assert!(store.poll_unseen_for_recipient("worker-a", None, 10).unwrap().is_empty());
+        drop(store);
+        let store = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        store.init().unwrap();
+        assert!(store.recipient_delivery(id, "worker-a").unwrap().unwrap().into_prompt().prompt.contains("acknowledged"));
+        store.conn.lock().unwrap().execute("DELETE FROM prompt_queue WHERE id = ?1", [id]).unwrap();
+        let retained: i64 = store.conn.lock().unwrap().query_row(
+            "SELECT COUNT(*) FROM prompt_queue_recipient_ack WHERE prompt_id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(retained, 0, "retention prunes recipient intent with its message");
     }
 
     #[test]
@@ -167,6 +176,9 @@ mod tests {
             let delivery = store.recipient_delivery(id, "worker-a").unwrap().unwrap();
             assert!(!delivery.is_full());
             assert!(delivery.into_prompt().prompt.contains("answered"));
+            store.acknowledge_for_recipients(id, &["worker-a".into()], None).unwrap();
+            assert!(store.recipient_delivery(id, "worker-a").unwrap().unwrap().into_prompt().prompt.contains("answered"),
+                "a later ACK must preserve the stronger actual answer");
             let named = store.poll_named_for_recipient("worker-a", None, &[id]).unwrap();
             assert!(!named[0].prompt.contains("Unresolved critical instruction"));
         }

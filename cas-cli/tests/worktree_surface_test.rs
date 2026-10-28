@@ -3883,7 +3883,7 @@ async fn post_merge_upkeep_refusal_returns_worker_for_redelivery_cas_efc1() {
     run_git(&["push", "origin", "main", "epic/upkeep"], &repo.root);
     let root = init_cas_dir(&repo.root, &mut env).unwrap();
     let configure = |stage: &str| std::fs::write(root.join("config.toml"), format!(
-        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-upkeep\"\n[qa.registry]\npath = \"{registry_path}\"\nenforce = \"{stage}\"\n"
+        "[verification]\nenabled = false\n[project]\ncanonical_id = \"merge-upkeep\"\n[qa]\nmode='per_task'\n[qa.registry]\npath = \"{registry_path}\"\nenforce = \"{stage}\"\n"
     )).unwrap();
     configure("off");
     cas::store::known_repos::register_repo_strict(&repo.root).unwrap();

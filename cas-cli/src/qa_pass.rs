@@ -205,7 +205,7 @@ pub fn gate_applies(task: &Task, qa: &QaConfig, passes: &[QaPass]) -> bool {
                 // mode. Older rounds must not recreate it for the next tip;
                 // a newer explicit request still binds. Batch evidence debt
                 // is enforced separately and cannot be waived here.
-                qa.mode != crate::config::QaMode::Batch || latest.state != QaPassState::Waived
+                qa.mode != crate::config::QaMode::Batch || latest.state != cas_types::QaPassState::Waived
             })
 }
 
@@ -1754,7 +1754,7 @@ mod tests {
         )
         .unwrap();
         let passes = cas_store::list_qa_passes(cas.path(), "cas-ui1").unwrap();
-        let qa = QaConfig::default();
+        let qa = QaConfig { mode: crate::config::QaMode::PerTask, ..Default::default() };
         assert_eq!(
             merge_gate(&task, &qa, &passes, &tip),
             Ok(()),
@@ -1863,7 +1863,7 @@ mod tests {
     #[test]
     fn merge_gate_requires_a_satisfying_round_for_the_exact_head() {
         use cas_types::QaPassState::*;
-        let qa = QaConfig::default();
+        let qa = QaConfig { mode: crate::config::QaMode::PerTask, ..Default::default() };
         let mut demo = task();
         demo.demo_statement = "Reply lands".to_string();
 

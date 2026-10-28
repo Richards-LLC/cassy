@@ -6284,8 +6284,8 @@ fn unsanctioned_factory_path_with_worktree(
     // Once a durable clone binding exists, cwd is only a tool location and
     // must not widen the contract. Keep cwd as the standalone-worker fallback
     // for sessions that have no registered or environment-provided root.
-    let mut sanctioned =
-        vec![worktree_root.unwrap_or_else(|| std::path::PathBuf::from(&input.cwd))];
+    let project_root = worktree_root.unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    let mut sanctioned = vec![project_root.clone()];
     sanctioned.push(crate::config::resolved_factory_artifacts_root(
         configured_artifacts_root.as_deref(),
     ));
@@ -6324,7 +6324,8 @@ fn unsanctioned_factory_path_with_worktree(
             .is_some_and(|root| resolved_path.starts_with(root))
     });
     if is_harness_session_scratchpad(&resolved_path, &input.session_id)
-        || (is_supervisor && is_harness_file_memory_path(&resolved_path, home.as_deref()))
+        || (is_supervisor
+            && is_harness_file_memory_path(&resolved_path, home.as_deref(), &project_root))
         || is_explicitly_sanctioned
     {
         return None;
@@ -6585,47 +6586,27 @@ fn lexically_normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
     normalized
 }
 
-/// The Claude harness persists its direct file memory per project below
-/// `~/.claude/projects/<project>/memory`, or an account-specific sibling such
-/// as `~/.claude-work/projects/<project>/memory`.  This is a narrow
-/// supervisor-only workspace-contract exception: all components after HOME
-/// are fixed except the account suffix, project slug, and files below memory.
-/// Reject parent traversal so the exception cannot authorize an adjacent
-/// harness directory.
-fn is_harness_file_memory_path(path: &std::path::Path, home: Option<&std::path::Path>) -> bool {
-    use std::path::Component;
-
-    let Some(home) = home else {
+/// Only the active Claude config root's current-project memory is a
+/// supervisor workspace exception. Canonicalize the config root itself so
+/// account symlinks work, but keep the project/memory suffix literal: a
+/// symlink below it must not widen the sanctioned subtree.
+fn is_harness_file_memory_path(
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+    project_root: &std::path::Path,
+) -> bool {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".claude")));
+    let Some(config) = config.filter(|config| config.is_absolute()) else {
         return false;
     };
-    let Ok(home) = home.canonicalize() else {
+    let Ok(config) = config.canonicalize() else {
         return false;
     };
-    let Ok(relative) = path.strip_prefix(&home) else {
-        return false;
-    };
-    let mut components = relative.components();
-    let Some(Component::Normal(config_dir)) = components.next() else {
-        return false;
-    };
-    let Some(config_dir) = config_dir.to_str() else {
-        return false;
-    };
-    if config_dir != ".claude"
-        && !config_dir
-            .strip_prefix(".claude-")
-            .is_some_and(|suffix| !suffix.is_empty())
-    {
-        return false;
-    }
-    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("projects")))
-        || !matches!(components.next(), Some(Component::Normal(_)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("memory")))
-    {
-        return false;
-    }
-
-    components.all(|component| matches!(component, Component::Normal(_)))
+    let slug = crate::factory_context_reset::claude_project_slug(&project_root.to_string_lossy());
+    path.starts_with(config.join("projects").join(slug).join("memory"))
 }
 
 /// Shell redirection to these character devices is a stream operation, not
@@ -6647,16 +6628,31 @@ mod workspace_contract_tests {
     fn harness_file_memory_canonicalizes_home_without_allowing_symlink_escape() {
         use std::os::unix::fs::symlink;
 
+        let _env = TestEnvGuard::new();
         let home = tempfile::tempdir().expect("home");
         let outside = tempfile::tempdir().expect("outside");
-        let memory = home.path().join(".claude/projects/project/memory");
+        let project = std::path::Path::new("/project");
+        let slug = crate::factory_context_reset::claude_project_slug(&project.to_string_lossy());
+        let memory = home
+            .path()
+            .join(".claude/projects")
+            .join(slug)
+            .join("memory");
         std::fs::create_dir_all(&memory).expect("memory directory");
         let inside = canonicalize_for_containment(&memory.join("context.md")).unwrap();
-        assert!(is_harness_file_memory_path(&inside, Some(home.path())));
+        assert!(is_harness_file_memory_path(
+            &inside,
+            Some(home.path()),
+            project
+        ));
 
         symlink(outside.path(), memory.join("escape")).expect("escape symlink");
         let escaped = canonicalize_for_containment(&memory.join("escape/secret.md")).unwrap();
-        assert!(!is_harness_file_memory_path(&escaped, Some(home.path())));
+        assert!(!is_harness_file_memory_path(
+            &escaped,
+            Some(home.path()),
+            project
+        ));
     }
 
     fn bash_input(command: &str, cwd: &Path) -> HookInput {

@@ -8,6 +8,32 @@
 
 export type WorkEventKind = "thinking" | "tool" | "todo" | "task" | "worker" | "notice";
 
+/** Optional v2 facts. Unknown string values remain readable by future clients. */
+export interface WorkTool {
+  readonly name: string;
+  readonly operation: string;
+  readonly targets: readonly string[];
+  readonly command?: string;
+  readonly cwd?: string;
+  readonly exit_code?: number;
+  readonly counts?: { readonly files?: number; readonly matches?: number };
+}
+export interface WorkLifecycle {
+  readonly id: string;
+  readonly stage: string;
+  readonly phase?: string;
+  readonly outcome?: string;
+  readonly started_at?: string;
+  readonly ended_at?: string;
+}
+export interface WorkReasoning { readonly summary: string; readonly source: string }
+export interface WorkChangedFile { readonly path: string; readonly operation: string; readonly source_event_id: string }
+export interface WorkChangedFiles {
+  readonly files: readonly WorkChangedFile[];
+  readonly provenance: string;
+  readonly complete: boolean;
+}
+
 export interface WorkEvent {
   readonly id: string;
   readonly kind: WorkEventKind;
@@ -19,9 +45,14 @@ export interface WorkEvent {
   readonly label: string;
   readonly hasDetail: boolean;
   readonly error: boolean;
+  readonly tool?: WorkTool;
+  readonly lifecycle?: WorkLifecycle;
+  readonly reasoning?: WorkReasoning;
+  readonly changed_files?: WorkChangedFiles;
 }
 
 export interface WorkEventsPage {
+  readonly schema_version?: number;
   readonly request_id: string;
   readonly events: WorkEvent[];
   readonly has_earlier: boolean;
@@ -45,6 +76,52 @@ export function workEventSupport(capabilities: unknown): WorkEventSupport {
   return capabilities.includes("work_events_live") ? "live" : "pull";
 }
 
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+function integer(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value); }
+function workTool(value: unknown): WorkTool | undefined {
+  const row = record(value);
+  if (!row || typeof row.name !== "string" || typeof row.operation !== "string" || !Array.isArray(row.targets) || !row.targets.every((target) => typeof target === "string")) return undefined;
+  const counts = record(row.counts);
+  return {
+    name: row.name, operation: row.operation, targets: row.targets as string[],
+    ...(typeof row.command === "string" ? { command: row.command } : {}),
+    ...(typeof row.cwd === "string" ? { cwd: row.cwd } : {}),
+    ...(integer(row.exit_code) ? { exit_code: row.exit_code } : {}),
+    ...(counts ? { counts: {
+      ...(integer(counts.files) && counts.files >= 0 ? { files: counts.files } : {}),
+      ...(integer(counts.matches) && counts.matches >= 0 ? { matches: counts.matches } : {}),
+    } } : {}),
+  };
+}
+function workLifecycle(value: unknown): WorkLifecycle | undefined {
+  const row = record(value);
+  if (!row || typeof row.id !== "string" || typeof row.stage !== "string") return undefined;
+  return {
+    id: row.id, stage: row.stage,
+    ...(typeof row.phase === "string" ? { phase: row.phase } : {}),
+    ...(typeof row.outcome === "string" ? { outcome: row.outcome } : {}),
+    ...(typeof row.started_at === "string" && Number.isFinite(Date.parse(row.started_at)) ? { started_at: row.started_at } : {}),
+    ...(typeof row.ended_at === "string" && Number.isFinite(Date.parse(row.ended_at)) ? { ended_at: row.ended_at } : {}),
+  };
+}
+function workReasoning(value: unknown): WorkReasoning | undefined {
+  const row = record(value);
+  return row && typeof row.summary === "string" && typeof row.source === "string" ? { summary: row.summary, source: row.source } : undefined;
+}
+function workChangedFiles(value: unknown): WorkChangedFiles | undefined {
+  const row = record(value);
+  if (!row || typeof row.provenance !== "string" || typeof row.complete !== "boolean" || !Array.isArray(row.files)) return undefined;
+  const files: WorkChangedFile[] = [];
+  for (const file of row.files) {
+    const item = record(file);
+    if (!item || typeof item.path !== "string" || typeof item.operation !== "string" || typeof item.source_event_id !== "string") return undefined;
+    files.push({ path: item.path, operation: item.operation, source_event_id: item.source_event_id });
+  }
+  return { files, provenance: row.provenance, complete: row.complete };
+}
+
 function workEvent(value: unknown): WorkEvent | undefined {
   if (!value || typeof value !== "object") return undefined;
   const row = value as Record<string, unknown>;
@@ -52,7 +129,13 @@ function workEvent(value: unknown): WorkEvent | undefined {
   if (typeof row.id !== "string" || !row.id || !Number.isFinite(at) || typeof row.label !== "string") return undefined;
   // An unknown kind reads as a notice (schema v1).
   const kind = KINDS.includes(row.kind as WorkEventKind) ? row.kind as WorkEventKind : "notice";
+  const tool = workTool(row.tool), lifecycle = workLifecycle(row.lifecycle);
+  const reasoning = workReasoning(row.reasoning), changedFiles = workChangedFiles(row.changed_files);
   return {
+    ...(tool ? { tool } : {}),
+    ...(lifecycle ? { lifecycle } : {}),
+    ...(reasoning ? { reasoning } : {}),
+    ...(changedFiles ? { changed_files: changedFiles } : {}),
     id: row.id,
     kind,
     session: typeof row.session === "string" ? row.session : "",
@@ -71,6 +154,7 @@ export function workEventsPage(value: unknown): WorkEventsPage | undefined {
   if (typeof page.request_id !== "string" || !Array.isArray(page.events)) return undefined;
   return {
     request_id: page.request_id,
+    ...(integer(page.schema_version) && page.schema_version > 0 ? { schema_version: page.schema_version } : {}),
     events: page.events.map(workEvent).filter((event): event is WorkEvent => event !== undefined),
     has_earlier: page.has_earlier === true,
     ...(typeof page.next_before === "string" ? { next_before: page.next_before } : {}),

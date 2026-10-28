@@ -18,10 +18,15 @@ impl CasService {
             scope: req.scope.unwrap_or_else(|| "all".to_string()),
             tags: req.tags,
         };
-        let result = self.inner
+        let result = self
+            .inner
             .cas_search_with_provenance(Parameters(inner_req), provenance_version, session_id)
             .await?;
-        Ok(if provenance_version.is_some() { result } else { bounded_context_receipt(result, max_tokens) })
+        Ok(if provenance_version.is_some() {
+            result
+        } else {
+            bounded_context_receipt(result, max_tokens)
+        })
     }
 
     pub(in crate::mcp::tools::service) async fn retrieval_feedback_impl(
@@ -365,7 +370,10 @@ impl CasService {
                 .context_limit()
         });
         if let Some(task_id) = req.task_id.as_deref() {
-            let result = self.inner.cas_context_for_task(task_id, limit, req.max_tokens).await?;
+            let result = self
+                .inner
+                .cas_context_for_task(task_id, limit, req.max_tokens)
+                .await?;
             return Ok(bounded_context_receipt(result, req.max_tokens));
         }
 
@@ -466,16 +474,28 @@ impl CasService {
 /// Consolidated text reads have a byte budget. Structured provenance and errors
 /// retain their existing complete contracts. Expansion repeats the same request
 /// with a larger budget instead of losing access to the omitted evidence.
-fn bounded_context_receipt(mut result: CallToolResult, max_tokens: Option<usize>) -> CallToolResult {
-    if result.is_error == Some(true) { return result; }
+fn bounded_context_receipt(
+    mut result: CallToolResult,
+    max_tokens: Option<usize>,
+) -> CallToolResult {
+    if result.is_error == Some(true) {
+        return result;
+    }
     let budget = max_tokens.unwrap_or(500).max(64).saturating_mul(4);
     for content in &mut result.content {
         if let rmcp::model::RawContent::Text(text) = &mut content.raw {
-            if text.text.len() <= budget { continue; }
-            let hint = format!("\n… Bounded response ({} bytes). Repeat this request with max_tokens={} for full text.",
-                text.text.len(), text.text.len().div_ceil(4));
+            if text.text.len() <= budget {
+                continue;
+            }
+            let hint = format!(
+                "\n… Bounded response ({} bytes). Repeat this request with max_tokens={} for full text.",
+                text.text.len(),
+                text.text.len().div_ceil(4)
+            );
             let mut end = budget.saturating_sub(hint.len());
-            while !text.text.is_char_boundary(end) { end -= 1; }
+            while !text.text.is_char_boundary(end) {
+                end -= 1;
+            }
             text.text.truncate(end);
             text.text.push_str(&hint);
         }

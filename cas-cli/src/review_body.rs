@@ -156,12 +156,17 @@ pub(crate) fn merge_request_review(
 /// Preserve copied proof once, with the same immutable file used by local reads
 /// and the published artifact. Publication errors leave the caller's full text
 /// in-band; a missing evidence store must never hide evidence.
-pub(crate) fn relay_evidence_manifest(cas_root: &Path, task_id: &str, body: &str) -> Result<String> {
+pub(crate) fn relay_evidence_manifest(
+    cas_root: &Path,
+    task_id: &str,
+    body: &str,
+) -> Result<String> {
     use crate::artifacts::{PublishContext, paths::PublishRoots};
     use sha2::{Digest, Sha256};
     use std::io::Write;
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
-    let root = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let root =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
     let roots = PublishRoots::new(cas_root, &root, task_id);
     std::fs::create_dir_all(&roots.task_artifacts_dir)?;
     let name = format!("relay-evidence-{:x}.md", Sha256::digest(body.as_bytes()));
@@ -169,22 +174,47 @@ pub(crate) fn relay_evidence_manifest(cas_root: &Path, task_id: &str, body: &str
     let mut file = tempfile::NamedTempFile::new_in(&roots.task_artifacts_dir)?;
     file.write_all(body.as_bytes())?;
     match file.persist_noclobber(&path) {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            anyhow::ensure!(std::fs::read(&path)? == body.as_bytes(), "existing manifest does not match its evidence");
-        },
+            anyhow::ensure!(
+                std::fs::read(&path)? == body.as_bytes(),
+                "existing manifest does not match its evidence"
+            );
+        }
         Err(error) => return Err(error.error.into()),
     }
     let store = cas_store::SqliteArtifactStore::open(cas_root)?;
-    let artifact = match store.list_for_task(task_id)?.into_iter().find(|artifact| artifact.name == name) {
+    let artifact = match store
+        .list_for_task(task_id)?
+        .into_iter()
+        .find(|artifact| artifact.name == name)
+    {
         Some(artifact) => artifact,
-        None => crate::artifacts::publish(&PublishContext {
-            store: &store, roots, task_id: task_id.into(), cloud: crate::artifacts::cloud_client(cas_root),
-        }, &path)?.artifact,
+        None => {
+            crate::artifacts::publish(
+                &PublishContext {
+                    store: &store,
+                    roots,
+                    task_id: task_id.into(),
+                    cloud: crate::artifacts::cloud_client(cas_root),
+                },
+                &path,
+            )?
+            .artifact
+        }
     };
     let read = if artifact.status == "committed" {
-        format!("Evidence manifest: artifact action=fetch task_id={task_id} id={}", artifact.id)
-    } else { format!("Evidence manifest: {} (local). Read file {}", artifact.id, path.display()) };
+        format!(
+            "Evidence manifest: artifact action=fetch task_id={task_id} id={}",
+            artifact.id
+        )
+    } else {
+        format!(
+            "Evidence manifest: {} (local). Read file {}",
+            artifact.id,
+            path.display()
+        )
+    };
     Ok(read)
 }
 
@@ -521,7 +551,10 @@ mod tests {
         assert_eq!(contract_evidence("no contract"), Vec::<String>::new());
         assert!(review.contains("/proof/qa/bundle.json"), "{review}");
         assert!(review.contains(&task_risk(&recorded)), "{review}");
-        assert!(review.contains(&cas_types::TaskDoor::OneWay.to_string()), "{review}");
+        assert!(
+            review.contains(&cas_types::TaskDoor::OneWay.to_string()),
+            "{review}"
+        );
 
         let missing = merge_request_review(temp.path(), &task, "missing-ref", &head, "");
         assert!(missing.contains("missing-ref -> "), "{missing}");
@@ -584,7 +617,13 @@ mod tests {
             "  Proof: 3/3 PASS\nci:\nCI: run 7 green\nproofs: nope\nnote: proof: inline",
         );
         assert_eq!(lines.len(), 2, "{lines:?}");
-        assert!(lines[0].starts_with("proof: ") && lines[0].ends_with("3/3 PASS"), "{lines:?}");
-        assert!(lines[1].starts_with("ci: ") && lines[1].ends_with("run 7 green"), "{lines:?}");
+        assert!(
+            lines[0].starts_with("proof: ") && lines[0].ends_with("3/3 PASS"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("ci: ") && lines[1].ends_with("run 7 green"),
+            "{lines:?}"
+        );
     }
 }

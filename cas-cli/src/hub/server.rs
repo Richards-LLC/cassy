@@ -53,6 +53,8 @@ pub struct HubState<R: SessionReadModel> {
     usage: Option<super::usage::UsageStore>,
     #[cfg(test)]
     artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
+    #[cfg(test)]
+    artifact_stream_clock: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -79,6 +81,8 @@ impl<R: SessionReadModel> HubState<R> {
             usage: None,
             #[cfg(test)]
             artifact_cloud_client: None,
+            #[cfg(test)]
+            artifact_stream_clock: None,
         }
     }
 
@@ -91,6 +95,12 @@ impl<R: SessionReadModel> HubState<R> {
     #[cfg(test)]
     pub(crate) fn with_artifact_cloud_client(mut self, client: crate::artifacts::cloud::ArtifactUploadClient) -> Self {
         self.artifact_cloud_client = Some(client);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_stream_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.artifact_stream_clock = Some(clock);
         self
     }
 

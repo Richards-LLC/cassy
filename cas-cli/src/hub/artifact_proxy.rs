@@ -317,6 +317,8 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     let mime = record.mime.clone();
     #[cfg(test)]
     let injected = state.artifact_cloud_client.clone();
+    #[cfg(test)]
+    let stream_clock = state.artifact_stream_clock.clone();
     let (head_tx, head_rx) = tokio::sync::oneshot::channel();
     let (body_tx, body_rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, io::Error>>(4);
     tokio::task::spawn_blocking(move || {
@@ -398,6 +400,8 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
             }
             let mut remaining = count;
             while remaining > 0 {
+                #[cfg(test)]
+                let _now = stream_clock.as_ref().map_or_else(Instant::now, |clock| clock());
                 if auth
                     .ensure_active_context(&context, chrono::Utc::now())
                     .is_err()

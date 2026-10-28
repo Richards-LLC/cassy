@@ -674,6 +674,40 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .unwrap();
         (root, service)
     };
+    for tamper in ["id", "origin_project"] {
+        let mut forged = synced.clone();
+        if tamper == "id" {
+            forged.id = "cas-forged".into();
+        } else {
+            forged.origin_project = Some("github.com/attacker/other".into());
+        }
+        let override_task = Mock::given(method("GET"))
+            .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+            .and(query_param("project_id", "github.com/source/blue"))
+            .and(header("Authorization", "Bearer fixture-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&forged))
+            .with_priority(1)
+            .mount_as_scoped(&server)
+            .await;
+        let (root, service) = fresh_recipient(&mut env);
+        let refused = service
+            .artifact(Parameters(foreign_fetch.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            refused.data.as_ref().unwrap()["state"],
+            "metadata_unavailable",
+            "{tamper}: {refused:?}"
+        );
+        assert!(
+            cas_store::SqliteArtifactStore::open(&root.path().join(".cas"))
+                .unwrap()
+                .get(id)
+                .unwrap()
+                .is_none()
+        );
+        drop(override_task);
+    }
     let mut conflicting = synced.clone();
     conflicting.origin_project = Some("github.com/source/green".into());
     conflicting.notes = conflicting.notes.replace(sha, &"0".repeat(64));
@@ -778,8 +812,8 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     );
 
     drop(download);
-    // Scoped wiremock guards can clear the earlier view fixture when they
-    // leave scope; restore it for the existing checksum regression below.
+    // Restore the view fixture after the scoped controls for the existing
+    // checksum regression below.
     Mock::given(method("GET"))
         .and(path("/api/artifacts/cloud-proof/url"))
         .and(header("Authorization", "Bearer fixture-token"))
@@ -791,6 +825,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     Mock::given(method("GET"))
         .and(path("/download"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong bytes"))
+        .with_priority(1)
         .mount(&server)
         .await;
     let error = owner_service

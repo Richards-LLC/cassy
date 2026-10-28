@@ -329,6 +329,12 @@ impl TranscriptIndex {
         } else {
             None
         };
+        // Polls are observations of the same operation. Carry its identity and
+        // scope on the newer row, even if the original has paged out of view.
+        let continuation = parent.map(|parent| {
+            let event = &self.events[parent].event;
+            (event.tool.clone(), event.lifecycle.clone())
+        });
         let Some(indexed) = self.events.last_mut() else {
             return;
         };
@@ -343,6 +349,14 @@ impl TranscriptIndex {
             started_at: Some(indexed.event.at.clone()),
             ended_at: None,
         });
+        if let Some((tool, Some(mut lifecycle))) = continuation {
+            indexed.event.tool = tool;
+            lifecycle.stage = "phase".into();
+            lifecycle.phase = Some("running".into());
+            lifecycle.outcome = None;
+            lifecycle.ended_at = None;
+            indexed.event.lifecycle = Some(lifecycle);
+        }
         if let (Some(call), Some(parent)) = (call, parent) {
             self.poll_parents.insert(call.to_owned(), parent);
         }

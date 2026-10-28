@@ -467,7 +467,10 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
         ],
     );
     let (ended, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let continuation = serde_json::to_value(&ended[2]).unwrap();
     let wire = serde_json::to_value(&ended[1]).unwrap();
+    assert_eq!(continuation["lifecycle"]["id"], wire["lifecycle"]["id"]);
+    assert_eq!(continuation["tool"]["operation"], "command");
     assert_eq!(wire["lifecycle"]["stage"], "end");
     assert_eq!(wire["lifecycle"]["outcome"], "error");
     assert_eq!(wire["tool"]["exit_code"], 3);

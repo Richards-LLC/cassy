@@ -140,6 +140,14 @@ The source adapters are in `daemon/runtime/work_events.rs`. Claude publishes
 `response_item` calls, outputs and `reasoning.summary`, and `event_msg`
 `task_started`/`task_complete` records. Codex command outputs with a session ID
 are still running; a later `write_stdin` result can finish that operation.
+Claude background Bash results (`isAsync`/`backgroundTaskId`) similarly stay
+running until `TaskOutput` returns a completed task. Continuation rows carry the
+original tool scope and lifecycle ID, so clients can group by `lifecycle.id`
+even after the initial call has paged out. A Claude `turn_duration` record
+reports an end with unknown outcome; it does not prove the turn succeeded.
+Compaction boundary records publish the completed `compacted` phase, not an
+invented in-progress interval. Opaque wrapper tools remain `other`: the adapter
+does not interpret JavaScript or shell scripts to guess their inner operations.
 No adapter invents setup, approval waiting, completion or file changes from
 prose. Some harness versions do not publish every phase; absence is unknown.
 

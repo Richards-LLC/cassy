@@ -637,23 +637,112 @@ fn queue_key(
     std::ops::ControlFlow::Continue(())
 }
 
-/// The next complete line typed ahead of the question that asks for it, as
-/// `read_line` would return it: `y\n`, or `""` for a bare Ctrl-D (EOF).
-/// An unfinished line is dropped, so the reader can still edit their answer.
-pub(crate) fn take_typeahead_line() -> Option<String> {
-    next_typed_line(&mut TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+/// What the reader typed ahead of the question that asks for it.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum TypedAhead {
+    /// A finished answer as `read_line` returns it: `y\n`, or `""` for EOF.
+    Line(String),
+    /// Unfinished: the question must keep editing it, not freeze it.
+    Partial(String),
 }
 
-fn next_typed_line(typed: &mut String) -> Option<String> {
+pub(crate) fn take_typeahead() -> Option<TypedAhead> {
+    next_typed(&mut TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+fn next_typed(typed: &mut String) -> Option<TypedAhead> {
     let Some(end) = typed.find(['\n', TYPED_EOF]) else {
-        typed.clear();
-        return None;
+        return (!typed.is_empty()).then(|| TypedAhead::Partial(std::mem::take(typed)));
     };
     let mut line: String = typed.drain(..=end).collect();
     if line.ends_with(TYPED_EOF) {
         line.pop();
     }
-    Some(line)
+    Some(TypedAhead::Line(line))
+}
+
+/// How an edited answer ended.
+pub(crate) enum EditedLine {
+    Line(String),
+    Interrupted,
+}
+
+/// Finish an unfinished typed-ahead line with the reader that already holds
+/// it, in raw mode, so the shown prefix stays editable: Backspace, Ctrl-U,
+/// Enter, Ctrl-D on an empty line (EOF) and Ctrl-C keep their terminal
+/// meaning. `stop` is polled every 50 ms for signals delivered meanwhile.
+pub(crate) fn edit_typed_line(prefix: String, mut stop: impl FnMut() -> bool) -> Result<EditedLine> {
+    use crossterm_inquire::event::{self, Event};
+    use std::io::Write;
+    struct Raw;
+    impl Drop for Raw {
+        fn drop(&mut self) {
+            let _ = crossterm_inquire::terminal::disable_raw_mode();
+        }
+    }
+    let mut line = prefix;
+    let mut err = std::io::stderr();
+    write!(err, "{line}")?;
+    err.flush()?;
+    crossterm_inquire::terminal::enable_raw_mode()?;
+    let _raw = Raw;
+    loop {
+        if stop() {
+            return Ok(EditedLine::Interrupted);
+        }
+        if !event::poll(std::time::Duration::from_millis(50))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else { continue };
+        let before = line.chars().count();
+        match edit_key(&mut line, key) {
+            LineEdit::Pending => {
+                let after = line.chars().count();
+                if after < before {
+                    write!(err, "{}", "\x08 \x08".repeat(before - after))?;
+                } else if after > before {
+                    write!(err, "{}", line.chars().last().unwrap_or_default())?;
+                }
+            }
+            LineEdit::Done(answer) => {
+                write!(err, "\r\n")?;
+                return Ok(EditedLine::Line(answer));
+            }
+            LineEdit::Interrupt => {
+                write!(err, "^C\r\n")?;
+                return Ok(EditedLine::Interrupted);
+            }
+        }
+        err.flush()?;
+    }
+}
+
+enum LineEdit {
+    Pending,
+    Done(String),
+    Interrupt,
+}
+
+fn edit_key(line: &mut String, key: crossterm_inquire::event::KeyEvent) -> LineEdit {
+    use crossterm_inquire::event::{KeyCode, KeyEventKind, KeyModifiers};
+    if key.kind == KeyEventKind::Release {
+        return LineEdit::Pending;
+    }
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') if control => return LineEdit::Interrupt,
+        KeyCode::Char('d') if control && line.is_empty() => return LineEdit::Done(String::new()),
+        KeyCode::Char('u') if control => line.clear(),
+        KeyCode::Enter => return LineEdit::Done(format!("{line}\n")),
+        KeyCode::Backspace => {
+            line.pop();
+        }
+        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            line.push(c)
+        }
+        _ => {}
+    }
+    LineEdit::Pending
 }
 
 /// What one seeding pass did, so the caller can report it honestly.
@@ -1021,13 +1110,20 @@ mod tests {
         ] {
             assert!(queue_key(&mut typed, queued).is_continue());
         }
-        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("y\n"));
+        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Line("y\n".into())));
         // Ctrl-D on an empty line is EOF, which cancels like stdin EOF.
-        assert_eq!(next_typed_line(&mut typed).as_deref(), Some(""));
-        // An unfinished line is dropped so the question can still edit it.
-        assert_eq!(next_typed_line(&mut typed), None);
-        assert!(typed.is_empty());
+        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Line(String::new())));
+        // An unfinished line stays editable at the question.
+        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Partial("n".into())));
+        assert_eq!(next_typed(&mut typed), None);
         assert!(queue_key(&mut typed, ctrl('c')).is_break());
+        // The question's editor continues that same line discipline.
+        let mut line = "n".to_string();
+        assert!(matches!(edit_key(&mut line, key(KeyCode::Backspace)), LineEdit::Pending));
+        assert!(matches!(edit_key(&mut line, ctrl('d')), LineEdit::Done(eof) if eof.is_empty()));
+        line.push('y');
+        assert!(matches!(edit_key(&mut line, key(KeyCode::Enter)), LineEdit::Done(answer) if answer == "y\n"));
+        assert!(matches!(edit_key(&mut line, ctrl('c')), LineEdit::Interrupt));
     }
 
     #[test]

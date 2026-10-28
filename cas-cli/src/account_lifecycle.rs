@@ -592,10 +592,41 @@ impl LoginSignals {
     fn answer(&self) -> Result<String> {
         // A line typed right after the picker's email prompt was read by
         // inquire's terminal reader, not stdin. Raw mode did not echo it.
-        if let Some(typed) = crate::cli::account_picker::take_typeahead_line() {
-            eprintln!("{}", typed.trim_end());
-            self.check()?;
-            return Ok(typed);
+        use crate::cli::account_picker::{EditedLine, TypedAhead};
+        match crate::cli::account_picker::take_typeahead() {
+            Some(TypedAhead::Line(typed)) => {
+                eprintln!("{}", typed.trim_end());
+                self.check()?;
+                return Ok(typed);
+            }
+            // The reader holding the prefix finishes the line, so it stays
+            // editable; raw-mode Ctrl-C becomes the same SIGINT cancellation.
+            Some(TypedAhead::Partial(prefix)) => {
+                let edited = crate::cli::account_picker::edit_typed_line(prefix, || {
+                    self.check().is_err()
+                })?;
+                match edited {
+                    EditedLine::Line(answer) => {
+                        self.check()?;
+                        return Ok(answer);
+                    }
+                    EditedLine::Interrupted => {
+                        // Die by SIGINT after cleanup, unless the caller ignores it.
+                        #[cfg(unix)]
+                        if self.previous.iter().any(|(signal, _)| *signal == libc::SIGINT) {
+                            let _ = LOGIN_SIGNAL.compare_exchange(
+                                0,
+                                libc::SIGINT,
+                                std::sync::atomic::Ordering::Relaxed,
+                                std::sync::atomic::Ordering::Relaxed,
+                            );
+                        }
+                        self.check()?;
+                        bail!("Login interrupted; account not added");
+                    }
+                }
+            }
+            None => {}
         }
         // Use the shared stdin buffer, including bytes prefetched by an earlier
         // prompt. read_line retries EINTR, so read on a separate thread while

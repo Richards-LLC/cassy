@@ -13119,15 +13119,27 @@ mod spawn_lifecycle_tests {
 
     #[test]
     fn a_refusal_names_the_default_account_when_the_caller_named_none() {
-        let specs = vec![spec_for(cas_mux::SupervisorCli::Codex, None)];
-        let error = preflight_account_auth_with(&specs, |_, _| {
-            evidence(
-                cas_factory::CapabilityAvailability::Unavailable,
-                "logged out",
-            )
-        }, || None)
-        .expect_err("refusal expected");
-        assert!(error.contains("~/.codex"), "{error}");
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        for inherited in [None, Some("")] {
+            match inherited {
+                Some(value) => env.set("CODEX_HOME", value),
+                None => env.remove("CODEX_HOME"),
+            }
+            let mut spec = spec_for(cas_mux::SupervisorCli::Codex, None);
+            spec.requester_config_dir = requester_account_dir(spec.cli);
+            assert!(spec.requester_config_dir.is_none(), "empty account must act as unset: {spec:?}");
+            assert_eq!(codex_home_path(spec.requester_config_dir.as_deref()), Some(env.home().join(".codex")));
+            let error = preflight_account_auth_with(&[spec], |_, _| {
+                evidence(
+                    cas_factory::CapabilityAvailability::Unavailable,
+                    "logged out",
+                )
+            }, || None)
+            .expect_err("refusal expected");
+            assert!(error.contains("~/.codex"), "{error}");
+        }
+        env.set("CODEX_HOME", "/selected/codex-account");
+        assert_eq!(requester_account_dir(cas_mux::SupervisorCli::Codex).as_deref(), Some("/selected/codex-account"));
     }
 
     #[test]

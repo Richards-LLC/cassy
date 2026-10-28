@@ -598,7 +598,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` at 1280, an open conversation whose session has workers, a ready task and an awaiting-merge task, on a device paired with factory:operate and factory:manage
 - **Goal:** pause a worker and undo it, assign a ready task to an idle worker, stop another worker after confirming, and ask the supervisor to merge after seeing the exact message, with every result announced and nothing refreshing on a timer
-- **Touches:** `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
+- **Touches:** `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts`, `hub-web/src/fleet-ops.ts`, `hub-web/src/fleet-ops-view.ts`, `hub-web/src/fleet-permissions.ts`, `hub-web/src/paired-machines.ts`, `hub-web/src/main.ts`, `hub-web/src/connection.ts`, `hub-web/src/styles.css`
 - **Suite:** `hub-web/e2e/journeys/fleet-ops.journey.ts`
 - **Gaps:** the hub double serves `POST /v1/sessions/<s>/operations` with the brief's contract (op_id dedupe, 409 stale, FleetChanged); the real endpoint (S1, S2) is verified when those land; the phone part is S6
 
@@ -608,7 +608,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 2. Assign a ready task to an idle worker — Assign… lists the idle workers, choosing one assigns it, and Undo unassigns it
 3. Stop another worker after confirming — Stop… opens an inline confirmation naming what stops, Cancel first and focused; confirming stops it, and a stale stop says what changed
 4. Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it once and the row reads "Asked … ago"
-5. A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears without a disabled Stop and restart button.
+5. A pairing without factory:manage — Stop… is disabled and names the missing permission; the header hides unavailable controls behind one collapsed Permissions line. Expanding it explains the actual grant and re-pair actions and links to Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears without a disabled Stop and restart button.
 
 #### Expected experience
 

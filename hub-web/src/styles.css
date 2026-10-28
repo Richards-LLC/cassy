@@ -3217,6 +3217,47 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .worker-timeline-rows .work-row-toggle, .worker-timeline-rows .work-row-line { width: 100%; }
 .worker-timeline-rows .work-row-time { margin-left: auto; padding-left: var(--space-2); }
 
+/* Release ledger: one completion strip, quiet ruled groups, device-local width. */
+.conversation-shell { position: relative; }
+.conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
+.context-resize { display: none; }
+@media (min-width: 53.001rem) {
+  .conversation-shell.context-open > .context-resize:not([hidden]) { display: block; position: absolute; z-index: 4; top: var(--space-4); bottom: var(--space-4); right: calc(var(--worker-collapsed-width) - var(--space-1)); width: var(--space-2); cursor: col-resize; touch-action: none; border-radius: var(--radius-pill); }
+  .context-resize:hover, .context-resize:focus-visible { background: var(--line-strong); outline: 2px solid var(--color-focus); outline-offset: 2px; }
+}
+.release-progress { padding-bottom: var(--space-4); margin-bottom: var(--space-3); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--ink); }
+.release-eyebrow { margin: 0 0 var(--space-2); color: var(--ink-mid); font-size: var(--fs-meta); }
+.release-progress h3 { margin: 0; font: var(--weight-medium) var(--fs-lg)/1.3 var(--font-display); overflow-wrap: anywhere; }
+.release-count { margin: var(--space-3) 0 var(--space-2); font-weight: var(--weight-semibold); }
+.release-progress progress { display: block; width: 100%; height: var(--space-2); appearance: none; border: 0; border-radius: var(--radius-pill); overflow: hidden; background: var(--bg-active); color: var(--color-action); }
+.release-progress progress::-webkit-progress-bar { background: var(--bg-active); }
+.release-progress progress::-webkit-progress-value { background: var(--color-action); }
+.release-progress progress::-moz-progress-bar { background: var(--color-action); }
+.release-meta, .status-last-activity { margin: var(--space-2) 0 0; font-size: var(--fs-meta); line-height: 1.5; color: var(--ink-mid); }
+.fleet-permissions { width: 100%; color: var(--ink-mid); font-size: var(--fs-meta); }
+.fleet-permissions summary { cursor: pointer; min-height: var(--rail-item-min); display: list-item; align-content: center; }
+.fleet-permissions p { margin: var(--space-2) 0; }
+.fleet-permissions a { display: inline-block; padding-block: var(--space-2); color: var(--color-action); }
+.progress-filter { margin: var(--space-4) 0 0; padding: var(--space-2) var(--space-3); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); color: var(--ink); background: var(--bg-panel); font: inherit; }
+.conversation-context .status-task { padding-inline: 0; background: var(--color-transparent); border-top: var(--line-width) solid var(--line-subtle); border-radius: 0; }
+.conversation-context .status-agent .status-line { align-items: start; flex-wrap: wrap; }
+.conversation-context .status-agent .status-timeline { margin-left: 0; }
+.conversation-reading, .conversation-context { scrollbar-width: thin; scrollbar-color: var(--ink-mid) var(--color-transparent); }
+.conversation-reading::-webkit-scrollbar, .conversation-context::-webkit-scrollbar { width: var(--space-2); height: var(--space-2); }
+.conversation-reading::-webkit-scrollbar-thumb, .conversation-context::-webkit-scrollbar-thumb { background: var(--ink-mid); border: 2px solid var(--panel); border-radius: var(--radius-pill); }
+@media (forced-colors: active) {
+  .conversation-reading, .conversation-context { scrollbar-color: auto; }
+  .release-progress progress { forced-color-adjust: none; background: Canvas; color: Highlight; border: 1px solid CanvasText; }
+  .release-progress progress::-webkit-progress-bar { background: Canvas; }
+  .release-progress progress::-webkit-progress-value { background: Highlight; }
+  .release-progress progress::-moz-progress-bar { background: Highlight; }
+  .context-resize:focus-visible { outline-color: Highlight; }
+}
+@media (max-width: 53rem), (max-height: 30rem) and (pointer: coarse) {
+  .conversation-shell.context-open { grid-template-columns: 1fr; }
+  .context-resize { display: none !important; }
+}
+
 /* Project-first register: the project owns the boundary; its supervisors
    carry identity and work. The boundary is a meaningful mark (>= 3:1). */
 .project-card { border-color: var(--ink-mid); }

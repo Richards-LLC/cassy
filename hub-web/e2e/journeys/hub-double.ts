@@ -120,9 +120,9 @@ export type WorkWorld = {
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
 export type FleetWorld = {
-  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; latest_activity?: { summary: string } }>;
-  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string }>;
-  epics: Array<{ id: string; title?: string }>;
+  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; liveness?: string; latest_activity?: { summary: string; created_at_rfc3339?: string } }>;
+  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string; epic_id?: string | null; delivery_state?: string | null }>;
+  epics: Array<{ id: string; title?: string; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null } }>;
   focused_epic: string | null;
   /** Names new workers get, in order. */
   spawnNames: string[];

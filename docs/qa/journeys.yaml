@@ -1650,10 +1650,10 @@ journeys:
     focused; confirming stops it, and a stale stop says what changed
   - Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it
     once and the row reads "Asked … ago"
-  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not
-    allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction
-    that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears
-    without a disabled Stop and restart button.
+  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header hides
+    unavailable controls behind one collapsed Permissions line. Expanding it explains the actual grant and re-pair
+    actions and links to Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command
+    appears without a disabled Stop and restart button.
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -1699,6 +1699,8 @@ journeys:
   - hub-web/src/pairing-scopes.ts
   - hub-web/src/pending-pairing.ts
   - hub-web/src/progress-model.ts
+  - hub-web/src/progress-view.ts
+  - hub-web/src/context-resize.ts
   - hub-web/src/raw-output.ts
   - hub-web/src/refusal.ts
   - hub-web/src/request-deadline.ts

@@ -21,6 +21,23 @@ abandons only pending prompts older than one day and preserves the rows for fore
 Run `gc_report` first. `force=true` without `older_than_secs` retains the legacy,
 destructive whole-queue clear and should not be used for targeted recovery.
 
+## Supervisor restart
+
+When your pane exits, the factory shuts down and every worker pane stops with
+it. No action restarts a supervisor alone. Tell the operator this plainly
+before recommending a restart.
+
+- **New `cas serve` binary:** ask the operator to use the harness's MCP
+  reconnect control (Claude Code: `/mcp`). It replaces only your MCP server;
+  your pane and the workers keep running. Use `recycle_worker` for stale
+  workers.
+- **Anything else** (a new harness version, a fresh context, a crash): treat it
+  as a factory restart.
+  1. Have each worker commit and push or park, and write `HANDOFF.md`.
+  2. Record your handoff with `memory action=remember entry_type=handoff`.
+  3. After the restart and preflight, respawn the workers by name on their
+     tasks. A respawn by name reuses the kept worktree.
+
 ## Disposable verification and walk checkouts
 
 Create review scratch with `cas factory scratch-checkout --cas-root <root>

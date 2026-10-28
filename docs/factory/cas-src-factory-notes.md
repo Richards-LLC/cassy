@@ -24,7 +24,7 @@ Step 0. **Binary freshness check.** Before anything else — confirm the running
 
    If they don't match AND `git log --oneline HEAD --not <running-hash> -- cas-cli/src/mcp cas-cli/src/hooks cas-cli/src/cli/factory` returns anything, the binary must be rebuilt — but **do not kill or restart `cas serve` from this active MCP session**. That stdio process is this session's Cassy-tool connection, so restarting it here disconnects the very tools needed to finish setup.
 
-   Stop at step 0 and ask the operator to run `cargo build --release` and use the harness's MCP reconnect/restart control (or open a fresh supervisor session) to launch the new `cas serve`. Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
+   Stop at step 0 and ask the operator to run `cargo build --release` and use the harness's MCP reconnect/restart control to launch the new `cas serve`; that keeps every worker running. A supervisor restart stops every worker in the factory, so checkpoint them first (see `cas-supervisor/references/worker-recovery.md`, Supervisor restart). Do not use `pkill` or any name-based process kill. Resume only after the Cassy tool list is restored, then rerun this checklist from step 0.
 
 ## From `cas-supervisor/references/workflow.md` — resuming an epic
 

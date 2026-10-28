@@ -101,6 +101,14 @@
         {
           "text": "../cas-tdd/SKILL.md#fewest-tests",
           "reason": "Keep the installed route to the canonical Fewest tests principle reachable; points of action cite it rather than copy it."
+        },
+        {
+          "text": "A supervisor restart stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+        },
+        {
+          "text": "references/worker-recovery.md#supervisor-restart",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
         }
       ],
       "absent": [
@@ -333,6 +341,14 @@
         {
           "text": "Do not kill or respawn",
           "reason": "Preserve the operational safety boundary documented by supervisor fix round recovery guidance present and mirrored."
+        },
+        {
+          "text": "## Supervisor restart",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
+        },
+        {
+          "text": "No action restarts a supervisor alone",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
         }
       ],
       "absent": [],
@@ -3100,6 +3116,10 @@
         {
           "text": "binary.source_evidence_missing",
           "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
+        },
+        {
+          "text": "A supervisor restart stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
         }
       ],
       "absent": [
@@ -3478,6 +3498,10 @@
         {
           "text": "binary.source_evidence_missing",
           "reason": "Unavailable source comparison must not force healthy MCP sessions to rebuild or reconnect."
+        },
+        {
+          "text": "A supervisor restart stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
         }
       ],
       "absent": [
@@ -4784,6 +4808,10 @@
         {
           "text": "Never restart `cas serve` from the active MCP session.",
           "reason": "Keep recovery outside the process providing the current tools."
+        },
+        {
+          "text": "stops every worker",
+          "reason": "A supervisor pane exit shuts its factory down; supervisor guidance must name that cost and the reconnect route that keeps workers."
         }
       ],
       "absent": [

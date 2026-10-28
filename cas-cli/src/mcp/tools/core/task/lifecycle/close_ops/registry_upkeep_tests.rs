@@ -353,6 +353,7 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
         assert!(findings.is_empty(), "{id}: {}", findings.iter().map(|f| f.detail.as_str()).collect::<Vec<_>>().join("; "));
     }
     f.base = head;
+    f.task.id = "cas-1234".into();
     write(f.repo.path(), "docs/qa/bug-families/alpha.yaml", "title: alpha\ntasks: [cas-1234]\ninvariants: [INV]\njourneys: [signup]\n");
     write(f.repo.path(), "src/pages/signup.ts", "another fix");
     let head = commit(f.repo.path());

@@ -145,6 +145,8 @@ export interface OperatorNoticeResolved {
 /** Durable operator message projected by the daemon's history page. */
 export interface ConversationHistoryMessage {
   notification_id: number;
+  /** Original send identity, so history can settle a send whose live ACK was lost. */
+  client_ref?: string | null;
   target: string;
   text: string;
   /** acknowledged = durable queue acceptance; delivered = actual supervisor transport proof. */

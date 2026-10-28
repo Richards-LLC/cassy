@@ -4786,6 +4786,7 @@ mod machine_protocol_tests {
         let frame = serde_json::to_vec(&DaemonMessage::OperatorMessage(
             crate::ui::factory::ConversationHistoryMessage {
                 notification_id: 41,
+                client_ref: None,
                 target: "supervisor".into(),
                 text: "Question".into(),
                 state: "sending".into(),

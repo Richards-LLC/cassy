@@ -2256,6 +2256,9 @@ fn delivery_stalled_episode_key(conn: &Connection, session: Option<&str>, recipi
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageDeliveryReport {
     pub id: i64,
+    /// Commander send identity retained in the row's durable attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ref: Option<String>,
     /// Original queue payload used only to correlate a concrete harness input
     /// record. It is deliberately omitted from the public status response.
     #[serde(skip)]
@@ -8475,7 +8478,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     last_pending_detail, transport_delivered_at, highest_stage,
                     broadcast_attempted, broadcast_succeeded, broadcast_failed,
                     acked_via, assumed_seen_at, wake_attempt, wake_attempt_at, wake_attempt_detail,
-                    wake_gate_declines
+                    wake_gate_declines, attribution_json
              FROM prompt_queue WHERE id = ?",
             params![prompt_id],
             |row| {
@@ -8504,6 +8507,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     row.get::<_, Option<String>>(21).unwrap_or(None),
                     row.get::<_, Option<String>>(22).unwrap_or(None),
                     row.get::<_, i64>(23).unwrap_or(0),
+                    row.get::<_, Option<String>>(24).unwrap_or(None),
                 ))
             },
         );
@@ -8533,6 +8537,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             wake_attempt_at_s,
             wake_attempt_detail,
             wake_gate_declines,
+            attribution_json,
         ) = match row {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
@@ -8736,6 +8741,13 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         };
         Ok(Some(MessageDeliveryReport {
             id,
+            client_ref: attribution_json
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                .and_then(|value| {
+                    value.get("client_ref").and_then(|value| value.as_str()).map(str::to_owned)
+                })
+                .filter(|value| !value.trim().is_empty()),
             prompt,
             legacy_status,
             stage,

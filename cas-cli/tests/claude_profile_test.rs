@@ -600,11 +600,13 @@ exit 0
         ))
         .unwrap();
         // (keys written with the email, keys written at the question, succeeds)
-        let cases: [(&[u8], &[u8], bool); 4] = [
+        let cases: [(&[u8], &[u8], bool); 5] = [
             (b"typed@example.com\ry\r", b"", true),
             // An unfinished type-ahead stays editable and can be completed.
             (b"typed@example.com\rn", b"\x7fy\r", true),
             (b"typed@example.com\ry", b"\r", true),
+            // Enter typed during the login reaches the editor as a newline.
+            (b"typed@example.com\ry", b"\n", true),
             (b"typed@example.com\r\x03", b"", false),
         ];
         for (with_email, at_question, succeeds) in cases {

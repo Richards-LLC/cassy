@@ -1993,6 +1993,7 @@ journeys:
   - Decode an inline image without moving its file caption
   - Read the real PDF first page inline
   - Play video and audio on demand; unavailable files keep Open
+  - Scroll a failed thumbnail out of the DOM, reconnect while it is cached, and scroll back to the recovered image
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/markdown-renderer.ts
@@ -2007,7 +2008,7 @@ journeys:
   - hub-web/e2e/journeys/rich-content.journey.ts
   - hub-web/playwright.rich-content-hub.config.ts
   - hub-web/scripts/rich-content-visual-qa.mjs
-  invariants: [HUB-J22-GOAL]
+  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY]
   traffic:
     share_pct: null
     basis: New evidence-reading journey; no per-journey usage instrumentation.

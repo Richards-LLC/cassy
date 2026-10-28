@@ -346,7 +346,8 @@ context_window = 200000
                     return {"mode": mode, "inventory": inventory, "audience": audience,
                             "status": "unsupported", "exit": result.returncode, "requests": len(model_requests),
                             "reason": result.stderr.strip(), "full_native_catalog_characters": None,
-                            "native_body_loaded": False, "original_skill_files_unchanged": True,
+                            "native_body_loaded": False,
+                            "original_skill_files_unchanged": all(file.read_bytes() == value for file, value in original_files.items()),
                             "refresh_link_control": refresh_link_control(root)}
                 raise RuntimeError(f"native fixture failed: exit={result.returncode}, requests={len(stub.requests)}\n{result.stdout}\n{result.stderr}")
             texts = list(strings(model_requests[0]))

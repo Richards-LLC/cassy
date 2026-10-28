@@ -446,23 +446,11 @@ fn qa_impact_commander_registry_matches_recent_merge_catalog_selection() {
             "clone",
             "--quiet",
             "--shared",
-            "--no-checkout",
             ".",
             snapshot.path().to_str().unwrap(),
         ],
     );
     let root = snapshot.path();
-    git(
-        root,
-        &[
-            "checkout",
-            "HEAD",
-            "--",
-            "docs/qa",
-            "hub-web",
-            "scripts/journeys-for-diff.py",
-        ],
-    );
     let catalog = std::fs::read_to_string(root.join("docs/qa/journeys.md")).unwrap();
     let (_, template) = catalog.rsplit_once("\n### ").unwrap();
     let template_id = template.split(" · ").next().unwrap();

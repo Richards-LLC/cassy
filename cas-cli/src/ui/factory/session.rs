@@ -38,11 +38,24 @@ pub(crate) struct EndedSession {
 /// Match end evidence to the daemon's owned supervisor generation.
 pub(crate) fn supervisor_end_is_current(
     metadata: &SessionMetadata,
-    _owned_pid: Option<u32>,
-    _recorded_pid: Option<u32>,
-    _recorded_starttime: Option<u64>,
+    owned_pid: Option<u32>,
+    recorded_pid: Option<u32>,
+    recorded_starttime: Option<u64>,
     registered_at: &str,
 ) -> bool {
+    if let Some(owned_pid) = owned_pid {
+        if recorded_pid != Some(owned_pid) {
+            return false;
+        }
+        if let Some((supervisor_start, daemon_start)) = recorded_starttime.zip(metadata.daemon_pid_starttime) {
+            // SessionStart can finish before metadata is written. The owned
+            // PTY's PID and boot-relative birth identify its generation without
+            // depending on the wall-clock ordering of those two writes.
+            return supervisor_start >= daemon_start;
+        }
+    }
+    // Older receipts without process fingerprints retain the conservative
+    // timestamp check; missing evidence must never borrow an earlier reason.
     chrono::DateTime::parse_from_rfc3339(registered_at).ok().zip(
         chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok())
         .is_some_and(|(registered, created)| registered >= created)

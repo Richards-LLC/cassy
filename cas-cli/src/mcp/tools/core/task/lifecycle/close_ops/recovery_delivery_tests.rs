@@ -255,6 +255,57 @@ async fn close(fixture: &Recovery) -> Task {
     parked
 }
 
+/// GH #1382: a start boundary can contain UI inherited from a reused lane.
+/// Only the source range delivered after that boundary owes UI evidence.
+#[tokio::test]
+async fn close_classifies_delivery_after_start_boundary_gh1382() {
+    let mut env = TestEnvGuard::temp_home();
+    for surface in ["api.ts", "delivered.vue"] {
+        let mut f = fixture_with_surface(&mut env, "note.txt", true);
+        let repo = f.dir.path();
+        git(&f.worker_path, &["reset", "--hard", "main"]);
+        std::fs::write(f.worker_path.join("inherited.vue"), "<template>Earlier UI</template>\n").unwrap();
+        git(&f.worker_path, &["add", "inherited.vue"]);
+        git(&f.worker_path, &["commit", "-qm", "Earlier lane work"]);
+        let start = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        std::fs::write(f.worker_path.join(surface), "export const result = 'delivered';\n").unwrap();
+        git(&f.worker_path, &["add", surface]);
+        git(&f.worker_path, &["commit", "-qm", &format!("fix({TASK}): deliver source change")]);
+        f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+        git(repo, &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
+        let cas_dir = repo.join(".cas");
+        let tasks = open_task_store(&cas_dir).unwrap();
+        let mut task = tasks.get(TASK).unwrap();
+        task.demo_statement.clear();
+        task.deliverables.parked_branch = None;
+        task.deliverables.factory_branch_anchor = Some(f.final_tip.clone());
+        task.deliverables.historical_factory_branch_anchors.clear();
+        task.deliverables.factory_branch_start = Some(cas_types::FactoryBranchStart {
+            work_target: task.deliverables.work_target.clone().unwrap(),
+            assignee: WORKER.into(),
+            branch: BRANCH.into(),
+            base_sha: start,
+        });
+        tasks.update(&task).unwrap();
+
+        let output = close_output(&f).await;
+        if surface.ends_with(".vue") {
+            assert!(output.contains("QA evidence bundle"), "delivered UI must owe evidence: {output}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::InProgress, "{output}");
+        } else {
+            assert!(output.contains("MERGE REQUIRED"), "API-only delivery must park: {output}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::AwaitingMerge, "{output}");
+            assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+            git(repo, &["merge", "-q", "--no-ff", BRANCH, "-m", "Integrate API delivery"]);
+            git(repo, &["update-ref", "refs/remotes/origin/main", "main"]);
+            let output = close_output(&f).await;
+            assert!(output.contains("Closed task:"), "API-only delivery must also close after integration: {output}");
+            assert_eq!(tasks.get(TASK).unwrap().status, TaskStatus::Closed, "{output}");
+            assert!(cas_store::list_qa_passes(&cas_dir, TASK).unwrap().is_empty());
+        }
+    }
+}
+
 /// cas-2bec: spawn assigns a plain lane. The commit hook records the RED
 /// commit, but only the pushed GREEN tip has a passing fast-rows receipt.
 #[tokio::test]

@@ -684,7 +684,7 @@ mod tests {
         let reset = Utc::now() + chrono::Duration::hours(1);
         record_claude_statusline(&dir, serde_json::from_value(serde_json::json!({
             "five_hour": {"used_percentage": 12.0, "resets_at": reset.timestamp()},
-            "seven_day": {"used_percentage": 34.0},
+            "seven_day": {"used_percentage": 34.0, "resets_at": reset.timestamp()},
             "accessToken": "must-not-be-cached"
         })).unwrap());
         let report = collect_claude("fixture", &dir);
@@ -698,15 +698,22 @@ mod tests {
         assert!(!fs::read_to_string(dir.join(CLAUDE_SNAPSHOT_FILE)).unwrap().contains("must-not-be-cached"));
         assert!(collect_claude("other", home.path()).windows.is_empty(), "profiles do not share usage");
         let mut snapshot: ClaudeSnapshot = serde_json::from_slice(&fs::read(dir.join(CLAUDE_SNAPSHOT_FILE)).unwrap()).unwrap();
-        snapshot.observed_at = Utc::now() - chrono::Duration::minutes(6);
+        snapshot.observed_at = Utc::now() - chrono::Duration::hours(3);
         fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();
-        assert!(collect_claude("fixture", &dir).windows.is_empty(), "stale capacity is unknown");
-        assert!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows.is_empty(),
-            "worker status must not retain an older in-process snapshot");
+        let report = collect_claude("fixture", &dir);
+        assert_eq!(report.windows[1].used_percent, Some(34.0), "unreset weekly observation survives idle sessions");
+        assert_eq!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows[1].used_percent, Some(34.0));
+        let picker = usage_summaries(crate::accounts::Provider::Claude,
+            vec![("fixture".into(), dir.clone())], Duration::from_secs(1));
+        assert!(picker["fixture"].contains("as of ") && picker["fixture"].contains(" ET"), "{}", picker["fixture"]);
+        let human = render_human(&LimitsReport { accounts: vec![report] });
+        assert!(human.contains("34%") && human.contains("as of ") && human.contains(" ET"), "{human}");
         snapshot.observed_at = Utc::now();
-        snapshot.windows[0].reset_at = Some((Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        for window in &mut snapshot.windows {
+            window.reset_at = Some((Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
+        }
         fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();
-        assert_eq!(collect_claude("fixture", &dir).windows[0].used_percent, None);
+        assert!(collect_claude("fixture", &dir).windows.iter().all(|window| window.used_percent.is_none()));
         fs::write(dir.join(".claude.json"), r#"{"oauthAccount":{"accountUuid":"new-account"}}"#).unwrap();
         assert!(collect_claude("fixture", &dir).windows.is_empty(), "a re-login invalidates old capacity");
     }

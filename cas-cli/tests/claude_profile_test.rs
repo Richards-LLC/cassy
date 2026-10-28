@@ -72,6 +72,42 @@ fn home_with_profiles() -> TempDir {
 }
 
 #[test]
+fn generated_statusline_records_usage_even_for_a_factory_supervisor() {
+    let home = home_with_profiles();
+    let project = TempDir::new().unwrap();
+    cas_cmd(home.path()).current_dir(project.path())
+        .env_remove("CAS_AGENT_ROLE")
+        .args(["init", "--yes", "--no-integrations", "--json"])
+        .assert().success();
+    let settings: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(project.path().join(".claude/settings.json")).unwrap()).unwrap();
+    let command = settings["statusLine"]["command"].as_str().unwrap();
+    let args = command.strip_prefix("cas ").expect("generated Cassy command");
+    for role in ["supervisor", "worker"] {
+        let dir = home.path().join(format!(".claude-{role}"));
+        std::fs::create_dir(&dir).unwrap();
+        cas_cmd(home.path()).current_dir(project.path())
+            .env("CLAUDE_CONFIG_DIR", &dir).env("CAS_AGENT_ROLE", role)
+            .args(args.split_whitespace())
+            .write_stdin(serde_json::json!({"rate_limits": {
+                "seven_day": {"used_percentage": 38, "resets_at": chrono::Utc::now().timestamp() + 86400}
+            }}).to_string())
+            .assert().success();
+        let snapshot: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(dir.join(".cas-claude-usage.json")).expect("generated command must record the native snapshot")).unwrap();
+        assert_eq!(snapshot["windows"][0]["used_percent"], 38);
+        // Idle profiles retain their observation until the window resets.
+        let mut old = snapshot;
+        old["observed_at"] = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339().into();
+        std::fs::write(dir.join(".cas-claude-usage.json"), old.to_string()).unwrap();
+    }
+    cas_cmd(home.path()).args(["claude", "--list-profiles"])
+        .assert().success()
+        .stdout(predicate::str::contains("weekly 62% left as of ").count(2))
+        .stdout(predicate::str::contains(" ET"));
+}
+
+#[test]
 fn list_profiles_shows_detected_accounts_and_login_state() {
     let home = home_with_profiles();
     let alt = home.path().join(".claude-alt");

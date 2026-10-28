@@ -267,7 +267,7 @@ fn supervisor_write_under_harness_file_memory_is_allowed_for_default_and_account
     }
     symlink(&canonical, &account).unwrap();
 
-    for config in [None, Some(account.as_path())] {
+    for config in [Some(account.as_path()), None] {
         match config {
             Some(path) => env.set("CLAUDE_CONFIG_DIR", path),
             None => env.remove("CLAUDE_CONFIG_DIR"),

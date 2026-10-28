@@ -51,6 +51,15 @@ The experimental external-token mode targets host apps that already own their
 user authentication lifecycle. Its existence does not establish approval to
 extract another application's stored subscription tokens.
 
+Support qualification matters: the app-server page's **Protocol** subsection says
+“WebSocket transport is experimental and unsupported.” The CLI reference's
+**`codex app-server`** subsection says “This is primarily for development and
+debugging and may change without notice.” These qualifications must be assessed
+for the chosen transport and deployment; documented methods and client attribution
+do not establish unconditional production approval. This review proposes a
+credential-free metadata seam, not a production deployment decision. The separate
+provider-policy audit owns that verdict.
+
 The three direct Codex storage readers above remain explicitly recorded for a
 separate migration to managed app-server account output. This Claude remediation
 does not claim that those readers are presence-only or that OpenAI endorses them.
@@ -63,6 +72,7 @@ remain independent review obligations, not outcomes inferred from unit tests.
 - [Claude Code statusline](https://code.claude.com/docs/en/statusline): native `rate_limits` fields, used percentage and Unix reset timestamps.
 - [Claude CLI reference](https://code.claude.com/docs/en/cli-reference): supported `auth status` JSON; no documented headless subscription-usage query was found in this review. Interactive `/usage` is not used as an automation protocol.
 - [Claude legal and compliance](https://code.claude.com/docs/en/legal-and-compliance): native subscription authentication constraints motivating removal of credential intermediation.
+- [Codex CLI reference](https://developers.openai.com/codex/cli/reference): the app-server command's development/debugging qualification.
 - [Codex authentication](https://developers.openai.com/codex/auth): native ChatGPT and API-key sign-in modes.
 - [Codex app-server](https://developers.openai.com/codex/app-server): managed account/auth/rate-limit methods and required client attribution.
 - [Sign in with ChatGPT app-server integration](https://developers.openai.com/siwc/token-sharing-open-source/codex-app-server): separately authorized host authentication and client identification.

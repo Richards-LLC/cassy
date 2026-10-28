@@ -13115,17 +13115,16 @@ mod tests {
             scopes: vec!["message:send".into()],
             operator_verified: true,
         };
-        let receipt = daemon.dispatch_commander_control(
-            super::super::delivery::CommanderControl::SendMessage {
-                target: "supervisor".into(),
-                text: "Yes please, reconcile it.".into(),
-                summary: None,
-                urgent: false,
-                client_ref: Some("ben-send".into()),
-                in_reply_to: None,
-                attribution,
-            },
-        ).await.unwrap().unwrap();
+        let send = super::super::delivery::CommanderControl::SendMessage {
+            target: "supervisor".into(),
+            text: "Yes please, reconcile it.".into(),
+            summary: None,
+            urgent: false,
+            client_ref: Some("ben-send".into()),
+            in_reply_to: None,
+            attribution,
+        };
+        let receipt = daemon.dispatch_commander_control(send.clone()).await.unwrap().unwrap();
         let receipt_json = serde_json::to_value(&receipt).unwrap();
         assert_eq!(receipt_json["MessageQueued"]["operator_label"], "Ben",
             "the origin's receipt must name the person, not just the hardware");
@@ -13141,6 +13140,11 @@ mod tests {
                 .is_none()
         );
         let live = daemon.live_operator_message(id).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&live).unwrap()["client_ref"], "ben-send",
+            "a lost live ACK must remain correlatable through the durable turn");
+        let retried = daemon.dispatch_commander_control(send).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(retried).unwrap()["MessageQueued"]["notification_id"], id,
+            "retrying the same client_ref must return the original row");
         assert_eq!(live.state, "acknowledged");
         assert_eq!(live.operator_label.as_deref(), Some("Ben"));
         // The inert supervisor has not consumed the row. A reload and another
@@ -13154,6 +13158,8 @@ mod tests {
             };
             assert_eq!(messages.len(), 1, "{device}'s accepted turn");
             assert_eq!(messages[0].notification_id, live.notification_id);
+            assert_eq!(serde_json::to_value(&messages[0]).unwrap()["client_ref"], "ben-send",
+                "{device}'s durable history must retain send identity after ACK loss");
             assert_eq!(messages[0].text, live.text);
             assert_eq!(messages[0].operator_label.as_deref(), Some("Ben"),
                 "both people must see Ben's name on reload");

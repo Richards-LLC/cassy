@@ -5937,3 +5937,38 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         }
     }
 }
+
+/// Terminal facts survive metadata deletion and hub restart; a replacement
+/// with the same name cannot inherit the old generation's end state.
+#[test]
+fn cec1_session_end_projection_survives_cleanup_without_ending_a_replacement() {
+    use crate::ui::factory::{SessionManager, create_metadata};
+    use crate::ui::factory::SessionEndOutcome;
+    let _env = crate::test_support::TestEnvGuard::temp_home();
+    let manager = SessionManager::new();
+    let mut metadata = create_metadata("ended-session", std::process::id(), "supervisor-a", &[], None, None, Some(4173));
+    metadata.created_at = "2026-10-28T15:00:00Z".into();
+    manager.save_metadata(&metadata).unwrap();
+    let outcome = SessionEndOutcome {
+        at: "2026-10-28T15:24:00Z".into(), reason: "prompt_input_exit".into(),
+        workers_stopped: vec!["worker-a".into(), "worker-b".into()],
+        orphans: vec!["worker-c".into()], unverified: vec!["worker-d".into()],
+    };
+    manager.record_ended(&metadata.name, outcome.clone()).unwrap();
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert_eq!(rows[0].ended, Some(outcome.clone()));
+    manager.remove_metadata(&metadata.name).unwrap();
+    assert!(manager.list_sessions_read_only().unwrap().is_empty());
+    let rows = super::server::supervisor_sessions(LocalSessionReadModel::default().list_sessions().unwrap(), false);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].ended, Some(outcome));
+    assert_eq!(rows[0].liveness, DaemonLiveness::StaleMetadata);
+    assert_eq!(rows[0].workers, vec!["worker-c"]);
+    assert_eq!(rows[0].supervisor, "supervisor-a");
+    assert!(rows[0].ws_port.is_none());
+    metadata.created_at = "2026-10-28T16:00:00Z".into();
+    manager.save_metadata(&metadata).unwrap();
+    let rows = LocalSessionReadModel::default().list_sessions().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].ended.is_none());
+}

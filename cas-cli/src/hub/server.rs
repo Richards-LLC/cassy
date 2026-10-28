@@ -2739,7 +2739,7 @@ pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: boo
     sessions
         .into_iter()
         .filter(|session| {
-            reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
+            session.ended.is_some() || reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
         })
         .filter(|session| !session.supervisor.trim().is_empty())
         .collect()

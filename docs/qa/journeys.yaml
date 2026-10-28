@@ -64,6 +64,10 @@ invariants:
     statement: the link pairs this browser and I reach the supervisor
     check: 'Walk HUB-J2 in hub-web/e2e/journeys/pair-link.journey.ts; verify the expected experience and edge paths
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the exchange endpoint is doubled'
+  HUB-J3-SESSION-ENDED:
+    statement: A supervisor exit closes its conversation with a dated receipt, confirmed worker stop count and named surviving workers; the row and header say Ended and sends cannot queue to the dead session.
+    check: 'Run the session-ended case in conversation-stage.test.ts and hub::tests::cec1_session_end_projection_survives_cleanup_without_ending_a_replacement; capture a real supervisor /exit with at least two workers and verify the receipt within ten seconds, local twelve-hour time, ended row/header and composer guidance.'
+    bug: {task: cas-cec1}
   HUB-J3-GOAL:
     statement: I can tell which conversation has something new and get to it quickly
     check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
@@ -627,6 +631,7 @@ journeys:
   - hub-web/src/viewport.ts
   invariants:
   - HUB-J3-GOAL
+  - HUB-J3-SESSION-ENDED
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

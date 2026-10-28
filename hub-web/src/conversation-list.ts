@@ -1,9 +1,11 @@
+import type { SessionEndOutcome } from "./types";
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 
 export interface ConversationRow {
+  ended?: SessionEndOutcome;
   key: string;
   machineId: string;
   session: string;
@@ -201,6 +203,7 @@ export function conversationRowSpokenName(row: ConversationRow): string {
  * then the last turn.
  */
 function rowPreviewText(row: ConversationRow, fallback: string): string {
+  if (row.ended) return `Ended · ${row.ended.workers_stopped.length} workers stopped${row.ended.orphans.length ? ` · Still alive: ${row.ended.orphans.join(", ")}` : ""}`;
   if (row.unreachable || row.interrupted) return row.connection;
   const draft = row.draft?.trim();
   if (draft && !row.selected) return `Draft: ${draft}`;
@@ -208,7 +211,7 @@ function rowPreviewText(row: ConversationRow, fallback: string): string {
 }
 
 export function conversationRowMarkup(row: ConversationRow): string {
-  const waiting = row.attention > 0;
+  const waiting = !row.ended && row.attention > 0;
   const unread = row.unread ?? 0;
   // cas-5d2c: a grouped row with no turn of its own yet shows what its
   // session last did, so siblings differ before any of them is opened.

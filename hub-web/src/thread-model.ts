@@ -12,6 +12,7 @@
  */
 import type { ConversationEvent, ConversationSend } from "./conversation-history";
 import type { OperatorReply, OperatorTurnKind } from "./types";
+import type { WorkEvent } from "./work-events";
 
 export type ThreadSide = "you" | "supervisor";
 
@@ -55,8 +56,14 @@ export interface ThreadDay { type: "day"; key: string; label: string }
 export interface ThreadSession { type: "session"; key: string; label: string }
 export interface ThreadHistoryEnd { type: "history-end"; key: string; label: string }
 export interface ThreadWorking { type: "working"; key: string }
+/**
+ * One stretch of the supervisor's work between two conversation turns
+ * (cas-ff22): its thinking, tool calls and task events, oldest first.
+ * Keyed by its first event, so events appended to it repaint this one node.
+ */
+export interface ThreadWork { type: "work"; key: string; events: WorkEvent[] }
 
-export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking;
+export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking | ThreadWork;
 
 export interface ThreadModelOptions {
   /** Whether the supervisor is executing: appends the working line. */
@@ -70,6 +77,13 @@ export interface ThreadModelOptions {
    * "session … started" divider: the thread is that session.
    */
   session?: string;
+  /**
+   * Show work (cas-ff22): the session's work events, oldest first. Each run
+   * between two turns becomes one `work` item. Events older than the oldest
+   * loaded turn wait for that turn's page unless history is complete.
+   * Absent, the model is exactly the conversation's.
+   */
+  work?: readonly WorkEvent[];
 }
 
 export function eventKey(event: ConversationEvent): string {
@@ -204,8 +218,30 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group = undefined;
   };
 
+  const work = options.work ?? [];
+  let nextWork = 0;
+  /** Paint the work done before `until` (all of it when undefined) as one item. */
+  const flushWork = (until: number | undefined): void => {
+    const start = nextWork;
+    while (nextWork < work.length && (until === undefined || work[nextWork]!.at < until)) nextWork += 1;
+    if (nextWork === start) return;
+    closeGroup(); coalesce = undefined;
+    const run = work.slice(start, nextWork);
+    // Work that opens the thread sits under its own day, not above the first label.
+    if (lastDay === undefined) {
+      lastDay = dayKey(run[0]!.at);
+      items.push({ type: "day", key: `day:${lastDay}`, label: dayLabel(run[0]!.at, now) });
+    }
+    items.push({ type: "work", key: `work:${run[0]!.id}`, events: run });
+  };
+
   const times = shownTimes(events, now);
   events.forEach((event, index) => {
+    if (event.at !== undefined) {
+      // Work older than the loaded history waits for its page.
+      if (index === 0 && !options.historyEnd) while (nextWork < work.length && work[nextWork]!.at < event.at) nextWork += 1;
+      else flushWork(event.at);
+    }
     const { at, clockAhead } = times[index]!;
     if (at !== undefined) {
       const day = dayKey(at);
@@ -270,6 +306,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group.time = stampLabel(at, now) ?? group.time;
     if (at !== undefined) { group.clockAhead = clockAhead; groupLastAt = at; }
   });
+  if (events.length > 0) flushWork(undefined);
   closeGroup();
   // An empty durable page owns the empty state. Do not let pagination or a
   // transient working signal turn it into a fake history marker/thread.

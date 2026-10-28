@@ -16,6 +16,9 @@ import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
 import { inlineAttachment } from '../src/rich-attachment';
 import evidenceImage from '../e2e/media/evidence.png?url';
+import { WorkEventStream, workEventsPage } from '../src/work-events';
+import type { WorkRowsContext } from '../src/work-rows-view';
+import { renderWorkerTimeline, workerTimelineDialog } from '../src/worker-timeline';
 import './pairs.css';
 // Real operator row 20812 (1,079 characters): the long status D2 measured.
 import LONG_STATUS from './hub-row-20812.txt?raw';
@@ -363,9 +366,31 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       reply(42, 41, 'The project badge stays visible in the list and conversation header.', 'answer', at(9, 43));
     }
   }
+  // cas-ff22: Show work on, the work between the send and its answer, one block open with a failed tool call's detail.
+  const showWork = state === 'conversation-show-work' || state === 'conversation-worker-timeline';
+  const workStream = new WorkEventStream();
+  const workOpen = new Set<string>(state === 'conversation-show-work' ? ['work:t:sup:1:0', 'row:t:sup:2:0'] : []);
+  const workDetail = 'Bash\n\nInput:\ncargo nextest run -p cas -E \'test(work_events)\'\n\nResult (error):\n1 test failed: a_worker_timeline_reads_its_own_transcript';
+  const stamp = (offset: number) => new Date(at(9, 41) + offset).toISOString();
+  workStream.requested('fixture', 'newest');
+  workStream.accept(workEventsPage({ request_id: 'fixture', has_earlier: false, events: [
+    { id: 't:sup:1:0', kind: 'thinking', session: 'fixture', agent: supervisor, at: stamp(20_000), label: 'Checking the lane before the merge', has_detail: true },
+    { id: 't:sup:2:0', kind: 'tool', session: 'fixture', agent: supervisor, at: stamp(30_000), label: 'Bash: Run the work-event tests', has_detail: true, error: true },
+    { id: 't:sup:3:0', kind: 'tool', session: 'fixture', agent: supervisor, at: stamp(50_000), label: 'Read: cas-cli/src/ui/factory/daemon/runtime/work_events.rs', has_detail: true },
+    { id: 'q:7', kind: 'task', session: 'fixture', agent: 'swift-lark-3', at: stamp(60_000), label: 'cas-42 parked for merge: Ship the stream', has_detail: true },
+    { id: 'q:8', kind: 'task', session: 'fixture', agent: 'swift-lark-3', at: stamp(70_000), label: 'cas-43 blocked: Wait for the hub relay', has_detail: true },
+  ] })!);
+  workStream.requested('detail', { detail: 't:sup:2:0' });
+  workStream.acceptDetail({ request_id: 'detail', event_id: 't:sup:2:0', detail: workDetail, truncated: false });
+  const workRows: WorkRowsContext = {
+    detail: (id) => workStream.detail(id),
+    requestDetail: () => {},
+    isOpen: (key) => workOpen.has(key),
+    setOpen: (key, open) => { if (open) workOpen.add(key); else workOpen.delete(key); },
+  };
   // Fixture respond: record the chip as an operator send answering the ask, exactly as main.ts does after the hub accepts it.
   const sessionFixture = state === 'conversation-sessions';
-  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture || state === 'conversation-empty-long-machine' ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }) } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
+  const view = new ConversationView(document, history, { supervisor, machine: machine.label, project: machine.project, header: false, working: () => working, echo: () => echo, ...(sessionFixture || state === 'conversation-empty-long-machine' ? { activity: () => ({ at: Date.now() - 120_000, label: 'supervisor → bright-robin-85' }) } : {}), hasEarlier: () => loadingEarlier, loadingEarlier: () => loadingEarlier, loadingHistory: () => state === 'conversation-opening', openingSince: () => Date.now() - 5_000, editMessage: () => {}, ...(showWork ? { work: () => workStream.events, workRows } : {}), retryMessage: (send) => { history.discardRefused(send.id); history.submit(`retry-${send.id}`, supervisor, send.text, Date.now(), send.replyTo); view.update(); }, respond: (ask, text) => { history.submit(`quick-${ask.notification_id}`, supervisor, text, Date.now(), ask.notification_id); view.update(); syncContextRail(app, { history, progress: false, attention: 0 }); } });
   const paneSlot = app.querySelector<HTMLElement>('#conversation-pane-slot')!;
   if (state === 'connection-failed-retry' || state === 'connection-fatal-browser') renderConnectionStage(paneSlot, view, state);
   else paneSlot.append(view.element);
@@ -407,6 +432,26 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
   // thread with neither folds the rail to its 48px track.
   syncContextRail(app, { history, progress: false, attention: 0 });
   if (state === 'conversation-raw-output') openRawOutputFixture(machine.project);
+  if (showWork) app.querySelector<HTMLButtonElement>('#conversation-show-work')?.setAttribute('aria-pressed', 'true');
+  if (state === 'conversation-worker-timeline') openWorkerTimelineFixture();
+}
+
+/** cas-ff22: one worker's timeline, newest first, with its task and state. */
+function openWorkerTimelineFixture(): void {
+  const stream = new WorkEventStream('swift-lark-3');
+  const now = Date.now();
+  stream.requested('fixture', 'newest');
+  stream.accept(workEventsPage({ request_id: 'fixture', has_earlier: true, next_before: 'older', events: [
+    { id: 't:w:1:0', kind: 'thinking', session: 'fixture', agent: 'swift-lark-3', at: new Date(now - 240_000).toISOString(), label: 'Reading the stream spec', has_detail: true },
+    { id: 't:w:2:0', kind: 'tool', session: 'fixture', agent: 'swift-lark-3', at: new Date(now - 180_000).toISOString(), label: 'Read: docs/guides/commander-work-events.md', has_detail: true },
+    { id: 'e:9', kind: 'worker', session: 'fixture', agent: 'swift-lark-3', at: new Date(now - 120_000).toISOString(), label: 'Committed changes', has_detail: false },
+    { id: 't:w:3:0', kind: 'todo', session: 'fixture', agent: 'swift-lark-3', at: new Date(now - 90_000).toISOString(), label: 'Todos 2/3 · Running the lane tests', has_detail: true },
+    { id: 't:w:4:0', kind: 'tool', session: 'fixture', agent: 'swift-lark-3', at: new Date(now - 30_000).toISOString(), label: 'Bash: cargo nextest run -p cas -E test(work_events)', has_detail: true },
+  ] })!);
+  const handlers = { readOlder: () => {}, closed: () => {}, rawOutput: () => {} };
+  const dialog = workerTimelineDialog(document, handlers);
+  renderWorkerTimeline(dialog, { worker: 'swift-lark-3', status: 'active', task: 'cas-42', taskTitle: 'Ship the stream' }, stream, { detail: () => undefined, requestDetail: () => {}, isOpen: () => false, setOpen: () => {} }, handlers);
+  dialog.showModal();
 }
 
 /**

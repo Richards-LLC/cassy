@@ -19,7 +19,7 @@ import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./co
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
 import { arrivalStore, catalogCacheStore, readMarkStore, draftStore, pendingSendStore, purgeConversations, type Arrivals, type Draft, type PendingSend } from "./conversation-store";
 import { HeldSendFlushes } from "./held-send-flush";
-import { CommanderJournal, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
+import { CommanderJournal, REPLY_WRITE_BATCH, credentialFence, deliveryScope, scopeKey, type CredentialFence, type DeliveryScope } from "./commander-journal";
 import { loadDismissedAsks, saveDismissedAsks, type DismissedAsksStorage } from "./dismissed-asks";
 import { ConversationView, emptyActivityText } from "./conversation-view";
 import { applySheetSemantics, findByFocusKey, focusKey, layerAboveSheet, sheetFocusables, sheetKeydown } from "./attention-sheet";
@@ -86,6 +86,8 @@ import { inboxThreads } from "./inbox/projection";
 import { IndexedDbInboxStore } from "./inbox/store";
 import { operatorOrigin } from "./inbox/wire";
 import { countUsage, usage, type UsageAction } from "./usage";
+import { WorkPicture } from "./work-picture";
+import { renderWorkerTimeline, workerTimelineDialog } from "./worker-timeline";
 import type { AttentionItem, ConversationHistoryPage, HubSession, LeaseState, OperatorReply, Scope, SessionCardSummary, SessionState, StoredMachine } from "./types";
 
 applyScheme();
@@ -176,6 +178,20 @@ installAttachmentSheet((sheet, file, context) => {
   return inlineAttachment(sheet, file, async () => connections.get(machineId)?.artifactPreview(session, file.artifact_id));
 });
 const conversationHistories = new Map<string, ConversationHistory>();
+/**
+ * Show work (cas-ff22): what work-event pages to read and when. A repaint
+ * updates only the session's own thread views and the open timeline, never
+ * the shell.
+ */
+const workPicture = new WorkPicture({
+  transport: (machineId) => connections.get(machineId),
+  repaintThread: (machineId, session) => {
+    const key = sessionKey(machineId, session);
+    for (const [viewKey, view] of conversationViews) if (viewKey === key || viewKey.startsWith(`${key}:`)) view.update();
+  },
+  repaintTimeline: () => syncWorkerTimeline(),
+  storage: (() => { try { return window.localStorage; } catch { return undefined; } })(),
+});
 /** Supervisor turns per thread the operator had on screen the last time that thread was open. */
 const readReplies = new Map<string, number>();
 /** Rows as last rendered, so the compose FAB can pick the thread that most wants the operator. */
@@ -466,6 +482,9 @@ function mountConversation(key: string, mount: HTMLElement): void {
         const page = conversationHistoryPage(threadKey);
         return page.loaded && !page.hasEarlier;
       },
+      // cas-ff22: Show work's rows between the turns; undefined while it is off.
+      work: () => workPicture.threadWork(threadMachineId, threadSession),
+      workRows: workPicture.rows(threadMachineId, threadSession),
       loadEarlier: () => {
         const page = conversationHistoryPage(threadKey);
         if (page.loading || page.nextBefore === undefined) return;
@@ -480,6 +499,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
     });
     conversationViews.set(key, conversation);
   }
+  workPicture.watchThread(selectedMachineId, selectedSession);
   if (conversation.element.parentElement !== mount) mount.append(conversation.element);
   // The unanswered ask is pinned directly above the composer as well as in the flow.
   const composerSlot = document.querySelector<HTMLElement>("#conversation-composer-slot");
@@ -766,6 +786,10 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       const key = sessionKey(machine.id, session);
       const attachWasLive = attachStates.get(key)?.phase === "live";
       attachStates.set(key, state);
+      // cas-ff22: answers in flight on the old socket never come; a live
+      // attach re-reads the newest work of whatever shows it.
+      if (attachWasLive && state.phase !== "live") workPicture.disconnected(machine.id, session);
+      if (state.phase === "live" && !attachWasLive) { workPicture.disconnected(machine.id, session); workPicture.reattached(machine.id, session); }
       if (state.phase === "live") {
         sessionsEverLive.add(key);
         clearTransportStatus(key);
@@ -958,12 +982,21 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       }
       updateConversationViews();
       renderConversationList();
+      // cas-ff22: older turns on screen may want the work done between them.
+      workPicture.coverHistory(machine.id, session, history.visibleEvents()[0]?.at);
       if (selectedMachineId === machine.id && selectedSession === session) render();
     },
     onSessionSummary: (session, summary) => {
       sessionSummaries.set(sessionKey(machine.id, session), summary);
       render();
     },
+    onWorkEvents: (session, page) => {
+      workPicture.page(machine.id, session, page);
+      workPicture.coverHistory(machine.id, session, conversationHistory(sessionKey(machine.id, session), session).visibleEvents()[0]?.at);
+    },
+    onWorkEventDetail: (session, detail) => workPicture.detail(machine.id, session, detail),
+    onWorkEventsFailed: (session, requestId, detail) => workPicture.failed(machine.id, session, requestId, detail),
+    onWorkEventsAppended: (session) => workPicture.appended(machine.id, session),
     onSocketError: (session, detail) => {
       renderTerminalFailure(machine.id, session, detail);
       // A retrying drop is already one plain status on the banner, header, row
@@ -2138,6 +2171,30 @@ function syncConversationActions(): void {
   syncControlHolder();
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-interrupt"), document.querySelector<HTMLElement>("#conversation-interrupt-reason"), interruptUnavailableReason());
   applyActionAvailability(document.querySelector<HTMLButtonElement>("#conversation-raw-output"), document.querySelector<HTMLElement>("#conversation-raw-output-reason"), rawOutputUnavailableReason());
+  const showWork = document.querySelector<HTMLButtonElement>("#conversation-show-work");
+  showWork?.setAttribute("aria-pressed", String(workPicture.showWork));
+  applyActionAvailability(showWork, document.querySelector<HTMLElement>("#conversation-show-work-reason"), showWorkUnavailableReason());
+}
+
+/** Why Show work cannot show anything for the open conversation (cas-ff22), if it cannot. */
+function showWorkUnavailableReason(): string | undefined {
+  if (!selectedMachineId || !selectedSession) return "Open a conversation to see its work.";
+  if (attachStates.get(sessionKey(selectedMachineId, selectedSession))?.phase !== "live" && !workPicture.supported(selectedMachineId, selectedSession)) return "Work shows once the conversation is connected.";
+  if (!workPicture.supported(selectedMachineId, selectedSession)) return "This machine's Cassy does not serve work yet. Update Cassy there to see work.";
+  return undefined;
+}
+
+/** Show work's switch: off shows replies only, on shows the work between them, on this device. */
+function toggleShowWork(): void {
+  const reason = showWorkUnavailableReason();
+  if (reason && !workPicture.showWork) {
+    const thread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
+    toast(reason, { thread, until: () => showWorkUnavailableReason() !== reason });
+    return;
+  }
+  workPicture.setShowWork(!workPicture.showWork);
+  countUsage("show-work.toggle");
+  syncConversationActions();
 }
 
 /**
@@ -2245,6 +2302,52 @@ function rawOutputDialog(): HTMLDialogElement {
     toggle?.focus();
   });
   return opened;
+}
+
+/** The worker whose timeline is open (cas-ff22). */
+let timelineWorker: { machineId: string; session: string; worker: string } | undefined;
+
+function timelineHandlers(): Parameters<typeof renderWorkerTimeline>[4] {
+  return {
+    readOlder: () => { if (timelineWorker) { workPicture.readOlder({ machineId: timelineWorker.machineId, session: timelineWorker.session, agent: timelineWorker.worker }); syncWorkerTimeline(); } },
+    closed: () => {
+      const closing = timelineWorker;
+      timelineWorker = undefined;
+      workPicture.watchTimeline(undefined);
+      // Focus goes back to the row's Timeline control, which a rail repaint may have replaced.
+      if (closing) document.querySelector<HTMLButtonElement>(`.status-timeline[data-worker="${CSS.escape(closing.worker)}"]`)?.focus();
+    },
+    rawOutput: openRawOutput,
+  };
+}
+
+/** Open one worker's live timeline from its row in Tasks & progress (cas-ff22). */
+function openWorkerTimeline(machineId: string, session: string, worker: string): void {
+  timelineWorker = { machineId, session, worker };
+  const dialog = workerTimelineDialog(document, timelineHandlers());
+  workPicture.watchTimeline({ machineId, session, agent: worker });
+  syncWorkerTimeline();
+  if (!dialog.open) { countUsage("worker.timeline"); dialog.showModal(); }
+}
+
+/** Repaint the open timeline from its stream and the worker's latest status. */
+function syncWorkerTimeline(): void {
+  const dialog = document.querySelector<HTMLDialogElement>("#worker-timeline");
+  if (!dialog?.open && !timelineWorker) return;
+  if (!dialog || !timelineWorker) return;
+  const { machineId, session, worker } = timelineWorker;
+  const status = statuses.get(sessionKey(machineId, session));
+  const agent = ((status?.agents as FleetAgent[] | undefined) ?? []).find((candidate) => candidate.name === worker);
+  const tasks = [...((status?.tasks_in_progress as FleetTask[] | undefined) ?? []), ...((status?.tasks_ready as FleetTask[] | undefined) ?? [])];
+  const task = agent?.current_task ?? undefined;
+  const unavailable = workPicture.timelineSupported(machineId, session) ? undefined : "This machine's Cassy does not serve worker timelines yet. Update Cassy there, or read the worker's terminal on the machine.";
+  renderWorkerTimeline(dialog, {
+    worker,
+    ...(agent?.status ? { status: agent.status } : {}),
+    ...(task ? { task } : {}),
+    ...(task && tasks.find((candidate) => candidate.id === task)?.title ? { taskTitle: String(tasks.find((candidate) => candidate.id === task)!.title) } : {}),
+    ...(unavailable ? { unavailable } : {}),
+  }, workPicture.stream(machineId, session, worker), workPicture.rows(machineId, session, worker), timelineHandlers());
 }
 
 /** Open the read-only Raw output drawer over the open conversation (cas-0546). */
@@ -2512,9 +2615,9 @@ function toast(message: string, scope?: { thread?: string; until?: () => boolean
   placeToastClearOfBanner(output);
   output.classList.add("visible");
   if (toastTimer !== undefined) window.clearTimeout(toastTimer);
-  // Timing out only hides it, as before; a scoped toast is also emptied once
-  // its conversation closes or its state ends (retireStaleToast).
-  toastTimer = window.setTimeout(() => output.classList.remove("visible"), 3200);
+  // Expiry retires the announcement too: an opacity-zero live region must
+  // not keep an old connection claim in the accessibility tree.
+  toastTimer = window.setTimeout(dismissToast, 3200);
 }
 
 /** The re-pair command shown under the status that introduces it (cas-093d F02). */
@@ -3396,26 +3499,51 @@ function restoreStoredSends(machine: StoredMachine): void {
   });
 }
 
+type DeviceReplyWrite = { machine: StoredMachine; session: string; reply: OperatorReply; fence: CredentialFence; done: () => void };
+const deviceReplyWrites: DeviceReplyWrite[] = [];
+let writingDeviceReplies = false;
+
 async function persistDeviceReply(machine: StoredMachine, session: string, reply: OperatorReply, frameFence?: CredentialFence): Promise<void> {
   // Never authorize a conversation reply ACK for an attention-only notice.
   if (isOperatorNotice(reply)) return;
+  return new Promise(resolve => {
+    deviceReplyWrites.push({ machine, session, reply, fence: frameFence ?? credentialFence(machine), done: resolve });
+    if (!writingDeviceReplies) {
+      writingDeviceReplies = true;
+      queueMicrotask(() => { void flushDeviceReplyWrites(); });
+    }
+  });
+}
+
+async function flushDeviceReplyWrites(): Promise<void> {
   try {
-  const fence = frameFence ?? credentialFence(machine);
-  const scope = deliveryScope(machine, session);
-  if (!await sendJournal.persistReply(scope, reply, fence)) { markReplyNotKept(machine, session, reply); return; }
-  const current = (await catalog.snapshot()).machines.find((item) => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
-  if (!current || current.credentialId !== fence.credentialId || credentialFence(current).generation !== fence.generation || conversationPersistenceBlocked.has(machine.id)) return;
-  conversationHistory(sessionKey(machine.id, session)).markReplyPersisted(reply.notification_id);
-  // Device identity is derived by the hub, never trusted from this frame.
-  connections.get(machine.id)?.send(session, { OperatorReplyPersisted: { notification_id: reply.notification_id, device_id: "" } });
-  updateConversationViews();
-  } catch { markReplyNotKept(machine, session, reply); /* Display remains forwarded; failed storage cannot authorize ACK. */ }
+    while (deviceReplyWrites.length) {
+      const writes = deviceReplyWrites.splice(0, REPLY_WRITE_BATCH);
+      const saved = await Promise.all(writes.map(({ machine, session, reply, fence }) =>
+        sendJournal.persistReply(deliveryScope(machine, session), reply, fence).catch(() => false)));
+      // Recheck the active installation after the durable commit, once per
+      // batch. Neither an old frame nor a revoked pairing can authorize ACKs.
+      const snapshot = saved.some(Boolean) ? await catalog.snapshot().catch(() => undefined) : undefined;
+      writes.forEach(({ machine, session, reply, fence, done }, index) => {
+        try {
+          if (!saved[index]) { markReplyNotKept(machine, session, reply); return; }
+          const current = snapshot?.machines.find(item => item.id === machine.id && item.deviceId === machine.deviceId && item.baseUrl === machine.baseUrl);
+          if (!current || current.credentialId !== fence.credentialId || credentialFence(current).generation !== fence.generation || conversationPersistenceBlocked.has(machine.id)) return;
+          conversationHistory(sessionKey(machine.id, session)).markReplyPersisted(reply.notification_id);
+          // Device identity is derived by the hub, never trusted from this frame.
+          connections.get(machine.id)?.send(session, { OperatorReplyPersisted: { notification_id: reply.notification_id, device_id: "" } });
+        } catch { /* A closed socket retries the committed reply on reconnect. */ }
+        finally { done(); }
+      });
+      // Receipt display does not delay the next item in the same commit.
+      try { updateConversationViews(); } catch { /* presentation cannot invalidate a durable receipt */ }
+    }
+  } finally { writingDeviceReplies = false; }
 }
 
 /** cas-97d58 F05: say "Not kept on this device yet" only after storing it actually failed. */
 function markReplyNotKept(machine: StoredMachine, session: string, reply: OperatorReply): void {
   conversationHistory(sessionKey(machine.id, session)).markReplyStoreFailed(reply.notification_id);
-  updateConversationViews();
 }
 
 async function cancelWaitingMessage(machineId: string, session: string, id: string): Promise<void> {
@@ -4928,6 +5056,16 @@ function renderStatus(status?: Record<string, unknown>): void {
     line.append(identifier(worker.name), chip(worker.agent?.status));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
+    if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
+      const machineId = selectedMachineId, sessionName = selectedSession;
+      const open = document.createElement("button");
+      open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
+      open.setAttribute("aria-haspopup", "dialog");
+      open.setAttribute("aria-label", `${worker.name} timeline`);
+      open.textContent = "Timeline";
+      open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
+      line.append(open);
+    }
     const work = document.createElement("p"); work.className = "status-activity";
     if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
     work.append(document.createTextNode(worker.work)); row.append(work);
@@ -4954,6 +5092,7 @@ function renderStatus(status?: Record<string, unknown>): void {
     empty.textContent = "No agents or tasks reported for this session yet.";
     container.append(empty);
   }
+  syncWorkerTimeline();
   if (phoneLayout()) presentFleetSheet(container, dismissFleetPanel);
   restoreFocus();
 }
@@ -5016,6 +5155,8 @@ function bindEvents(): void {
   if (interrupt) interrupt.onclick = () => { void interruptSupervisor(); };
   const rawOutputToggle = document.querySelector<HTMLButtonElement>("#conversation-raw-output");
   if (rawOutputToggle) rawOutputToggle.onclick = openRawOutput;
+  const showWorkToggle = document.querySelector<HTMLButtonElement>("#conversation-show-work");
+  if (showWorkToggle) showWorkToggle.onclick = toggleShowWork;
   // Phone compose FAB: open the thread that is waiting on the operator, else
   // the first one, and land in its composer; with nothing paired, pair.
   const compose = document.querySelector<HTMLButtonElement>("#compose-fab");

@@ -22,6 +22,8 @@ export const FIXTURE_NAMES = [
   "conversation-needs-pairing",
   "conversation-interrupt-unavailable",
   "conversation-raw-output",
+  "conversation-show-work",
+  "conversation-worker-timeline",
   "attention-notice-details",
   "fleet-ops-menu",
   "fleet-ops-confirm",

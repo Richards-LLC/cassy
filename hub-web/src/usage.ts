@@ -34,6 +34,8 @@ export const USAGE_ACTIONS = {
   "write-grant": "HUB-J20",
   "app-switch.explorer": "HUB-J21",
   "rich-content.inspect": "HUB-J22",
+  "show-work.toggle": "HUB-J25",
+  "worker.timeline": "HUB-J25",
 } as const;
 
 export type UsageAction = keyof typeof USAGE_ACTIONS;

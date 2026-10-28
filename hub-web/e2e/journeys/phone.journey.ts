@@ -1,5 +1,5 @@
 import type { Locator, Page } from "@playwright/test";
-import { test, expect, journeyPart } from "./journey";
+import { test, expect, journeyPart, holdPageClock } from "./journey";
 import type { HubDouble, Machine } from "./hub-double";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 
@@ -343,6 +343,18 @@ test("HUB-J9 on a phone: from the list to a reply and back", async ({ page, jour
     });
     const [notice, heading] = await Promise.all([toast.boundingBox(), page.locator(".conversation-heading").boundingBox()]);
     expect(notice!.y, "toast below the thread header").toBeGreaterThanOrEqual(heading!.y + heading!.height);
+    await expect(toast).toHaveAttribute("role", "status");
+    await holdPageClock(page);
+    try {
+      // The public notice lasts 3.2 seconds; advance its browser clock,
+      // rather than waiting for the host to be idle long enough.
+      await page.clock.fastForward(3_200);
+      await expect(toast).not.toHaveClass(/\bvisible\b/);
+      await expect(toast).toBeEmpty();
+      await expect(toast).toHaveAttribute("role", "status");
+    } finally {
+      await page.clock.resume();
+    }
   });
 });
 

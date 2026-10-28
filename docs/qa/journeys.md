@@ -121,6 +121,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Expected experience
 
+- Reply receipt regression (cas-c641): a live daemon reply with `operator_label: null` commits to IndexedDB before exactly one application ACK. Pending replies outside the bounded history page drain across batches of ten; after a fresh attach the drained backlog is not replayed. Lost ACKs remain safe to re-ACK without duplicate turns. A reply queued behind a busy browser writer for more than five seconds still commits before authorizing its ACK.
+
 - Rows read project first, then machine, so two machines never look alike; the generated codename is tertiary.
 - New replies and questions waiting for me are visible on the row without opening it.
 - A visible search field finds a conversation by project, machine or supervisor; the palette does too, from anywhere.
@@ -319,7 +321,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
 6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
 7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
-8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row
+8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row. After its 3.2-second lifetime, the status region is empty so the expired notice is no longer read.
 9. Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row, Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom sheet, and 932×430, where it is a side drawer with no empty left gutter, in dark)
 
 #### Expected experience
@@ -733,3 +735,33 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Invalid diagram syntax remains readable source.
 - Missing or local-only artifacts show Preview unavailable beside their original Open link.
 - SVG from the renderer is sanitized before DOM node insertion; the unit boundary regression supplies script, event-handler and foreignObject payloads.
+### HUB-J25 · See the whole picture of the work
+
+- **Entry:** `/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a thread with work between two replies, and one worker on a task
+- **Goal:** see what the supervisor thought, ran and moved between its replies, collapsed until I open it, with each detail loaded only when I ask, and follow one worker's live timeline from Tasks & progress, without a terminal
+- **Touches:** `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`
+- **Suite:** `hub-web/e2e/journeys/whole-picture.journey.ts`
+- **Gaps:** the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe and the hub's follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests`)
+
+#### Steps
+
+1. Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is read
+2. Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and its rows not; a worker's own tool call stays in its timeline
+3. Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand and markup in it reads as text
+4. New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the earlier reply keeps its node
+5. Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies only
+6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
+7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
+8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+
+#### Expected experience
+
+- Work reads as quiet context between replies, never as a reply: one muted line, chips for task moves, rows a tap deeper.
+- The timeline replaces watching a worker's terminal: state, task and the last things it did, updating by itself.
+- Nothing heavy loads until asked: no work page while Show work is off, and no detail until a row opens.
+
+#### Edge paths
+
+- A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
+- A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
+- A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.

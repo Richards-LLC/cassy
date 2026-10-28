@@ -83,8 +83,8 @@ impl PublishDisposition {
             PublishDisposition::Committed { cloud_url: None } => {
                 "stored in Cloud (private)".to_string()
             }
-            PublishDisposition::CommittedMetadataUnavailable { reason } => {
-                format!("stored in Cloud; artifact_metadata_unavailable: {reason}")
+            PublishDisposition::CommittedMetadataUnavailable { .. } => {
+                "stored in Cloud; peer metadata unavailable".to_string()
             }
             PublishDisposition::StorageNotLive { .. } => {
                 "recorded locally; Cloud storage is not live yet".to_string()

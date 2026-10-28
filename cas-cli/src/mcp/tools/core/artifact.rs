@@ -175,7 +175,7 @@ fn internal(error: impl std::fmt::Display) -> McpError {
 fn metadata_error(error: anyhow::Error) -> McpError {
     if let Some(missing) = error.downcast_ref::<crate::artifacts::proof::MetadataUnavailable>() {
         return McpError {
-            code: ErrorCode::INVALID_PARAMS,
+            code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(error.to_string()),
             data: Some(serde_json::json!({
                 "state": "metadata_unavailable",
@@ -216,6 +216,9 @@ fn render_publish(outcome: &PublishOutcome) -> String {
         out.push_str(&format!(
             "\nThe record is usable; the upload is not.\n{reason}\n"
         ));
+    }
+    if let PublishDisposition::CommittedMetadataUnavailable { reason } = &outcome.disposition {
+        out.push_str(&format!("\nCloud committed the bytes, but the task reference was not recorded.\n{reason}\n"));
     }
     out
 }

@@ -202,18 +202,22 @@ fn print_publish(outcome: &PublishOutcome) {
     println!("     {}", outcome.disposition.summary());
     println!("     sha256 {}", artifact.sha256);
     match &outcome.disposition {
-        PublishDisposition::UploadFailed { reason } => {
+        PublishDisposition::UploadFailed { reason } | PublishDisposition::CommittedMetadataUnavailable { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.
             for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
-            println!("  -> cas artifact show {}", artifact.id);
+            if matches!(outcome.disposition, PublishDisposition::CommittedMetadataUnavailable { .. }) {
+                println!("  -> cas cloud sync");
+            } else {
+                println!("  -> cas artifact show {}", artifact.id);
+            }
         }
         PublishDisposition::StorageNotLive { .. } | PublishDisposition::NotLoggedIn => {
             println!("  -> cas artifact show {}", artifact.id);
         }
-        PublishDisposition::Committed { .. } | PublishDisposition::CommittedMetadataUnavailable { .. } => {}
+        PublishDisposition::Committed { .. } => {}
     }
 }
 

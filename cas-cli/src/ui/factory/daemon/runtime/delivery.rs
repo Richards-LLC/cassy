@@ -1514,7 +1514,8 @@ impl FactoryDaemon {
                         .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?;
                     Some(match delivery {
                         cas_store::RecipientDelivery::Full(_) => claude_teams_inbox_text(text, body, source, id),
-                        cas_store::RecipientDelivery::Reference(row) => row.prompt,
+                        cas_store::RecipientDelivery::Reference(row)
+                        | cas_store::RecipientDelivery::Settled(row) => row.prompt,
                     })
                 } else { None };
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);

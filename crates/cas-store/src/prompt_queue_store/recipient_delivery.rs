@@ -7,6 +7,8 @@ use super::*;
 pub enum RecipientDelivery {
     Full(QueuedPrompt),
     Reference(QueuedPrompt),
+    /// Recipient intent is terminal; this is not a transport/body observation.
+    Settled(QueuedPrompt),
 }
 
 impl RecipientDelivery {
@@ -16,7 +18,7 @@ impl RecipientDelivery {
 
     pub fn into_prompt(self) -> QueuedPrompt {
         match self {
-            Self::Full(row) | Self::Reference(row) => row,
+            Self::Full(row) | Self::Reference(row) | Self::Settled(row) => row,
         }
     }
 }
@@ -75,6 +77,7 @@ impl SqlitePromptQueueStore {
             params![row.id, recipient],
             |r| r.get(0),
         )?;
+        let settled = terminal.is_some();
         let status = if let Some(terminal) = terminal {
             terminal
         } else if needs_full_recovery(&row) || !body_seen || named_read {
@@ -87,7 +90,11 @@ impl SqlitePromptQueueStore {
         // A summary can itself contain the original message. Keep the reference
         // bounded even when callers print both summary and prompt.
         row.summary = Some(format!("Message {}: {status}", row.id));
-        Ok(RecipientDelivery::Reference(row))
+        Ok(if settled {
+            RecipientDelivery::Settled(row)
+        } else {
+            RecipientDelivery::Reference(row)
+        })
     }
 
     pub(super) fn settle_recipient_message(

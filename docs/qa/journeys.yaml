@@ -241,6 +241,11 @@ invariants:
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
 bug_families:
+  expired-toast-announcement:
+    title: Expired connection notices must leave an empty live region while subsequent notices still announce
+    tasks: [cas-326e8]
+    invariants: [HUB-J9-GOAL]
+    journeys: [HUB-J9]
   deferred-session-startup:
     title: A deferred startup wake must retry after pane readiness instead of remaining hidden by its transport claim
     tasks: [cas-dd2e]
@@ -933,7 +938,7 @@ journeys:
     "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
   - Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected"
     toast sits below the thread header, never over the back link, project and host, and on the list below the brand
-    row
+    row. After its 3.2-second lifetime, the status region is empty so the expired notice is no longer read.
   - Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row,
     Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output
     title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom

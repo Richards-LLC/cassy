@@ -1,6 +1,6 @@
 import { activate, phoneLayout, showConversationList } from "./responsive-goals";
 import type { Locator } from "@playwright/test";
-import { test, expect, expectWholeFocusRing } from "./journey";
+import { test, expect, expectWholeFocusRing, holdPageClock } from "./journey";
 import { ATLAS, PELICAN } from "./world";
 
 /** Every field in the dialog is visible without scrolling it (F4). */
@@ -94,42 +94,47 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
 
   await journey.stage("See the machine's supervisor ready to talk to", async () => {
     await expect(page.getByRole("status").filter({ hasText: "Atlas · Linux connected" })).toBeVisible({ timeout: 15_000 });
-    await showConversationList(page);
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
-    await expect(row).toBeVisible();
-    // cas-d8a5 (journey F32): the row's spoken name reads as words: no run-on
-    // badge, no empty part, no stray " , " before its time.
-    const spoken = await row.getAttribute("aria-label");
-    expect(spoken).toMatch(/^cas-src on Atlas/);
-    expect(spoken).not.toMatch(/ , |,,|\.,/);
-    await activate(page, row);
-    await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
-    // cas-010f: a supervisor that has not written yet reads plainly. The
-    // conversation is the only surface (cas-0546): the card offers no other
-    // view, and the header carries Raw output and Interrupt.
-    const empty = page.locator(".thread .empty");
-    await expect(empty.locator(".said")).toHaveText("No messages from the cas-src supervisor in this session yet — nothing is waiting on you.");
-    await expect(empty).not.toContainText("Commander");
-    await expect(empty.getByRole("button")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: /Terminal view/i })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Raw output", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Interrupt the cas-src supervisor", exact: true })).toBeVisible();
-    // The "connected" toast sits at the top, clear of the message box (journey F12).
-    // Measure #toast itself: it keeps its box after it fades, so a slow run
-    // that outlasts the 3.2 s display cannot hang on the .visible class.
-    const toast = page.locator("#toast");
-    await expect(toast).toHaveText("Atlas · Linux connected");
-    const [notice, composer] = await Promise.all([toast.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
-    expect(notice!.y + notice!.height, "toast above the composer").toBeLessThan(composer!.y);
-    // It covers no heading either: at the top right it used to land on the
-    // context rail's "Tasks & progress" (3.30.0 journey F8).
-    const covered = await page.evaluate(() => {
-      const t = document.querySelector<HTMLElement>("#toast")!.getBoundingClientRect();
-      return [...document.querySelectorAll<HTMLElement>("h1, h2, h3")].filter((h) => h.getClientRects().length > 0).filter((h) => {
-        const r = h.getBoundingClientRect();
-        return r.width > 0 && t.left < r.right && t.right > r.left && t.top < r.bottom && t.bottom > r.top;
-      }).map((h) => h.textContent?.trim());
-    });
-    expect(covered, "headings under the toast").toEqual([]);
+    await holdPageClock(page);
+    try {
+      await showConversationList(page);
+      const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+      await expect(row).toBeVisible();
+      // cas-d8a5 (journey F32): the row's spoken name reads as words: no run-on
+      // badge, no empty part, no stray " , " before its time.
+      const spoken = await row.getAttribute("aria-label");
+      expect(spoken).toMatch(/^cas-src on Atlas/);
+      expect(spoken).not.toMatch(/ , |,,|\.,/);
+      await activate(page, row);
+      await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
+      // cas-010f: a supervisor that has not written yet reads plainly. The
+      // conversation is the only surface (cas-0546): the card offers no other
+      // view, and the header carries Raw output and Interrupt.
+      const empty = page.locator(".thread .empty");
+      await expect(empty.locator(".said")).toHaveText("No messages from the cas-src supervisor in this session yet — nothing is waiting on you.");
+      await expect(empty).not.toContainText("Commander");
+      await expect(empty.getByRole("button")).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /Terminal view/i })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "Raw output", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Interrupt the cas-src supervisor", exact: true })).toBeVisible();
+      // The "connected" toast sits at the top, clear of the message box (journey F12).
+      // Keep the actual active notice for geometry checks; expired notices
+      // now correctly have no text (cas-326e8).
+      const toast = page.locator("#toast");
+      await expect(toast).toHaveText("Atlas · Linux connected");
+      const [notice, composer] = await Promise.all([toast.boundingBox(), page.locator(".conversation-composer").boundingBox()]);
+      expect(notice!.y + notice!.height, "toast above the composer").toBeLessThan(composer!.y);
+      // It covers no heading either: at the top right it used to land on the
+      // context rail's "Tasks & progress" (3.30.0 journey F8).
+      const covered = await page.evaluate(() => {
+        const t = document.querySelector<HTMLElement>("#toast")!.getBoundingClientRect();
+        return [...document.querySelectorAll<HTMLElement>("h1, h2, h3")].filter((h) => h.getClientRects().length > 0).filter((h) => {
+          const r = h.getBoundingClientRect();
+          return r.width > 0 && t.left < r.right && t.right > r.left && t.top < r.bottom && t.bottom > r.top;
+        }).map((h) => h.textContent?.trim());
+      });
+      expect(covered, "headings under the toast").toEqual([]);
+    } finally {
+      await page.clock.resume();
+    }
   });
 });

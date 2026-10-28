@@ -7,14 +7,12 @@ metadata:
 
 # Factory Worker
 
-Factory workers run the targeted tests for their change themselves. Every task
-assignment authorizes and requires the fewest tests that fail without the change,
-a few that each prove one behaviour
-([Fewest tests](../cas-tdd/SKILL.md#fewest-tests)), and running its affected
-targeted tests. Affected means the whole test module of each changed
-production function plus every integration harness that calls it, not only the
-tests you named ([discipline.md](references/discipline.md)).
-A case added to an existing test file satisfies `test-first`. Workers close their own tasks; never ask the supervisor to close
+Run affected targeted tests: the whole test module of each changed production
+function plus every integration harness that calls it
+([discipline.md](references/discipline.md)). Use the
+[fewest tests](../cas-tdd/SKILL.md#fewest-tests) that fail without the change,
+one per behaviour. A case added to an existing test file satisfies `test-first`.
+Workers close their own tasks; never ask the supervisor to close
 your task on their behalf. `CONTRIBUTING` names the scoped test commands. Docs-only and no-code tasks prove their
 acceptance check instead (e.g. markdownlint, `cas codemap status`, a published
 artifact); don't add code tests to them.

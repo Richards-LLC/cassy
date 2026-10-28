@@ -345,7 +345,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Task lifecycle/dependencies. Workers start then close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (optional note_type). create project= files a cross-project proposal in the Cloud proposal_* inbox, never a task row. Supervisor cancel requires reason (optional superseded_by) for ended work without delivery. request_changes reopens AwaitingMerge or a blocked parked delivery after failed review, retaining assignee. Supervisor rebind_branch approves a fresh delivery branch with reason and an old-tip audit."
+        description = "Task lifecycle. Workers start/close; follow verification-required guidance. Aliases: get=show; dep_add/dep_remove blocked_by=to_id; close summary=notes. notes id reads; notes= appends (note_type optional). create project= files a Cloud proposal_* entry, never a task row. Supervisor cancel: ended work without delivery; reason required, superseded_by optional. request_changes reopens failed parked deliveries, retaining assignee. Supervisor rebind_branch: fresh branch, reason and old-tip audit."
     )]
     pub async fn task(
         &self,
@@ -622,7 +622,7 @@ impl CasService {
     }
 
     #[tool(
-        description = "Supervisor factory control; only available in factory mode. Actions by group: fleet (spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, record_test_receipt, recover_branch, agent_list, agent_cleanup, lease_history); servers (server_start, server_list, server_stop; workers stop only their own); database, supervisor only (db_branch_create, db_branch_show, db_branch_delete: one disposable Neon branch per task, deleted at close; DATABASE_URL only in the worker's .env.cas-db; workers ask by blocker); worktree (worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status); loops and queues (loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack); Slack-thread authority, authenticated supervisor only (claim, claim_status, release_claim, transfer_claim, accept_claim, renew_claim, reply_intent). clear_context types the harness's reset command and verifies it in the new transcript; an unproven reset errors. Messaging and reminders are on the `coordination` tool. Per-action rules are on the parameters they govern."
+        description = "Factory control (factory mode). Fleet: spawn_workers, shutdown_workers, recycle_worker, hold_worker, release_worker, worker_status, worker_activity, epic_status, focus_epic, epic_split, sync_all_workers, clear_context, gc_report, gc_cleanup, restart_spawn_queue, record_test_receipt, recover_branch, agent_list, agent_cleanup, lease_history. Servers: server_start, server_list, server_stop (workers stop own only). Neon (supervisor only): db_branch_create, db_branch_show, db_branch_delete; one branch/task, deleted at close; DATABASE_URL only in worker .env.cas-db; workers ask by blocker. Worktrees: worktree_create, worktree_list, worktree_show, worktree_cleanup, worktree_merge, worktree_status. Loops/queues: loop_start, loop_cancel, loop_status, queue_notify, queue_poll, queue_peek, queue_ack. Slack authority (authenticated supervisor): claim, claim_status, release_claim, transfer_claim, accept_claim, renew_claim, reply_intent. clear_context types reset and verifies a new transcript or errors. Messaging/reminders: coordination."
     )]
     pub async fn factory(
         &self,
@@ -809,7 +809,7 @@ impl CasService {
     // ========================================================================
 
     #[tool(
-        description = "Published artifacts. Supply a local path; the runtime resolves it, hashes and measures the bytes, records the artifact and uploads it when Cloud storage is live. Never compute a digest or handle an upload URL yourself. publish returns a citable artifact_id even when Cloud storage is unreachable. post shares a committed artifact to Slack via Violet, SHA-256-checked. publish with notes and note_type attaches a portable proof receipt; fetch with task_id and id downloads and verifies its bytes on any machine."
+        description = "Artifacts: publish a local path; runtime hashes, measures, records and uploads when Cloud is live, returning artifact_id even offline. Never compute digests or handle upload URLs. post: SHA-256-checked Slack share via Violet. publish notes/note_type: portable proof receipt. fetch task_id/id: download and verify on any machine."
     )]
     pub async fn artifact(
         &self,

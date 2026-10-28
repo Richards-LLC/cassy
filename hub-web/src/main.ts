@@ -5681,10 +5681,16 @@ function renderMachineRegister(): void {
       });
     },
   });
-  if (!dialog.open) { list.scrollTop = 0; dialog.scrollTop = 0; }
   // Paired machines replaces the palette: clear its open flag too, or the
   // next render reopens it over whatever the operator opens next (cas-dfc8).
-  const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };
+  const open = (opener: string) => {
+    pairedMachinesOpener = opener; commandPaletteOpen = false;
+    document.querySelector<HTMLDialogElement>('#command-palette')?.close();
+    dialog.showModal();
+    // Reset when opened, rather than forcing the conversation's fresh
+    // layout by writing scroll offsets on an invisible register each render.
+    list.scrollTop = 0; dialog.scrollTop = 0;
+  };
   for (const id of ['paired-machines-toggle', 'palette-paired-machines']) {
     const button = document.getElementById(id); if (button) button.onclick = () => open(id);
   }

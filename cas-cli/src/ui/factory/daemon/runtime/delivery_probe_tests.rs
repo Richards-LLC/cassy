@@ -665,63 +665,72 @@ async fn cas_cc89_slow_flag_revalidation_does_not_hold_the_store_writer() {
 
 #[tokio::test]
 async fn cas_cc89_reset_cancels_a_claimed_pointer_before_file_delivery() {
-    let mut env = crate::test_support::TestEnvGuard::temp_home();
-    let (temp, mut daemon, queue, row) = fixture(false);
-    let inbox = setup_pointer(&mut daemon, queue.as_ref(), row, temp.path(), &mut env).await;
-    let root = daemon.app.cas_dir().to_path_buf();
-    daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
-    let release = hold_lane(&mut daemon, jobs::Lane::External);
-    daemon
-        .fallback_unsurfaced_teams_pointers(queue.as_ref())
-        .await;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let key = format!("teams-fallback:{row}:worker-a:file");
-    while !daemon.relay_jobs.writing(&key) {
-        daemon.drain_relay_jobs();
-        assert!(
-            Instant::now() < deadline,
-            "pointer never reached held file phase"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
-    // Even an in-flight-key refusal must delay the next ownership clone.
-    let pointer_key = format!("teams-fallback:{row}:worker-a");
-    daemon
-        .queue_jobs
-        .poison_jobs
-        .pointers
-        .get_mut(&pointer_key)
-        .unwrap()
-        .retry_at = Instant::now() - Duration::from_secs(1);
-    let retried = Instant::now();
-    daemon.drain_relay_jobs();
-    assert!(
-        daemon.queue_jobs.poison_jobs.pointers[&pointer_key].retry_at
-            >= retried + Duration::from_millis(900),
-        "an in-flight phase refusal must back off"
-    );
-    daemon.forget_probe_pane("worker-a");
-    release.send(()).unwrap();
-    while !daemon.queue_jobs.poison_jobs.pointers.is_empty() {
-        daemon.drain_relay_jobs();
-        assert!(Instant::now() < deadline, "cancelled claim never released");
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(!queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
-    let messages: Vec<super::super::teams::InboxMessage> =
-        serde_json::from_str(&std::fs::read_to_string(inbox).unwrap()).unwrap();
-    let original = queue.queued_prompt(row).unwrap().unwrap().prompt;
-    assert_eq!(messages.len(), 1, "only the original pointer may remain");
-    assert!(
-        !messages[0].text.contains(&original),
-        "cancelled job must not deliver full body to replacement"
-    );
-    assert!(
+    for acknowledged in [false, true] {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let (temp, mut daemon, queue, row) = fixture(false);
+        let row = if acknowledged {
+            queue.enqueue_with_session("supervisor", "all_workers", "Shared pointer body", &daemon.session_name).unwrap()
+        } else { row };
+        let inbox = setup_pointer(&mut daemon, queue.as_ref(), row, temp.path(), &mut env).await;
+        let root = daemon.app.cas_dir().to_path_buf();
+        daemon.queue_jobs = prompt_queue_jobs::QueueJobs::start_with_private_writer(root.clone(), None);
+        let release = hold_lane(&mut daemon, jobs::Lane::External);
+        daemon
+            .fallback_unsurfaced_teams_pointers(queue.as_ref())
+            .await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let key = format!("teams-fallback:{row}:worker-a:file");
+        while !daemon.relay_jobs.writing(&key) {
+            daemon.drain_relay_jobs();
+            assert!(
+                Instant::now() < deadline,
+                "pointer never reached held file phase"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
+        // Even an in-flight-key refusal must delay the next ownership clone.
+        let pointer_key = format!("teams-fallback:{row}:worker-a");
         daemon
             .queue_jobs
-            .drain_for_shutdown(&root, Duration::from_secs(3))
-    );
+            .poison_jobs
+            .pointers
+            .get_mut(&pointer_key)
+            .unwrap()
+            .retry_at = Instant::now() - Duration::from_secs(1);
+        let retried = Instant::now();
+        daemon.drain_relay_jobs();
+        assert!(
+            daemon.queue_jobs.poison_jobs.pointers[&pointer_key].retry_at
+                >= retried + Duration::from_millis(900),
+            "an in-flight phase refusal must back off"
+        );
+        if acknowledged {
+            queue.acknowledge_for_recipients(row, &["worker-a".into()], None).unwrap();
+        } else {
+            daemon.forget_probe_pane("worker-a");
+        }
+        release.send(()).unwrap();
+        while !daemon.queue_jobs.poison_jobs.pointers.is_empty() {
+            daemon.drain_relay_jobs();
+            assert!(Instant::now() < deadline, "cancelled claim never released");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!queue.teams_body_fallback_claimed(row, "worker-a").unwrap());
+        let messages: Vec<super::super::teams::InboxMessage> =
+            serde_json::from_str(&std::fs::read_to_string(inbox).unwrap()).unwrap();
+        let original = queue.queued_prompt(row).unwrap().unwrap().prompt;
+        assert_eq!(messages.len(), 1, "only the original pointer may remain");
+        assert!(
+            !messages[0].text.contains(&original),
+            "cancelled job must not deliver full body to replacement"
+        );
+        assert!(
+            daemon
+                .queue_jobs
+                .drain_for_shutdown(&root, Duration::from_secs(3))
+        );
+    }
 }
 
 #[tokio::test]

@@ -1755,25 +1755,38 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
 
     let first_turn = worker.start_turn("working through cas-x");
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let kept = "Rebase onto v43, then re-run the named tests.";
+    let kept = "Rebase onto v43, then re-run the named tests.\n".repeat(60);
     let acked = "FYI: lane CI is green.";
-    let kept_id = store.enqueue_with_session("supervisor", WORKER, kept, SESSION).unwrap();
+    let kept_id = store.enqueue_with_session("supervisor", WORKER, &kept, SESSION).unwrap();
     let acked_id = store.enqueue_with_session("supervisor", WORKER, acked, SESSION).unwrap();
     // Mid-turn, the agent polls both (what `inbox_poll` runs) and acks one.
     let polled = store.poll_unseen_for_recipient(WORKER, Some(SESSION), 10).unwrap();
     assert_eq!(polled.len(), 2);
     store.ack(acked_id).unwrap();
     let same_turn = worker.tool_call();
-    assert!(!same_turn.contains(kept) && !same_turn.contains(acked), "{first_turn}{same_turn}");
+    assert!(!same_turn.contains(kept.trim()) && !same_turn.contains(acked), "{first_turn}{same_turn}");
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let next_turn = worker.take_turn("continuing my work");
-    assert_eq!(next_turn.matches(kept).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
+    println!("AFE0_FIXTURE input_body_bytes={} repeat_hook_bytes={}", kept.len(), next_turn.len());
+    // Durable diagnostics for replaying this synthetic fixture on the base
+    // and treatment with the same capped test command.
+    let report_root = crate::test_paths::workspace_root();
+    if report_root.join("Cargo.toml").is_file() {
+        let report_dir = report_root.join("target");
+        std::fs::create_dir_all(&report_dir).unwrap();
+        std::fs::write(report_dir.join("afe0-fixture.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "input_body_bytes": kept.len(), "repeat_hook_bytes": next_turn.len(), "rendered": next_turn
+        })).unwrap()).unwrap();
+    } else {
+        eprintln!("SKIP byte replay artifact export: runtime checkout is absent");
+    }
+    assert_eq!(next_turn.matches(kept.trim()).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
     assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
     assert_eq!(
         store.recipient_receipt(kept_id, WORKER).unwrap(),
-        Some(cas_store::SurfacingSource::HookSurfaced)
+        Some(cas_store::SurfacingSource::InboxPoll)
     );
     assert_eq!(
         store.recipient_receipt(acked_id, WORKER).unwrap(),
@@ -1781,7 +1794,7 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     );
 
     let after = worker.take_turn("still working");
-    assert!(!after.contains(kept) && !after.contains("[not acknowledged]"), "once: {after}");
+    assert!(!after.contains(kept.trim()) && !after.contains("[not acknowledged]"), "once: {after}");
 }
 
 /// cas-6ccb: a Claude Teams member's next turn may be a teammate-message
@@ -1808,7 +1821,7 @@ fn cas_6ccb_a_teammate_turn_shows_a_polled_unacked_row_at_its_tool_boundary() {
     deliver_to_claude_worker(&store, &mut worker, next_id, next);
     std::thread::sleep(std::time::Duration::from_millis(20));
     let teammate_turn = worker.next_teammate_turn().unwrap();
-    assert_eq!(teammate_turn.matches(kept).count(), 1, "{teammate_turn}");
+    assert_eq!(teammate_turn.matches(kept).count(), 0, "{teammate_turn}");
     assert!(teammate_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{teammate_turn}");
     assert_eq!(teammate_turn.matches(next).count(), 1, "{teammate_turn}");
     assert!(!worker.take_turn("continuing my work").contains(kept));
@@ -1836,7 +1849,7 @@ fn cas_6ccb_the_repeat_runs_once_per_turn_without_new_mail() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let turn = worker.take_turn_without_prompt_hook("<teammate-message teammate_id=\"peer\">\nping\n</teammate-message>");
-    assert_eq!(turn.matches(kept).count(), 1, "{turn}");
+    assert_eq!(turn.matches(kept).count(), 0, "{turn}");
     assert!(turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{turn}");
     assert!(turn.contains("one-time repeat"), "{turn}");
     assert!(!worker.tool_call().contains(kept));
@@ -1871,7 +1884,7 @@ fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
 }
 
 /// cas-6ccb review: a polled row that this turn's pointer also names gets one
-/// note. Shown in full as the repeat, it is not also "[already shown]".
+/// note. Its recovery reference is not also labelled "[already shown]".
 #[test]
 fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
     let mut env = TestEnvGuard::new();
@@ -1891,7 +1904,7 @@ fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let woken = worker.take_turn(&wake);
-    assert_eq!(woken.matches(body).count(), 1, "{woken}");
+    assert_eq!(woken.matches(body).count(), 0, "{woken}");
     assert!(woken.contains(&format!("[not acknowledged] Message #{id}")), "{woken}");
     assert!(!woken.contains(&format!("[already shown] Message #{id}")), "{woken}");
 }

@@ -64,6 +64,10 @@ invariants:
     statement: the link pairs this browser and I reach the supervisor
     check: 'Walk HUB-J2 in hub-web/e2e/journeys/pair-link.journey.ts; verify the expected experience and edge paths
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the exchange endpoint is doubled'
+  HUB-J3-SESSION-ENDED:
+    statement: A supervisor exit closes its conversation with a dated receipt, confirmed worker stop count and named surviving workers; the row and header say Ended and sends cannot queue to the dead session.
+    check: 'Run the session-ended case in conversation-stage.test.ts and hub::tests::cec1_session_end_projection_survives_cleanup_without_ending_a_replacement; capture a real supervisor /exit with at least two workers and verify the receipt within ten seconds, local twelve-hour time, ended row/header and composer guidance.'
+    bug: {task: cas-cec1}
   HUB-J3-GOAL:
     statement: I can tell which conversation has something new and get to it quickly
     check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
@@ -280,6 +284,10 @@ invariants:
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
+  HUB-J22-CACHED-PREVIEW-RECOVERY:
+    statement: A transiently failed image keeps a compact note and recovers when its cached card scrolls back into the live conversation after an offscreen reconnect.
+    check: Run the HUB-J22 cached failed thumbnail Chromium regression; prove the same node leaves the DOM during reconnect, returns, decodes the image and removes its note, with exactly one renewed ticket.
+    bug: {task: cas-abb7}
   HUB-J24-SENT-ATTACHMENT:
     statement: Sent uploads show an image thumbnail or named file sheet without host paths, including after reload and on another paired device; the supervisor retains the exact resolvable artifact reference.
     check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history.
@@ -288,6 +296,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  hidden-cached-preview-retry:
+    title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
+    tasks: [cas-abb7]
+    invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
+    journeys: [HUB-J22]
   stale-worker-and-delivery-projection:
     title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
     tasks: [cas-0a75]
@@ -622,6 +635,7 @@ journeys:
   - hub-web/src/viewport.ts
   invariants:
   - HUB-J3-GOAL
+  - HUB-J3-SESSION-ENDED
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -1641,10 +1655,10 @@ journeys:
     focused; confirming stops it, and a stale stop says what changed
   - Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it
     once and the row reads "Asked … ago"
-  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not
-    allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction
-    that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears
-    without a disabled Stop and restart button.
+  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header hides
+    unavailable controls behind one collapsed Permissions line. Expanding it explains the actual grant and re-pair
+    actions and links to Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command
+    appears without a disabled Stop and restart button.
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -1690,6 +1704,8 @@ journeys:
   - hub-web/src/pairing-scopes.ts
   - hub-web/src/pending-pairing.ts
   - hub-web/src/progress-model.ts
+  - hub-web/src/progress-view.ts
+  - hub-web/src/context-resize.ts
   - hub-web/src/raw-output.ts
   - hub-web/src/refusal.ts
   - hub-web/src/request-deadline.ts
@@ -2004,6 +2020,7 @@ journeys:
   - Decode an inline image without moving its file caption
   - Read the real PDF first page inline
   - Play video and audio on demand; unavailable files keep Open
+  - Scroll a failed thumbnail out of the DOM, reconnect while it is cached, and scroll back to the recovered image
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/markdown-renderer.ts
@@ -2020,7 +2037,7 @@ journeys:
   - hub-web/e2e/journeys/rich-content.journey.ts
   - hub-web/playwright.rich-content-hub.config.ts
   - hub-web/scripts/rich-content-visual-qa.mjs
-  invariants: [HUB-J22-GOAL]
+  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY]
   traffic:
     share_pct: null
     basis: New evidence-reading journey; no per-journey usage instrumentation.

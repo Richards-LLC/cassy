@@ -876,8 +876,9 @@ fn service_https_port(definition: &str) -> u16 {
 /// Bring an installed unit's restart policy up to the current template
 /// (cas-621ec) without touching anything else in it: binary, ports,
 /// publication flags and any operator edits survive. It also adds the hub's
-/// `LimitNOFILE` when absent (cas-6cc6). Returns `None` when the unit already
-/// carries both, or has no `[Service]` section to amend.
+/// `LimitNOFILE` (cas-6cc6) and resource reservations (cas-93356) when absent.
+/// Explicit operator values survive. Returns `None` when the unit already
+/// carries these policies, or has no `[Service]` section to amend.
 fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     let desired = format!("RestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}");
     let has_policy = definition.lines().any(|line| line.trim() == desired);
@@ -885,7 +886,15 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     let has_limit = definition
         .lines()
         .any(|line| line.trim_start().starts_with("LimitNOFILE="));
-    if has_policy && has_limit {
+    let missing_resources = ["CPUWeight=1000", "MemoryLow=1G"]
+        .into_iter()
+        .filter(|setting| {
+            let key = format!("{}=", setting.split_once('=').expect("resource setting").0);
+            !definition.lines().any(|line| line.trim_start().starts_with(&key))
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if has_policy && has_limit && missing_resources.is_empty() {
         return None;
     }
     let mut lines = Vec::new();
@@ -907,11 +916,15 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
         lines.insert(service + 1, "Restart=on-failure".to_owned());
     }
     if !has_limit {
-        // Before the log lines, as in the template, so operator lines after
-        // RestartSec stay adjacent.
+        // Before resource reservations and logs, as in the template, so
+        // operator lines after RestartSec stay adjacent.
         let at = lines
             .iter()
-            .position(|line| line.trim_start().starts_with("StandardOutput="))
+            .position(|line| {
+                ["CPUWeight=", "MemoryLow=", "StandardOutput="]
+                    .iter()
+                    .any(|key| line.trim_start().starts_with(*key))
+            })
             .or_else(|| {
                 lines
                     .iter()
@@ -920,6 +933,15 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
             })?;
         lines.insert(at, format!("LimitNOFILE={HUB_FILE_LIMIT}"));
     }
+    if !missing_resources.is_empty() {
+        let at = lines
+            .iter()
+            .position(|line| line.trim_start().starts_with("StandardOutput="))
+            .or_else(|| {
+                lines.iter().position(|line| line.starts_with("LimitNOFILE=")).map(|at| at + 1)
+            })?;
+        lines.splice(at..at, missing_resources);
+    }
     let mut upgraded = lines.join("\n");
     if definition.ends_with('\n') {
         upgraded.push('\n');
@@ -927,7 +949,7 @@ fn upgrade_systemd_restart_policy(definition: &str) -> Option<String> {
     Some(upgraded)
 }
 
-/// Rewrite an installed systemd unit whose restart policy predates the
+/// Rewrite an installed systemd unit whose service policy predates the
 /// current template. `daemon-reload` applies the new policy to the running
 /// service without restarting it. Returns whether the unit changed.
 fn refresh_systemd_unit(path: &Path) -> Result<bool> {
@@ -1992,7 +2014,7 @@ fn systemd_unit(binary: &Path, tailscale_serve: bool, tailscale_port: u16) -> St
         .collect::<Vec<_>>()
         .join(" ");
     format!(
-        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
+        "[Unit]\nDescription=Cassy Commander hub\nAfter=network-online.target tailscaled.service\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={command}\nRestart=on-failure\nRestartForceExitStatus={SYSTEMD_FORCE_RESTART_SIGNALS}\nRestartSec=3\nLimitNOFILE={HUB_FILE_LIMIT}\nCPUWeight=1000\nMemoryLow=1G\nStandardOutput=append:%h/.cas/hub/hub.log\nStandardError=append:%h/.cas/hub/hub.log\n\n[Install]\nWantedBy=default.target\n"
     )
 }
 
@@ -2779,6 +2801,9 @@ exit 0
     fn legacy_systemd_unit_upgrades_to_the_current_template() {
         let upgraded =
             upgrade_systemd_restart_policy(LEGACY_SYSTEMD_UNIT).expect("legacy unit needs upgrade");
+        let service = service_lines(&upgraded);
+        assert!(service.contains(&"CPUWeight=1000"), "{upgraded}");
+        assert!(service.contains(&"MemoryLow=1G"), "{upgraded}");
         assert_eq!(
             upgraded,
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
@@ -2796,6 +2821,12 @@ exit 0
             upgrade_systemd_restart_policy(&pre_limit).as_deref(),
             Some(current.as_str())
         );
+        let pre_isolation = current.replace("CPUWeight=1000\nMemoryLow=1G\n", "");
+        assert_eq!(
+            upgrade_systemd_restart_policy(&pre_isolation).as_deref(),
+            Some(current.as_str()),
+            "existing units also acquire the hub resource reservation"
+        );
         assert_eq!(
             upgrade_systemd_restart_policy(&systemd_unit(
                 Path::new("/opt/cas/bin/cas"),
@@ -2811,9 +2842,14 @@ exit 0
     fn systemd_restart_upgrade_preserves_operator_edits_and_replaces_stale_lists() {
         let edited = LEGACY_SYSTEMD_UNIT.replace(
             "RestartSec=3\n",
-            "RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\n",
+            "RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\nCPUWeight=80\nMemoryLow=2G\n",
         );
         let upgraded = upgrade_systemd_restart_policy(&edited).unwrap();
+        let service = service_lines(&upgraded);
+        assert!(service.contains(&"CPUWeight=80"), "{upgraded}");
+        assert!(service.contains(&"MemoryLow=2G"), "{upgraded}");
+        assert!(!service.contains(&"CPUWeight=1000"), "{upgraded}");
+        assert!(!service.contains(&"MemoryLow=1G"), "{upgraded}");
         assert!(upgraded.contains("RestartSec=10\nEnvironment=TAILSCALE=/opt/ts/bin/tailscale\n"));
         assert!(upgraded.contains(
             "Restart=on-failure\nRestartForceExitStatus=SIGHUP SIGINT SIGPIPE\nRestartSec=10\n"

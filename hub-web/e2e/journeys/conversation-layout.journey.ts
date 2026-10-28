@@ -10,7 +10,7 @@ for (const colorScheme of ["light", "dark"] as const) {
       const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
       await journey.stage("Read the phone conversation, the only thing in its stage", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         const thread = page.locator(".conversation-reading.thread");
         await expect(thread).toBeVisible();
         // cas-f285: the thread mounts straight into the stage; no pane host,

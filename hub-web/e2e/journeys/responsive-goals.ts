@@ -26,7 +26,7 @@ export async function showConversationList(page: Page): Promise<void> {
 }
 export async function openConversation(page: Page, project: string): Promise<void> {
   await showConversationList(page);
-  await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: new RegExp(`^${project} on `) }));
+  await activate(page, page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: new RegExp(`^${project} on `) }).and(page.locator(".conversation-row")));
   await expect(page.getByRole("button", { name: `Send to the ${project} supervisor`, exact: true })).toBeVisible();
 }
 export async function declaredChoice(page: Page, name: string): Promise<Locator> {
@@ -50,7 +50,7 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
     await expect(list).toBeVisible();
     await expect(search).toHaveAttribute("placeholder", "Search conversations");
     await search.fill("atlas");
-    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
     await openConversation(page, "cas-src");
     await expect(list).toBeHidden();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
@@ -59,9 +59,9 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
     await openConversation(page, "gabber-studio");
     ask = hub.supervisorSays(PELICAN, "Which lane should go first?", { kind: "ask", options: ["Linux first", "Mac first"] });
     await showConversationList(page);
-    await expect(list.getByRole("button", { name: /cas-src/ }).getByRole("img", { name: "Waiting for you", exact: true })).toBeVisible();
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByRole("img", { name: "Waiting for you", exact: true })).toBeVisible();
     await search.fill("cas-src");
-    await expect(list.getByRole("button")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
     await openConversation(page, "cas-src");
     await expect(page.getByRole("log")).toContainText("Which lane should go first?");
   });
@@ -70,9 +70,9 @@ export async function phoneFind(page: Page, journey: Journey): Promise<void> {
     await activate(page, await declaredChoice(page, "Linux first"));
     expect(await sent).toMatchObject({ machine: "atlas", target: PELICAN, text: "Linux first", in_reply_to: ask });
     await showConversationList(page);
-    await expect(list.getByRole("button", { name: /cas-src/ }).getByRole("img", { name: "Waiting for you", exact: true })).toHaveCount(0);
+    await expect(list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).getByRole("img", { name: "Waiting for you", exact: true })).toHaveCount(0);
     await expect(search).toHaveValue("");
-    await expect(list.getByRole("button")).toHaveCount(2);
+    await expect(list.locator(".conversation-row")).toHaveCount(2);
   });
 }
 
@@ -198,7 +198,7 @@ export async function phoneDark(page: Page, journey: Journey): Promise<void> {
     await page.emulateMedia({ forcedColors: "active" });
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
     await showConversationList(page);
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible();
     await openConversation(page, "cas-src");
     const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
     const style = await send.evaluate(element => { const css = getComputedStyle(element); return { border: css.borderTopStyle, color: css.color, background: css.backgroundColor }; });

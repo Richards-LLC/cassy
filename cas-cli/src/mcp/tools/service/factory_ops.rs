@@ -7681,7 +7681,7 @@ impl CasService {
             // retention, journey cleanup or any other GC mutation.
             if req.artifacts == Some(true) || req.older_than_secs.is_some() {
                 return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "Named unknown-cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed"));
+                    "Named cache reclaim cannot combine artifacts or prompt expiry; no cleanup performed"));
             }
             let config = crate::config::Config::load(&self.inner.cas_root)
                 .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("Cannot establish cache policy: {error}")))?;
@@ -7693,7 +7693,7 @@ impl CasService {
             let report = cleanup_target_cache_report(&self.inner.cas_root, &config, agents.as_ref(),
                 worktrees.as_ref(), &live, req.force == Some(true) && req.dry_run == Some(false), Some(Path::new(path)));
             return Ok(Self::success(match report {
-                Ok(report) => format!("Named unknown-owner cache reclaim.{}", render_target_cache_report(&report)),
+                Ok(report) => format!("Named target-cache reclaim.{}", render_target_cache_report(&report)),
                 Err(error) => format!("Named cache reclaim refused (fail-closed): {error}"),
             }));
         }
@@ -8066,8 +8066,12 @@ fn cleanup_target_cache_report(
     unknown: Option<&std::path::Path>,
 ) -> std::io::Result<crate::factory_target_cache::TargetCacheReport> {
     let policy = crate::factory_target_cache::TargetCachePolicy::from(config.factory());
-    let known = known_target_cache_worktrees(cas_root, config, agents, worktrees);
-    let mut report = crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?;
+    let mut report = if let Some(path) = unknown {
+        crate::factory_target_cache::inspect_named(cas_root, policy, path, live, !authorized)?
+    } else {
+        let known = known_target_cache_worktrees(cas_root, config, agents, worktrees);
+        crate::factory_target_cache::inspect(cas_root, policy, &known, live, !authorized)?
+    };
     if authorized || unknown.is_some() {
         crate::factory_target_cache::cleanup_selected_with_opt_in(cas_root, &mut report, policy, live, unknown)?;
     }

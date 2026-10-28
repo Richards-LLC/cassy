@@ -20,13 +20,19 @@ export type Session = {
   supervisor: string;
   project_dir: string;
   workers: string[];
-  liveness: "live";
+  liveness: "live" | "stale_metadata";
+  ended?: import("../../src/types").SessionEndOutcome;
   dormant?: boolean;
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;
   last_activity?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), as the hub reports it. */
   cloud_project_id?: string;
+  /** Additive catalog identity; older hubs omit these fields. */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  machine_online?: boolean;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };
@@ -114,9 +120,9 @@ export type WorkWorld = {
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
 export type FleetWorld = {
-  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; latest_activity?: { summary: string } }>;
-  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string }>;
-  epics: Array<{ id: string; title?: string }>;
+  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; liveness?: string; latest_activity?: { summary: string; created_at_rfc3339?: string } }>;
+  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string; epic_id?: string | null; delivery_state?: string | null }>;
+  epics: Array<{ id: string; title?: string; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null } }>;
   focused_epic: string | null;
   /** Names new workers get, in order. */
   spawnNames: string[];

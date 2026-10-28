@@ -22,7 +22,7 @@ test("HUB-J12 opaque authenticated requests recover without re-pairing (cas-b85a
   await hub.seedPaired();
   await clock.start();
   await page.goto("./");
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   const header = page.locator("#conversation-connection");
   await expect(header).toHaveText(" · Live");
   await journey.stage("A blocked authenticated route keeps the active pairing and retries", async () => {

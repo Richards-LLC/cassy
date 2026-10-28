@@ -1207,6 +1207,26 @@ describe("Commander live connection lifecycle", () => {
     }
   });
 
+  it("does not subscribe a session that ends while waiting for its attach rate slot", async () => {
+    transport(true);
+    TransportSocket.instances = [];
+    vi.stubGlobal("WebSocket", TransportSocket);
+    const connection = supervisor(await storedMachine("ended-rate-slot"));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const attached = connection.attach("session-a");
+    await vi.waitFor(() => expect(TransportSocket.instances).toHaveLength(1));
+    const socket = TransportSocket.instances[0]!;
+    socket.open(); socket.receive({ proto: 2 });
+    await attached;
+    const queued = connection.attach("session-b");
+    connection.setSessionEnded("session-b", true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await queued;
+    expect(socket.sent.map(frame => JSON.parse(frame)).filter(frame => frame.channel === "pty:session-b" && frame.subscribe)).toEqual([]);
+  });
+
   it.each([
     { pong: true, health: false },
     { pong: false, health: true },

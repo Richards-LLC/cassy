@@ -180,9 +180,10 @@ test("HUB-J2 the installation inventory on keyboard and phone, and exact-device 
         - button "Pair a machine"
         - button "Appearance & commands"
         - heading "Conversations" [level=1]
-        - paragraph: Your projects. Your supervisors.
+        - paragraph:
+          - text: Your projects. Your supervisors.
+          - button "Operator inbox"
         - navigation "Choose a supervisor"
-        - status
         - text: Pair a machine to start your first conversation. Got a pairing link from whoever runs it? Open it on this device.
         - button "0 paired machines Not paired"
     `);

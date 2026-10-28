@@ -242,6 +242,7 @@ async fn task_read_byte_budget_and_lossless_pages() {
     );
     store.add(&task).unwrap();
     let service = CasService::new(core, None);
+    let mut replay = serde_json::Map::new();
     for action in ["show", "notes"] {
         let read = |extra: serde_json::Value| {
             let mut value = serde_json::json!({"action": action, "id": task.id});
@@ -258,6 +259,11 @@ async fn task_read_byte_budget_and_lossless_pages() {
         }
         let full = extract_text(service.task(read(serde_json::json!({"full": true}))).await.unwrap());
         assert!(full.contains(&task.notes), "{action} full lost evidence");
+        replay.insert(action.into(), serde_json::json!({"before": full, "after": brief}));
+        let interior = full.find('α').unwrap() + 1;
+        for offset in [interior, usize::MAX] {
+            assert!(service.task(read(serde_json::json!({"offset": offset}))).await.is_err(), "invalid cursor accepted");
+        }
         let mut body = String::new();
         let mut offset = 0;
         loop {
@@ -270,6 +276,14 @@ async fn task_read_byte_budget_and_lossless_pages() {
             offset = next.parse::<usize>().unwrap();
         }
         assert_eq!(body, full, "{action} pages must reproduce full output byte for byte");
+    }
+    let workspace = cas::test_paths::workspace_root();
+    if workspace.join("Cargo.toml").is_file() {
+        let path = workspace.join("target/task-read-replay.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(&replay).unwrap()).unwrap();
+    } else {
+        eprintln!("SKIP replay artifact: source checkout absent; all assertions ran");
     }
 }
 
@@ -463,7 +477,7 @@ async fn test_task_show() {
     let id = extract_task_id(&text).expect("should have task ID");
 
     // Show task
-    let show_req = TaskShowRequest {
+    let show_req = TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
         id: id.to_string(),
         with_deps: true,
     };
@@ -631,7 +645,7 @@ async fn test_execution_note_create_and_show_happy_path() {
         .to_string();
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(),
             with_deps: false,
         }))
@@ -663,7 +677,7 @@ async fn test_execution_note_null_omitted_from_show() {
         .to_string();
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id,
             with_deps: false,
         }))
@@ -723,7 +737,7 @@ async fn test_execution_note_value_only_create_and_show() {
         .to_string();
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id,
             with_deps: false,
         }))
@@ -778,7 +792,7 @@ async fn test_execution_note_update_sets_value() {
     );
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id,
             with_deps: false,
         }))
@@ -832,7 +846,7 @@ async fn test_execution_note_update_empty_string_clears() {
         .expect("update clear");
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id,
             with_deps: false,
         }))
@@ -989,7 +1003,7 @@ async fn test_task_update_design_and_acceptance_criteria() {
     );
 
     // Verify via show
-    let show_req = TaskShowRequest {
+    let show_req = TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
         id: id.to_string(),
         with_deps: false,
     };
@@ -1376,7 +1390,7 @@ async fn test_task_notes_succeeds_when_activity_event_recording_fails() {
     assert!(text.contains("Added note") || text.contains("note"));
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id,
             with_deps: false,
         }))
@@ -1544,7 +1558,7 @@ async fn test_task_ready_excludes_foreign_origin_project_and_show_exposes_it() {
     );
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: foreign_id,
             with_deps: false,
         }))
@@ -3106,7 +3120,7 @@ async fn test_task_show_dependency_direction_labels() {
         .to_string();
 
     let show = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: blocked_id.clone(),
             with_deps: true,
         }))
@@ -3119,7 +3133,7 @@ async fn test_task_show_dependency_direction_labels() {
     );
 
     let blocker_show = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: blocker_id.clone(),
             with_deps: true,
         }))
@@ -3272,7 +3286,7 @@ async fn test_close_auto_unblocks_blocked_dependents() {
     );
 
     let show = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: blocked_id,
             with_deps: false,
         }))
@@ -3303,7 +3317,7 @@ async fn update_task_json(service: &CasCore, request: serde_json::Value) {
 
 async fn task_show_text(service: &CasCore, id: &str) -> String {
     let show = service
-        .cas_task_show(Parameters(TaskShowRequest { id: id.to_string(), with_deps: false }))
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() }, id: id.to_string(), with_deps: false }))
         .await
         .expect("task show");
     extract_text(show)
@@ -3697,7 +3711,7 @@ async fn test_subtask_start_auto_starts_epic() {
     let epic_id = extract_task_id(&text).expect("should have epic ID");
 
     // Verify epic is NOT in progress
-    let show_req = TaskShowRequest {
+    let show_req = TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
         id: epic_id.to_string(),
         with_deps: false,
     };
@@ -3748,7 +3762,7 @@ async fn test_subtask_start_auto_starts_epic() {
         id: subtask_id.to_string(),
     };
     let result = service
-        .cas_task_start(Parameters(start_req))
+        .cas_task_start_with_options(Parameters(TaskStartRequest { id: start_req.id, brief: Some(false), force: None }))
         .await
         .expect("subtask start should succeed");
 
@@ -3773,7 +3787,7 @@ async fn test_subtask_start_auto_starts_epic() {
     );
 
     // Verify the epic is now in progress
-    let show_req2 = TaskShowRequest {
+    let show_req2 = TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
         id: epic_id.to_string(),
         with_deps: false,
     };
@@ -4358,7 +4372,7 @@ async fn test_release_active_started_task_resets_status_to_open_and_ready() {
     );
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(),
             with_deps: false,
         }))
@@ -4469,7 +4483,7 @@ async fn test_release_autorecovers_lease_less_in_progress_task() {
 
     // Show must reflect Open status immediately after release.
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(),
             with_deps: false,
         }))
@@ -4610,7 +4624,7 @@ async fn test_reset_clears_lease_assignee_and_forces_open() {
 
     // Show must reflect the reset: Open, no assignee, audit note present.
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(),
             with_deps: false,
         }))
@@ -4766,7 +4780,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
         .expect("update to in_progress");
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(),
             with_deps: false,
         }))
@@ -4807,7 +4821,7 @@ async fn test_show_after_update_reflects_new_status_without_lag() {
         .expect("update back to open");
 
     let shown = service
-        .cas_task_show(Parameters(TaskShowRequest {
+        .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(),
             with_deps: false,
         }))
@@ -6802,7 +6816,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         assert_eq!(stored.assignee.as_deref(), Some(worker.name.as_str()));
         // pin: Assignee is the operator-visible field in create/show receipts.
         assert!(receipt.contains(&format!("Assignee: {}", worker.name)), "{receipt}");
-        let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+        let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: id.clone(), with_deps: false,
         })).await.unwrap());
         assert!(shown.contains(&format!("Assignee: {}", worker.name)), "{shown}");
@@ -6811,7 +6825,7 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
         assert!(dispatch.iter().any(|row| row.prompt.contains(&format!("action=start id={id}"))),
             "accepted creation must reach the same worker it displays");
     }
-    let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest {
+    let shown = extract_text(service.cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
         id: task_id, with_deps: false,
     })).await.unwrap());
     // pin: task show must explicitly distinguish an unassigned task from an omitted field.

@@ -10541,7 +10541,7 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
     let clean_show = env
         .service
         .inner
-        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: clean_id.clone(),
             with_deps: false,
         }))
@@ -10556,7 +10556,7 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
     let conflict_show = env
         .service
         .inner
-        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+        .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: conflict_id.clone(),
             with_deps: false,
         }))

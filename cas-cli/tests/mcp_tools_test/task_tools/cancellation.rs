@@ -72,7 +72,7 @@ async fn cancel_without_commits_persists_pointer_and_lists_as_no_delivery() {
     assert!(listed.contains("Cancelled [NO DELIVERY]"), "{listed}");
 
     let shown = extract_text(
-        core.cas_task_show(Parameters(TaskShowRequest {
+        core.cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
             id: task.id.clone(),
             with_deps: false,
         }))

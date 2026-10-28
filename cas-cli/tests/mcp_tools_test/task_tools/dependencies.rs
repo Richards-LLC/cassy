@@ -196,7 +196,7 @@ async fn test_task_show_with_deps_has_no_arrows_and_names_both_directions() {
 
     let text = extract_text(
         service
-            .cas_task_show(Parameters(TaskShowRequest {
+            .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
                 id: id_a.clone(),
                 with_deps: true,
             }))

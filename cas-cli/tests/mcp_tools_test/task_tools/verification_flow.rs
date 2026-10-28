@@ -1182,7 +1182,7 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
     );
     let shown = extract_text(
         supervisor
-            .cas_task_show(Parameters(TaskShowRequest {
+            .cas_task_show(Parameters(TaskShowRequest { read: cas::mcp::tools::TaskReadOptions { full: true, ..Default::default() },
                 id: task_id.clone(),
                 with_deps: false,
             }))

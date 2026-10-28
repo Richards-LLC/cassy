@@ -30,7 +30,7 @@ pub struct TaskStartRequest {
     /// Return a context-affordable response containing this task's notes but
     /// no parent-epic or sibling-task payload.
     #[schemars(
-        description = "Return a size-bounded start response with this task's notes only; omit parent-epic and sibling-task context"
+        description = "Default true: bounded own-task start; false explicitly includes parent-epic and sibling-task context"
     )]
     #[serde(default)]
     pub brief: Option<bool>,
@@ -284,7 +284,9 @@ pub struct TaskCloseRequest {
     pub reason: Option<String>,
 
     /// Fresh declaration, measured and audited on each close attempt.
-    #[schemars(description = "Declare no delivery for this close attempt, with a non-empty reason. Requires registered caller and measured absence of recorded delivery, task commits and unmerged lane work. Verification and dirty-work checks remain required.")]
+    #[schemars(
+        description = "Declare no delivery for this close attempt, with a non-empty reason. Requires registered caller and measured absence of recorded delivery, task commits and unmerged lane work. Verification and dirty-work checks remain required."
+    )]
     #[serde(default)]
     pub no_delivery: Option<bool>,
 
@@ -550,8 +552,30 @@ pub struct TaskUpdateRequest {
 // Task Show Request
 // ============================================================================
 
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+pub struct TaskReadOptions {
+    /// Return the entire text, without a byte ceiling.
+    #[serde(default)]
+    pub full: bool,
+    /// UTF-8 byte cursor into the full rendered text.
+    #[serde(default)]
+    pub offset: Option<usize>,
+    /// Page body budget, clamped to 4..1600 bytes.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskNotesReadRequest {
+    pub id: String,
+    #[serde(flatten)]
+    pub read: TaskReadOptions,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct TaskShowRequest {
+    #[serde(flatten)]
+    pub read: TaskReadOptions,
     /// Task ID
     #[schemars(description = "ID of the task to show")]
     pub id: String,

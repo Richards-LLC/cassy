@@ -396,6 +396,7 @@ impl CasService {
         let inner_req = TaskShowRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "show"))?,
             with_deps: req.with_deps.unwrap_or(true),
+            read: crate::mcp::tools::TaskReadOptions { full: req.full.unwrap_or(false), offset: req.offset, limit: req.limit },
         };
         self.inner.cas_task_show(Parameters(inner_req)).await
     }
@@ -454,7 +455,7 @@ impl CasService {
         use crate::mcp::tools::TaskStartRequest;
         let inner_req = TaskStartRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "start"))?,
-            brief: req.brief,
+            brief: req.brief.or(req.full.map(|full| !full)),
             force: req.force,
         };
         self.inner
@@ -623,7 +624,7 @@ impl CasService {
     }
 
     pub(super) async fn task_notes(&self, req: TaskRequest) -> Result<CallToolResult, McpError> {
-        use crate::mcp::tools::{IdRequest, TaskNotesRequest};
+        use crate::mcp::tools::{TaskNotesReadRequest, TaskNotesRequest, TaskReadOptions};
         let supervisor_override = req.effective_supervisor_override();
         let id = req.id.ok_or_else(|| self.missing_id("task", "notes"))?;
 
@@ -640,7 +641,7 @@ impl CasService {
             }
             None => {
                 self.inner
-                    .cas_task_notes_read(Parameters(IdRequest { id }))
+                    .cas_task_notes_read(Parameters(TaskNotesReadRequest { id, read: TaskReadOptions { full: req.full.unwrap_or(false), offset: req.offset, limit: req.limit } }))
                     .await
             }
         }

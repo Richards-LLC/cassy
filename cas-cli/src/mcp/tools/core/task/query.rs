@@ -1,7 +1,5 @@
 use crate::mcp::tools::core::imports::*;
 
-const TASK_SHOW_NOTES_LIMIT: usize = 5;
-
 fn retain_list_tasks(
     tasks: &mut Vec<Task>,
     filter: &str,
@@ -37,42 +35,137 @@ fn append_list_filter_report(
     }
 }
 
-fn task_show_notes(notes: &str, task_id: &str) -> String {
-    // Notes written by `task notes` begin with a timestamped `[... ]`
-    // heading. Split on the heading boundary so blank lines inside a note do
-    // not accidentally turn one note into several; retain the simpler split
-    // for legacy/plain note blobs without headings.
-    let entries: Vec<&str> = if notes.contains("\n\n[") {
-        let mut entries = Vec::new();
-        let mut start = 0;
-        for (offset, _) in notes.match_indices("\n\n[") {
-            let entry = &notes[start..offset];
-            if !entry.trim().is_empty() {
-                entries.push(entry);
-            }
-            start = offset + 2;
+/// Keep short history intact; for a large timeline retain the latest decision,
+/// proof and checkpoint, each with a byte cursor into the original notes.
+/// Full reads remain the source of truth, including attached artifact receipts.
+pub(super) fn task_show_notes(notes: &str, task_id: &str) -> String {
+    if notes.len() <= 700 {
+        return notes.to_string();
+    }
+    let mut starts = vec![0];
+    starts.extend(notes.match_indices("\n\n[").map(|(i, _)| i + 2));
+    let entries: Vec<_> = starts
+        .iter()
+        .enumerate()
+        .map(|(i, start)| {
+            (
+                *start,
+                notes[*start..starts.get(i + 1).copied().unwrap_or(notes.len())].trim_end(),
+            )
+        })
+        .collect();
+    let mut selected = Vec::new();
+    for marker in ["DECISION", "PROOF"] {
+        if let Some((offset, text)) = entries
+            .iter()
+            .rev()
+            .find(|(_, text)| text.lines().next().unwrap_or("").contains(marker))
+        {
+            selected.push((*offset, *text));
         }
-        let entry = &notes[start..];
-        if !entry.trim().is_empty() {
-            entries.push(entry);
+    }
+    if let Some(last) = entries.last() {
+        selected.push(*last);
+    }
+    selected.sort_by_key(|(offset, _)| *offset);
+    selected.dedup_by_key(|(offset, _)| *offset);
+    let mut result = String::new();
+    for (offset, text) in selected {
+        result.push_str(&format!("[note byte {offset}] {}\n", excerpt(text, 160)));
+    }
+    if let Some(id) = notes
+        .lines()
+        .rev()
+        .filter_map(|line| line.strip_prefix("ARTIFACT_PROOF: "))
+        .find_map(|json| {
+            serde_json::from_str::<serde_json::Value>(json)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("id")
+                        .and_then(|id| id.as_str())
+                        .map(str::to_string)
+                })
+        })
+    {
+        result.push_str(&format!("Latest artifact: {}\n", excerpt(&id, 80)));
+    }
+    result.push_str(&format!(
+        "History: {} bytes; task notes id={task_id} full=true",
+        notes.len()
+    ));
+    result
+}
+
+pub(super) fn excerpt(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut end = budget.saturating_sub(3).min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+pub(super) fn read_hint(id: &str, action: &str) -> String {
+    format!(
+        "\nFull: task {action} id={id} full=true\nPage: task {action} id={id} offset=0 limit=1600"
+    )
+}
+
+/// The summary and navigation together fit the response budget. A page is a
+/// slice of the complete renderer, so following next= is lossless even in UTF-8.
+pub(super) fn render_task_read(
+    full: &str,
+    summary: &str,
+    id: &str,
+    action: &str,
+    read: &TaskReadOptions,
+) -> Result<String, McpError> {
+    if read.full {
+        return Ok(full.to_string());
+    }
+    if read.offset.is_some() || read.limit.is_some() {
+        let start = read.offset.unwrap_or(0);
+        if start > full.len() || !full.is_char_boundary(start) {
+            return Err(CasCore::error(
+                ErrorCode::INVALID_PARAMS,
+                "offset must be a UTF-8 boundary within the full text; follow next= from the previous page",
+            ));
         }
-        entries
-    } else {
-        notes
-            .split("\n\n")
-            .filter(|entry| !entry.trim().is_empty())
-            .collect()
-    };
-    let earlier = entries.len().saturating_sub(TASK_SHOW_NOTES_LIMIT);
-    let visible = &entries[earlier..];
-    let mut rendered = String::new();
-    if earlier > 0 {
-        rendered.push_str(&format!(
-            "{earlier} earlier notes; `task notes id={task_id}` for all\n\n"
+        let budget = read.limit.unwrap_or(1600).clamp(4, 1600);
+        let mut end = start.saturating_add(budget).min(full.len());
+        while !full.is_char_boundary(end) {
+            end -= 1;
+        }
+        let next = if end == full.len() {
+            "end".into()
+        } else {
+            end.to_string()
+        };
+        return Ok(format!(
+            "Task {action} bytes {start}..{end}/{} next={next}\n\n{}",
+            full.len(),
+            &full[start..end]
         ));
     }
-    rendered.push_str(&visible.join("\n\n"));
-    rendered
+    let hint = read_hint(id, action);
+    Ok(format!(
+        "{}{}",
+        excerpt(summary, 2000usize.saturating_sub(hint.len())),
+        hint
+    ))
+}
+
+pub(super) fn task_scope(task: &Task) -> String {
+    format!(
+        "Execution Note: {}\nDescription: {}\nAcceptance Criteria: {}\nProof Targets: {}\n",
+        excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 120),
+        excerpt(&task.description, 180),
+        excerpt(&task.acceptance_criteria, 140),
+        excerpt(&task.proof_targets.join(", "), 100)
+    )
 }
 
 impl CasCore {
@@ -124,7 +217,9 @@ impl CasCore {
             target
         );
         // cas-ea9c (GH #1005): cited issues attached at assignment.
-        if let Some(section) = crate::github_issue_attach::cited_issue_section(&self.cas_root, &task) {
+        if let Some(section) =
+            crate::github_issue_attach::cited_issue_section(&self.cas_root, &task)
+        {
             output.push_str(&format!("\n{section}\n"));
         }
 
@@ -254,26 +349,34 @@ impl CasCore {
         if let Some(batch) = task.deliverables.integration_batch.as_ref() {
             output.push_str(&format!(
                 "{}: {}@{} (base {}, delivery {}, supervisor {})\n",
-                if task.status == TaskStatus::AwaitingMerge { "Staged in integration batch" } else { "Integration batch receipt" }, batch.branch, batch.tip, batch.base, batch.delivered_head, batch.supervisor_id
+                if task.status == TaskStatus::AwaitingMerge {
+                    "Staged in integration batch"
+                } else {
+                    "Integration batch receipt"
+                },
+                batch.branch,
+                batch.tip,
+                batch.base,
+                batch.delivered_head,
+                batch.supervisor_id
             ));
         }
+
+        let status_summary = output.clone();
 
         if !task.description.is_empty() {
             output.push_str(&format!("\nDescription:\n{}\n", task.description));
         }
 
         if !task.notes.is_empty() {
-            output.push_str(&format!(
-                "\nNotes:\n{}\n",
-                task_show_notes(&task.notes, &task.id)
-            ));
+            output.push_str(&format!("\nNotes:\n{}\n", task.notes));
         }
 
         // cas-7d54: surface web-authored comments (read-only mirror, contract
         // §2). Best-effort fetch off the async runtime via spawn_blocking;
         // degrades to nothing when not logged in / no team / offline so it
         // never blocks or fails `task show`.
-        {
+        if req.read.full || req.read.offset.is_some() || req.read.limit.is_some() {
             let cas_root = self.cas_root.clone();
             let comment_task_id = req.id.clone();
             let comments = tokio::task::spawn_blocking(move || {
@@ -313,7 +416,12 @@ impl CasCore {
         } else {
             output.push_str("\nRisk: undeclared\n");
         }
-        output.push_str(&format!("Door: {} (recorded only)\n", task.door.map(|door| door.to_string()).unwrap_or_else(|| "undeclared".into())));
+        output.push_str(&format!(
+            "Door: {} (recorded only)\n",
+            task.door
+                .map(|door| door.to_string())
+                .unwrap_or_else(|| "undeclared".into())
+        ));
         if !task.proof_targets.is_empty() {
             output.push_str(&format!(
                 "Proof Targets: {}\n",
@@ -346,7 +454,9 @@ impl CasCore {
                     output.push_str("\nOutcome: delivered");
                 }
                 cas_types::TaskTerminalOutcome::EvidenceOnly => {
-                    output.push_str("\nOutcome: successful evidence-only delivery (not for integration)");
+                    output.push_str(
+                        "\nOutcome: successful evidence-only delivery (not for integration)",
+                    );
                 }
                 cas_types::TaskTerminalOutcome::NegativeResult => {
                     output.push_str("\nOutcome: measured negative result (no delivery)");
@@ -381,13 +491,21 @@ impl CasCore {
             if let Some(ref commit) = task.deliverables.commit_hash {
                 output.push_str(&format!("\n  Commit: {commit}"));
             }
-            if let Some(merge) = task.deliverables.merge_commit.as_ref()
+            if let Some(merge) = task
+                .deliverables
+                .merge_commit
+                .as_ref()
                 .or(task.deliverables.green_merge_commit.as_ref())
             {
                 output.push_str(&format!("\n  Merge commit: {merge}"));
             }
-            if task.deliverables.green_merge_commit.is_some() || task.deliverables.merge_ci_admission.is_some() {
-                output.push_str(&format!("\n  CI admission: {}", task.deliverables.effective_merge_ci_admission().label()));
+            if task.deliverables.green_merge_commit.is_some()
+                || task.deliverables.merge_ci_admission.is_some()
+            {
+                output.push_str(&format!(
+                    "\n  CI admission: {}",
+                    task.deliverables.effective_merge_ci_admission().label()
+                ));
             }
         }
 
@@ -558,7 +676,15 @@ impl CasCore {
             }
         }
 
-        Ok(Self::success(output))
+        let summary = format!(
+            "{}\n{}\nNotes:\n{}",
+            excerpt(&status_summary, 550),
+            task_scope(&task),
+            task_show_notes(&task.notes, &task.id)
+        );
+        Ok(Self::success(render_task_read(
+            &output, &summary, &task.id, "show", &req.read,
+        )?))
     }
 
     /// List blocked tasks
@@ -1065,23 +1191,6 @@ mod tests {
         assert!(listed_ids(&text).is_empty());
         assert!(text.contains("No tasks found matching filters."));
         assert!(text.contains("1 quarantined tasks hidden"), "{text}");
-    }
-
-    #[test]
-    fn task_show_notes_pages_old_entries_but_keeps_newest_five() {
-        let notes = (1..=7)
-            .map(|index| format!("[2026-09-10T12:00:0{index}Z] PROGRESS note-{index}"))
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        let rendered = task_show_notes(&notes, "cas-9568");
-
-        assert!(rendered.starts_with("2 earlier notes; `task notes id=cas-9568` for all"));
-        assert!(!rendered.contains("note-1"));
-        assert!(!rendered.contains("note-2"));
-        for index in 3..=7 {
-            assert!(rendered.contains(&format!("note-{index}")), "{rendered}");
-        }
     }
 
     #[test]

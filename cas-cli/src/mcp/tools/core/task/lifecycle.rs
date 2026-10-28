@@ -2962,7 +2962,7 @@ impl CasCore {
         // Record working epic if this task belongs to one
         // This is used by the exit blocker to ensure all epic subtasks are completed
         // Also look up the parent epic's worktree and sibling notes
-        let brief = req.brief.unwrap_or(false);
+        let brief = req.brief.unwrap_or(true);
         let mut parent_worktree_info: Option<String> = None;
         let mut epic_ownership_info: Option<String> = None;
         let mut sibling_notes_info: Option<String> = None;
@@ -3346,12 +3346,11 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
-        let related_context = self
-            .related_recall_excluding(
-                &task_recall_query(&task.title, &task.labels, &task.description),
-                Some(&task.id),
-            )
-            .unwrap_or_default();
+        let related_context = if brief { String::new() } else {
+            self.related_recall_excluding(
+                &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id),
+            ).unwrap_or_default()
+        };
 
         if brief {
             // Bound the complete variable portion of the brief response. The
@@ -3382,35 +3381,25 @@ impl CasCore {
                     Ok::<String, McpError>(format!("\n\nStructured execution state:\n{encoded}"))
                 })
                 .transpose()?;
-            let own_notes = if task.notes.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    "\n\n📋 TASK NOTES:\n{}",
-                    crate::mcp::tools::truncate_str(&task.notes, 4_093)
-                )
-            };
+            use super::query::{excerpt, read_hint, task_scope, task_show_notes};
+            // Scope and the newest evidence precede optional context. Every
+            // clipped field is available through task show/notes full or pages.
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}",
-                req.id,
-                crate::mcp::tools::truncate_str(&task.title, 509),
-                task.delivery_mode,
-                claim_info.unwrap_or_default(),
-                reused_factory_branch_reset.as_deref().unwrap_or_default(),
-                blocker_warning,
-                crate::mcp::tools::truncate_str(&unanchored_warning.unwrap_or_default(), 765,),
-                crate::mcp::tools::truncate_str(&cited_issues, 1_021),
-                related_context,
-                execution_state.unwrap_or_default(),
-                start_guidance(&task),
-                own_notes,
-                push_note,
+                "Started task: {} - {}\nDelivery mode: {}{}\n{}{}\n{}\nNotes:\n{}\n{}{}{}{}",
+                task.id, excerpt(&task.title, 120), task.delivery_mode,
+                excerpt(&claim_info.unwrap_or_default(), 180),
+                excerpt(&blocker_warning, 160),
+                task_scope(&task),
+                excerpt(&execution_state.unwrap_or_default(), 240),
+                task_show_notes(&task.notes, &task.id),
+                excerpt(&start_guidance(&task), 300),
+                excerpt(reused_factory_branch_reset.as_deref().unwrap_or_default(), 120),
+                excerpt(&unanchored_warning.unwrap_or_default(), 120),
+                excerpt(&push_note, 100),
             );
-            // `truncate_str` appends three bytes when it truncates, hence the
-            // 6_141 payload bound for a hard 6 KiB response ceiling.
-            return Ok(Self::success(crate::mcp::tools::truncate_str(
-                &response, 6_141,
-            )));
+            let hint = read_hint(&task.id, "show");
+            return Ok(Self::success(format!("{}{}", excerpt(&response, 2000 - hint.len()), hint)));
+
         }
 
         Ok(Self::success(format!(

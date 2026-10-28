@@ -42,14 +42,16 @@ async fn machine_health_answers_while_subscription_catalog_is_busy() {
     };
     let events = MachineEventBus::new(16);
     let app = router(HubState::new(
-        SessionCatalog::new(model.clone()), Arc::new(PreAuthAuthorizer),
+        SessionCatalog::new(model.clone()), Arc::new(ExactOriginReadAuthorizer("https://controller.example")),
         MachineIdentity { id: "busy-catalog".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let hub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/v1/attach?ticket=fixture")).await.unwrap();
+    let mut request = format!("ws://{address}/v1/attach?ticket=fixture").into_client_request().unwrap();
+    request.headers_mut().insert("origin", "https://controller.example".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
     socket.send(WsMessage::Text(serde_json::json!({"proto":2}).to_string().into())).await.unwrap();
     socket.next().await.unwrap().unwrap();
     socket.send(WsMessage::Text(serde_json::json!({"channel":"pty:factory-a","subscribe":true}).to_string().into())).await.unwrap();

@@ -27813,7 +27813,7 @@ mod merge_state_gate_tests {
             // A merge resolution discards the delivery. A deliberate later
             // edit would instead be legitimate supersession under the
             // existing content policy, and must remain accepted.
-            git(p, &["rm", "delivery.rs"]);
+            git(p, &["rm", "-f", "delivery.rs"]);
         }
         git(p, &["commit", "-q", "-m", "land delivery"]);
         if case == "dropped" {

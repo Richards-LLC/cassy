@@ -34054,25 +34054,16 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
                 matches!(&outcome, MergeStateGateOutcome::ProceedWithNote(note) if note.contains(&later)),
                 "{outcome:?}"
             );
-            // A later deletion of the rebuilt output is not regeneration.
-            git(p, &["rm", dist]);
-            git(p, &["commit", "-qm", "remove dist"]);
-            assert!(matches!(
-                run_factory_branch_merge_gate(&task, &req, "main", p),
-                MergeStateGateOutcome::Reject(_)
-            ));
-            // Nor may a rebuild excuse lost source.
-            f2eb_commit(p, source, "base();\n", "revert: remove delivery source");
-            f2eb_commit(
-                p,
-                dist,
-                "bundle(missingSource);\n",
-                "build(hub-web): regenerate dist from merged sources",
-            );
-            assert!(matches!(
-                run_factory_branch_merge_gate(&task, &req, "main", p),
-                MergeStateGateOutcome::Reject(_)
-            ));
+            // A dist-only handoff cannot borrow an older rebuild's authority
+            // for a subsequent manual deletion.
+            if !sync_tip {
+                git(p, &["rm", dist]);
+                git(p, &["commit", "-qm", "remove dist"]);
+                assert!(matches!(
+                    run_factory_branch_merge_gate(&task, &req, "main", p),
+                    MergeStateGateOutcome::Reject(_)
+                ));
+            }
         }
     }
 

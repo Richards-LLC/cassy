@@ -221,6 +221,8 @@ export class HubDouble {
   private polls = 0;
   /** Relay polls answered so far: the pairing's own clock (cas-03b7). */
   get relayPolls(): number { return this.polls; }
+  /** The current relay request's deadline: set when it is created, repeated by its polls (cas-fa56). */
+  private relayExpiresAt: string | undefined;
   private requestedScopes: string[] = [];
   private nextId = 1000;
   /** Machines currently unreachable (network down, Tailscale off), and how. */
@@ -1184,7 +1186,11 @@ export class HubDouble {
     const relay = this.options.relay;
     if (!relay) return route.fulfill({ status: 503, json: { error: "relay not configured for this journey" } });
     const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
-    const expiresAt = this.stamp(600_000);
+    // A request keeps the deadline it was created with while it is polled; only
+    // a new request gets a fresh one. A deadline moving on every poll reads as
+    // a new pairing step to the page and resets its view (cas-fa56).
+    if (url.pathname.endsWith("/requests")) this.relayExpiresAt = this.stamp(600_000);
+    const expiresAt = this.relayExpiresAt ?? this.stamp(600_000);
     if (url.pathname.endsWith("/requests")) {
       this.requestedScopes = (body.requested_scopes as string[]) ?? [];
       return route.fulfill({

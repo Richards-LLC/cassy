@@ -13237,13 +13237,13 @@ mod tests {
         // cas-59da: a row addressed to an away phone, viewed by this desktop.
         // The desktop's stored receipts leave the row pending, so they must not
         // clear its backoff (that re-forwarded it at the select-loop rate).
+        let mut phone_payload: serde_json::Value = serde_json::from_str(
+            &crate::supervisor_notices::operator_prompt("phone reply", "reply").unwrap(),
+        )
+        .unwrap();
+        phone_payload["device_id"] = "phone".into();
         let addressed = queue
-            .enqueue_with_session(
-                "supervisor",
-                "operator",
-                &crate::supervisor_notices::operator_prompt("phone reply", "reply").unwrap(),
-                "provision-test",
-            )
+            .enqueue_with_session("supervisor", "operator", &phone_payload.to_string(), "provision-test")
             .unwrap();
         queue.stamp_recipient_device(addressed, "phone").unwrap();
         let cas_store::EnqueueIdempotentResult::Created(notice) = queue

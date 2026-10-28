@@ -592,13 +592,11 @@ impl LoginSignals {
     fn answer(&self) -> Result<String> {
         // A line typed right after the picker's email prompt was read by
         // inquire's terminal reader, not stdin. Raw mode did not echo it.
-        let typed = crate::cli::account_picker::take_typeahead_line().unwrap_or_default();
-        if typed.ends_with('\n') {
+        if let Some(typed) = crate::cli::account_picker::take_typeahead_line() {
             eprintln!("{}", typed.trim_end());
             self.check()?;
             return Ok(typed);
         }
-        eprint!("{typed}");
         // Use the shared stdin buffer, including bytes prefetched by an earlier
         // prompt. read_line retries EINTR, so read on a separate thread while
         // the login owner remains able to notice cancellation and clean up.
@@ -615,9 +613,7 @@ impl LoginSignals {
             match receive.recv_timeout(std::time::Duration::from_millis(50)) {
                 Ok(answer) => {
                     self.check()?;
-                    // EOF still cancels, even after a partial type-ahead.
-                    let answer = answer?;
-                    return Ok(if answer.is_empty() { answer } else { typed + &answer });
+                    return Ok(answer?);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(error) => return Err(error.into()),

@@ -576,7 +576,7 @@ pub(crate) fn prompt_for_selection(
                     })
                     .prompt()
                     .with_context(|| format!("new {provider_label} login cancelled"))?;
-            stash_typeahead();
+            stash_typeahead(provider_label)?;
             Ok(Selection::NewLogin(entered.trim().to_string()))
         }
     }
@@ -585,43 +585,75 @@ pub(crate) fn prompt_for_selection(
 /// Keystrokes typed after the email prompt's Enter, for the login flow's
 /// later question (the duplicate-account confirmation).
 static TYPEAHEAD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// A typed-ahead Ctrl-D: ends the line it follows, as the terminal would.
+const TYPED_EOF: char = '\u{4}';
 
 /// inquire reads through crossterm 0.25, which takes every byte available on
 /// the terminal at once and queues the events after Enter privately. A later
-/// `std::io::stdin()` read can never see them, so move them out here.
-fn stash_typeahead() {
-    use crossterm_inquire::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+/// `std::io::stdin()` read can never see them, so move them out here. A queued
+/// Ctrl-C cancels now, as it would have the moment it was typed.
+fn stash_typeahead(provider_label: &str) -> Result<()> {
+    use crossterm_inquire::event::{self, Event};
     let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
         let Ok(event) = event::read() else { break };
         let Event::Key(key) = event else { continue };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        match key.code {
-            KeyCode::Enter => typed.push('\n'),
-            KeyCode::Backspace if !typed.is_empty() && !typed.ends_with('\n') => {
-                typed.pop();
+        if queue_key(&mut typed, key).is_break() {
+            typed.clear();
+            drop(typed);
+            // Nothing is staged yet; die by SIGINT like an ordinary Ctrl-C.
+            #[cfg(unix)]
+            unsafe {
+                libc::raise(libc::SIGINT);
             }
-            KeyCode::Char(c)
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                typed.push(c)
-            }
-            _ => {}
+            anyhow::bail!("new {provider_label} login cancelled");
         }
     }
+    Ok(())
 }
 
-/// The next line typed ahead of the question that asks for it. A line without
-/// a trailing newline is partial: the caller reads the rest from stdin.
-pub(crate) fn take_typeahead_line() -> Option<String> {
-    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if typed.is_empty() {
-        return None;
+/// Apply one queued key with the terminal line discipline's meaning.
+fn queue_key(
+    typed: &mut String,
+    key: crossterm_inquire::event::KeyEvent,
+) -> std::ops::ControlFlow<()> {
+    use crossterm_inquire::event::{KeyCode, KeyEventKind, KeyModifiers};
+    if key.kind == KeyEventKind::Release {
+        return std::ops::ControlFlow::Continue(());
     }
-    let end = typed.find('\n').map_or(typed.len(), |newline| newline + 1);
-    Some(typed.drain(..end).collect())
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') if control => return std::ops::ControlFlow::Break(()),
+        KeyCode::Char('d') if control => typed.push(TYPED_EOF),
+        KeyCode::Enter => typed.push('\n'),
+        KeyCode::Backspace if !typed.is_empty() && !typed.ends_with(['\n', TYPED_EOF]) => {
+            typed.pop();
+        }
+        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            typed.push(c)
+        }
+        _ => {}
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+/// The next complete line typed ahead of the question that asks for it, as
+/// `read_line` would return it: `y\n`, or `""` for a bare Ctrl-D (EOF).
+/// An unfinished line is dropped, so the reader can still edit their answer.
+pub(crate) fn take_typeahead_line() -> Option<String> {
+    next_typed_line(&mut TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+fn next_typed_line(typed: &mut String) -> Option<String> {
+    let Some(end) = typed.find(['\n', TYPED_EOF]) else {
+        typed.clear();
+        return None;
+    };
+    let mut line: String = typed.drain(..=end).collect();
+    if line.ends_with(TYPED_EOF) {
+        line.pop();
+    }
+    Some(line)
 }
 
 /// What one seeding pass did, so the caller can report it honestly.
@@ -971,6 +1003,31 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn queued_keys_follow_the_terminal_line_discipline() {
+        use crossterm_inquire::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut typed = String::new();
+        for queued in [
+            key(KeyCode::Char('n')),
+            key(KeyCode::Backspace),
+            key(KeyCode::Char('y')),
+            key(KeyCode::Enter),
+            ctrl('d'),
+            key(KeyCode::Char('n')),
+        ] {
+            assert!(queue_key(&mut typed, queued).is_continue());
+        }
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("y\n"));
+        // Ctrl-D on an empty line is EOF, which cancels like stdin EOF.
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some(""));
+        // An unfinished line is dropped so the question can still edit it.
+        assert_eq!(next_typed_line(&mut typed), None);
+        assert!(typed.is_empty());
+        assert!(queue_key(&mut typed, ctrl('c')).is_break());
     }
 
     #[test]

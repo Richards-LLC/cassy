@@ -54,7 +54,7 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 
 11. In Commander the operator reads safe Mermaid diagrams, expands unified diffs, and inspects inline image, video, audio and PDF first-page attachments. Source and original files remain reachable; previews reserve their space and rich renderers load on demand.
 
-12. A supervisor attaches an HTML page, such as a report with diagrams, images or video, to a reply, and Commander shows it inline beneath the file card and opens it in its own tab (HUB-J4). The publishing machine serves the page through a short-lived ticket under a CSP sandbox: no script, an opaque origin, no top navigation or popups, no network beyond its own assets, and framing allowed only from the Commander origin that asked. Agent markup never enters Commander's document.
+12. A supervisor attaches an HTML page, such as a report with diagrams, images or video, to a reply, and Commander shows it inline beneath the file card, in the conversation's light or dark theme, and opens it in its own tab (HUB-J4). The publishing machine serves the page through a short-lived ticket under a CSP sandbox: no script, an opaque origin, no top navigation or popups, no network beyond its own assets, and framing allowed only from the Commander origin that asked. Agent markup never enters Commander's document.
 
 ## Authoritative Sources
 

@@ -89,6 +89,7 @@ pub enum ReconciliationCode {
     ChannelUnavailable,
     LegacyIntakeActive,
     BindingUnevidenced,
+    NoEligibleReaders,
     RateLimited,
     AuthorityUnavailable,
 }
@@ -112,6 +113,7 @@ pub enum ReconciliationReason {
     NotMember,
     LegacyIntakeActive,
     BindingUnevidenced,
+    NoEligibleReaders,
     CallerRateLimited,
     AuthorityUnconfigured,
     ProofUnavailable,
@@ -142,6 +144,7 @@ impl ReconciliationReason {
             Self::NotMember => (409, C::ChannelUnavailable, A::InviteViolet),
             Self::LegacyIntakeActive => (409, C::LegacyIntakeActive, A::StopLegacyIntake),
             Self::BindingUnevidenced => (409, C::BindingUnevidenced, A::OperatorRepair),
+            Self::NoEligibleReaders => (409, C::NoEligibleReaders, A::RetryLater),
             Self::CallerRateLimited => (429, C::RateLimited, A::RetryLater),
             Self::AuthorityUnconfigured | Self::ProofInvalid => {
                 (503, C::AuthorityUnavailable, A::OperatorRepair)
@@ -404,6 +407,47 @@ impl ReconciliationResponse {
     }
 
     fn validate_refusal(&self) -> Result<(), WireError> {
+        if self.reason == ReconciliationReason::NoEligibleReaders {
+            let binding = self.binding.as_ref().ok_or(WireError("reader refusal has no binding"))?;
+            let latest = self.latest_attempt.as_ref().ok_or(WireError("reader refusal has no attempted receipt"))?;
+            ensure(
+                self.activation_id.as_ref() == Some(&latest.id)
+                    && latest.outcome == ActivationOutcome::Refused
+                    && latest.fence_generation == binding.fence_generation
+                    && self.blockers.is_none()
+                    && self.retry_after_secs.is_none()
+                    && self.settled.as_ref().is_some_and(|settled| {
+                        settled.migrated == 0 && settled.retired == 0 && settled.invalidated_leases == 0
+                    }),
+                "reader refusal lacks unchanged attempt and settlement",
+            )?;
+            match binding.mode {
+                BindingMode::Legacy => ensure(
+                    self.strict_activation == Some(StrictActivation::Refused)
+                        && self.fence_receipt.is_none()
+                        && binding.fence_generation == 0
+                        && binding.activated_at.is_none()
+                        && binding.legacy_fenced_at.is_none()
+                        && latest.prior_mode == BindingMode::Legacy,
+                    "legacy reader refusal cannot carry fence evidence",
+                )?,
+                BindingMode::Managed => {
+                    let fence = self.fence_receipt.as_ref().ok_or(WireError("managed reader refusal lost original fence"))?;
+                    ensure(
+                        self.strict_activation == Some(StrictActivation::Unevidenced)
+                            && binding.verified
+                            && binding.activated_at.is_some()
+                            && binding.legacy_fenced_at.is_some()
+                            && latest.prior_mode == BindingMode::Managed
+                            && fence.outcome == ActivationOutcome::Activated
+                            && fence.prior_mode != BindingMode::Managed
+                            && fence.fence_generation == binding.fence_generation,
+                        "managed reader refusal changed original fence",
+                    )?;
+                }
+                BindingMode::Activating => return Err(WireError("reader refusal has activating binding")),
+            }
+        }
         if self.reason == ReconciliationReason::LegacyIntakeActive {
             let binding = self
                 .binding

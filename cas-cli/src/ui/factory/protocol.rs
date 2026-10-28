@@ -261,7 +261,7 @@ pub struct ConversationHistoryReply {
 
 /// Version of the [`WorkEvent`] schema; documented in
 /// `docs/guides/commander-work-events.md` (cas-8f88).
-pub const WORK_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const WORK_EVENT_SCHEMA_VERSION: u32 = 2;
 /// Default and largest page of work events.
 pub const WORK_EVENT_PAGE_SIZE: u16 = 100;
 
@@ -283,6 +283,66 @@ pub enum WorkEventKind {
     Notice,
     #[serde(other)]
     Other,
+}
+
+/// Additive v2 tool facts. Strings intentionally allow future operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkTool {
+    pub name: String,
+    pub operation: String,
+    pub targets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub counts: Option<WorkToolCounts>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkToolCounts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matches: Option<u64>,
+}
+
+/// The latest observed state of an operation, never inferred from elapsed time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkLifecycle {
+    pub id: String,
+    pub stage: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkReasoning {
+    pub summary: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkChangedFile {
+    pub path: String,
+    pub operation: String,
+    pub source_event_id: String,
+}
+
+/// A cumulative per-turn snapshot of successful explicit edit calls, not Git state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkChangedFiles {
+    pub files: Vec<WorkChangedFile>,
+    pub provenance: String,
+    pub complete: bool,
 }
 
 /// One item of a session's work stream (cas-8f88). Read from transcripts,
@@ -310,6 +370,14 @@ pub struct WorkEvent {
     /// The tool call failed.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<WorkTool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<WorkLifecycle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<WorkReasoning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<WorkChangedFiles>,
 }
 
 impl MessageAttribution {
@@ -520,7 +588,10 @@ pub enum ClientMessage {
 
     /// Request the redacted detail of one work event (cas-8f88): a tool's
     /// input and result, or a thinking block's full text.
-    WorkEventDetailRequest { request_id: String, event_id: String },
+    WorkEventDetailRequest {
+        request_id: String,
+        event_id: String,
+    },
 
     /// Request current state snapshot
     GetState,
@@ -568,7 +639,9 @@ pub enum PaneSizeAuthority {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonMessage {
     /// Local-only response. An acknowledgement exists only after both tasks drain.
-    BindingIntake { reply: super::daemon::runtime::violet_intake::IntakeReply },
+    BindingIntake {
+        reply: super::daemon::runtime::violet_intake::IntakeReply,
+    },
     /// Welcome message on attach with current state
     Welcome {
         /// Session name
@@ -1303,7 +1376,10 @@ mod tests {
         };
         let encoded = serde_json::to_string(&current).unwrap();
         assert!(!encoded.contains("reply_to_session"), "{encoded}");
-        assert!(!encoded.contains("options"), "empty choices stay absent: {encoded}");
+        assert!(
+            !encoded.contains("options"),
+            "empty choices stay absent: {encoded}"
+        );
         let decoded: OperatorReplyPayload = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded, current);
         assert_eq!(legacy.reply_to_session, None);
@@ -1316,7 +1392,10 @@ mod tests {
         };
         let decoded: OperatorReplyPayload =
             serde_json::from_str(&serde_json::to_string(&cross).unwrap()).unwrap();
-        assert_eq!(decoded.reply_to_session.as_deref(), Some("acct-wise-lion-31"));
+        assert_eq!(
+            decoded.reply_to_session.as_deref(),
+            Some("acct-wise-lion-31")
+        );
 
         // cas-7ebc: choices must survive the same payload boundary used by
         // persisted operator turns, rather than existing only in hub doubles.
@@ -1498,7 +1577,11 @@ mod tests {
         assert_eq!(json["ConversationHistory"]["request_id"], "history-1");
         // cas-55a4: the earlier-session section is additive. An empty one is
         // not on the wire, and an older page without it still decodes.
-        assert!(json["ConversationHistory"].get("earlier_messages").is_none());
+        assert!(
+            json["ConversationHistory"]
+                .get("earlier_messages")
+                .is_none()
+        );
         assert!(json["ConversationHistory"].get("earlier_replies").is_none());
         let legacy: DaemonMessage = serde_json::from_value(serde_json::json!({
             "ConversationHistory": {"request_id": "h", "messages": [], "replies": [], "has_earlier": false}

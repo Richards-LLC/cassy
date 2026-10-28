@@ -516,6 +516,72 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
     }
 }
 
+/// GH #1370: held A and later integrated C belong to separate deliveries;
+/// neither can turn B's empty task lane into a code delivery.
+#[tokio::test]
+async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
+    let mut env = TestEnvGuard::temp_home();
+    for own_commit in [false, true] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        let mut held = assigned("cas-a0b1", TaskType::Bug, "main");
+        held.status = TaskStatus::AwaitingMerge;
+        held.deliverables.parked_branch = Some(LANE.into());
+        held.deliverables.factory_branch_anchor = Some(f.foreign_tip.clone());
+        f.put(&held);
+
+        let id = "cas-b3d4";
+        let own_lane = format!("{LANE}-{id}");
+        git(&worker_path, &["checkout", "-q", "-b", &own_lane, "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let mut helper = assigned(id, TaskType::Task, "main");
+        helper.status = TaskStatus::Open;
+        f.put(&helper);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref().unwrap().branch, own_lane);
+
+        let c_lane = format!("{LANE}-cas-c3d4");
+        git(repo, &["checkout", "-q", "-b", &c_lane, "main"]);
+        std::fs::write(repo.join("sibling.rs"), "pub fn sibling() {}\n").unwrap();
+        git(repo, &["add", "sibling.rs"]);
+        git(repo, &["commit", "-q", "-m", "fix(cas-c3d4): separate delivery"]);
+        let c_tip = git(repo, &["rev-parse", "HEAD"]);
+        git(repo, &["push", "-q", "origin", &c_lane]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["merge", "-q", "--no-ff", &c_lane, "-m", "Integrate C"]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let mut delivered = assigned("cas-c3d4", TaskType::Bug, "main");
+        delivered.status = TaskStatus::Closed;
+        delivered.deliverables.parked_branch = Some(c_lane.clone());
+        delivered.deliverables.factory_branch_anchor = Some(c_tip.clone());
+        f.put(&delivered);
+        if own_commit {
+            std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+            git(&worker_path, &["add", "own.rs"]);
+            git(&worker_path, &["commit", "-q", "-m", "fix(cas-b3d4): own delivery"]);
+        }
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Diagnosis finished", "no_delivery":true,
+        })).await;
+        if own_commit {
+            assert!(response.contains("NO DELIVERY CLOSE REJECTED"), "{response}");
+            assert_eq!(f.task(id).status, TaskStatus::InProgress, "{response}");
+        } else {
+            assert_closed_without_lane(&f, id, &response);
+            assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        }
+        assert_eq!(f.task(&held.id).status, TaskStatus::AwaitingMerge);
+        assert_eq!(git(repo, &["rev-parse", LANE]), f.foreign_tip);
+        assert_eq!(git(repo, &["rev-parse", &c_lane]), c_tip);
+        assert_eq!(f.task(&delivered.id).status, TaskStatus::Closed);
+    }
+}
+
 /// GH #1133: a deploy-only task targeting `main`, started on a lane whose tip
 /// is another task's delivery. The worker declares no-code at close.
 #[tokio::test]

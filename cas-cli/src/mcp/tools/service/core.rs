@@ -396,7 +396,11 @@ impl CasService {
         let inner_req = TaskShowRequest {
             id: req.id.ok_or_else(|| self.missing_id("task", "show"))?,
             with_deps: req.with_deps.unwrap_or(true),
-            read: crate::mcp::tools::TaskReadOptions { full: req.full.unwrap_or(false), offset: req.offset, limit: req.limit },
+            read: crate::mcp::tools::TaskReadOptions {
+                full: req.full.unwrap_or(false),
+                offset: req.offset,
+                limit: req.limit,
+            },
         };
         self.inner.cas_task_show(Parameters(inner_req)).await
     }
@@ -641,7 +645,14 @@ impl CasService {
             }
             None => {
                 self.inner
-                    .cas_task_notes_read(Parameters(TaskNotesReadRequest { id, read: TaskReadOptions { full: req.full.unwrap_or(false), offset: req.offset, limit: req.limit } }))
+                    .cas_task_notes_read(Parameters(TaskNotesReadRequest {
+                        id,
+                        read: TaskReadOptions {
+                            full: req.full.unwrap_or(false),
+                            offset: req.offset,
+                            limit: req.limit,
+                        },
+                    }))
                     .await
             }
         }

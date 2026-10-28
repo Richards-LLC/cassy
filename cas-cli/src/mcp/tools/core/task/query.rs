@@ -70,8 +70,18 @@ pub(super) fn task_show_notes(notes: &str, task_id: &str) -> String {
     selected.sort_by_key(|(offset, _)| *offset);
     selected.dedup_by_key(|(offset, _)| *offset);
     let mut result = String::new();
+    let header_bytes = format!(
+        "Notes for task {}\n{}\n\n",
+        task_id,
+        "=".repeat(task_id.len() + 15)
+    )
+    .len();
     for (offset, text) in selected {
-        result.push_str(&format!("[note byte {offset}] {}\n", excerpt(text, 160)));
+        result.push_str(&format!(
+            "[notes offset={}] {}\n",
+            header_bytes + offset,
+            excerpt(text, 100)
+        ));
     }
     if let Some(id) = notes
         .lines()
@@ -161,10 +171,10 @@ pub(super) fn render_task_read(
 pub(super) fn task_scope(task: &Task) -> String {
     format!(
         "Execution Note: {}\nDescription: {}\nAcceptance Criteria: {}\nProof Targets: {}\n",
-        excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 120),
-        excerpt(&task.description, 180),
-        excerpt(&task.acceptance_criteria, 140),
-        excerpt(&task.proof_targets.join(", "), 100)
+        excerpt(task.execution_note.as_deref().unwrap_or("(none)"), 40),
+        excerpt(&task.description, 100),
+        excerpt(&task.acceptance_criteria, 80),
+        excerpt(&task.proof_targets.join(", "), 40)
     )
 }
 
@@ -180,6 +190,8 @@ impl CasCore {
             message: Cow::from(format!("Task not found: {e}")),
             data: None,
         })?;
+
+        let mut read_status = String::new();
 
         let target = task
             .deliverables
@@ -245,6 +257,10 @@ impl CasCore {
                 )),
                 data: None,
             })?;
+            read_status.push_str(&format!(
+                "Structured execution state: {}\n",
+                excerpt(&encoded, 180)
+            ));
             output.push_str("\nStructured execution state:\n");
             output.push_str(&encoded);
             output.push('\n');
@@ -282,6 +298,13 @@ impl CasCore {
                         "worker revalidates repository/tips and submits a new receipt"
                     }
                 };
+                read_status.insert_str(
+                    0,
+                    &format!(
+                        "Transactional delivery: {}\nReceipt: {}\nCommit: {}\n",
+                        transaction.state, receipt.id, receipt.commit_sha
+                    ),
+                );
                 output.push_str(&format!(
                     "\nTransactional delivery: {}\n  Receipt: {}\n  Commit: {}\n  Next action: {}",
                     transaction.state, receipt.id, receipt.commit_sha, next_action
@@ -314,6 +337,7 @@ impl CasCore {
                     | cas_types::VerificationDispatchState::Claimed
             )
         {
+            read_status.insert_str(0, &format!("Verification dispatch: {}\n", dispatch.id));
             output.push_str(&format!(
                 "\nVerification dispatch: {} (deadline {})\n",
                 dispatch.id,
@@ -328,6 +352,7 @@ impl CasCore {
         // clean one queued for the supervisor.
         if task.status == TaskStatus::AwaitingMerge {
             if task.deliverables.merge_conflicted {
+                read_status.insert_str(0, "MERGE CONFLICT / REWORK REQUIRED\n");
                 output.push_str(
                     "⚠️  MERGE CONFLICT / REWORK REQUIRED — this task is NOT complete. \
                      The parked branch is conflicted or its conflict preflight could \
@@ -342,6 +367,7 @@ impl CasCore {
                 );
             }
             if let Some(ref branch) = task.deliverables.parked_branch {
+                read_status.insert_str(0, &format!("Parked branch: {}\n", excerpt(branch, 100)));
                 output.push_str(&format!("Parked branch: {branch}\n"));
             }
         }
@@ -361,8 +387,6 @@ impl CasCore {
                 batch.supervisor_id
             ));
         }
-
-        let status_summary = output.clone();
 
         if !task.description.is_empty() {
             output.push_str(&format!("\nDescription:\n{}\n", task.description));
@@ -676,10 +700,23 @@ impl CasCore {
             }
         }
 
+        let header = format!(
+            "Task: {} - {}\nStatus: {:?}\nAssignee: {}\nPriority: P{}; Depth: {}; Delivery mode: {}\nOrigin project: {}\nTarget: {}\n",
+            task.id,
+            excerpt(&task.title, 60),
+            task.status,
+            excerpt(task.assignee.as_deref().unwrap_or("(unassigned)"), 40),
+            task.priority.0,
+            task.depth,
+            task.delivery_mode,
+            excerpt(&origin, 40),
+            excerpt(&target, 80),
+        );
         let summary = format!(
-            "{}\n{}\nNotes:\n{}",
-            excerpt(&status_summary, 550),
+            "{}\n{}{}\nNotes:\n{}",
+            excerpt(&header, 400),
             task_scope(&task),
+            excerpt(&read_status, 200),
             task_show_notes(&task.notes, &task.id)
         );
         Ok(Self::success(render_task_read(

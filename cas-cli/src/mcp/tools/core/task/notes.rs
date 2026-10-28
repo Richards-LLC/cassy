@@ -25,24 +25,25 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.notes.is_empty() {
-            return Ok(Self::success(format!(
-                "No notes recorded for task {}",
-                task.id
-            )));
-        }
-
-        let full = format!(
-            "Notes for task {}\n{}\n\n{}",
-            task.id,
-            "=".repeat(task.id.len() + 15),
-            task.notes
-        );
-        let summary = format!(
-            "Notes for task {}\n{}",
-            task.id,
-            super::query::task_show_notes(&task.notes, &task.id)
-        );
+        let full = if task.notes.is_empty() {
+            format!("No notes recorded for task {}", task.id)
+        } else {
+            format!(
+                "Notes for task {}\n{}\n\n{}",
+                task.id,
+                "=".repeat(task.id.len() + 15),
+                task.notes
+            )
+        };
+        let summary = if task.notes.is_empty() {
+            full.clone()
+        } else {
+            format!(
+                "Notes for task {}\n{}",
+                task.id,
+                super::query::task_show_notes(&task.notes, &task.id)
+            )
+        };
         Ok(Self::success(super::query::render_task_read(
             &full, &summary, &task.id, "notes", &req.read,
         )?))

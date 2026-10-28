@@ -3346,17 +3346,16 @@ impl CasCore {
         // cas-3e41 (GH #993): the worker's first context for this task carries
         // the domain-matched rules and memories, bounded like the create and
         // spawn receipts. Empty when nothing matches.
-        let related_context = if brief { String::new() } else {
-            self.related_recall_excluding(
-                &task_recall_query(&task.title, &task.labels, &task.description), Some(&task.id),
-            ).unwrap_or_default()
-        };
+        let related_context = self
+            .related_recall_excluding(
+                &task_recall_query(&task.title, &task.labels, &task.description),
+                Some(&task.id),
+            )
+            .unwrap_or_default();
 
         if brief {
-            // Bound the complete variable portion of the brief response. The
-            // fixed header/claim/warning/push text remains small, while own
-            // notes are capped to 4 KiB and sibling/epic/workflow payloads are
-            // omitted entirely.
+            // Keep scope, resume state and recent evidence within 2000 bytes.
+            // Complete fields remain available through show/notes full or pages.
             let execution_state = task_store
                 .get_execution_state(&task.id)
                 .map_err(|error| {
@@ -3384,22 +3383,31 @@ impl CasCore {
             use super::query::{excerpt, read_hint, task_scope, task_show_notes};
             // Scope and the newest evidence precede optional context. Every
             // clipped field is available through task show/notes full or pages.
+            let advisory = format!(
+                "{}{}{}{}",
+                claim_info.unwrap_or_default(),
+                blocker_warning,
+                reused_factory_branch_reset.as_deref().unwrap_or_default(),
+                unanchored_warning.unwrap_or_default()
+            );
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}\n{}{}\n{}\nNotes:\n{}\n{}{}{}{}",
-                task.id, excerpt(&task.title, 120), task.delivery_mode,
-                excerpt(&claim_info.unwrap_or_default(), 180),
-                excerpt(&blocker_warning, 160),
+                "Started task: {} - {}\nDelivery mode: {}{}{}\n{}\n{}\n{}\nNotes:\n{}",
+                task.id,
+                excerpt(&task.title, 60),
+                task.delivery_mode,
+                excerpt(&advisory, 160),
+                start_guidance(&task),
                 task_scope(&task),
-                excerpt(&execution_state.unwrap_or_default(), 240),
+                excerpt(&execution_state.unwrap_or_default(), 120),
+                excerpt(&related_context, 120),
                 task_show_notes(&task.notes, &task.id),
-                excerpt(&start_guidance(&task), 300),
-                excerpt(reused_factory_branch_reset.as_deref().unwrap_or_default(), 120),
-                excerpt(&unanchored_warning.unwrap_or_default(), 120),
-                excerpt(&push_note, 100),
             );
             let hint = read_hint(&task.id, "show");
-            return Ok(Self::success(format!("{}{}", excerpt(&response, 2000 - hint.len()), hint)));
-
+            return Ok(Self::success(format!(
+                "{}{}",
+                excerpt(&response, 2000 - hint.len()),
+                hint
+            )));
         }
 
         Ok(Self::success(format!(

@@ -4,6 +4,77 @@ import { test, expect, journeyPart, RECEIPTS } from "./journey";
 import { journeyStamp } from "./clock";
 import { ATLAS, STUDIO, PELICAN, OTTER } from "./world";
 import type { DoubleOptions, Machine } from "./hub-double";
+import { LATEST_RELEASE_URL } from "./hub-double";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+
+test("HUB-J3 machine versions distinguish installed runtimes, cached updates and the web build", journeyPart, async ({ page, journey }) => {
+  let checks = 0, unavailable = false;
+  await page.route(LATEST_RELEASE_URL, route => {
+    checks++;
+    return unavailable ? route.abort() : route.fulfill({ json: { tag_name: "v3.88.0" } });
+  });
+  const versions = { atlas: "3.9.0", studio: "3.88.0" };
+  await journey.hub({ machines: [ATLAS, STUDIO], paired: ["atlas", "studio"], versions });
+  await journey.open();
+  // seedPaired clears localStorage during fixture setup. Measure the cache
+  // after the real returning-user navigation, independently of that warm-up.
+  await expect.poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("commander.latest-release.v1") ?? "null")?.version)).toBe("3.88.0");
+  const initialChecks = checks;
+  const atlas = page.locator('.project-machine-chip[data-project-machine="atlas"]');
+  const studio = page.locator('.project-machine-chip[data-project-machine="studio"]');
+  await expect(atlas).toContainText("Cassy 3.9.0");
+  await expect(atlas).toContainText("Update available → 3.88.0");
+  await expect(studio).toContainText("Cassy 3.88.0");
+  await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+  await expect(page.locator('[title="Web client release and build"]')).toHaveText(/^Web \d+\.\d+\.\d+ · [a-f0-9]{8}$/);
+  const captureVersions = async (name: string) => {
+    if (!process.env.VERSION_QA) return;
+    // Preserve the real production DOM and CSS for the strict visual polish
+    // inspector; only asset URLs are inlined, with no replacement markup.
+    mkdirSync(process.env.VERSION_QA, { recursive: true });
+    const css = readFileSync("dist/app.css", "utf8").replace(/url\((?:["']?)([^)'"\s]+\.woff2)(?:["']?)\)/g, (_match, url: string) =>
+      `url(data:font/woff2;base64,${readFileSync(`dist/${url.split("/").at(-1)}`).toString("base64")})`);
+    const html = await page.evaluate(() => {
+      const root = document.documentElement.cloneNode(true) as HTMLElement;
+      root.querySelectorAll("script, link").forEach(node => node.remove());
+      return `<!doctype html>${root.outerHTML}`;
+    });
+    writeFileSync(`${process.env.VERSION_QA}/machine-versions-${name}.html`, html.replace("</head>", `<style>${css}</style></head>`));
+  };
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia({ colorScheme });
+    await journey.stage(`Read installed and available versions at ${width} in ${colorScheme}`, async () => {
+      await expect(atlas).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await expect(page.locator('[title="Web client release and build"]')).toBeVisible();
+    });
+    await captureVersions(`${width}-${colorScheme}`);
+  }
+  await journey.stage("The machine register repeats the installed and target versions", async () => {
+    await page.locator("#paired-machines-toggle").click();
+    await expect(page.locator('[data-machine-id="atlas"] .paired-machine-runtime')).toContainText("Update available → 3.88.0");
+    await expect(page.locator('[data-machine-id="studio"] .paired-machine-runtime')).toHaveText("Cassy 3.88.0");
+    await page.getByRole("button", { name: "Close paired machines" }).click();
+  });
+  await journey.stage("Reloads and unknown machine versions do not invent update warnings or extra checks", async () => {
+    versions.studio = "unknown";
+    await page.reload();
+    await expect(studio).toContainText("Version unknown");
+    await expect(studio.locator(".machine-version-update")).toHaveCount(0);
+    await expect(atlas).toContainText("Update available → 3.88.0");
+    expect(checks).toBe(initialChecks);
+  });
+  await journey.stage("An hourly failed check retains the last known release without retrying on reload", async () => {
+    unavailable = true;
+    await page.clock.fastForward(60 * 60_000 + 1);
+    await expect.poll(() => checks).toBe(initialChecks + 1);
+    await expect(atlas).toContainText("Update available → 3.88.0");
+    await page.reload();
+    await expect(atlas).toContainText("Update available → 3.88.0");
+    expect(checks).toBe(initialChecks + 1);
+  });
+});
 
 // A third machine with a 40-character name (cas-1ca1): its row must ellipsise
 // the name and keep the time stamp readable.

@@ -10,6 +10,7 @@ import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
 import { projectTitle } from "./cloud-brand";
+import { LatestRelease, RELEASE_CHECK_INTERVAL } from "./machine-version";
 import { CANT_REACH_RETRYING, machineFooterMarkup, orderPairedMachines, pairedMachinesDialogMarkup, renderPairedMachines, type PairedMachineRow } from "./paired-machines";
 import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./worker-visibility";
 import "./styles.css";
@@ -214,6 +215,7 @@ let conversationRows: ConversationRow[] = [];
 /** The list search's text (journey F8); rows render filtered by it. */
 let conversationSearchQuery = "";
 const conversationList = new ProjectNavigation();
+const latestRelease = new LatestRelease();
 const pendingSubmissions = new Set<string>();
 /**
  * The thread for machine:session. With `session`, the thread learns which
@@ -654,6 +656,9 @@ function commitSelection(next: SessionSelection): void {
 }
 
 async function boot(): Promise<void> {
+  const checkRelease = async () => { await latestRelease.check(); renderConversationList(); };
+  void checkRelease();
+  window.setInterval(() => { void checkRelease(); }, RELEASE_CHECK_INTERVAL);
   const remotePending = await installationAccess.recover(window.fetch.bind(window));
   const stored = remotePending ? await catalog.snapshot() : await catalog.recoverPending();
   const pendingHubs = new Set((await installationStore.list()).filter((r) => r.pending).map((r) => r.id.split("@")[0]));
@@ -4551,7 +4556,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live" })), searchActive: Boolean(conversationSearchQuery.trim()) });
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live", runtime: machineInfo.get(machine.id)?.version, latestRelease: latestRelease.version })), searchActive: Boolean(conversationSearchQuery.trim()) });
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -5858,6 +5863,7 @@ function pairedMachineRows(): PairedMachineRow[] {
         : state?.phase === "failed" && state.fatal === true ? { cause: `This browser can't connect. ${fatalConnectionRecovery(state.reason)}` } : {}),
       lastSeen: updated ? `Last seen ${relativeTimestamp(Date.parse(updated))} · ${clockLabel(Date.parse(updated))}` : 'Not yet seen in this visit',
       runtime: machineInfo.get(machine.id)?.version,
+      latestRelease: latestRelease.version,
       // cas-d382: what this pairing may do to the fleet, and how to get the rest.
       fleet: { operate: fleetControlGate(machine.scopes, "add-workers", location.origin), manage: fleetControlGate(machine.scopes, "stop-worker", location.origin) } };
   }));
@@ -5893,7 +5899,7 @@ function renderMachineRegister(): void {
     const total = counts.reduce((sum, listed) => sum + listed.length, 0);
     const stale = counts.reduce((sum, listed) => sum + listed.filter((session) => session.stale).length, 0);
     const lastKnown = (!counted && cachedCatalogs.size > 0) || stale;
-    const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, __HUB_BUILD__, !machineCatalogLoaded, lastKnown);
+    const markup = machineFooterMarkup(rows, counted || lastKnown ? total : undefined, `${__HUB_VERSION__} · ${__HUB_BUILD__}`, !machineCatalogLoaded, lastKnown);
     // Preserve the opener itself: dialog Escape must return focus after a catalog tick.
     const button = footer.querySelector<HTMLButtonElement>('#paired-machines-toggle');
     if (!button) footer.innerHTML = markup;

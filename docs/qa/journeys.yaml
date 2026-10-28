@@ -74,6 +74,9 @@ invariants:
       edge paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: none'
     bug:
       task: cas-7c14
+  HUB-J3-MACHINE-VERSIONS:
+    statement: Each machine names its reported runtime and a newer stable release when known; the Web footer names the client release and build independently.
+    check: 'Run the named machine versions part of find-conversation.journey.ts against committed dist. Verify old, current and unknown runtimes, cards and chips, phone and desktop light/dark, a cached hourly release check and retained last-known release after a failed check.'
   HUB-J4-GOAL:
     statement: I can read what was said before, back to the start
     check: 'Walk HUB-J4 in hub-web/e2e/journeys/read-history.journey.ts; verify the expected experience and edge
@@ -637,6 +640,7 @@ journeys:
   - hub-web/e2e/journeys/find-conversation.journey.ts
   - hub-web/e2e/journeys/phone-host-line.journey.ts
   - hub-web/e2e/journeys/responsive-goals.ts
+  - hub-web/src/machine-version.ts
   - hub-web/src/abort-signals.ts
   - hub-web/src/app-switcher.ts
   - hub-web/src/attachment-sheet.ts
@@ -669,6 +673,7 @@ journeys:
   invariants:
   - HUB-J3-GOAL
   - HUB-J3-SESSION-ENDED
+  - HUB-J3-MACHINE-VERSIONS
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

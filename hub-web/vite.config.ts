@@ -12,11 +12,12 @@ for (const dir of ['src', 'public']) {
   }
 }
 for (const file of ['index.html', 'vite.config.ts', 'package-lock.json']) digest.update(readFileSync(join(root, file)));
-const hubBuild = digest.digest('hex').slice(0, 8);
+const hubVersion = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, "../cas-cli/Cargo.toml"), "utf8"))![1];
+const hubBuild = digest.update(hubVersion).digest('hex').slice(0, 8);
 import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
-  define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
+  define: { __HUB_BUILD__: JSON.stringify(hubBuild), __HUB_VERSION__: JSON.stringify(hubVersion) },
   base: "/commander/",
   plugins: [{
     name: "rich-content-licenses",

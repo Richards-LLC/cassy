@@ -9,6 +9,7 @@ import { expect, type Page, type Route, type WebSocketRoute } from "@playwright/
 import { createHash, webcrypto } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { journeyNow } from "./clock";
+export const LATEST_RELEASE_URL = "https://api.github.com/repos/Richards-LLC/cassy/releases/latest";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
 /** The hub's visual page policy, the very file it embeds (cas-3aff). */
@@ -65,6 +66,8 @@ export type ProtocolTime = {
 type ComposerUpload = { machine: string; session: string; id: string; mime: string; body: Buffer };
 
 export type DoubleOptions = {
+  /** Actual /v1/machine reports for the version-badge journey. */
+  versions?: Record<string, string>;
   /** Durable local uploads, shared with a separately paired device's hub double. */
   composerUploads?: Map<string, ComposerUpload>;
   /** Unreceipted daemon replies, independent of the bounded history page. */
@@ -425,6 +428,7 @@ export class HubDouble {
 
   /** Install routes; call before the first navigation. */
   async install(page = this.page): Promise<void> {
+    await page.context().route(LATEST_RELEASE_URL, route => route.fulfill({ json: { tag_name: "v3.87.0" } }));
     // /v1/events is a long-lived event stream the bundle reads with fetch.
     await page.addInitScript((bases) => {
       const localHosts = new Set(bases.map((base) => new URL(base).host));
@@ -982,7 +986,7 @@ export class HubDouble {
       this.observed();
       const capabilities = ["session_index", "daemon_attach", "machine_events", ...(this.options.multiplex ? ["machine_multiplex_v2"] : [])];
       const defaultCli = this.options.launch?.[machineId]?.defaultCli;
-      return route.fulfill({ json: { schema_version: 1, version: "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
+      return route.fulfill({ json: { schema_version: 1, version: this.options.versions?.[machineId] ?? "journey-double", capabilities, ...(defaultCli ? { default_supervisor_cli: defaultCli } : {}) } });
     }
     if (path === "/v1/auth/scopes" && method === "POST") {
       const add = (route.request().postDataJSON() as { add?: string[] }).add;

@@ -23,6 +23,14 @@ describe("threadModel", () => {
     expect(shape(threadModel(history.events, { now: NOW, work: events }))).toEqual(["day", "group", "work:a:2", "group", "work:tail:1"]);
     expect(shape(threadModel(history.events, { now: NOW, historyEnd: true, work: events }))).toEqual(["history-end", "day", "work:before-history:1", "group", "work:a:2", "group", "work:tail:1"]);
     expect(threadModel(history.events, { now: NOW, work: [] })).toEqual(threadModel(history.events, { now: NOW }));
+    // Attach catch-up can precede the durable tail by queue id while its
+    // arrival clock is newer. It must not discard the tail's work events.
+    const replay = new ConversationHistory();
+    replay.hydrateReply({ ...reply(2, "answer"), at: new Date(at(9, 1)).toISOString() }, NOW);
+    replay.hydrateReply({ ...reply(3, "answer"), at: new Date(at(9, 5)).toISOString() }, NOW);
+    replay.receive(reply(1, "answer"), NOW);
+    expect(shape(threadModel(replay.events, { now: NOW, work: [work("between", at(9, 3))] })))
+      .toEqual(["day", "group", "work:between:1", "group"]);
   });
   it("dates any turn time that is not today's (cas-e829)", () => {
     expect(stampLabel(at(9, 41), NOW)).toBe("09:41");

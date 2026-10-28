@@ -13234,6 +13234,50 @@ mod tests {
             attempts,
             "invalid persistence receipt cannot reset retries"
         );
+        // cas-59da: a row addressed to an away phone, viewed by this desktop.
+        // The desktop's stored receipts leave the row pending, so they must not
+        // clear its backoff (that re-forwarded it at the select-loop rate).
+        let addressed = queue
+            .enqueue_with_session(
+                "supervisor",
+                "operator",
+                &crate::supervisor_notices::operator_prompt("phone reply", "reply").unwrap(),
+                "provision-test",
+            )
+            .unwrap();
+        queue.stamp_recipient_device(addressed, "phone").unwrap();
+        let cas_store::EnqueueIdempotentResult::Created(notice) = queue
+            .enqueue_idempotent(
+                "relay-watchdog", "operator", "notice", Some("provision-test"), None, None,
+                "notice", Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        else {
+            panic!("expected a new notice");
+        };
+        queue.stamp_recipient_device(notice, "phone").unwrap();
+        let addressed_reply = super::read_operator_replies(
+            &root, queue.as_ref(), "provision-test", false, &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|row| row.queued.id == addressed)
+        .unwrap();
+        daemon.forward_operator_replies(vec![addressed_reply.clone()]);
+        attempts += 1;
+        daemon.persist_operator_reply_receipt(addressed, "paired-device").unwrap();
+        daemon.persist_operator_notice_receipt(notice, "paired-device").unwrap();
+        daemon.forward_operator_replies(vec![addressed_reply.clone()]);
+        assert_eq!(log_count(), attempts, "non-addressee receipts keep the backoff");
+        daemon.persist_operator_reply_receipt(addressed, "phone").unwrap();
+        assert!(queue.queued_prompt(addressed).unwrap().unwrap().processed_at.is_some());
+        assert!(
+            !super::read_operator_replies(&root, queue.as_ref(), "provision-test", false, &Default::default())
+                .unwrap()
+                .iter()
+                .any(|row| row.queued.id == addressed),
+            "the addressee's receipt closes the row: it is never forwarded again"
+        );
         daemon
             .persist_operator_reply_receipt(other, "paired-device")
             .unwrap();

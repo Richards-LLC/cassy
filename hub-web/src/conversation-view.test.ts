@@ -14,7 +14,7 @@ describe("ConversationView (Pebble thread)", () => {
   it("coalesces mount requests before paint and ignores one superseded by an immediate update", () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });
-    onTestFinished(() => vi.unstubAllGlobals());
+    onTestFinished(() => { vi.unstubAllGlobals(); });
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup");
     document.body.replaceChildren(view.element);

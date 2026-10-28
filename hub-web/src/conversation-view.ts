@@ -1241,10 +1241,27 @@ export class ConversationView {
         const focusedClass = previous && active instanceof HTMLElement && previous.contains(active) ? active.className : undefined;
         if (turn.event.kind === "send") bubble = this.renderSend(document, turn, turn.event.value, run);
         else ({ bubble, sheets } = this.renderReply(document, turn, turn.event.value));
+        // Ask/blocker bodies carry their attachment nodes inside the object.
+        const nested = [...(previous?.querySelectorAll<HTMLElement>("[data-attachment-signature]") ?? [])];
+        [...bubble.querySelectorAll<HTMLElement>("[data-attachment-signature]")].forEach((sheet, index) => {
+          const kept = nested[index];
+          if (kept && kept.dataset.attachmentSignature === sheet.dataset.attachmentSignature) sheet.replaceWith(kept);
+        });
         bubble.classList.add("conversation-turn");
         bubble.dataset.key = turn.key;
         bubble.dataset.signature = signature;
-        sheets.forEach((sheet, index) => { sheet.classList.add("conversation-sheet"); sheet.dataset.key = `${turn.key}#${index}`; });
+        // Receipt-only changes rebuild the bubble, while media keeps its DOM,
+        // playback and in-flight URL request when the attachment is unchanged.
+        const attachments = turn.event.kind === "reply" ? turn.event.value.attachments : undefined;
+        sheets = sheets.map((sheet, index) => {
+          const key = `${turn.key}#${index}`;
+          const payload = JSON.stringify(attachments?.[index]);
+          const previous = existing.get(key);
+          if (previous && previous.dataset.attachmentSignature === payload) return previous;
+          sheet.classList.add("conversation-sheet"); sheet.dataset.key = key;
+          sheet.dataset.attachmentSignature = payload;
+          return sheet;
+        });
         if (focusedClass !== undefined) refocus = { bubble, className: focusedClass };
       }
       bubble.classList.toggle("group-first", turn.first);

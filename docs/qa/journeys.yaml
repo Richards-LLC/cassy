@@ -240,6 +240,9 @@ invariants:
       paths in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the work-event stream is
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
+  HUB-J22-GOAL:
+    statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
+    check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
 bug_families:
   expired-toast-announcement:
     title: Expired connection notices must leave an empty live region while subsequent notices still announce
@@ -1888,6 +1891,41 @@ journeys:
   catalog_gaps: Explorer is stubbed at the cloud origin; Explorer's own switcher back to Commander and its token
     adoption are tracked in Richards-LLC/petra-stella-cloud#148; that the hub reports `cloud_project_id` from the
     project's canonical id is proven by the Rust hub test (cas-eaa3)
+- id: HUB-J22
+  name: Read diagrams, media and diffs in the conversation
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: A paired supervisor conversation at 1280x800 and 390x844 in light and dark
+  steps:
+  - Open plain text without loading rich renderers
+  - Read a diagram and inspect its source; bad input stays readable
+  - Expand a unified diff
+  - Decode an inline image without moving its file caption
+  - Read the real PDF first page inline
+  - Play video and audio on demand; unavailable files keep Open
+  owner_groups: [commander_runtime, commander_dependencies]
+  owners:
+  - hub-web/src/markdown-renderer.ts
+  - hub-web/src/rich-code.ts
+  - hub-web/src/rich-diagram.ts
+  - hub-web/src/rich-diff.ts
+  - hub-web/src/rich-attachment.ts
+  - hub-web/src/rich-media.ts
+  - hub-web/src/rich-pdf.ts
+  - hub-web/src/rich-content.css
+  - hub-web/src/attachment-sheet.ts
+  - hub-web/e2e/journeys/rich-content.journey.ts
+  - hub-web/playwright.rich-content-hub.config.ts
+  - hub-web/scripts/rich-content-visual-qa.mjs
+  invariants: [HUB-J22-GOAL]
+  traffic:
+    share_pct: null
+    basis: New evidence-reading journey; no per-journey usage instrumentation.
+  spec: hub-web/e2e/journeys/rich-content.journey.ts
+  catalog_gaps: Tickets and proxy bytes are doubled; real PNG/PDF/WebM/WAV decode and playback use the production browser build. Embedded assets and ticket/proxy authorization have separate hub handler tests. Hosted cross-origin media is outside this proof.
+
 - id: HUB-J25
   name: See the whole picture of the work
   status: live

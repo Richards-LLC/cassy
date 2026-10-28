@@ -58,6 +58,8 @@ export type DoubleOptions = {
   /** Controlled journeys own the browser and protocol reply clock together. */
   time?: ProtocolTime;
   machines: Machine[];
+  /** A registered hub can serve the bundle while its protocol is doubled on that same origin. */
+  baseUrls?: Record<string, string>;
   /** Seed these machine ids as already paired (IndexedDB), as a returning user. */
   paired?: string[];
   /** Conversation history pages served in order for each session, newest first. */
@@ -192,6 +194,7 @@ export class HubDouble {
   private readonly pendingReplyFlights = new Map<string, Set<number>>();
   /** Artifact ids Commander asked a signed view URL for (cassy#910). */
   readonly artifactRequests: string[] = [];
+  readonly previewTicketRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
   private readonly protocolWaiters = new Set<() => void>();
@@ -280,6 +283,10 @@ export class HubDouble {
       this.pendingReplyForwards.push(id);
       ws.send(JSON.stringify({ OperatorReply: reply }));
     }
+  }
+
+  private machineIdFor(url: URL): string {
+    return Object.entries(this.options.baseUrls ?? {}).find(([, base]) => new URL(base).host === url.host)?.[0] ?? url.hostname.replace(/\.test$/, "");
   }
 
   private now(): number { return this.options.time?.now() ?? journeyNow(); }
@@ -384,7 +391,8 @@ export class HubDouble {
   /** Install routes; call before the first navigation. */
   async install(page = this.page): Promise<void> {
     // /v1/events is a long-lived event stream the bundle reads with fetch.
-    await page.addInitScript(() => {
+    await page.addInitScript((bases) => {
+      const localHosts = new Set(bases.map((base) => new URL(base).host));
       const original = window.fetch;
       // Outages (journey network cells): a machine the page cannot reach
       // refuses new event streams, and an outage that resets connections
@@ -423,7 +431,7 @@ export class HubDouble {
       };
       window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input), location.href);
-        if (url.hostname.endsWith(".test") && url.pathname === "/v1/events") {
+        if ((url.hostname.endsWith(".test") || localHosts.has(url.host)) && url.pathname === "/v1/events") {
           if (down.has(url.hostname) || !navigator.onLine) return Promise.reject(new TypeError("Failed to fetch"));
           if (init?.signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
           w.__journeyEventStreamOpens[url.hostname] = (w.__journeyEventStreamOpens[url.hostname] ?? 0) + 1;
@@ -448,10 +456,11 @@ export class HubDouble {
         }
         return original(input, init);
       };
-    });
+    }, Object.values(this.options.baseUrls ?? {}));
     await page.route("https://*.test/**", (route) => this.hub(route));
+    for (const base of Object.values(this.options.baseUrls ?? {})) await page.route(`${new URL(base).origin}/v1/**`, (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
-    await page.routeWebSocket(/\.test\/v1\//, (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
+    await page.routeWebSocket((url) => url.pathname.startsWith("/v1/") && (url.hostname.endsWith(".test") || Object.values(this.options.baseUrls ?? {}).some((base) => new URL(base).host === url.host)), (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
     // Every notification id the page's hub sockets deliver (received()). The
     // listener is attached in the constructor, so it runs before the app's
     // own: by the time a later evaluation sees an id, the app has handled it.
@@ -628,7 +637,7 @@ export class HubDouble {
 
   /** Seed paired machines in IndexedDB exactly as a completed pairing stores them. */
   async seedPaired(): Promise<void> {
-    const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label, scopes: this.scopesFor(id) }));
+    const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label, baseUrl: this.options.baseUrls?.[id] ?? `https://${id}.test`, scopes: this.scopesFor(id) }));
     await this.page.evaluate(async ({ machines }) => {
       localStorage.clear();
       const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
@@ -657,7 +666,7 @@ export class HubDouble {
         const tx = db.transaction("machines", "readwrite");
         for (const m of machines) {
           tx.objectStore("machines").put({
-            id: m.id, label: m.label, baseUrl: `https://${m.id}.test`, deviceId: "journey-device",
+            id: m.id, label: m.label, baseUrl: m.baseUrl, deviceId: "journey-device",
             credentialId: "journey-credential", credential: "journey-only", expiresAt: "2099-01-01T00:00:00Z",
             scopes: m.scopes, privateKey: pair.privateKey, publicKey,
           });
@@ -843,7 +852,7 @@ export class HubDouble {
 
   private async hub(route: Route): Promise<void> {
     const url = new URL(route.request().url());
-    const machineId = url.hostname.replace(/\.test$/, "");
+    const machineId = this.machineIdFor(url);
     const path = url.pathname;
     const method = route.request().method();
     if (!this.reachable(machineId)) {
@@ -971,6 +980,14 @@ export class HubDouble {
     if (path === "/v1/auth/websocket-ticket") return route.fulfill({ json: { ticket: "journey-ticket" } });
     // cassy#910: a signed view URL for an artifact the session published. An
     // id starting `art-local` was never uploaded to Cloud.
+    const previewTicket = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/ticket$/.exec(path);
+    if (previewTicket && method === "POST") {
+      const id = decodeURIComponent(previewTicket[1]!);
+      this.previewTicketRequests.push(id);
+      if (id.startsWith("art-local")) return route.fulfill({ status: 409, json: { error: "artifact_not_in_cloud" } });
+      const count = this.previewTicketRequests.filter((value) => value === id).length;
+      return route.fulfill({ json: { ticket: `fixture-${id}-${count}`, expires_at: this.stamp(60_000) } });
+    }
     const artifactView = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/url$/.exec(path);
     if (artifactView) {
       const id = decodeURIComponent(artifactView[1]!);
@@ -1152,7 +1169,7 @@ export class HubDouble {
 
   private socket(ws: WebSocketRoute): void {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
-    const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
+    const machineId = this.machineIdFor(new URL(ws.url()));
     if (this.held.has(session) || !this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     this.legacySocketOpens.set(session, (this.legacySocketOpens.get(session) ?? 0) + 1);
     this.sockets.set(session, ws);
@@ -1208,7 +1225,7 @@ export class HubDouble {
    * wrapped as `{channel, message}`, and health ping/pong.
    */
   private machineSocket(ws: WebSocketRoute): void {
-    const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
+    const machineId = this.machineIdFor(new URL(ws.url()));
     if (!this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: unreachable" }); return; }
     this.machineSocketOpens.set(machineId, (this.machineSocketOpens.get(machineId) ?? 0) + 1);
     this.observed();

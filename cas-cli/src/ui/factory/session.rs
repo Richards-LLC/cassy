@@ -35,6 +35,19 @@ pub(crate) struct EndedSession {
     pub ended: SessionEndOutcome,
 }
 
+/// Match end evidence to the daemon's owned supervisor generation.
+pub(crate) fn supervisor_end_is_current(
+    metadata: &SessionMetadata,
+    _owned_pid: Option<u32>,
+    _recorded_pid: Option<u32>,
+    _recorded_starttime: Option<u64>,
+    registered_at: &str,
+) -> bool {
+    chrono::DateTime::parse_from_rfc3339(registered_at).ok().zip(
+        chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok())
+        .is_some_and(|(registered, created)| registered >= created)
+}
+
 /// Directory for factory session data
 const SESSIONS_DIR: &str = "sessions";
 /// Directory for factory logs (under ~/.cas)
@@ -802,6 +815,24 @@ pub fn create_metadata(
 #[cfg(test)]
 mod tests {
     use crate::ui::factory::session::*;
+
+    #[test]
+    fn cec1_end_reason_matches_owned_process_even_when_registration_precedes_metadata() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let mut metadata = create_metadata("session-a", 100, "supervisor-a", &[], None, None, None);
+        metadata.created_at = "2026-10-28T18:41:32.004138274Z".into();
+        metadata.daemon_pid_starttime = Some(54141857);
+        // Measured real /exit: registration preceded metadata by 18.06 ms.
+        for (pid, start, registered, expected) in [
+            (Some(2729301), Some(54141868), "2026-10-28T18:41:31.986078318Z", true),
+            (Some(2729301), Some(54141856), "2026-10-28T18:41:31Z", false),
+            (Some(2729302), Some(54141868), "2026-10-28T18:41:33Z", false),
+            (Some(2729301), None, "2026-10-28T18:41:31Z", false),
+        ] {
+            assert_eq!(supervisor_end_is_current(&metadata, Some(2729301), pid, start, registered), expected,
+                "pid={pid:?} start={start:?} registered={registered}");
+        }
+    }
 
     /// cas-fcb0: `cas kill` reaps a SIGKILLed daemon's workers from the store
     /// it recorded. FactoryDaemon::new, the path hub, bridge and Commander

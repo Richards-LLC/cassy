@@ -4330,9 +4330,9 @@ impl FactoryDaemon {
             && let Ok(metadata) = serde_json::from_slice::<crate::ui::factory::protocol::SessionMetadata>(&bytes)
             && let Some(row) = rows.into_iter().find(|row| row.factory_session.as_deref() == Some(self.session_name.as_str())
                 && row.name == self.app.supervisor_name()
-                && chrono::DateTime::parse_from_rfc3339(&row.registered_at).ok().zip(
-                    chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok())
-                    .is_some_and(|(registered, created)| registered >= created))
+                && crate::ui::factory::session::supervisor_end_is_current(
+                    &metadata, self.app.mux.pane_process_group_id(self.app.supervisor_name()),
+                    row.pid, row.pid_starttime, &row.registered_at))
         {
             ended.reason = row.reason;
         }

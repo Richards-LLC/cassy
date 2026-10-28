@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Bump when the verdict semantics or the key inputs change.
-const CACHE_VERSION: u32 = 8; // cas-5993: attributed ordinary retirement, closed-child authority
+const CACHE_VERSION: u32 = 9; // GH #1401: accepted reviewed-drop decisions affect content verdicts
 /// Bound on stored verdicts; the oldest are evicted first.
 const MAX_ENTRIES: usize = 8192;
 const CACHE_DIR: &str = "cas";
@@ -156,6 +156,9 @@ pub(super) fn verdict_key(
         commit(&format!("origin/{target_branch}"))
     );
     let _ = writeln!(material, "anchor={recorded_anchor:?} resolved={anchor_resolved}");
+    for decision in super::accepted_delivery_drop_decisions(child) {
+        let _ = writeln!(material, "accepted-reviewed-drop={decision}");
+    }
     for branch in branches {
         let _ = writeln!(
             material,

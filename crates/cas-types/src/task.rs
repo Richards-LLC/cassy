@@ -920,21 +920,21 @@ pub fn merge_task_execution_state_patch(current: &Value, patch: &Value) -> Resul
     Ok(result)
 }
 
-/// Validate a stored execution-state JSON object without changing it.
+/// Validate known stored execution-state fields without changing the object.
+/// Additive fields from newer runtimes remain readable and are preserved by
+/// merge patches. Patch authors still use the explicit allowlist above, and
+/// unknown stored data remains subject to the total resume-state size limit.
 pub fn validate_task_execution_state(state: &Value) -> Result<(), String> {
     let object = state
         .as_object()
         .ok_or_else(|| "execution state must be a JSON object".to_string())?;
     for (field, value) in object {
+        if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
+            continue;
+        }
         if value.is_null() {
             return Err(format!(
                 "execution state field '{field}' must be deleted, not stored as null"
-            ));
-        }
-        if !TASK_EXECUTION_STATE_FIELDS.contains(&field.as_str()) {
-            return Err(format!(
-                "unknown execution state field '{field}'; allowed fields: {}",
-                TASK_EXECUTION_STATE_FIELDS.join(", ")
             ));
         }
         validate_task_execution_state_field(field, value)?;

@@ -11,6 +11,29 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
+  it("copies original fenced bytes through message splitting and retains Wrap on new replies", async () => {
+    const source = '\tconst literal = "雪";  \r\n| literal | source |\r\n| --- | --- |\r\n\r\n  done();';
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+    onTestFinished(() => { Reflect.deleteProperty(navigator, "clipboard"); });
+    const history = new ConversationHistory();
+    const view = new ConversationView(document, history, "sup");
+    document.body.replaceChildren(view.element);
+    history.reply(reply(1, "answer", `\`\`\`ts\r\n${source}\r\n\`\`\``), at(9, 0));
+    view.update();
+    const frame = view.element.querySelector<HTMLElement>(".code-frame")!;
+    expect(frame.querySelector("code")?.textContent).toBe(source);
+    expect(view.element.querySelector('[role="table"]')).toBeNull();
+    frame.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();
+    await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith(source));
+    frame.querySelector<HTMLButtonElement>('[data-action="wrap"]')!.click();
+    history.reply(reply(2, "answer", "More evidence follows."), at(9, 1));
+    view.update();
+    expect(view.element.querySelector(".code-frame")).toBe(frame);
+    expect(frame.dataset.wrap).toBe("true");
+    view.dispose();
+  });
+
   it("coalesces mount requests before paint and ignores one superseded by an immediate update", () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => { frames.push(callback); return frames.length; });

@@ -45,7 +45,7 @@ for (const [index, variant] of variants.entries()) {
       });
 
       await journey.stage("Copy exact source and wrap a code frame with the keyboard", async () => {
-        const source = `const message = "<script>&amp;雪 ${"long_source_".repeat(18)}";  \n\tconsole.log(message);`;
+        const source = `const message = "<script>&amp;雪 ${"long_source_".repeat(18)}";  \n\tconsole.log(message);\n| literal | source |\n| --- | --- |`;
         hub.supervisorSays(PELICAN, `# Source ready to copy\n\n\`\`\`ts src/example.ts\n${source}\n\`\`\`\n\n~~~unknown\nUnknown languages stay readable.\n~~~`);
         const frame = log.locator(".code-frame").first();
         await expect(frame.locator(".code-frame-label")).toHaveText("src/example.ts");

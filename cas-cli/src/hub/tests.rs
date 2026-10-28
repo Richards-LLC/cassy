@@ -113,7 +113,8 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
         let status = response.status();
         let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         if index == 1 {
-            assert_eq!(status, StatusCode::FORBIDDEN);
+            // The session catalog's existing missing-scope response is bare 401.
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert!(!String::from_utf8_lossy(&bytes).contains("account_email"));
             continue;
         }

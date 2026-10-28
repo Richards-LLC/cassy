@@ -5170,6 +5170,29 @@ echo SMOKE_DONE
                 "Codex supervisor contract must carry the commentary policy: {required}"
             );
         }
+        // cas-cbbb: Codex keeps developer_instructions across compaction but
+        // drops skill bodies read with `cat`, so supervisors re-read skills
+        // after every compaction (8.1 reads/h vs 0.8 for Claude). A resident
+        // signal → action core replaces that ritual, within a byte budget.
+        for required in [
+            "Supervisor core (resident",
+            "READY TO MERGE, MERGE REQUIRED or task_awaiting_merge →",
+            "blocker=true →",
+            "worker idle or died →",
+            "cas-qa-dispatch →",
+            "operator question →",
+            "After a compaction, continue from this core; do not re-read skills.",
+        ] {
+            assert!(
+                all_args.contains(required),
+                "Codex supervisor contract must carry the resident core: {required}"
+            );
+        }
+        assert!(
+            CODEX_SUPERVISOR_INSTRUCTIONS.len() <= 6_500,
+            "Codex supervisor contract is {} bytes; the resident core must keep it at or under 6,500",
+            CODEX_SUPERVISOR_INSTRUCTIONS.len()
+        );
     }
 
     /// Recognize delivered message framing without promising that ordinary

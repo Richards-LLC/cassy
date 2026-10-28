@@ -110,7 +110,11 @@ test("HUB-J1 first open and pair a machine with a code", async ({ page, journey 
       // conversation is the only surface (cas-0546): the card offers no other
       // view, and the header carries Raw output and Interrupt.
       const empty = page.locator(".thread .empty");
-      await expect(empty.locator(".said")).toHaveText("No messages from the cas-src supervisor in this session yet — nothing is waiting on you.");
+      // A held clock must still drive the frame that presents a mounted thread.
+      await expect.poll(async () => {
+        await page.clock.runFor(32);
+        return empty.locator(".said").allTextContents();
+      }).toEqual(["No messages from the cas-src supervisor in this session yet — nothing is waiting on you."]);
       await expect(empty).not.toContainText("Commander");
       await expect(empty.getByRole("button")).toHaveCount(0);
       await expect(page.getByRole("button", { name: /Terminal view/i })).toHaveCount(0);

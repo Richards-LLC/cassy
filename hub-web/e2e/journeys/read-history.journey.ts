@@ -192,8 +192,10 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     }, key);
     /** The reader's turn stays where it was (within 3 px) across what follows. */
     const holds = async (anchor: { key: string; y: number }, what: string) => {
-      await expect.poll(() => anchorY(anchor.key), { message: `"${anchor.key}" stays where the reader left it ${what}` }).toBeGreaterThanOrEqual(anchor.y - 3);
-      expect(await anchorY(anchor.key)).toBeLessThanOrEqual(anchor.y + 3);
+      // Await the anchored presentation in both directions. The previous
+      // asymmetric poll accepted a downward drift before that frame ran.
+      await expect.poll(async () => Math.abs(await anchorY(anchor.key) - anchor.y),
+        { message: `"${anchor.key}" stays where the reader left it ${what}` }).toBeLessThanOrEqual(3);
     };
     const beforeDrop = await reading();
     // cas-c945 QA F01: what a screen reader would hear. Each change of text

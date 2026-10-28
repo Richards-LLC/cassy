@@ -260,7 +260,7 @@ invariants:
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
   HUB-J22-GOAL:
-    statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
+    statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
@@ -1969,6 +1969,7 @@ journeys:
     trigger: A paired supervisor conversation at 1280x800 and 390x844 in light and dark
   steps:
   - Open plain text without loading rich renderers
+  - Copy exact source and wrap a code frame with the keyboard
   - Read a diagram and inspect its source; bad input stays readable
   - Expand a unified diff
   - Decode an inline image without moving its file caption
@@ -1977,6 +1978,8 @@ journeys:
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/markdown-renderer.ts
+  - hub-web/src/code-frame.ts
+  - hub-web/src/code-frame.css
   - hub-web/src/rich-code.ts
   - hub-web/src/rich-diagram.ts
   - hub-web/src/rich-diff.ts

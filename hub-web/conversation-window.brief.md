@@ -40,8 +40,11 @@ Logical unconfirmed-send runs span visual chunks. Window navigation exposes cach
 turns before fetching another page. Load earlier, Load later, Jump to latest and
 question bookmarks remain keyboard paths in chronological order.
 
-Socket catch-up schedules one presentation per animation frame. The journal owns
-commit and ACK authority; its post-batch refresh must call the same scheduler.
+Socket catch-up and history share one presentation in the task after an animation
+frame, separate from the shell's geometry measurements. Mount requests coalesce
+before paint. Before measured row heights exist, text volume estimates keep long
+Markdown replies from mounting many screens in the first frame. The journal owns
+commit and ACK authority; its post-batch refresh uses the same scheduler.
 
 ## Validation remaining
 

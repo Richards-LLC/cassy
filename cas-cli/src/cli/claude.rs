@@ -487,6 +487,13 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Factory help and argument errors belong to its parser, before account
+    // lookup, login probes or shared-link repair. Bare mode forwards Claude's
+    // own flags instead; login and profile listing were handled above.
+    if !args.bare {
+        let _ = parse_factory_args(args.passthrough_args());
+    }
+
     let home = dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
 
     let profile = match args.profile() {

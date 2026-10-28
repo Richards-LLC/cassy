@@ -441,6 +441,25 @@ mod tests {
     }
 
     #[test]
+    fn task_issue_refs_resolves_task_gh_mentions_in_the_default_repo() {
+        let task = task(
+            "cas-8284",
+            TaskStatus::Closed,
+            "Fixed cas-397b/GH#188 and cas-cdb0/gh#195; see cas-397b/actual#7",
+        );
+        let refs = task_issue_refs(&task, Some(REPO));
+        assert_eq!(
+            refs.iter().map(IssueRef::display).collect::<Vec<_>>(),
+            ["Richards-LLC/cassy#188", "Richards-LLC/cassy#195", "cas-397b/actual#7"]
+        );
+        assert_eq!(
+            task_issue_refs(&task, None).iter().map(IssueRef::display).collect::<Vec<_>>(),
+            ["cas-397b/actual#7"],
+            "unresolved task/GH shorthand must not invent a repository"
+        );
+    }
+
+    #[test]
     fn epic_close_warns_about_open_referenced_issues_and_names_unchecked_ones() {
         let children = vec![
             task("cas-a", TaskStatus::Closed, "GH #1158: first"),

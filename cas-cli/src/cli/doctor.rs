@@ -7174,7 +7174,10 @@ mod tests {
     fn shipped_issues_doctor_row_lists_open_issues_whose_fixes_shipped_cas_dd56() {
         struct States(Result<std::collections::HashSet<u64>, String>);
         impl crate::issue_reconcile::IssueStates for States {
-            fn open_issues(&self, _repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+            fn open_issues(&self, repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                if repo == "broken/repo" {
+                    return Err("repository unavailable".into());
+                }
                 self.0.clone()
             }
         }
@@ -7202,10 +7205,23 @@ mod tests {
 
         let check = shipped_issues_check(&tasks, repo, &States(Err("gh: offline".into())), &tags);
         assert!(matches!(check.status, CheckStatus::Info), "{}", check.message);
-        assert!(check.message.contains("skipped: could not list open issues (gh: offline)"));
+        assert!(check.message.contains("skipped: could not list open issues") && check.message.contains("gh: offline"));
 
         let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
         assert!(check.message.starts_with("skipped: no GitHub repository"), "{}", check.message);
+
+
+        let mut mixed = tasks.clone();
+        mixed.push(crate::types::Task::new("cas-bad".into(), "broken/repo#9: fix".into()));
+        let check = shipped_issues_check(&mixed, repo, &States(Ok([1158].into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"), "{}", check.message);
+        assert!(check.message.contains("could not check") && check.message.contains("broken/repo#9") && check.message.contains("repository unavailable"), "{}", check.message);
+        assert!(!check.message.contains("skipped:"), "{}", check.message);
+
+        let check = shipped_issues_check(&mixed, repo, &States(Ok([].into())), &tags);
+        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
+        assert!(check.message.contains("no open Richards-LLC/cassy issue") && check.message.contains("broken/repo#9"), "{}", check.message);
     }
 
     #[test]

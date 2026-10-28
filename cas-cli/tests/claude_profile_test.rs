@@ -646,7 +646,8 @@ exit 0
         .await;
         pty.kill_tree_force();
         let output = String::from_utf8_lossy(&output).replace('\r', "");
-        assert_eq!(result.expect("duplicate question waited for input"), Some(0), "{provider}: {output}");
+        let Ok(code) = result else { panic!("{provider}: still waiting for input: {output}") };
+        assert_eq!(code, Some(0), "{provider}: {output}");
         assert!(output.contains("Keep the existing account? [y/N] y"), "{provider}: {output}");
         let left: Vec<_> = std::fs::read_dir(home.path())
             .unwrap()

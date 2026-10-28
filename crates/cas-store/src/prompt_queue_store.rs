@@ -270,21 +270,22 @@ pub const PEER_COPY_KIND: &str = "worker_peer_copy";
 
 /// Non-rendering metadata (digests and explicit recovery cards) must not
 /// trigger a daemon transport delivery.
-const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (COALESCE(origin_kind, '') = 'daemon' \
-     AND (COALESCE(kind, '') = 'notice_digest'
-     OR (source = 'delivery-watchdog' AND COALESCE(kind, '') = 'recovery_reference')))";
+const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (
+     COALESCE(kind, '') = 'worker_peer_copy'
+     OR (COALESCE(origin_kind, '') = 'daemon' AND (COALESCE(kind, '') = 'notice_digest'
+     OR (source = 'delivery-watchdog' AND COALESCE(kind, '') = 'recovery_reference'))))";
 
 /// Hook drains exclude digests; recovery cards have their own filter below.
-const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon' \
-     AND COALESCE(q.kind, '') = 'notice_digest')";
+const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.kind, '') = 'worker_peer_copy'
+     OR (COALESCE(q.origin_kind, '') = 'daemon' AND COALESCE(q.kind, '') = 'notice_digest'))";
 
 /// cas-286c: explicit-read cards never consume automatic delivery slots.
 const NOT_RECOVERY_REFERENCE_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '') = 'daemon'
      AND q.source = 'delivery-watchdog' AND COALESCE(q.kind, '') = 'recovery_reference')";
 
 /// cas-bf890: only [`NOTICE_DIGEST_KIND`] rows, over the `q` alias.
-const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND COALESCE(q.origin_kind, '') = 'daemon' \
-     AND COALESCE(q.kind, '') = 'notice_digest'";
+const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND (COALESCE(q.kind, '') = 'worker_peer_copy'
+     OR (COALESCE(q.origin_kind, '') = 'daemon' AND COALESCE(q.kind, '') = 'notice_digest'))";
 
 /// cas-1f0c: which rows a budgeted hook drain may take; the hook variants of
 /// [`TransportEligibility`].
@@ -5021,6 +5022,57 @@ impl SqlitePromptQueueStore {
     }
 }
 
+/// Receipts need no response. Terminal task evidence is recipient-specific;
+/// an unknown task id keeps monitoring so a fresh assignment cannot disappear.
+fn alarm_needs_response_on_conn(conn: &Connection, prompt_id: i64) -> Result<bool> {
+    let (text, summary, kind, target, session): (String, Option<String>, Option<String>, String, Option<String>) = conn.query_row(
+        "SELECT prompt, summary, kind, target, factory_session FROM prompt_queue WHERE id=?",
+        [prompt_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    )?;
+    if matches!(kind.as_deref(), Some("receipt" | "informational" | NOTICE_DIGEST_KIND | PEER_COPY_KIND))
+        || split_quiet_marker(&text).0 {
+        return Ok(false);
+    }
+    if !agents_table_exists(conn)? || !conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')", [], |row| row.get::<_, bool>(0),
+    )? { return Ok(true); }
+    let recipient: Option<String> = conn.query_row(
+        "SELECT id FROM agents WHERE name=? AND factory_session IS ? AND role='worker' LIMIT 1",
+        params![target, session], |row| row.get(0),
+    ).optional()?;
+    let Some(recipient) = recipient else { return Ok(true); };
+    let named = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .chain(summary.as_deref().unwrap_or_default().split(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+        .filter(|id| id.starts_with("cas-") && id.len() > 4)
+        .collect::<std::collections::HashSet<_>>();
+    if !named.is_empty() {
+        for id in named {
+            let terminal: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND assignee IN (?2,?3) AND status IN ('closed','cancelled'))",
+                params![id, target, recipient], |row| row.get(0),
+            )?;
+            if !terminal { return Ok(true); }
+        }
+        return Ok(false);
+    }
+    Ok(!conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE assignee IN (?1,?2))
+          AND NOT EXISTS(SELECT 1 FROM tasks WHERE assignee IN (?1,?2) AND status NOT IN ('closed','cancelled'))",
+        params![target, recipient], |row| row.get::<_, bool>(0),
+    )?)
+}
+
+/// Non-action lifecycle rows use the existing per-turn digest. The daemon
+/// stamp is required; a worker quoting one of these envelopes remains mail.
+fn routine_supervisor_digest(source: &str, prompt: &str, origin: Option<&QueueOrigin>) -> bool {
+    matches!(origin, Some(QueueOrigin::Daemon)) && (
+        source.starts_with("lifecycle:")
+        || (source.starts_with("lifecycle-wake:worker-attention:")
+            && ["worker_idle", "verification_dispatch_expired"].iter().any(|kind|
+                prompt.starts_with(&format!("<worker-attention kind=\"{kind}\" "))))
+    )
+}
+
 /// Metadata-only evidence shared by the watchdog read and atomic bounce write.
 /// A daemon reminder bearing a worker's name is not recipient-authored work.
 fn recipient_action_satisfies_alarm_on_conn(conn: &Connection, prompt_id: i64) -> Result<bool> {
@@ -6145,10 +6197,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // its dedupe key.
             let origin_kind = origin.map(QueueOrigin::kind_str);
             let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
+            let digest = !urgent && !is_operator_target(target)
+                && routine_supervisor_digest(source, prompt, origin);
             let changed = conn.execute(
                 "INSERT OR IGNORE INTO prompt_queue
-                    (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_agent_id, origin_kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_agent_id, origin_kind, kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     source,
                     target,
@@ -6160,7 +6214,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     urgent,
                     dedupe_key,
                     origin_agent_id,
-                    origin_kind
+                    origin_kind,
+                    digest.then_some(NOTICE_DIGEST_KIND)
                 ],
             )?;
 
@@ -6381,21 +6436,28 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                {recipient_acted}
                AND (((q.urgent = 1 OR q.priority <= 1) AND q.created_at <= ?)
                     OR (q.urgent = 0 AND q.priority > 1 AND q.created_at <= ?))
-             ORDER BY q.priority ASC, q.id ASC
-             LIMIT ?",
+             ORDER BY q.priority ASC, q.id ASC",
         ))?;
-        Ok(stmt
+        let rows = stmt
             .query_map(
                 params![
                     factory_session,
                     stale_cutoff,
                     priority_cutoff,
-                    normal_cutoff,
-                    limit as i64
+                    normal_cutoff
                 ],
                 Self::prompt_from_row,
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()?)
+            )?;
+        let mut eligible = Vec::new();
+        if limit == 0 { return Ok(eligible); }
+        for row in rows {
+            let row = row?;
+            if alarm_needs_response_on_conn(&conn, row.id)? {
+                eligible.push(row);
+                if eligible.len() == limit { break; }
+            }
+        }
+        Ok(eligible)
     }
 
     fn enqueue_delivery_stalled_bounce(
@@ -6408,7 +6470,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
-            if recipient_action_satisfies_alarm_on_conn(&tx, prompt_id)? {
+            if recipient_action_satisfies_alarm_on_conn(&tx, prompt_id)?
+                || !alarm_needs_response_on_conn(&tx, prompt_id)? {
                 return Ok(None);
             }
             let stale_cutoff =

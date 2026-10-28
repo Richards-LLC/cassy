@@ -10617,6 +10617,37 @@ mod tests {
     }
 
     #[test]
+    fn delayed_current_lifecycle_digest_keeps_its_queue_age_for_visible_label() {
+        let (temp, store) = create_test_store();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("session".into());
+        agents.register(&supervisor).unwrap();
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = Task::new("cas-current-digest".into(), "relay target".into());
+        task.status = TaskStatus::InProgress;
+        tasks.add(&task).unwrap();
+        let body = format!("<task-lifecycle transition=\"task_started\" task_id=\"{}\" new=\"in_progress\" occurrence=\"{}\">started</task-lifecycle>", task.id, task.updated_at.to_rfc3339());
+        let result = store.enqueue_idempotent("lifecycle:13952", "supervisor", &body, Some("session"), Some("task_started: cas-current-digest"), None, "started-13952", Some(&QueueOrigin::Daemon)).unwrap();
+        let EnqueueIdempotentResult::Created(id) = result else { panic!("new relay") };
+        let queued_at = Utc::now() - chrono::Duration::minutes(29);
+        store.conn.lock().unwrap().execute(
+            "UPDATE prompt_queue SET created_at = ?1 WHERE id = ?2",
+            params![queued_at.to_rfc3339(), id],
+        ).unwrap();
+        let surfaced = store.surface_for_recipient_within_budget("supervisor", Some("session"), HookDrain::NoticeDigest, 10, 0).unwrap().rows;
+        assert_eq!(surfaced.len(), 1, "current relay must remain available as a digest");
+        assert_eq!(surfaced[0].id, id);
+        assert_eq!(surfaced[0].created_at, queued_at);
+        assert_eq!(store.recipient_receipt(id, "supervisor").unwrap(), Some(SurfacingSource::HookSurfaced));
+    }
+
+    #[test]
     fn cas_1485_current_terminal_reports_and_uncertain_payloads_still_surface() {
         for (source, current, announced, missing_task, malformed) in [
             ("lifecycle-wake:17717", TaskStatus::AwaitingMerge, "awaiting_merge", false, false),

@@ -7167,6 +7167,112 @@ async fn test_reset_alive_worker_task_with_force_succeeds_and_logs_audit() {
 // =============================================================================
 
 #[tokio::test]
+async fn immutable_qa_assignment_does_not_follow_the_moving_epic() {
+    let mut env = TestEnvGuard::temp_home();
+    let (temp, core) = setup_cas(&mut env);
+    let root = temp.path().join(".cas");
+    std::fs::write(root.join("config.toml"),
+        "[factory]\nwarn_stale_assignment=true\nblock_stale_assignment=true\nstale_threshold_commits=1\n").unwrap();
+    let repo = temp.path().join("qa-upstream");
+    let checkout = temp.path().join("reviewer-checkout");
+    std::fs::create_dir(&repo).unwrap();
+    let git = |path: &std::path::Path, args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(path).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.name", "Test"]);
+    git(&repo, &["config", "user.email", "test@example.com"]);
+    std::fs::write(repo.join("file"), "producer").unwrap();
+    git(&repo, &["add", "file"]);
+    git(&repo, &["commit", "-qm", "producer"]);
+    let bound_head = git(&repo, &["rev-parse", "HEAD"]);
+    git(&repo, &["branch", "epic/moving"]);
+    git(&repo, &["clone", "-q", repo.to_str().unwrap(), checkout.to_str().unwrap()]);
+    git(&repo, &["checkout", "-q", "epic/moving"]);
+    for n in 0..17 {
+        std::fs::write(repo.join("file"), format!("epic advance {n}")).unwrap();
+        git(&repo, &["commit", "-qam", "advance epic"]);
+    }
+    // Real factory worktrees share the supervisor's local epic refs. Mirror
+    // that layout explicitly: clone only creates a local main branch.
+    git(&checkout, &["fetch", "-q", "origin"]);
+    git(&checkout, &["branch", "-f", "epic/moving", "origin/epic/moving"]);
+    let mut reviewer = Agent::new("reviewer-session".into(), "reviewer".into());
+    reviewer.role = AgentRole::Worker;
+    reviewer.metadata.insert("clone_path".into(), checkout.to_string_lossy().into_owned());
+    open_agent_store(&root).unwrap().register(&reviewer).unwrap();
+    let tasks = open_task_store(&root).unwrap();
+    let service = CasService::new(core, None);
+    env.set("CAS_FACTORY_MODE", "1");
+
+    // A label alone is not an immutable review binding. Check both stored
+    // spellings of the producer identity as well as the implementation row.
+    for (index, (qa_label, producer, accepted)) in [
+        (false, None, false),
+        (true, Some("independent-producer"), true),
+        (true, None, false),
+        (true, Some(reviewer.name.as_str()), false),
+        (true, Some(reviewer.id.as_str()), false),
+    ].into_iter().enumerate() {
+        let mut task = Task::new(format!("cas-assignment-{index}"), "assignment contract".into());
+        task.deliverables.work_target = Some(cas::types::WorkTarget {
+            repo_selector: "project:fixture".into(), target_branch: "epic/moving".into(),
+        });
+        if qa_label { task.labels.push("qa-pass".into()); }
+        tasks.add(&task).unwrap();
+        if let Some(producer) = producer {
+            let source = Task::new(format!("cas-producer-{index}"), "immutable producer".into());
+            tasks.add(&source).unwrap();
+            let pass = cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+                task_id: &source.id, implementer_agent_id: producer,
+                branch: "factory/producer", bound_head: &bound_head,
+                deadline_at: chrono::Utc::now() + chrono::Duration::hours(1), max_rounds: 2,
+            }, chrono::Utc::now()).unwrap();
+            let cas_store::QaPassOpen::Dispatched(pass) = pass else { panic!("new pass expected") };
+            cas_store::set_qa_task(&root, &pass.id, &task.id).unwrap();
+        }
+        let request: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+            "action":"update", "id":task.id, "assignee":reviewer.name,
+        })).unwrap();
+        let result = service.task(Parameters(request)).await;
+        if accepted {
+            let text = extract_text(result.expect("immutable QA must ignore moving epic ancestry"));
+            assert!(!text.contains("rebase"), "immutable candidate must never get a rebase remedy: {text}");
+            assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(reviewer.name.as_str()));
+            // Reserving a review also preserves another clean idle checkout.
+            git(&checkout, &["checkout", "-q", "--detach", "epic/moving"]);
+            let idle_head = git(&checkout, &["rev-parse", "HEAD"]);
+            let assign = || serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+                "action":"update", "id":task.id, "assignee":reviewer.name,
+            })).unwrap();
+            let text = extract_text(service.task(Parameters(assign())).await.unwrap());
+            assert!(text.contains(&bound_head) && !text.contains("rebase"), "{text}");
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), idle_head);
+            std::fs::write(checkout.join("file"), "reviewer's pending work").unwrap();
+            let error = service.task(Parameters(assign())).await.expect_err("dirty review checkout stays protected");
+            assert!(error.message.contains("tracked checkout changes"), "{error}");
+            git(&checkout, &["checkout", "--", "file"]);
+            git(&checkout, &["checkout", "-q", "--detach", &bound_head]);
+        } else {
+            let error = result.expect_err("implementation, unbound label and self-review remain guarded");
+            if producer.is_none() {
+                // pin: the real17-commit regression keeps the implementation freshness guard.
+                assert!(error.message.contains("17 commits behind"), "{error}");
+            } else {
+                assert!(error.message.contains("no self-review"), "{error}");
+                assert!(!error.message.contains("rebase"), "{error}");
+            }
+            assert!(tasks.get(&task.id).unwrap().assignee.is_none());
+        }
+        assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), bound_head,
+            "assignment never changes the review candidate");
+        assert!(git(&checkout, &["status", "--porcelain"]).is_empty());
+    }
+}
+
+#[tokio::test]
 async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted() {
     let mut test_env = TestEnvGuard::temp_home();
     let (temp, service) = setup_cas(&mut test_env);

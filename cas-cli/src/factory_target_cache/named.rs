@@ -278,6 +278,7 @@ mod tests {
         fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
         let mut agent = cas_types::Agent::new("retired-owner".into(), "retired".into());
         agent.pid = Some(i32::MAX as u32);
+        crate::mcp::daemon::stamp_pid_fingerprint(&mut agent, i32::MAX as u32);
         agent.pid_starttime = Some(1);
         agent.status = cas_types::AgentStatus::Shutdown;
         agent

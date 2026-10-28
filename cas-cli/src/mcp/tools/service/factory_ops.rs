@@ -19004,6 +19004,8 @@ effort = "high"
         let rel = "2026/08/18/rollout-2026-08-18T17-22-01-live.jsonl";
         let (account_home, sessions) = fake_codex_sessions_dir(&[(rel, clone)]);
         let account_dir = account_home.path().to_str().expect("utf-8 account home");
+        // macOS temp roots can be spelled /var or /private/var; compare the real file.
+        let expected_rollout = sessions.join(rel).canonicalize().unwrap();
 
         let resolved = resolve_worker_transcript_path_for_account(
             Some(clone),
@@ -19011,7 +19013,7 @@ effort = "high"
             cas_mux::SupervisorCli::Codex,
             Some(account_dir),
         );
-        assert_eq!(resolved, Some(sessions.join(rel)));
+        assert_eq!(resolved, Some(expected_rollout.clone()));
 
         let status_path = worker_status_transcript_path_for_account(
             Some(clone),
@@ -19019,7 +19021,7 @@ effort = "high"
             cas_mux::SupervisorCli::Codex,
             Some(account_dir),
         );
-        assert_eq!(status_path, Some(sessions.join(rel)));
+        assert_eq!(status_path, Some(expected_rollout.clone()));
 
         let mut agent = cas_types::Agent::new(
             "codex-kind-owl-71-session".to_string(),
@@ -19036,7 +19038,7 @@ effort = "high"
             .insert("worker_account_dir".to_string(), account_dir.to_string());
         assert_eq!(
             worker_transcript_path_for_agent(account_home.path(), &agent),
-            Some(sessions.join(rel)),
+            Some(expected_rollout),
             "the registered worker's spawn-time CODEX_HOME must reach all agent-aware callers"
         );
     }

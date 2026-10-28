@@ -187,6 +187,27 @@ describe("Commander live connection lifecycle", () => {
     expect(onMachineInfo.mock.calls.at(-1)?.[0]).toEqual(known);
   });
 
+  it("keeps authentication connecting through one slow catalog read, then recovers on the next read", async () => {
+    transport();
+    const fetchNow = globalThis.fetch;
+    let reads = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (new URL(String(input)).pathname === "/v1/sessions" && ++reads === 1) {
+        return new Promise<Response>((_, reject) => init!.signal!.addEventListener("abort", () => reject(init!.signal!.reason), { once: true }));
+      }
+      return fetchNow(input, init);
+    }));
+    const states: ConnectionState[] = [];
+    const connection = supervisor(await storedMachine("auth-grace"), state => states.push(state));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+    connection.start();
+    await vi.waitFor(() => expect(reads).toBe(1));
+    await vi.advanceTimersByTimeAsync(3_000);
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"), { timeout: 250 });
+    expect(reads).toBe(2);
+    expect(states.some(state => state.phase === "failed" || state.phase === "backoff")).toBe(false);
+  });
+
   it("settles a resend receipt when an overlapping legacy attach's ticket finishes later (cas-547a)", async () => {
     transport();
     TransportSocket.instances = [];

@@ -188,8 +188,7 @@ fn digest_row(notices: &[QueuedPrompt]) -> Option<String> {
         .collect();
     let more = notices.len().saturating_sub(DIGEST_NAMED);
     Some(format!(
-        "[digest] {} system notice{} folded here instead of a wake each, no action needed \
-         (messages abandoned to recipients that have ended): {}{}. Read one whole with \
+        "[digest] {} inbox update{}: {}{}. Read one whole with \
          inbox_poll notification_id=<id>.",
         notices.len(),
         if notices.len() == 1 { "" } else { "s" },

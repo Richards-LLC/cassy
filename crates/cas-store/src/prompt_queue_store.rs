@@ -271,12 +271,12 @@ pub const PEER_COPY_KIND: &str = "worker_peer_copy";
 /// Non-rendering metadata (digests and explicit recovery cards) must not
 /// trigger a daemon transport delivery.
 const NOT_NOTICE_DIGEST_SQL: &str = "AND NOT (
-     COALESCE(kind, '') = 'worker_peer_copy'
+     COALESCE(kind, '') IN ('worker_peer_copy', 'supervisor_digest')
      OR (COALESCE(origin_kind, '') = 'daemon' AND (COALESCE(kind, '') = 'notice_digest'
      OR (source = 'delivery-watchdog' AND COALESCE(kind, '') = 'recovery_reference'))))";
 
 /// Hook drains exclude digests; recovery cards have their own filter below.
-const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.kind, '') = 'worker_peer_copy'
+const NOT_NOTICE_DIGEST_Q_SQL: &str = "AND NOT (COALESCE(q.kind, '') IN ('worker_peer_copy', 'supervisor_digest')
      OR (COALESCE(q.origin_kind, '') = 'daemon' AND COALESCE(q.kind, '') = 'notice_digest'))";
 
 /// cas-286c: explicit-read cards never consume automatic delivery slots.
@@ -284,7 +284,7 @@ const NOT_RECOVERY_REFERENCE_Q_SQL: &str = "AND NOT (COALESCE(q.origin_kind, '')
      AND q.source = 'delivery-watchdog' AND COALESCE(q.kind, '') = 'recovery_reference')";
 
 /// cas-bf890: only [`NOTICE_DIGEST_KIND`] rows, over the `q` alias.
-const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND (COALESCE(q.kind, '') = 'worker_peer_copy'
+const ONLY_NOTICE_DIGEST_Q_SQL: &str = "AND (COALESCE(q.kind, '') IN ('worker_peer_copy', 'supervisor_digest')
      OR (COALESCE(q.origin_kind, '') = 'daemon' AND COALESCE(q.kind, '') = 'notice_digest'))";
 
 /// cas-1f0c: which rows a budgeted hook drain may take; the hook variants of
@@ -5025,24 +5025,61 @@ impl SqlitePromptQueueStore {
 /// Receipts need no response. Terminal task evidence is recipient-specific;
 /// an unknown task id keeps monitoring so a fresh assignment cannot disappear.
 fn alarm_needs_response_on_conn(conn: &Connection, prompt_id: i64) -> Result<bool> {
-    let (text, summary, kind, target, session): (String, Option<String>, Option<String>, String, Option<String>) = conn.query_row(
+    let (text, summary, kind, target, session): (
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+    ) = conn.query_row(
         "SELECT prompt, summary, kind, target, factory_session FROM prompt_queue WHERE id=?",
-        [prompt_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        [prompt_id],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
     )?;
-    if matches!(kind.as_deref(), Some("receipt" | "informational" | NOTICE_DIGEST_KIND | PEER_COPY_KIND))
-        || split_quiet_marker(&text).0 {
+    if matches!(
+        kind.as_deref(),
+        Some(
+            "receipt" | "informational" | "supervisor_digest" | NOTICE_DIGEST_KIND | PEER_COPY_KIND
+        )
+    ) || split_quiet_marker(&text).0
+    {
         return Ok(false);
     }
-    if !agents_table_exists(conn)? || !conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')", [], |row| row.get::<_, bool>(0),
-    )? { return Ok(true); }
-    let recipient: Option<String> = conn.query_row(
-        "SELECT id FROM agents WHERE name=? AND factory_session IS ? AND role='worker' LIMIT 1",
-        params![target, session], |row| row.get(0),
-    ).optional()?;
-    let Some(recipient) = recipient else { return Ok(true); };
-    let named = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
-        .chain(summary.as_deref().unwrap_or_default().split(|c: char| !c.is_ascii_alphanumeric() && c != '-'))
+    if !agents_table_exists(conn)?
+        || !conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        return Ok(true);
+    }
+    let recipient: Option<String> = conn
+        .query_row(
+            "SELECT id FROM agents WHERE name=? AND factory_session IS ? AND role='worker' LIMIT 1",
+            params![target, session],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(recipient) = recipient else {
+        return Ok(true);
+    };
+    let named = text
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .chain(
+            summary
+                .as_deref()
+                .unwrap_or_default()
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-'),
+        )
         .filter(|id| id.starts_with("cas-") && id.len() > 4)
         .collect::<std::collections::HashSet<_>>();
     if !named.is_empty() {
@@ -5051,7 +5088,9 @@ fn alarm_needs_response_on_conn(conn: &Connection, prompt_id: i64) -> Result<boo
                 "SELECT EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND assignee IN (?2,?3) AND status IN ('closed','cancelled'))",
                 params![id, target, recipient], |row| row.get(0),
             )?;
-            if !terminal { return Ok(true); }
+            if !terminal {
+                return Ok(true);
+            }
         }
         return Ok(false);
     }
@@ -5062,15 +5101,141 @@ fn alarm_needs_response_on_conn(conn: &Connection, prompt_id: i64) -> Result<boo
     )?)
 }
 
-/// Non-action lifecycle rows use the existing per-turn digest. The daemon
-/// stamp is required; a worker quoting one of these envelopes remains mail.
-fn routine_supervisor_digest(source: &str, prompt: &str, origin: Option<&QueueOrigin>) -> bool {
-    matches!(origin, Some(QueueOrigin::Daemon)) && (
-        source.starts_with("lifecycle:")
-        || (source.starts_with("lifecycle-wake:worker-attention:")
-            && ["worker_idle", "verification_dispatch_expired"].iter().any(|kind|
-                prompt.starts_with(&format!("<worker-attention kind=\"{kind}\" "))))
-    )
+/// CAS-authored metadata only: request fields cannot choose this row kind.
+/// Preserve bodies and provenance while routing duplicate/routine events to
+/// the existing per-turn digest instead of another transport or body slot.
+fn supervisor_delivery_kind(
+    conn: &Connection,
+    source: &str,
+    target: &str,
+    prompt: &str,
+    session: Option<&str>,
+    urgent: bool,
+    origin: Option<&QueueOrigin>,
+) -> Result<Option<String>> {
+    const DIGEST: &str = "supervisor_digest";
+    if urgent
+        || is_operator_target(target)
+        || !matches!(
+            origin,
+            Some(QueueOrigin::Daemon | QueueOrigin::RegisteredAgent { .. })
+        )
+    {
+        return Ok(None);
+    }
+    let has_agents = agents_table_exists(conn)?;
+    let supervisor: Option<String> = if has_agents {
+        conn.query_row(
+            "SELECT id FROM agents WHERE role='supervisor' AND factory_session IS ?1
+               AND (name=?2 OR ?2='supervisor') AND status IN ('active','idle') ORDER BY id LIMIT 1",
+            params![session, target], |row| row.get(0),
+        ).optional()?
+    } else {
+        (target == "supervisor").then(|| target.to_string())
+    };
+    let Some(supervisor) = supervisor else {
+        return Ok(None);
+    };
+    let daemon = matches!(origin, Some(QueueOrigin::Daemon));
+    if split_quiet_marker(prompt).0
+        || (daemon
+            && (source.starts_with("lifecycle:")
+                || (source.starts_with("lifecycle-wake:worker-attention:")
+                    && ["worker_idle", "verification_dispatch_expired"]
+                        .iter()
+                        .any(|kind| {
+                            prompt.starts_with(&format!("<worker-attention kind=\"{kind}\" "))
+                        }))))
+    {
+        return Ok(Some(DIGEST.into()));
+    }
+    // A blocker is independently actionable even if its body mentions a merge.
+    if prompt.contains("<cas-blocker ") {
+        return Ok(None);
+    }
+    let mut boundary = None;
+    if daemon {
+        if let Some(event) = cas_types::parse_lifecycle_envelope(prompt)
+            && event.transition.as_deref() == Some("task_awaiting_merge")
+            && let Some(head) = event.branch_tip
+        {
+            boundary = Some((event.task_id, head));
+        }
+    } else if let Some(QueueOrigin::RegisteredAgent { agent_id }) = origin {
+        let worker: Option<String> =
+            if has_agents {
+                conn.query_row(
+            "SELECT name FROM agents WHERE id=?1 AND role='worker' AND factory_session IS ?2",
+            params![agent_id, session], |row| row.get(0),
+        ).optional()?
+            } else {
+                None
+            };
+        let Some(worker) = worker else {
+            return Ok(None);
+        };
+        if let Some((_, json)) = prompt.rsplit_once("<cas-merge-request>")
+            && let Some(json) = json.strip_suffix("</cas-merge-request>")
+            && let Ok(event) = serde_json::from_str::<serde_json::Value>(json)
+        {
+            // Unverified source freshness cannot authorize suppression.
+            if !event
+                .get("source_freshness_unavailable")
+                .is_none_or(|v| v.is_null())
+            {
+                return Ok(None);
+            }
+            if let (Some(task), Some(head)) =
+                (event["task_id"].as_str(), event["branch_tip"].as_str())
+            {
+                boundary = Some((task.to_string(), head.to_string()));
+            }
+        } else if prompt.ends_with("</cas-worker-action>")
+            && let Some((_, tag)) = prompt.rsplit_once("<cas-worker-action ")
+        {
+            let attribute = |name: &str| -> Option<&str> {
+                tag.split_once('>')?
+                    .0
+                    .split_once(&format!("{name}=\""))?
+                    .1
+                    .split('"')
+                    .next()
+            };
+            if attribute("kind") == Some("ready") && attribute("worker") == Some(worker.as_str())
+                && conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks')", [], |row| row.get::<_, bool>(0))? {
+                // Bind a taskless ready only when there is exactly one parked
+                // delivery. A generic status or new assignment keeps its wake.
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, json_extract(deliverables,'$.factory_branch_anchor') FROM tasks
+                     WHERE assignee IN (?1,?2) AND status='awaiting_merge' AND json_valid(deliverables)
+                       AND (?3 IS NULL OR id=?3) LIMIT 2",
+                )?;
+                let rows = stmt.query_map(params![worker, agent_id, attribute("task_id")], |row|
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if rows.len() == 1 && let Some(head) = &rows[0].1 {
+                    boundary = Some((rows[0].0.clone(), head.clone()));
+                }
+            }
+        }
+    }
+    let Some((task, head)) = boundary else {
+        return Ok(None);
+    };
+    if task.is_empty() || head.len() != 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let episode = format!(
+        "merge_ready:{}",
+        serde_json::to_string(&(&supervisor, &task, &head))?
+    );
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM prompt_queue WHERE factory_session IS ?1 AND kind=?2
+           AND COALESCE(highest_stage,'enqueued') NOT IN ('dropped','suppressed','abandoned'))",
+        params![session, episode],
+        |row| row.get(0),
+    )?;
+    Ok(Some(if exists { DIGEST.into() } else { episode }))
 }
 
 /// Metadata-only evidence shared by the watchdog read and atomic bounce write.
@@ -5779,6 +5944,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                 "SELECT id, prompt, summary FROM prompt_queue
                  WHERE factory_session = ? AND origin_agent_id = ?
                    AND processed_at IS NULL AND transport_delivered_at IS NULL
+                   AND kind IS NULL
                    AND COALESCE(highest_stage, 'enqueued')
                        NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
                  ORDER BY id",
@@ -5808,11 +5974,12 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // Reserve the new row inside this transaction before assembling
             // the superseded notifications and their provenance labels.
             let origin_kind = origin.kind_str();
+            let kind = supervisor_delivery_kind(&tx, source, target, prompt, Some(factory_session), urgent, Some(origin))?;
             tx.execute(
                 "INSERT INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary,
-                     priority, urgent, origin_agent_id, origin_kind)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     priority, urgent, origin_agent_id, origin_kind, kind)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     source,
                     target,
@@ -5823,7 +5990,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     prio,
                     urgent_flag,
                     origin_agent_id,
-                    origin_kind
+                    origin_kind,
+                    kind
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -6119,9 +6287,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // those are what the sender said about itself.
             let origin_kind = origin.map(QueueOrigin::kind_str);
             let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
+            let kind = supervisor_delivery_kind(&tx, source, target, prompt, factory_session, urgent, origin)?;
             tx.execute(
-                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, attribution_json, origin_agent_id, origin_kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag, attribution_json, origin_agent_id, origin_kind],
+                "INSERT INTO prompt_queue (source, target, prompt, created_at, factory_session, summary, priority, urgent, attribution_json, origin_agent_id, origin_kind, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![source, target, prompt, now_text, factory_session, summary, prio, urgent_flag, attribution_json, origin_agent_id, origin_kind, kind],
             )?;
 
             let id = tx.last_insert_rowid();
@@ -6188,6 +6357,7 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = ImmediateTx::new(&conn)?;
             let now = Utc::now().to_rfc3339();
             let prio: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
 
@@ -6197,9 +6367,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // its dedupe key.
             let origin_kind = origin.map(QueueOrigin::kind_str);
             let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
-            let digest = !urgent && !is_operator_target(target)
-                && routine_supervisor_digest(source, prompt, origin);
-            let changed = conn.execute(
+            let kind = supervisor_delivery_kind(&tx, source, target, prompt, factory_session, urgent, origin)?;
+            let changed = tx.execute(
                 "INSERT OR IGNORE INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key, origin_agent_id, origin_kind, kind)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -6215,21 +6384,23 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                     dedupe_key,
                     origin_agent_id,
                     origin_kind,
-                    digest.then_some(NOTICE_DIGEST_KIND)
+                    kind
                 ],
             )?;
 
             if changed > 0 {
-                let id = conn.last_insert_rowid();
-                let _ = capture_message_event(&conn, source, target);
+                let id = tx.last_insert_rowid();
+                let _ = capture_message_event(&tx, source, target);
+                tx.commit()?;
                 return Ok(EnqueueIdempotentResult::Created(id));
             }
 
-            let existing_id: i64 = conn.query_row(
+            let existing_id: i64 = tx.query_row(
                 "SELECT id FROM prompt_queue WHERE dedupe_key = ?",
                 params![dedupe_key],
                 |row| row.get(0),
             )?;
+            tx.commit()?;
             Ok(EnqueueIdempotentResult::AlreadyExists(existing_id))
         })
     }
@@ -16650,7 +16821,15 @@ mod tests {
         let (temp, store) = create_test_store();
         register_bounce_sender(&store, "supervisor", "factory-a");
         register_bounce_sender(&store, "done-worker", "factory-a");
-        store.conn.lock().unwrap().execute("UPDATE agents SET role='worker' WHERE name='done-worker'", []).unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE agents SET role='worker' WHERE name='done-worker'",
+                [],
+            )
+            .unwrap();
         let tasks = SqliteTaskStore::open(temp.path()).unwrap();
         tasks.init().unwrap();
         let mut task = Task::new("cas-done".into(), "delivery".into());
@@ -16661,22 +16840,65 @@ mod tests {
             format!("{QUIET_MESSAGE_MARKER}\nMerged and closed by Cassy: cas-done"),
             format!("[CAS reply: #1]\n{QUIET_MESSAGE_MARKER}\nreceived"),
         ] {
-            quiet_ids.push(store.enqueue_with_session("supervisor", "done-worker", &body, "factory-a").unwrap());
+            quiet_ids.push(
+                store
+                    .enqueue_with_session("supervisor", "done-worker", &body, "factory-a")
+                    .unwrap(),
+            );
         }
-        let typed = store.enqueue_with_session("supervisor", "done-worker", "receipt", "factory-a").unwrap();
-        store.conn.lock().unwrap().execute("UPDATE prompt_queue SET kind='receipt' WHERE id=?", [typed]).unwrap();
+        let typed = store
+            .enqueue_with_session("supervisor", "done-worker", "receipt", "factory-a")
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("UPDATE prompt_queue SET kind='receipt' WHERE id=?", [typed])
+            .unwrap();
         quiet_ids.push(typed);
-        let done = store.enqueue_with_session("supervisor", "done-worker", "Retry close cas-done", "factory-a").unwrap();
-        let fresh = store.enqueue_with_session("supervisor", "done-worker", "Start cas-new-assignment", "factory-a").unwrap();
-        assert_eq!(candidate_ids(&store), vec![done, fresh], "receipts must never raise an alarm");
+        let done = store
+            .enqueue_with_session(
+                "supervisor",
+                "done-worker",
+                "Retry close cas-done",
+                "factory-a",
+            )
+            .unwrap();
+        let fresh = store
+            .enqueue_with_session(
+                "supervisor",
+                "done-worker",
+                "Start cas-new-assignment",
+                "factory-a",
+            )
+            .unwrap();
+        assert_eq!(
+            candidate_ids(&store),
+            vec![done, fresh],
+            "receipts must never raise an alarm"
+        );
         task.status = TaskStatus::Closed;
         tasks.update(&task).unwrap();
-        assert_eq!(candidate_ids(&store), vec![fresh], "a fresh assignment survives terminal prior work");
+        assert_eq!(
+            candidate_ids(&store),
+            vec![fresh],
+            "a fresh assignment survives terminal prior work"
+        );
         for id in quiet_ids.into_iter().chain([done]) {
-            assert_eq!(store.enqueue_delivery_stalled_bounce(id, "factory-a", "stalled", "stalled").unwrap(), None,
-                "atomic bounce must reject informational/terminal row {id}");
+            assert_eq!(
+                store
+                    .enqueue_delivery_stalled_bounce(id, "factory-a", "stalled", "stalled")
+                    .unwrap(),
+                None,
+                "atomic bounce must reject informational/terminal row {id}"
+            );
         }
-        assert!(store.enqueue_delivery_stalled_bounce(fresh, "factory-a", "stalled", "stalled").unwrap().is_some());
+        assert!(
+            store
+                .enqueue_delivery_stalled_bounce(fresh, "factory-a", "stalled", "stalled")
+                .unwrap()
+                .is_some()
+        );
     }
 
     /// cas-913c: the supervisor's messages are stored under the `supervisor`
@@ -20336,23 +20558,75 @@ mod cas_bf890_notice_digest_tests {
         let mut ids = Vec::new();
         for (source, body) in &fixtures {
             for _ in 0..2 {
-                let result = store.enqueue_idempotent(source, "supervisor", body, Some(SESSION), Some(source), None, source, Some(&QueueOrigin::Daemon)).unwrap();
-                let id = match result { EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id };
-                if !ids.contains(&id) { ids.push(id); }
+                let result = store
+                    .enqueue_idempotent(
+                        source,
+                        "supervisor",
+                        body,
+                        Some(SESSION),
+                        Some(source),
+                        None,
+                        source,
+                        Some(&QueueOrigin::Daemon),
+                    )
+                    .unwrap();
+                let id = match result {
+                    EnqueueIdempotentResult::Created(id)
+                    | EnqueueIdempotentResult::AlreadyExists(id) => id,
+                };
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
             }
         }
-        let peer = store.enqueue_worker_peer_with_supervisor_copy("w", "peer", "supervisor", "collision details", "Peer worker message copy — from w to peer: collision details", SESSION, Some("collision"), None, false, Some(&QueueOrigin::RegisteredAgent { agent_id: "id-w".into() })).unwrap();
+        let peer = store
+            .enqueue_worker_peer_with_supervisor_copy(
+                "w",
+                "peer",
+                "supervisor",
+                "collision details",
+                "Peer worker message copy — from w to peer: collision details",
+                SESSION,
+                Some("collision"),
+                None,
+                false,
+                Some(&QueueOrigin::RegisteredAgent {
+                    agent_id: "id-w".into(),
+                }),
+            )
+            .unwrap();
         ids.push(peer.supervisor_copy_id);
         let action = store.enqueue_idempotent("lifecycle-wake:5", "supervisor", "<task-lifecycle transition=\"task_blocked\" task_id=\"cas-fixture\">blocker</task-lifecycle>", Some(SESSION), None, None, "action", Some(&QueueOrigin::Daemon)).unwrap();
-        let action = match action { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
-        assert_eq!(selected(&store), vec![action], "routine and copied bodies must not create transports");
+        let action = match action {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            selected(&store),
+            vec![action],
+            "routine and copied bodies must not create transports"
+        );
         assert_eq!(drain(&store, HookDrain::Unseen), vec![action]);
         assert_eq!(drain(&store, HookDrain::NoticeDigest), ids);
-        assert!(drain(&store, HookDrain::NoticeDigest).is_empty(), "one digest receipt per episode");
-        let full = store.poll_named_for_recipient("supervisor", Some(SESSION), &[peer.supervisor_copy_id]).unwrap();
+        assert!(
+            drain(&store, HookDrain::NoticeDigest).is_empty(),
+            "one digest receipt per episode"
+        );
+        let full = store
+            .poll_named_for_recipient("supervisor", Some(SESSION), &[peer.supervisor_copy_id])
+            .unwrap();
         // pin: named reads preserve the full copied message byte for byte.
-        assert_eq!(full[0].prompt, "Peer worker message copy — from w to peer: collision details");
-        assert_eq!(store.peek_for_targets(&["peer"], Some(SESSION), 10).unwrap()[0].id, peer.recipient_id);
+        assert_eq!(
+            full[0].prompt,
+            "Peer worker message copy — from w to peer: collision details"
+        );
+        assert_eq!(
+            store
+                .peek_for_targets(&["peer"], Some(SESSION), 10)
+                .unwrap()[0]
+                .id,
+            peer.recipient_id
+        );
     }
 
     /// One parked tip has one merge wake even when three producers relay it.
@@ -20371,23 +20645,112 @@ mod cas_bf890_notice_digest_tests {
         task.assignee = Some("w".into());
         task.deliverables.factory_branch_anchor = Some("a".repeat(40));
         tasks.add(&task).unwrap();
-        let worker = QueueOrigin::RegisteredAgent { agent_id: format!("id-w-{SESSION}") };
+        let worker = QueueOrigin::RegisteredAgent {
+            agent_id: format!("id-w-{SESSION}"),
+        };
         let at = Utc::now().to_rfc3339();
-        let lifecycle = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"w\" notification_id=\"1\" occurrence=\"{at}\" branch_tip=\"{}\">MERGE REQUIRED</task-lifecycle>", task.id, "a".repeat(40));
-        let first = store.enqueue_idempotent("lifecycle-wake:1", "supervisor", &lifecycle, Some(SESSION), None, None, "park-1", Some(&QueueOrigin::Daemon)).unwrap();
-        let first = match first { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
-        let ready = format!("READY TO MERGE\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>", task.id);
-        let ready_id = store.enqueue_worker_action_with_outcome("w", "lead-sup", &ready, "w", SESSION, None, None, false, &worker).unwrap().id();
-        let merge = |head: char| format!("proof: kept whole\n\n<cas-merge-request>{{\"task_id\":\"{}\",\"branch_tip\":\"{}\",\"target_branch\":\"epic/test\",\"target_branch_tip\":\"{}\"}}</cas-merge-request>", task.id, head.to_string().repeat(40), "c".repeat(40));
-        let duplicate = store.enqueue_urgent_with_outcome("w", "lead-sup", &merge('a'), Some(SESSION), None, None, false, Some(&worker)).unwrap().id();
-        let fresh = store.enqueue_urgent_with_outcome("w", "lead-sup", &merge('b'), Some(SESSION), None, None, false, Some(&worker)).unwrap().id();
-        let blocker = store.enqueue_urgent_with_outcome("w", "supervisor", "new blocker <cas-blocker worker=\"w\"></cas-blocker>", Some(SESSION), None, None, false, Some(&worker)).unwrap().id();
-        let verdict = store.enqueue_idempotent("verification-verdict:1", "supervisor", "verification approved", Some(SESSION), None, None, "verdict", Some(&QueueOrigin::Daemon)).unwrap();
-        let verdict = match verdict { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
-        assert_eq!(selected(&store), vec![first, fresh, blocker, verdict]);
+        let lifecycle = format!(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"w\" notification_id=\"1\" occurrence=\"{at}\" branch_tip=\"{}\">MERGE REQUIRED</task-lifecycle>",
+            task.id,
+            "a".repeat(40)
+        );
+        let first = store
+            .enqueue_idempotent(
+                "lifecycle-wake:1",
+                "supervisor",
+                &lifecycle,
+                Some(SESSION),
+                None,
+                None,
+                "park-1",
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        let first = match first {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => unreachable!(),
+        };
+        let ready = format!(
+            "READY TO MERGE\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>",
+            task.id
+        );
+        let ready_id = store
+            .enqueue_worker_action_with_outcome(
+                "w", "lead-sup", &ready, "w", SESSION, None, None, false, &worker,
+            )
+            .unwrap()
+            .id();
+        let merge = |head: char| {
+            format!(
+                "proof: kept whole\n\n<cas-merge-request>{{\"task_id\":\"{}\",\"branch_tip\":\"{}\",\"target_branch\":\"epic/test\",\"target_branch_tip\":\"{}\"}}</cas-merge-request>",
+                task.id,
+                head.to_string().repeat(40),
+                "c".repeat(40)
+            )
+        };
+        let duplicate = store
+            .enqueue_urgent_with_outcome(
+                "w",
+                "lead-sup",
+                &merge('a'),
+                Some(SESSION),
+                None,
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap()
+            .id();
+        let fresh = store
+            .enqueue_urgent_with_outcome(
+                "w",
+                "lead-sup",
+                &merge('b'),
+                Some(SESSION),
+                None,
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap()
+            .id();
+        let blocker = store
+            .enqueue_urgent_with_outcome(
+                "w",
+                "supervisor",
+                "new blocker <cas-blocker worker=\"w\"></cas-blocker>",
+                Some(SESSION),
+                None,
+                None,
+                false,
+                Some(&worker),
+            )
+            .unwrap()
+            .id();
+        let verdict = store
+            .enqueue_idempotent(
+                "verification-verdict:1",
+                "supervisor",
+                "verification approved",
+                Some(SESSION),
+                None,
+                None,
+                "verdict",
+                Some(&QueueOrigin::Daemon),
+            )
+            .unwrap();
+        let verdict = match verdict {
+            EnqueueIdempotentResult::Created(id) => id,
+            _ => unreachable!(),
+        };
+        let mut selected_ids = selected(&store);
+        selected_ids.sort_unstable();
+        assert_eq!(selected_ids, vec![first, fresh, blocker, verdict]);
         let digested = drain(&store, HookDrain::NoticeDigest);
         assert_eq!(digested, vec![ready_id, duplicate]);
-        let evidence = store.poll_named_for_recipient("lead-sup", Some(SESSION), &[duplicate]).unwrap();
+        let evidence = store
+            .poll_named_for_recipient("lead-sup", Some(SESSION), &[duplicate])
+            .unwrap();
         assert_eq!(evidence[0].prompt, merge('a'));
     }
 

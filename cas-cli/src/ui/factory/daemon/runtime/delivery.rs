@@ -439,6 +439,15 @@ pub(crate) fn enqueue_director_prompt(
     Ok(id)
 }
 
+/// Green director readiness uses the same durable episode as park/manual mail.
+pub(crate) fn enqueue_merge_ready_prompt(
+    cas_dir: &Path,
+    factory_session: &str,
+    prompt: &crate::ui::factory::director::Prompt,
+) -> anyhow::Result<i64> {
+    enqueue_director_prompt(cas_dir, factory_session, &prompt.target, &prompt.text)
+}
+
 /// Stall nudges always enter the durable lane, even for a ready pane.
 /// The episode identity and its session scope survive daemon retries.
 pub(crate) fn enqueue_worker_stall_nudge(

@@ -6053,6 +6053,12 @@ fn hub_auth_load_probe() {
         std::fs::set_permissions(root.join("auth.json"), std::fs::Permissions::from_mode(0o600)).unwrap();
     }
     let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let compacted_bytes = std::fs::read(root.join("auth.json")).unwrap();
+    let compacted: serde_json::Value = serde_json::from_slice(&compacted_bytes).unwrap();
+    let source: serde_json::Value = serde_json::from_slice(&std::fs::read(target.join("auth-load-fixture.json")).unwrap()).unwrap();
+    assert_eq!(compacted["devices"].as_array().unwrap().len(), source["devices"].as_array().unwrap().len());
+    assert_eq!(compacted["pairings"], source["pairings"]);
+    let startup = serde_json::json!({"bytes": compacted_bytes.len(), "devices": compacted["devices"].as_array().unwrap().len(), "pairings": compacted["pairings"].as_array().unwrap().len()});
     let now = Utc::now();
     let (_, context) = paired_context(&auth, now, Scope::default_read_only());
     let state_bytes = std::fs::metadata(root.join("auth.json")).unwrap().len();
@@ -6097,7 +6103,7 @@ fn hub_auth_load_probe() {
         serde_json::json!({"samples": n, "p50_us": values.get(n/2), "p95_us": values.get(n*95/100), "max_us": values.last()})
     };
     let label = if state_bytes > 200_000 { "before" } else { "after" };
-    let metrics = serde_json::json!({"fixture_bytes": state_bytes, "sockets": 8, "attaches_per_second": 2,
+    let metrics = serde_json::json!({"fixture_bytes": state_bytes, "sockets": 8, "attaches_per_second": 2, "startup_compaction": startup,
         "lock_wait": summary(samples("lock_wait_us")), "lock_hold": summary(samples("lock_hold_us")), "persist": summary(samples("persist_us"))});
     std::fs::write(target.join(format!("auth-load-{label}.json")), serde_json::to_vec_pretty(&metrics).unwrap()).unwrap();
     std::fs::write(target.join(format!("auth-load-{label}.trace")), trace).unwrap();

@@ -166,6 +166,7 @@ async function cleanup() {
   if (state.paused) state.hub.kill("SIGCONT");
   await stop(state.hub);
   await stop(state.daemon);
+  await stop(state.progressWorker);
   const ownedLaunch = join(state.home, "launched-pid");
   if (existsSync(ownedLaunch)) {
     const owned = JSON.parse(await readFile(ownedLaunch, "utf8"));
@@ -471,6 +472,52 @@ print(json.dumps([dict(row) for row in rows]))
 `, join(state.project, ".cas", "cas.db"), String(notificationId)], { timeout: 5000 });
   return JSON.parse(stdout);
 }
+// Real stores, Git and a live inert harness; the hub still projects all data.
+// The fixture never fabricates /status, worker liveness or merge verdicts.
+async function progress() {
+  state.progressWorker = spawn("bash", ["-c", "exec -a codex sleep 3600"], {
+    cwd: state.project, env: state.env, stdio: "ignore",
+  });
+  const worker = state.progressWorker;
+  await new Promise((ok, fail) => { worker.once("spawn", ok); worker.once("error", fail); });
+  const { stdout } = await run("python3", ["-c", `
+import sqlite3,json,sys,os,subprocess,glob
+from datetime import datetime,timezone
+home,project,session,pid=sys.argv[1:]
+now=datetime.now(timezone.utc).isoformat()
+def git(*args): return subprocess.check_output(['git',*args],cwd=project,text=True).strip()
+git('config','user.email','fixture@example.test');git('config','user.name','Fixture')
+git('checkout','-b','epic/progress')
+open(os.path.join(project,'delivery.txt'),'w').write('delivered\\n')
+git('add','delivery.txt');git('commit','-m','integrated delivery')
+anchor=git('rev-parse','HEAD')
+account=os.path.join(home,'codex');rollouts=os.path.join(account,'sessions','2026','10','28')
+os.makedirs(rollouts,exist_ok=True)
+with open(os.path.join(rollouts,'rollout-progress-worker.jsonl'),'w') as f:
+ f.write(json.dumps(dict(type='session_meta',payload=dict(id='progress-worker-id',cwd=project,source='cli')))+'\\n')
+ f.write(json.dumps(dict(timestamp=now,type='event_msg',payload=dict(type='task_started',turn_id='progress-turn')))+'\\n')
+c=sqlite3.connect(os.path.join(project,'.cas','cas.db'))
+meta=dict(worker_cli='codex',clone_path=project,worker_account_dir=account)
+start=int(open('/proc/'+pid+'/stat').read().split(') ',1)[1].split()[19])
+c.execute('INSERT INTO agents(id,name,role,status,pid,pid_starttime,factory_session,cc_session_id,registered_at,last_heartbeat,metadata,startup_confirmed) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)',('progress-worker-id','progress-worker','worker','active',int(pid),start,session,'progress-worker-id',now,now,json.dumps(meta)))
+for id,title,status,kind,assignee,deliverables in [
+ ('cas-progress-epic','Progress fixture','in_progress','epic',None,{}),
+ ('cas-progress-live','Live worker task','in_progress','task','progress-worker-id',{}),
+ ('cas-progress-merged','Integrated delivery held by close gate','awaiting_merge','task',None,dict(factory_branch_anchor=anchor,merge_commit=anchor)),
+ ('cas-progress-ready','Ready task','open','task',None,{})]:
+ c.execute('INSERT INTO tasks(id,title,status,task_type,assignee,branch,deliverables,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)',(id,title,status,kind,assignee,'epic/progress' if kind=='epic' else None,json.dumps(deliverables),now,now))
+ if kind!='epic': c.execute('INSERT INTO dependencies(from_id,to_id,dep_type,created_at) VALUES(?,?,?,?)',(id,'cas-progress-epic','parent_child',now))
+c.commit()
+for path in glob.glob(os.path.join(home,'.cas','sessions','*.json')):
+ data=json.load(open(path))
+ if data.get('name')==session:
+  data['workers']=[dict(name='progress-worker',pid=int(pid),worktree_path=project)]
+  data['epic_id']='cas-progress-epic'
+  json.dump(data,open(path,'w'))
+print(json.dumps(dict(worker_pid=int(pid),anchor=anchor,task='cas-progress-live',target='epic/progress',merged='cas-progress-merged')))
+`, state.home, state.project, state.session, String(worker.pid)], { timeout: 10000 });
+  return JSON.parse(stdout);
+}
 async function readLogs(directory) {
   if (!existsSync(directory)) return "";
   const files = (await readdir(directory))
@@ -598,6 +645,8 @@ const server = createServer(async (req, res) => {
           return ask();
         case "/answers":
           return answers(data.notificationId);
+        case "/progress":
+          return progress();
         case "/queue":
           return queue(data.message);
         case "/evidence":

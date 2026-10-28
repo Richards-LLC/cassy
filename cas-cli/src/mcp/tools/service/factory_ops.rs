@@ -642,7 +642,7 @@ fn factory_rehome_label(agent: &cas_types::Agent) -> String {
 /// session. Prefer the freshest heartbeat: it is the strongest evidence of
 /// which same-name process is currently answering. This keeps a live respawn
 /// from being hidden behind its older ghost row.
-fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
+pub(crate) fn dedupe_authoritative_agents(agents: Vec<cas_types::Agent>) -> (Vec<cas_types::Agent>, usize) {
     let original_len = agents.len();
     let mut by_identity = std::collections::BTreeMap::<(String, String), cas_types::Agent>::new();
 

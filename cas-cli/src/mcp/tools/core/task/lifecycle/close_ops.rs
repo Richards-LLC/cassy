@@ -17,6 +17,7 @@ pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
 mod merge_queue_proof;
+mod verified_delivery;
 mod merged_verification;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
@@ -8478,6 +8479,35 @@ impl CasCore {
             return Ok(Self::tool_error(message));
         }
 
+        // A resolved approval owns its exact correction head, even if the
+        // previous rejected anchor already landed and its preservation ref
+        // still points there. Track only an attributed, receipted pushed fix.
+        let reviewed_delivery = if close_disposition.requires_delivery_gates()
+            && task.task_type != TaskType::Epic
+            && task.execution_note.as_deref() != Some("no-code")
+            // A legacy worktree alone locates a checkout; it does not bind
+            // a factory delivery or declare an integration target.
+            && (has_recorded_code_delivery(&task)
+                || task.deliverables.work_target.is_some()
+                || req.commit_receipt.is_some())
+            && has_delivery_to_measure(&task)
+            && (close_repo_verified || worker_worktree_path.is_some())
+        {
+            let reviewed = match verified_delivery::current(&self.cas_root, &task) {
+                Ok(reviewed) => reviewed,
+                Err(error) => return Ok(Self::tool_error(error)),
+            };
+            if let Some(reviewed) = reviewed.as_ref() {
+                let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
+                match self.track_reviewed_correction(task_store.as_ref(), &task, repo, &resolved_parent_branch, reviewed) {
+                    Ok(Some(current)) => task = current,
+                    Ok(None) => {}
+                    Err(error) => return Ok(Self::tool_error(error)),
+                }
+            }
+            reviewed
+        } else { None };
+
         // cas-ba4a: a task parked for merge answers for its recorded anchor,
         // not for the mutable factory ref or the worktree HEAD, which may
         // already carry the worker's next task or a force-push. The live tip
@@ -8994,6 +9024,14 @@ impl CasCore {
 
                     return Ok(Self::tool_error(msg));
                 }
+            }
+
+            // Exact approved B must land, even when legacy branch selection
+            // or patch-equivalence admitted its earlier merged anchor A.
+            if let Some(reviewed) = reviewed_delivery.as_ref()
+                && let Some(refusal) = reviewed.merge_refusal(&close_project_root, &task, &resolved_parent_branch, req.commit_receipt.as_deref())
+            {
+                return Ok(Self::tool_error(refusal));
             }
 
             // cas-619f backstop: the delivery is integrated. A user-facing
@@ -15171,6 +15209,11 @@ pub(crate) fn task_changed_hands(task: &Task) -> bool {
 /// `None` when none of the recorded candidates resolves. A released task
 /// retains its recorded delivery even though it no longer has an assignee.
 pub(crate) fn task_delivery_branch(repo_path: &std::path::Path, task: &Task) -> Option<String> {
+    if let Some(branch) = task.assignee.as_deref().and_then(|assignee|
+        verified_delivery::tracked_correction_branch(repo_path, task, assignee))
+    {
+        return Some(branch);
+    }
     let unique = task_delivery_branch_candidates(task);
     unique
         .iter()
@@ -15304,6 +15347,19 @@ pub(crate) fn resolve_close_delivery_branch(
     task: &Task,
     assignee: &str,
 ) -> Result<String, String> {
+    // A reviewed correction can resume the actual worker lane while a stale
+    // preservation ref still names A. The recorded B boundary wins over that
+    // ref only when the ref cannot carry B; a later task still cannot replace
+    // a parked source whose tip has moved beyond its immutable anchor.
+    if let Some(parked) = verified_delivery::tracked_correction_branch(repo_path, task, assignee)
+    {
+        let mut measured = task.clone();
+        if let Some(start) = measured.deliverables.factory_branch_start.as_mut() {
+            start.branch = parked.clone();
+        }
+        return Ok(task_attribution::started_delivery(repo_path, &measured)?
+            .map(|delivery| delivery.branch).unwrap_or(parked));
+    }
     // GH #1353: older starts recorded the reusable lane before the worker
     // cut its own per-task branch. That lane may still back another task's
     // open PR. Measure the task lane, keeping the original base and all
@@ -27783,6 +27839,106 @@ mod merge_state_gate_tests {
             cas_store::TaskStore::get(&store, &task.id).unwrap().status,
             TaskStatus::Open
         );
+    }
+
+    #[tokio::test]
+    async fn approved_correction_must_land_after_rejected_anchor_cas_53bb() {
+        use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
+        use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, bare) = handoff_repo();
+        let p = dir.path();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-53bb): initial delivery A"]);
+        let a = head_sha(p);
+        let preserved = "factory/worker-cas-53bb";
+        git(p, &["branch", preserved]);
+        git(p, &["push", "-q", "origin", "factory/worker", preserved]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge A"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let wt = tempfile::tempdir().unwrap();
+        git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
+
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = 'cas-53bb-fixture'\n[verification]\nenabled = true\n[code_review]\nowner = 'worker'\n").unwrap();
+        open_store(&root).unwrap().init().unwrap();
+        open_rule_store(&root).unwrap().init().unwrap();
+        open_skill_store(&root).unwrap().init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        agents.register(&Agent::new_with_role("worker-id".into(), "worker".into(), AgentRole::Worker)).unwrap();
+        agents.register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let worktrees = open_worktree_store(&root).unwrap();
+        worktrees.init().unwrap();
+        let worktree = Worktree::new(Worktree::generate_id(), "factory/worker".into(), "main".into(), wt.path().to_path_buf());
+        worktrees.add(&worktree).unwrap();
+        let mut task = worker_task("worker");
+        task.id = "cas-53bb".into();
+        task.status = TaskStatus::AwaitingMerge;
+        task.risk = vec![TaskRisk::None];
+        task.worktree_id = Some(worktree.id.clone());
+        task.deliverables.factory_branch_anchor = Some(a.clone());
+        task.deliverables.parked_branch = Some(preserved.into());
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-53bb-fixture".into(), target_branch: "main".into() });
+        tasks.add(&task).unwrap();
+        let supervisor = CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-id".into());
+        let worker = CasCore::with_daemon(root.clone(), None, None);
+        worker.set_agent_id_for_testing("worker-id".into());
+        let dispatch = |head: &str| {
+            let proof = super::super::repository_proof::capture_repository_proof_with_anchors(p, wt.path(), vec![head.into()]).unwrap();
+            cas_store::create_verification_dispatch_bound(&root, &task.id, "worker-id", "supervisor-id", &VerificationProofBoundary::task_at(proof), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap()
+        };
+        let verdict = |id: String, status: &str| crate::mcp::tools::VerificationAddRequest {
+            task_id: task.id.clone(), status: status.into(), summary: "Reviewed exact delivery boundary".into(), confidence: Some(0.99),
+            issues: None, files_reviewed: Some("fixed.txt".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(id),
+        };
+        let first = dispatch(&a);
+        supervisor.cas_verification_add(Parameters(verdict(first.id, "rejected"))).await.unwrap();
+        std::fs::write(wt.path().join("fixed.txt"), "correction B\n").unwrap();
+        git(wt.path(), &["add", "fixed.txt"]);
+        git(wt.path(), &["commit", "-q", "-m", "fix(cas-53bb): correct rejected A at B"]);
+        let b = head_sha(wt.path());
+        // The worker pushes its actual lane, never the preservation ref.
+        git(wt.path(), &["push", "-q", "origin", "factory/worker"]);
+        let second = dispatch(&b);
+        supervisor.cas_verification_add(Parameters(verdict(second.id, "approved"))).await.unwrap();
+        // Exact-head containment remains mandatory even when a sibling owns
+        // the live source and tracking must leave the parked boundary alone.
+        let mut sibling = worker_task("worker");
+        sibling.id = "cas-sibling".into();
+        sibling.deliverables.factory_branch_anchor = Some(b.clone());
+        tasks.add(&sibling).unwrap();
+        let held = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        let held = format!("{held:?}");
+        assert!(held.contains("MERGE REQUIRED") && held.contains(&b), "{held}");
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(a.as_str()));
+        sibling.status = TaskStatus::Closed;
+        tasks.update(&sibling).unwrap();
+        let response = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        let text = format!("{response:?}");
+        let parked = tasks.get(&task.id).unwrap();
+        assert_ne!(parked.status, TaskStatus::Closed, "{text}");
+        assert!(text.contains("MERGE REQUIRED") && text.contains(&b), "{text}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
+        assert_eq!(task_delivery_branch(p, &parked).as_deref(), Some("factory/worker"));
+        assert_eq!(rev_parse_local(p, &format!("origin/{preserved}")), a);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge correction B"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let closed = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed:?}");
+        assert!(git_commit_is_ancestor(p, &b, "origin/main"));
+        // Keep the backing remote alive through every close-time fetch.
+        drop(bare);
     }
 
     #[cfg(unix)]

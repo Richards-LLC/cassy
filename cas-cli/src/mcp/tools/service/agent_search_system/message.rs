@@ -5782,7 +5782,7 @@ mod cas_89e1_post_merge_message_type_tests {
         task_b.status = TaskStatus::AwaitingMerge;
         task_b.risk = vec![cas_types::TaskRisk::Concurrency];
         task_b.door = Some(cas_types::TaskDoor::TwoWay);
-        task_b.notes = "qa-bundle: /proof/task-b/qa/bundle.json".into();
+        task_b.notes = "qa-bundle: /proof/task-b/qa/bundle.json\n".repeat(100);
         task_b.deliverables.work_target = task.deliverables.work_target.clone();
         task_b.deliverables.parked_branch = Some("factory/worker-a".into());
         tasks.update(&task_b).expect("park B with metadata");
@@ -5803,10 +5803,25 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(row.prompt.contains("**Risk:** concurrency"));
         // pin: merge requests preserve the task lifecycle gate in their context.
         assert!(row.prompt.contains("**Door:** two-way"));
-        // pin: exact QA bundle paths remain attached to the merge request.
-        assert!(row.prompt.contains("/proof/task-b/qa/bundle.json"));
-        // pin: file names from the task diff remain byte-preserved in the request.
-        assert!(row.prompt.contains("A\ttask-b.txt"));
+        let review = crate::review_body::merge_request_review(repo, &task_b,
+            &envelope.target_branch_tip, &envelope.branch_tip,
+            "Fresh worker delivery; please merge the branch.");
+        eprintln!("MANIFEST_REPLAY review_bytes={} queued_bytes={}", review.len(), row.prompt.len());
+        assert!(!row.prompt.contains("/proof/task-b/qa/bundle.json"), "relay must use one manifest reference");
+        let artifacts = cas_store::SqliteArtifactStore::open(&cas_root).unwrap()
+            .list_for_task(&task_b.id).unwrap();
+        let manifest = artifacts.iter().find(|artifact| artifact.name.starts_with("relay-evidence-"))
+            .expect("full evidence must be published before reducing the relay");
+        assert!(row.prompt.contains(&manifest.id));
+        let config = crate::config::Config::load(&cas_root).unwrap_or_default();
+        let root = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let roots = crate::artifacts::PublishRoots::new(&cas_root, &root, &task_b.id);
+        let full = std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap();
+        assert!(full.contains(&review), "manifest must preserve the complete review");
+        assert!(full.contains("/proof/task-b/qa/bundle.json"));
+        assert!(full.contains("A\ttask-b.txt"));
+        assert!(row.prompt.len() < review.len() / 2, "queued evidence should be bounded by a pointer");
+
     }
 
     #[tokio::test(flavor = "current_thread")]

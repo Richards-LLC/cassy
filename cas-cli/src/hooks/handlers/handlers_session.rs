@@ -1208,7 +1208,7 @@ mod large_artifact_staging_tests {
         );
         let warning = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
         assert!(
-            warning.contains("WORKTREE"),
+            warning.contains(tmp.path().join("other-worktree").to_str().unwrap()),
             "resume lost current safety warning: {warning}"
         );
         env.remove("CAS_CLONE_PATH");

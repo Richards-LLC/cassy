@@ -617,6 +617,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Edge paths
 
+- The project catalog includes foreign and terminal epics: default groups and the header use only this supervisor's open pinned epic, otherwise its assigned or verification-owned epics (matching name or registration ID). Foreign and closed-epic tasks appear only after All tasks. HUB-J7 and the server-shaped progress-model regression cover this boundary (cas-5a42).
 - A stale precondition (the worker restarted, the task was assigned elsewhere) changes nothing and says what changed.
 - A refused operation shows the hub's detail on the row.
 - A fleet change that overlaps an older catalog heartbeat still refreshes the roster: a stopped worker disappears without waiting for the next heartbeat (cas-66ea).

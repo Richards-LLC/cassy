@@ -9,7 +9,7 @@ async function openQuestionless(page: Page, journey: Journey) {
   const workers = ["young-otter-14", "rapid-kestrel-30", "steady-stork-35", "ready-owl-88", "warm-phoenix-6", "keen-otter-80"];
   const hub = await journey.hub({ machines: [{ ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, workers }] }], paired: ["atlas"], fleet: { [PELICAN]: {
     agents: [
-      { name: PELICAN, role: "supervisor", status: "active", generation: 1, latest_activity: { summary: "RAW INTERNAL NOTE" } },
+      { id: "supervisor-id", name: PELICAN, role: "supervisor", status: "active", generation: 1, latest_activity: { summary: "RAW INTERNAL NOTE" } },
       { name: workers[0]!, status: "active", generation: 1, current_task: "cas-1234", liveness: "working", latest_activity: { summary: "raw worker activity", created_at_rfc3339: "2026-09-30T12:00:00Z" } },
       { name: workers[1]!, status: "idle", generation: 1, current_task: null },
     ],
@@ -17,9 +17,13 @@ async function openQuestionless(page: Page, journey: Journey) {
       { id: "cas-1234", title: "Polish the conversation and keep questions readable", epic_id: "cas-release", status: "InProgress", assignee: workers[0], updated_at: "2026-09-30T12:00:00Z" },
       { id: "cas-5678", title: "Review before merge", epic_id: "cas-release", status: "AWAITINGMERGE", updated_at: "2026-09-30T12:00:00Z" },
       { id: "cas-ready", title: "Ready for the next worker", epic_id: "cas-release", status: "open", updated_at: "2026-09-30T12:00:00Z" },
+      { id: "cas-closed-child", title: "Closed release task", epic_id: "cas-closed-epic", status: "open", updated_at: "2026-09-30T12:00:00Z" },
       { id: "cas-other", title: "Another supervisor's task", epic_id: "cas-other-epic", status: "open", updated_at: "2026-09-30T12:00:00Z" },
       { id: "cas-closing", title: "Already delivered", epic_id: "cas-release", status: "AwaitingMerge", delivery_state: "merged", updated_at: "2026-09-30T12:00:00Z" },
-    ], epics: [{ id: "cas-release", title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5, last_merged_at: "2026-09-30T12:00:00Z" } }], focused_epic: "cas-release", spawnNames: [],
+    ], epics: [{ id: "cas-release", status: "inprogress", assignee: "supervisor-id", title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5, last_merged_at: "2026-09-30T12:00:00Z" } },
+      { id: "cas-other-epic", title: "Another supervisor's release", status: "open", assignee: "another-supervisor" },
+      { id: "cas-closed-epic", title: "Closed release", status: "closed", epic_verification_owner: PELICAN },
+    ], focused_epic: null, spawnNames: [],
   } } });
   await journey.open();
   await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
@@ -80,10 +84,13 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     await expect(page.locator(".release-progress progress")).toHaveAttribute("value", "3");
     await expect(page.locator(".status-task").filter({ hasText: "Already delivered" })).toContainText("Merged, closing");
     await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toHaveCount(0);
+    await expect(page.locator(".status-task").filter({ hasText: "Closed release task" })).toHaveCount(0);
     await page.getByRole("button", { name: "All tasks", exact: true }).click();
     await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toBeVisible();
+    await expect(page.locator(".status-task").filter({ hasText: "Closed release task" })).toBeVisible();
     await page.getByRole("button", { name: "Supervisor tasks", exact: true }).click();
     await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toHaveCount(0);
+    await expect(page.locator(".status-task").filter({ hasText: "Closed release task" })).toHaveCount(0);
     const grip = page.getByRole("separator", { name: "Resize tasks and progress" });
     const panel = page.locator(".conversation-context");
     const initialPanelWidth = (await panel.boundingBox())!.width;

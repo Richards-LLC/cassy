@@ -18918,7 +18918,9 @@ effort = "high"
         let output = response_text(service.factory_worker_status(request).await.unwrap());
         let elapsed = start.elapsed();
         let lines: Vec<_> = output.lines().collect();
-        assert_eq!(lines.len(), 8, "{output}");
+        let liveness_lines: Vec<_> = lines.iter().filter(|line| line.starts_with("liveness:")).collect();
+        assert_eq!(liveness_lines.len(), 5, "{output}");
+        assert!(lines.iter().any(|line| line.starts_with("Factory MCP versions")), "{output}");
         assert!(
             lines.iter().any(|line| line.starts_with("Peer mailbox: not receiving:")
                 && line.contains("has not reported a mailbox poll")),
@@ -18940,8 +18942,8 @@ effort = "high"
         .enumerate()
         {
             assert!(
-                lines
-                    .get(index + 1)
+                liveness_lines
+                    .get(index)
                     .unwrap()
                     .starts_with(&format!("liveness: {expected} |")),
                 "{output}"

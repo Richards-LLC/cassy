@@ -16,6 +16,7 @@ pub(crate) use rebased_delivery::same_patch_set as rebased_delivery_has_same_pat
 pub(crate) use super::qa_dispatch::freshest_target_ref;
 mod epic_verdict_cache;
 mod receipt_scope;
+mod merge_queue_proof;
 mod merged_verification;
 mod epic_autoclose;
 // cas-269ab: the Git evidence probes and the epic-measurement deadline live
@@ -10485,6 +10486,7 @@ impl CasCore {
 
         let mut waived_risk_gate = None;
         let mut accepted_inherited_scoped_failures = None;
+        let mut accepted_merge_queue_proof = None;
         if close_disposition.requires_delivery_gates() {
             let proof_repo = worker_worktree_path
                 .as_deref()
@@ -10795,31 +10797,46 @@ impl CasCore {
                     build_proofs,
                     &mut scoped_proof_cache,
                 ) {
-                    // The cache already holds this result; an unresolved
-                    // surface is the refusal the gate just returned.
-                    let Ok(required_targets) = required_scoped_proof_targets(
+                    // A registered supervisor may cite an already successful
+                    // queue run. Substitute only the scoped test obligation;
+                    // the ordinary content, CI and QA gates still run.
+                    match merge_queue_proof::verify(
+                        req.reason.as_deref().unwrap_or_default(),
                         proof_repo,
-                        target_repo,
-                        &changed_paths,
-                        &mut scoped_proof_cache,
-                    ) else {
-                        return Ok(Self::tool_error(epic_refusal(scoped_error)));
-                    };
-                    if required_targets.is_empty() {
-                        return Ok(Self::tool_error(epic_refusal(scoped_error)));
-                    }
-                    match validate_inherited_scoped_failures(
-                        &task,
-                        &self.cas_root,
-                        proof_repo,
-                        scoped_proof_base.as_deref(),
-                        &required_targets,
+                        delivered_tip.as_deref(),
                     ) {
-                        Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
-                        Err(audit_error) => {
-                            return Ok(Self::tool_error(epic_refusal(format!(
-                                "{scoped_error} Inherited base-red audit rejected: {audit_error}"
-                            ))));
+                        Ok(Some(proof)) => accepted_merge_queue_proof = Some(proof),
+                        Err(error) => return Ok(Self::tool_error(epic_refusal(format!(
+                            "{scoped_error} Merge-queue proof rejected: {error}"
+                        )))),
+                        Ok(None) => {
+                            // The cache already holds this result; an unresolved
+                            // surface is the refusal the gate just returned.
+                            let Ok(required_targets) = required_scoped_proof_targets(
+                                proof_repo,
+                                target_repo,
+                                &changed_paths,
+                                &mut scoped_proof_cache,
+                            ) else {
+                                return Ok(Self::tool_error(epic_refusal(scoped_error)));
+                            };
+                            if required_targets.is_empty() {
+                                return Ok(Self::tool_error(epic_refusal(scoped_error)));
+                            }
+                            match validate_inherited_scoped_failures(
+                                &task,
+                                &self.cas_root,
+                                proof_repo,
+                                scoped_proof_base.as_deref(),
+                                &required_targets,
+                            ) {
+                                Ok(measurement) => accepted_inherited_scoped_failures = Some(measurement),
+                                Err(audit_error) => {
+                                    return Ok(Self::tool_error(epic_refusal(format!(
+                                        "{scoped_error} Inherited base-red audit rejected: {audit_error}. Alternatively, cite merge_group_run=<run id> in the supervisor override reason to reuse successful CI for a landed tree containing this delivery."
+                                    ))));
+                                }
+                            }
                         }
                     }
                 }
@@ -11155,6 +11172,11 @@ impl CasCore {
             if let Some(measurement) = accepted_inherited_scoped_failures.as_deref() {
                 task.notes.push_str(&format!(
                     "\n\n[{timestamp}] DECISION: supervisor accepted inherited scoped failures after comparing durable base and delivery logs: {measurement}"
+                ));
+            }
+            if let Some(proof) = accepted_merge_queue_proof.as_deref() {
+                task.notes.push_str(&format!(
+                    "\n\n[{timestamp}] DECISION: supervisor reused verified merge-queue scoped proof: {proof}"
                 ));
             }
         }
@@ -27761,6 +27783,148 @@ mod merge_state_gate_tests {
             cas_store::TaskStore::get(&store, &task.id).unwrap().status,
             TaskStatus::Open
         );
+    }
+
+    #[cfg(unix)]
+    async fn queue_proof_close_cas_4386(case: &str) -> (Task, String) {
+        use crate::mcp::CasService;
+        use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store};
+        use cas_types::{Agent, AgentRole, WorkTarget};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, bare) = handoff_repo();
+        let p = dir.path();
+        std::fs::create_dir_all(p.join("cas-cli/tests")).unwrap();
+        std::fs::write(p.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
+        std::fs::write(p.join("cas-cli/tests/queue_proof_test.rs"), "// integration target\n").unwrap();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore", "cas-cli", "delivery.rs"]);
+        git(p, &["commit", "-q", "-m", "test(cas-4386): delivery with scoped proof obligation"]);
+        let delivery = head_sha(p);
+        git(p, &["push", "-q", "origin", "factory/worker"]);
+        let mut tree = rev_parse_local(p, "HEAD^{tree}");
+        // A queue's synthetic commit and the landed commit may differ while
+        // carrying the same tree. Keep that real Git boundary in the fixture.
+        git(p, &["checkout", "-q", "-b", "queue"]);
+        git(p, &["commit", "-q", "--allow-empty", "-m", "synthetic queue head"]);
+        let mut queue = head_sha(p);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/worker"]);
+        if case == "dropped" {
+            // A merge resolution discards the delivery. A deliberate later
+            // edit would instead be legitimate supersession under the
+            // existing content policy, and must remain accepted.
+            git(p, &["rm", "-f", "delivery.rs"]);
+        }
+        git(p, &["commit", "-q", "-m", "land delivery"]);
+        if case == "dropped" {
+            tree = rev_parse_local(p, "HEAD^{tree}");
+            git(p, &["checkout", "-q", "-b", "queue-dropped"]);
+            git(p, &["commit", "-q", "--allow-empty", "-m", "queue proof of dropping merge"]);
+            queue = head_sha(p);
+            git(p, &["checkout", "-q", "main"]);
+        }
+        assert_ne!(head_sha(p), queue);
+        let before_delivery = rev_parse_local(p, "main~1");
+        let before_tree = rev_parse_local(p, "main~1^{tree}");
+        std::fs::write(p.join("later.txt"), "unrelated later main change\n").unwrap();
+        git(p, &["add", "later.txt"]);
+        git(p, &["commit", "-q", "-m", "advance main after the queue landing"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let tree = if case == "wrong-tree" { "a".repeat(40) } else { tree };
+        let proof_head = if case == "before-delivery" { before_delivery } else { queue };
+        let tree = if case == "before-delivery" { before_tree } else { tree };
+        let mut run = serde_json::json!({
+            "id": 4386, "event": "merge_group", "status": "completed", "conclusion": "success",
+            "path": ".github/workflows/ci.yml", "head_sha": proof_head,
+            "head_branch": "gh-readonly-queue/main/pr-1415-seed",
+            "repository": {"full_name": "acme/epic"},
+            "head_repository": {"full_name": "acme/epic"},
+        });
+        match case {
+            "failed" => run["conclusion"] = serde_json::json!("failure"),
+            "pending" => run["status"] = serde_json::json!("in_progress"),
+            "wrong-event" => run["event"] = serde_json::json!("pull_request"),
+            "wrong-repo" => run["repository"]["full_name"] = serde_json::json!("other/repo"),
+            _ => {}
+        }
+        let artifacts = if case == "no-gate-receipt" { serde_json::json!([]) } else {
+            serde_json::json!([{"name": format!("merge-queue-validated-tree-{tree}"), "expired": false}])
+        };
+        let gh = env.home().join("gh");
+        crate::test_paths::warm_stub(&gh, &format!(r#"#!/bin/sh
+case "$1 $2" in
+'repo view') printf '%s\n' '{{"nameWithOwner":"acme/epic"}}' ;;
+'api repos/acme/epic/actions/runs/4386') printf '%s\n' '{run}' ;;
+'api repos/acme/epic/actions/runs/4386/artifacts?per_page=100') printf '%s\n' '{{"total_count":{},"artifacts":{artifacts}}}' ;;
+'api repos/acme/epic/git/commits/'*) printf '%s\n' '{{"sha":"{proof_head}","tree":{{"sha":"{tree}"}}}}' ;;
+*) exit 97 ;;
+esac
+"#, artifacts.as_array().unwrap().len()));
+        env.set(crate::github_issue_attach::GH_BIN_ENV, &gh);
+        git(p, &["config", &format!("url.{}.insteadOf", bare.path().display()), "https://github.com/acme/epic"]);
+        git(p, &["config", "remote.origin.url", "https://github.com/acme/epic"]);
+
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = \"cas-4386-fixture\"\n[verification]\nenabled = false\n").unwrap();
+        open_store(&root).unwrap().init().unwrap();
+        open_rule_store(&root).unwrap().init().unwrap();
+        open_skill_store(&root).unwrap().init().unwrap();
+        let store = open_task_store(&root).unwrap();
+        store.init().unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        agents.register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let core = CasCore::with_daemon(root.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor-id".into());
+        let service = CasService::new(core, None);
+        let mut task = worker_task("worker");
+        task.id = "cas-4386".into();
+        task.status = TaskStatus::AwaitingMerge;
+        task.risk = vec![TaskRisk::None];
+        task.deliverables.factory_branch_anchor = Some(delivery.clone());
+        task.deliverables.parked_branch = Some("factory/worker".into());
+        task.deliverables.work_target = Some(WorkTarget {
+            repo_selector: "project:cas-4386-fixture".into(), target_branch: "main".into(),
+        });
+        store.add(&task).unwrap();
+        let reason = if case == "no-citation" { "Reviewed delivery" } else { "Reviewed delivery; merge_group_run=4386" };
+        let response = service.task(Parameters(serde_json::from_value(serde_json::json!({
+            "action": "close", "id": task.id, "commit_receipt": delivery,
+            "supervisor_override": true, "reason": reason,
+        })).unwrap())).await.unwrap();
+        (store.get(&task.id).unwrap(), format!("{response:?}"))
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_close_reuses_landed_queue_proof_cas_4386() {
+        let (task, text) = queue_proof_close_cas_4386("green").await;
+        assert_eq!(task.status, TaskStatus::Closed, "{text}");
+        assert!(task.notes.contains("MERGE_QUEUE_PROOF:"), "{}", task.notes);
+        assert!(task.notes.contains("run=4386"), "{}", task.notes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_close_keeps_scoped_obligation_without_queue_proof_cas_4386() {
+        for case in ["no-citation", "failed", "pending", "wrong-event", "wrong-repo", "wrong-tree", "before-delivery", "no-gate-receipt"] {
+            let (task, text) = queue_proof_close_cas_4386(case).await;
+            assert_ne!(task.status, TaskStatus::Closed, "{case}: {text}");
+            assert!(text.contains("scoped proof receipt has base"), "{case}: {text}");
+            assert!(!task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_queue_proof_keeps_delivery_content_gate_cas_4386() {
+        let (task, text) = queue_proof_close_cas_4386("dropped").await;
+        assert_ne!(task.status, TaskStatus::Closed, "{text}");
+        assert!(text.contains("DELIVERY CONTENT DROPPED"), "{text}");
     }
 
     #[test]

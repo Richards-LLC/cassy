@@ -63,8 +63,13 @@ impl ReviewedDelivery {
         task: &Task,
         target: &str,
     ) -> Option<String> {
-        let (reference, _) =
-            preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode);
+        // Synthetic origin refs do not displace a local-only project's
+        // integration authority. Published projects answer for live origin.
+        let reference = if !origin_remote_configured(repo) {
+            target.to_string()
+        } else {
+            preferred_live_target_ref_for_delivery(repo, target, task.delivery_mode).0
+        };
         (!git_commit_is_ancestor(repo, &self.repository.head_commit, &reference)).then(|| format!(
             "MERGE REQUIRED: task {} was verified at exact head {} (dispatch {}), which is not contained in {reference}. An earlier merged anchor cannot authorize this correction. Merge this exact verified delivery into {target}, then retry close.",
             task.id, self.repository.head_commit, self.dispatch,

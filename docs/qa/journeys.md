@@ -756,7 +756,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
 - Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.
 - Media reserve their viewport before tickets or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes. An expired video ticket is renewed once, preserving the requested playback and native Range seeking.
-- PDF previews render only the first page as pixels. The original file link remains beneath every preview, including unavailable ones.
+- PDF previews render only the first page as pixels. Each file's chip and supported preview share one card; image thumbnails replace their type plate and open the original preview. A failed preview leaves a compact chip with an inline note.
 
 #### Edge paths
 
@@ -769,7 +769,7 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 
 - **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
 - **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with resolvable local paths; sent bubbles show image previews or named file sheets, including after reload and on another paired phone.
-- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`
+- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/sent-attachments.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-content.css`
 - **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
 - **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.
 
@@ -779,10 +779,12 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 2. Preview a long paste, screenshot and picked file together
 3. A connection loss keeps the files visibly, then reuses the upload identity
 4. Sent files show their names and an image preview after reload and on another phone
+5. A missing preview stays on its own file card
 
 #### Expected experience
 
 - Every attachment is named and removable before sending; long text has a bounded preview and screenshots have thumbnails.
+- Sent and received images use a reserved thumbnail inside their own named file card; the card opens the existing full preview. A real failing content fetch collapses the preview to an inline note without an empty panel.
 - Files remain through reconnect and shell replacement, with a visible reminder to send before closing the page.
 
 #### Edge paths

@@ -97,12 +97,14 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
           await image.scrollIntoViewIfNeeded();
           await expect(image).toBeVisible();
           await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
+          await expect(log.locator('a.sheet').filter({ hasText: "screenshot.png" }).locator('.plate img')).toBeVisible();
+          expect(await image.evaluate((node) => node.getBoundingClientRect().width)).toBe(48);
           expect(await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         };
         await assertFiles(page);
-        if (colorScheme === "light") await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-${width}.png` });
+        await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-${width}-${colorScheme}.png` });
         const popup = page.waitForEvent("popup");
-        await page.getByRole("link", { name: "Open screenshot.png preview", exact: true }).click();
+        await page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" }).click();
         const preview = await popup;
         await preview.waitForURL(/\/artifacts\/art-.*\/content\?t=/);
         await preview.close();
@@ -126,6 +128,26 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
             await peer.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-second-phone.png` });
           } finally { await phone.close(); }
         }
+      });
+      await journey.stage("A missing preview stays on its own file card", async () => {
+        // Forward a real HTTP 404 from this run's static server. The ticket and
+        // artifact request still take the normal application path.
+        const missing = await page.request.get(`${new URL(baseURL!).origin}/commander/attachment-preview-missing.png`);
+        expect(missing.status()).toBe(404);
+        await page.route(contentRoute, route => route.fulfill({ response: missing }));
+        await page.reload();
+        const sent = page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" });
+        await expect(sent.locator('.preview-note')).toHaveText("Preview unavailable");
+        await expect(sent.locator('.rich-media')).toBeHidden();
+        hub.supervisorSays(PELICAN, "This screenshot is unavailable too.", { attachments: [{ artifact_id: "art-failed-preview", name: "Unavailable.png", mime: "image/png", size_bytes: 2048, sha256: "9f".repeat(32) }] });
+        const received = page.getByRole("log").locator('a.sheet').filter({ hasText: "Unavailable.png" });
+        await expect(received.locator('.preview-note')).toHaveText("Preview unavailable");
+        await expect(received.locator('.rich-media')).toBeHidden();
+        for (const card of [sent, received]) {
+          await card.scrollIntoViewIfNeeded();
+          expect((await card.boundingBox())!.height).toBeLessThan(104);
+        }
+        await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/unavailable-${width}-${colorScheme}.png` });
       });
       await journey.stage("A refusal names its file and keeps the hub's reason", async () => {
         const pick = async (files: { name: string; mimeType: string; buffer: Buffer }[]) => {

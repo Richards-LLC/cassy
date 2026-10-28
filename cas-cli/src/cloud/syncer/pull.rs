@@ -4448,6 +4448,11 @@ mod web_close_tests {
             merge_task_notes(local, remote),
             "[2026-08-09 09:30] 📝 PROGRESS remote first\n\n[2026-08-09 10:30] 📝 PROGRESS local follow-up\n\n[2026-08-09 11:30] 📝 PROGRESS shared"
         );
+        // A separately published metadata pointer is its own block, rather
+        // than an enrichment of the preceding receipt.
+        let receipt = "[2026-08-09 11:30] 📝 PROGRESS shared";
+        let pointer = format!("{receipt}\n\nARTIFACT_PROOF: standalone metadata");
+        assert_eq!(merge_task_notes(&pointer, receipt), pointer);
     }
 
     #[test]

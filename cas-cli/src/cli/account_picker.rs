@@ -576,7 +576,7 @@ pub(crate) fn prompt_for_selection(
                     })
                     .prompt()
                     .with_context(|| format!("new {provider_label} login cancelled"))?;
-            stash_typeahead();
+            stash_typeahead(provider_label)?;
             Ok(Selection::NewLogin(entered.trim().to_string()))
         }
     }
@@ -585,43 +585,114 @@ pub(crate) fn prompt_for_selection(
 /// Keystrokes typed after the email prompt's Enter, for the login flow's
 /// later question (the duplicate-account confirmation).
 static TYPEAHEAD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+/// A typed-ahead Ctrl-D: ends the line it follows, as the terminal would.
+const TYPED_EOF: char = '\u{4}';
 
-/// inquire reads through crossterm 0.25, which takes every byte available on
-/// the terminal at once and queues the events after Enter privately. A later
-/// `std::io::stdin()` read can never see them, so move them out here.
-fn stash_typeahead() {
-    use crossterm_inquire::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-        let Ok(event) = event::read() else { break };
+/// Hand the email prompt's type-ahead over to the terminal's own line
+/// discipline.
+///
+/// inquire reads through crossterm 0.25, which reads up to 1 KiB at once and
+/// keeps every key parsed after Enter in a private queue that a later
+/// `std::io::stdin()` read never sees. The vendored
+/// `take_buffered_events` returns exactly those already-read keys, oldest
+/// first, without reading the terminal, so newer input stays queued in the
+/// kernel behind them. Only finished records carry over: a line ended by
+/// Enter or Ctrl-J, Ctrl-D (EOF) and Ctrl-C, which cancels now as it would
+/// have when typed. Ctrl-U and Backspace edit the queued line; its unfinished,
+/// never-displayed tail is dropped.
+fn stash_typeahead(provider_label: &str) -> Result<()> {
+    use crossterm_inquire::event::Event;
+    let mut queued = String::new();
+    for event in crossterm_inquire::event::take_buffered_events() {
         let Event::Key(key) = event else { continue };
-        if key.kind == KeyEventKind::Release {
-            continue;
-        }
-        match key.code {
-            KeyCode::Enter => typed.push('\n'),
-            KeyCode::Backspace if !typed.is_empty() && !typed.ends_with('\n') => {
-                typed.pop();
+        if queue_key(&mut queued, key).is_break() {
+            // Nothing is staged yet; die by SIGINT like an ordinary Ctrl-C.
+            #[cfg(unix)]
+            unsafe {
+                libc::raise(libc::SIGINT);
             }
-            KeyCode::Char(c)
-                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                typed.push(c)
-            }
-            _ => {}
+            anyhow::bail!("new {provider_label} login cancelled");
         }
     }
+    queued.truncate(queued.rfind(['\n', TYPED_EOF]).map_or(0, |end| end + 1));
+    TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_str(&queued);
+    Ok(())
 }
 
-/// The next line typed ahead of the question that asks for it. A line without
-/// a trailing newline is partial: the caller reads the rest from stdin.
-pub(crate) fn take_typeahead_line() -> Option<String> {
-    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if typed.is_empty() {
-        return None;
+/// Read the duplicate-account answer from input the picker did not buffer.
+///
+/// A terminal in canonical mode returns one record per read: a line ending in
+/// a newline, or the text before a Ctrl-D, or nothing for Ctrl-D on an empty
+/// line. Ctrl-D ends the answer unsent, so a record without a newline is EOF
+/// (`None`); waiting for more would make the reader press Ctrl-D twice. A
+/// canonical line never exceeds the kernel's line limit, far below the
+/// buffer. Pipes and files are streams, not records: a short chunk is not EOF,
+/// so they keep `read_line` semantics and only an empty read is EOF.
+pub(crate) fn read_answer(input: &mut impl std::io::BufRead, terminal: bool) -> std::io::Result<Option<String>> {
+    if !terminal {
+        let mut line = String::new();
+        return Ok((input.read_line(&mut line)? > 0).then_some(line));
     }
-    let end = typed.find('\n').map_or(typed.len(), |newline| newline + 1);
-    Some(typed.drain(..end).collect())
+    let record = loop {
+        match input.fill_buf() {
+            Ok(record) => break record,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    };
+    let (line, used) = match record.iter().position(|&byte| byte == b'\n') {
+        Some(end) => (Some(String::from_utf8_lossy(&record[..=end]).into_owned()), end + 1),
+        None => (None, record.len()),
+    };
+    input.consume(used);
+    Ok(line)
+}
+
+/// Apply one queued key with the terminal line discipline's meaning.
+fn queue_key(
+    typed: &mut String,
+    key: crossterm_inquire::event::KeyEvent,
+) -> std::ops::ControlFlow<()> {
+    use crossterm_inquire::event::{KeyCode, KeyEventKind, KeyModifiers};
+    if key.kind == KeyEventKind::Release {
+        return std::ops::ControlFlow::Continue(());
+    }
+    let control = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') if control => return std::ops::ControlFlow::Break(()),
+        KeyCode::Char('d') if control => typed.push(TYPED_EOF),
+        KeyCode::Enter => typed.push('\n'),
+        KeyCode::Char('j') if control => typed.push('\n'),
+        // Ctrl-U erases the unfinished line, never a finished record.
+        KeyCode::Char('u') if control => {
+            typed.truncate(typed.rfind(['\n', TYPED_EOF]).map_or(0, |end| end + 1))
+        }
+        KeyCode::Backspace if !typed.is_empty() && !typed.ends_with(['\n', TYPED_EOF]) => {
+            typed.pop();
+        }
+        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+            typed.push(c)
+        }
+        _ => {}
+    }
+    std::ops::ControlFlow::Continue(())
+}
+
+/// The next finished line typed ahead of the question that asks for it, as
+/// `read_line` returns it: `y\n`, or `""` for Ctrl-D (EOF). An unfinished
+/// fragment is discarded: it was read after the email's Enter and never shown,
+/// and from here the terminal's own line discipline owns all input.
+pub(crate) fn take_typeahead_line() -> Option<String> {
+    next_typed_line(&mut TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+}
+
+fn next_typed_line(typed: &mut String) -> Option<String> {
+    let Some(end) = typed.find(['\n', TYPED_EOF]) else {
+        typed.clear();
+        return None;
+    };
+    let line: String = typed.drain(..=end).collect();
+    Some(if line.ends_with(TYPED_EOF) { String::new() } else { line })
 }
 
 /// What one seeding pass did, so the caller can report it honestly.
@@ -971,6 +1042,70 @@ mod tests {
                 ]
             );
         }
+    }
+
+    #[test]
+    fn queued_keys_follow_the_terminal_line_discipline() {
+        use crossterm_inquire::event::{KeyCode, KeyEvent, KeyModifiers};
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut typed = String::new();
+        for queued in [
+            key(KeyCode::Char('n')),
+            key(KeyCode::Backspace),
+            key(KeyCode::Char('y')),
+            key(KeyCode::Enter),
+            ctrl('d'),
+            key(KeyCode::Char('n')),
+        ] {
+            assert!(queue_key(&mut typed, queued).is_continue());
+        }
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("y\n"));
+        // Ctrl-D is EOF, which cancels like stdin EOF.
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some(""));
+        // An unfinished, undisplayed fragment does not carry over.
+        assert_eq!(next_typed_line(&mut typed), None);
+        assert!(typed.is_empty());
+        for queued in [key(KeyCode::Char('y')), ctrl('j'), key(KeyCode::Char('y')), ctrl('u'), key(KeyCode::Enter)] {
+            assert!(queue_key(&mut typed, queued).is_continue());
+        }
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("y\n"));
+        // Ctrl-U erased the second `y` before its Enter: an empty answer.
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("\n"));
+        assert!(queue_key(&mut typed, ctrl('c')).is_break());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn answers_are_terminal_records_but_pipe_streams() {
+        use std::io::{BufReader, Read, Write};
+        use std::os::fd::FromRawFd;
+        // A real terminal pair in its default canonical mode.
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(
+            unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) },
+            0
+        );
+        let mut keyboard = unsafe { std::fs::File::from_raw_fd(master) };
+        let mut terminal = BufReader::new(unsafe { std::fs::File::from_raw_fd(slave) });
+        let mut type_keys = |keys: &[u8]| {
+            keyboard.write_all(keys).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        // Erase is the terminal's; each record is read once, in order.
+        type_keys(b"nx\x7f\x7fy\rn\r");
+        assert_eq!(read_answer(&mut terminal, true).unwrap().as_deref(), Some("y\n"));
+        assert_eq!(read_answer(&mut terminal, true).unwrap().as_deref(), Some("n\n"));
+        // Ctrl-D after an unfinished answer, and on an empty line, is EOF.
+        type_keys(b"y\x04");
+        assert_eq!(read_answer(&mut terminal, true).unwrap(), None);
+        type_keys(b"\x04");
+        assert_eq!(read_answer(&mut terminal, true).unwrap(), None);
+        // A pipe chunk without a newline is not EOF: the stream continues.
+        let stream = std::io::Cursor::new(b"y".to_vec()).chain(std::io::Cursor::new(b"es\n".to_vec()));
+        let mut pipe = BufReader::with_capacity(1, stream);
+        assert_eq!(read_answer(&mut pipe, false).unwrap().as_deref(), Some("yes\n"));
+        assert_eq!(read_answer(&mut pipe, false).unwrap(), None);
     }
 
     #[test]

@@ -12290,13 +12290,15 @@ pub(super) fn commander_history_send(
         return None;
     }
     let (reply_to, text) = commander_history_message_text(&row.prompt);
+    let delivery = if terminal { None } else { queue.message_delivery_report(row.id).ok().flatten() };
     Some(crate::ui::factory::ConversationHistoryMessage {
         notification_id: row.id,
+        client_ref: delivery.as_ref().and_then(|report| report.client_ref.clone()),
         target: row.target,
         text,
         // A durable row proves queue acceptance. Cleanup's processed_at is
         // not transport proof, and a gated row has never reached the supervisor.
-        state: if terminal || queue.message_delivery_report(row.id).ok().flatten()
+        state: if terminal || delivery
             .is_some_and(|report| report.delivered_at.is_some()) {
             "delivered".to_string()
         } else {

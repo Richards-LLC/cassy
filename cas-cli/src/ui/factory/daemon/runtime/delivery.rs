@@ -985,6 +985,7 @@ impl FactoryDaemon {
                             summary.as_deref(),
                             urgent,
                             in_reply_to,
+                            client_ref.as_deref(),
                             &attribution,
                         )?;
                         live_view = Some(self.live_operator_message(outcome.id()));
@@ -1043,6 +1044,7 @@ impl FactoryDaemon {
     /// Enqueue a Commander semantic message through the same durable prompt
     /// queue drained by MCP coordination messages. Delivery therefore reuses
     /// the existing inbox+wake and urgent interrupt-and-redirect machinery.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn enqueue_attributed_message(
         &self,
         target: &str,
@@ -1050,9 +1052,10 @@ impl FactoryDaemon {
         summary: Option<&str>,
         urgent: bool,
         in_reply_to: Option<i64>,
+        client_ref: Option<&str>,
         attribution: &crate::ui::factory::protocol::MessageAttribution,
     ) -> anyhow::Result<cas_store::EnqueueOutcome> {
-        let outcome = enqueue_commander_message(
+        let outcome = crate::ops::fleet::enqueue_commander_message_with_client_ref(
             self.app.cas_dir(),
             &self.session_name,
             target,
@@ -1060,6 +1063,7 @@ impl FactoryDaemon {
             summary,
             urgent,
             in_reply_to,
+            client_ref,
             attribution,
         )?;
 

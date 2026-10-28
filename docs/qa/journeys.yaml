@@ -161,6 +161,10 @@ invariants:
       reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real
       phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by
       its visibility events'
+  HUB-J12-DURABLE-SEND-REF:
+    statement: A send whose live ACK is lost across reconnect is matched to its durable history by client_ref and reaches its confirmed state once, without another Retry or merging a different send with identical text.
+    check: Run the cas-d17f pending-sends client regression and cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history Rust regression; batch real-hub proof drops the live ACK, reconnects, and reads back one queue row and one supervisor inbox delivery for that client_ref.
+    bug: {task: cas-d17f}
   HUB-J13-GOAL:
     statement: I start a supervisor on a project from my phone, without SSH, and land in its conversation
     check: 'Walk HUB-J13 in hub-web/e2e/journeys/launch-session.journey.ts; verify the expected experience and edge
@@ -292,6 +296,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  lost-ack-history-correlation:
+    title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
+    tasks: [cas-d17f]
+    invariants: [HUB-J12-DURABLE-SEND-REF, HUB-J5-RECEIPT-STAGES]
+    journeys: [HUB-J5, HUB-J12]
   hidden-cached-preview-retry:
     title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
     tasks: [cas-abb7]
@@ -812,6 +821,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J12-DURABLE-SEND-REF
   - HUB-J5-SEND-WITHOUT-PANE-LEASE
   - HUB-J5-RECEIPT-STAGES
   - HUB-J5-ANSWER-MONOTONIC
@@ -1306,6 +1316,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J12-GOAL
+  - HUB-J12-DURABLE-SEND-REF
   - HUB-J12-TRUTHFUL-WORKING
   - HUB-J5-RECEIPT-STAGES
   traffic:

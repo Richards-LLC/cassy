@@ -188,10 +188,13 @@ pub struct OperatorReplyPayload {
 ///
 /// This is intentionally a send-shaped projection rather than a `QueuedPrompt`:
 /// the browser must never receive pane/transcript fields, and the durable
-/// notification id is the only stable identity available after a reconnect.
+/// notification id and original client_ref correlate accepted sends after a reconnect.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationHistoryMessage {
     pub notification_id: i64,
+    /// Original send identity, including when the live MessageQueued ACK was lost.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_ref: Option<String>,
     pub target: String,
     pub text: String,
     /// acknowledged: durably queued; delivered: actual recipient transport proof.
@@ -1556,6 +1559,7 @@ mod tests {
             request_id: "history-1".into(),
             messages: vec![ConversationHistoryMessage {
                 notification_id: 3139,
+                client_ref: None,
                 target: "supervisor".into(),
                 text: "status?".into(),
                 state: "acknowledged".into(),

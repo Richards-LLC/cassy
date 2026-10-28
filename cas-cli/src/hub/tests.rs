@@ -2969,6 +2969,7 @@ fn hub_history_response_summary_exposes_shape_without_turn_content() {
     let frame = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-2".into(),
         messages: vec![crate::ui::factory::ConversationHistoryMessage {
+            client_ref: None,
             notification_id: 41,
             target: "supervisor".into(),
             text: "private prompt".into(),

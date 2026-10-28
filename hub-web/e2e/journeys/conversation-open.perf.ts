@@ -40,7 +40,7 @@ function installProbe() {
   const w = window as typeof window & { perfProbe: any };
   const resuming = sessionStorage.getItem("perf:reload") === "1";
   sessionStorage.removeItem("perf:reload");
-  const probe = w.perfProbe = { t0: 0, active: resuming, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], acks: [] as any[], longTasks: [] as any[], tailSamples: [] as any[] };
+  const probe = w.perfProbe = { t0: 0, active: resuming, paintEnabled: true, firstPaint: 0, latestPaint: 0, lastMutation: 0, parse: [] as any[], requests: [] as any[], frames: [] as any[], acks: [] as any[], longTasks: [] as any[], historyPaints: [] as any[], tailSamples: [] as any[] };
   const parse = JSON.parse;
   JSON.parse = function (text, reviver) {
     const start = performance.now();
@@ -58,12 +58,29 @@ function installProbe() {
         if (typeof event.data === "string") {
           const live = event.data.includes('"OperatorReply":');
           const reply = live ? parse(event.data).OperatorReply : undefined;
+          if (event.data.includes('"ConversationHistory":')) {
+            const received = performance.now();
+            const thread = document.querySelector<HTMLElement>(".conversation-reading.thread");
+            const box = thread?.getBoundingClientRect();
+            const anchor = box && [...thread!.querySelectorAll<HTMLElement>(".msgs [data-key]")].find(node => {
+              const rect = node.getBoundingClientRect(); return rect.height > 0 && rect.bottom > box.top && rect.top < box.bottom;
+            });
+            const key = anchor?.dataset.key;
+            const top = anchor?.getBoundingClientRect().top;
+            const older = probe.requests.at(-1)?.older === true;
+            const hasEarlier = parse(event.data).ConversationHistory.has_earlier;
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const held = key && [...(thread?.querySelectorAll<HTMLElement>(".msgs [data-key]") ?? [])].find(node => node.dataset.key === key);
+              probe.historyPaints.push({ at: received, older, has_earlier: hasEarlier, paint_ms: performance.now() - received,
+                anchor_key: key, anchor_drift_px: held && top !== undefined ? held.getBoundingClientRect().top - top : null });
+            }));
+          }
           probe.frames.push({ at: performance.now(), bytes: new TextEncoder().encode(event.data).length, history: event.data.includes('"ConversationHistory":'), live_reply: live, notification_id: reply?.notification_id });
         }
       });
     }
     send(data: string | ArrayBufferLike | Blob | ArrayBufferView) {
-      if (typeof data === "string" && data.includes('"ConversationHistoryRequest":')) probe.requests.push({ at: performance.now(), bytes: new TextEncoder().encode(data).length });
+      if (typeof data === "string" && data.includes('"ConversationHistoryRequest":')) probe.requests.push({ at: performance.now(), bytes: new TextEncoder().encode(data).length, older: parse(data).ConversationHistoryRequest?.before != null });
       if (typeof data === "string" && data.includes('"OperatorReplyPersisted":')) {
         const frame = parse(data);
         const ack = frame.OperatorReplyPersisted ?? frame.message?.OperatorReplyPersisted;
@@ -243,6 +260,7 @@ for (const profile of [
           parses: p.parse.filter((entry: any) => entry.at >= since), requests: p.requests.filter((entry: any) => entry.at >= since),
           frames: p.frames.filter((entry: any) => entry.at >= since), long_tasks: p.longTasks.filter((entry: any) => entry.at >= since),
           acknowledgement_timeline: p.acks.filter((entry: any) => entry.at >= since).map((entry: any) => ({ notification_id: entry.notification_id, ms: entry.at - p.t0 })),
+          history_paints: p.historyPaints.filter((entry: any) => entry.at >= since),
           tail_samples: p.tailSamples, dom_elements: document.querySelectorAll("*").length, rendered_turns: document.querySelectorAll(".msgs .conversation-turn").length };
       }, since);
       const costs = await endProfile(cdp, directory, phase);

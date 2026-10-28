@@ -721,9 +721,14 @@ impl PromptQueueTyper<'_> {
         let mut prompt = managed_violet_activity_envelope(&channel, &channel, kind, &item, source_age);
         let delivery_id = crate::prompt_revalidation::xml_attribute_value(&delivery.id);
         let identity = match &delivery.occurrence_id {
-            Some(occurrence_id) => format!(
-                "Claimed delivery_id={delivery_id} occurrence_id={occurrence_id}\nFor a reply to this claimed mention, pass this occurrence_id to coordination reply_intent; never use the Slack message timestamp.\n"
-            ),
+            Some(occurrence_id) => {
+                let reply_hint = if mention {
+                    "For a reply to this claimed mention, pass this occurrence_id to coordination reply_intent; never use the Slack message timestamp.\n"
+                } else {
+                    ""
+                };
+                format!("Claimed delivery_id={delivery_id} occurrence_id={occurrence_id}\n{reply_hint}")
+            }
             None => format!("Claimed delivery_id={delivery_id}\n"),
         };
         prompt.insert_str(prompt.len() - VIOLET_ACTIVITY_ENVELOPE_CLOSE.len(), &format!("{identity}{text}"));

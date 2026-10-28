@@ -204,6 +204,62 @@ impl Fx {
 }
 
 #[tokio::test]
+async fn independent_qa_bundle_does_not_shadow_producer_cas_7a14() {
+    use super::independent_qa::{reviewer_core, round_evidence};
+    use cas::mcp::CasService;
+    use cas_mcp::types::VerificationRequest;
+
+    let mut env = TestEnvGuard::temp_home();
+    let fx = fixture(
+        &mut env,
+        &[("web/composer.css", ".composer{gap:8px}\n")],
+        "Open the composer; spacing is even",
+    );
+    let cas_dir = fx.repo.join(".cas");
+    let config = cas_dir.join("config.toml");
+    let body = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, body.replace("independent_pass = false", "independent_pass = true"))
+        .unwrap();
+    std::fs::write(fx.repo.join(".git/info/exclude"), "/.cas/\n/artifacts/\n").unwrap();
+    let head = git(&fx.repo, &["rev-parse", "HEAD"]);
+    let producer = fx.write_bundle(&head);
+    let producer_bytes = std::fs::read(&producer).unwrap();
+    let parked = close_text(&fx.core, TASK).await;
+    assert!(parked.contains("INDEPENDENT QA DISPATCHED"), "{parked}");
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now()).unwrap().unwrap();
+    let qa_task = pass.qa_task_id.unwrap();
+    let reviewer = reviewer_core(&cas_dir, "qa-reviewer");
+    reviewer.cas_task_start(Parameters(IdRequest { id: qa_task.clone() })).await.unwrap();
+    // GH #1403: the reviewer owns a different task root, with no
+    // /independent-qa/ segment for the old path heuristic to recognize.
+    let reviewer_dir = fx.artifacts.join(&qa_task).join("qa");
+    let ledger = round_evidence(&reviewer_dir, TASK, &head);
+    let reviewer_bundle = reviewer_dir.join("bundle.json");
+    let reviewer_bytes = std::fs::read(&reviewer_bundle).unwrap();
+    let service = CasService::new(reviewer, None);
+    let request: VerificationRequest = serde_json::from_value(serde_json::json!({
+        "action": "qa_record", "task_id": TASK, "status": "approved",
+        "summary": "Independent review of the unchanged delivery",
+        "ledger_path": ledger.display().to_string(),
+    })).unwrap();
+    let recorded = extract_text(service.verification(Parameters(request)).await.unwrap());
+    assert!(recorded.contains("APPROVAL"), "{recorded}");
+
+    git(&fx.repo, &["checkout", "-q", "main"]);
+    git(&fx.repo, &["merge", "-q", "--no-ff", "-m", "merge reviewed delivery", "factory/test-agent"]);
+    git(&fx.repo, &["checkout", "-q", "factory/test-agent"]);
+    let closed = close_text(&fx.core, TASK).await;
+    assert_eq!(fx.status(), TaskStatus::Closed, "{closed}");
+    assert_eq!(cas::qa_evidence::cited_bundle_path(&fx.notes()).as_deref(), producer.to_str());
+    assert!(fx.notes().contains(&format!("qa-review-bundle: {}", reviewer_bundle.display())));
+    let pass = cas_store::latest_qa_pass(&cas_dir, TASK, chrono::Utc::now()).unwrap().unwrap();
+    assert_eq!(pass.ledger_path.as_deref(), ledger.to_str());
+    assert_eq!(pass.bound_head, head);
+    assert_eq!(std::fs::read(&producer).unwrap(), producer_bytes);
+    assert_eq!(std::fs::read(&reviewer_bundle).unwrap(), reviewer_bytes);
+}
+
+#[tokio::test]
 async fn cherry_picked_delivery_reuses_only_approved_identical_diff_bundle_cas_daa6() {
     for changed_diff in [true, false] {
         let mut env = TestEnvGuard::temp_home();

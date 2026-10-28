@@ -6959,6 +6959,7 @@ impl CasCore {
         repo: &std::path::Path,
         parent_branch: &str,
         receipt: &str,
+        window: Option<&TaskCommitReceiptWindow>,
     ) -> Option<String> {
         if task.status == TaskStatus::AwaitingMerge { return None; }
         let recorded = task.deliverables.factory_branch_anchor.as_deref()?;
@@ -6970,6 +6971,18 @@ impl CasCore {
             || !git_commit_is_ancestor(repo, recorded, &tip)
             || unpushed_delivery_tip(repo, &branch, &tip, task.delivery_mode).is_some()
         {
+            return None;
+        }
+        // A restarted worker can adopt a target descendant after its original
+        // anchored delivery has merged. The later target commits are not a new
+        // delivery from this worker; the original receipt remains the evidence.
+        if window.is_some_and(|window| {
+            resolve_task_commit_receipt_sha(repo, recorded).ok().as_deref()
+                == Some(receipt_sha.as_str())
+                && commit_is_merged_into_parent(repo, &receipt_sha, parent_branch)
+                && commit_is_merged_into_parent(repo, &tip, parent_branch)
+                && validate_task_commit_receipt(repo, &receipt_sha, parent_branch, window).is_ok()
+        }) {
             return None;
         }
         let (target, _) = preferred_live_target_ref_for_delivery(repo, parent_branch, task.delivery_mode);
@@ -8700,7 +8713,7 @@ impl CasCore {
         if let Some(receipt) = req.commit_receipt.as_deref()
             && let Some(refusal) = self.stale_fresh_park_receipt_refusal(
                 task_store.as_ref(), &task, &close_project_root,
-                &resolved_parent_branch, receipt,
+                &resolved_parent_branch, receipt, commit_receipt_window.as_ref(),
             )
         {
             return Ok(Self::tool_error(refusal));

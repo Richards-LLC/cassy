@@ -449,18 +449,27 @@ impl CasCore {
             // sealed, and expired/terminal cycles require explicit recovery.
             let live = cas_store::get_latest_verification_dispatch(&self.cas_root, &req.task_id)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
-                .filter(|dispatch| matches!(dispatch.state,
-                    cas_types::VerificationDispatchState::Pending | cas_types::VerificationDispatchState::Claimed)
-                    && dispatch.deadline_at > chrono::Utc::now());
+                .filter(|dispatch| {
+                    matches!(
+                        dispatch.state,
+                        cas_types::VerificationDispatchState::Pending
+                            | cas_types::VerificationDispatchState::Claimed
+                    ) && dispatch.deadline_at > chrono::Utc::now()
+                });
             match live {
                 Some(dispatch) => dispatch.id,
                 // A restart can leave an immutable parked delivery without an
                 // active review cycle; recover the boundary without a close attempt.
                 None if task.status == TaskStatus::AwaitingMerge => {
-                    self.recover_parked_verification_dispatch(&task, &caller)?.id
+                    self.recover_parked_verification_dispatch(&task, &caller)?
+                        .id
                 }
-                None => return Err(Self::error(ErrorCode::INVALID_PARAMS,
-                    "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id.")),
+                None => {
+                    return Err(Self::error(
+                        ErrorCode::INVALID_PARAMS,
+                        "No active verification dispatch can be inferred. Retry task close to prepare the delivery; expired dispatch recovery requires its explicit dispatch_id.",
+                    ));
+                }
             }
         } else {
             return Err(McpError {
@@ -478,17 +487,18 @@ impl CasCore {
         // child-handoff authority, but let a direct supervisor verdict follow
         // an unchanged proof boundary to the current pending dispatch.
         if supervisor_direct {
-            requested_dispatch_id =
-                cas_store::resolve_verification_dispatch_for_add(
-                    &self.cas_root,
-                    &requested_dispatch_id,
-                )
-                .map_err(|_| McpError {
-                    code: ErrorCode::INVALID_PARAMS,
-                    message: Cow::from("Supervisor-direct verification rejected: named dispatch is unavailable."),
-                    data: None,
-                })?
-                .id;
+            requested_dispatch_id = cas_store::resolve_verification_dispatch_for_add(
+                &self.cas_root,
+                &requested_dispatch_id,
+            )
+            .map_err(|_| McpError {
+                code: ErrorCode::INVALID_PARAMS,
+                message: Cow::from(
+                    "Supervisor-direct verification rejected: named dispatch is unavailable.",
+                ),
+                data: None,
+            })?
+            .id;
         }
 
         // cas-b269: urgent stop halt blocks verification MCP.
@@ -739,12 +749,11 @@ impl CasCore {
                 data: None,
             })?;
             // GH #1165: the pool's budget-aware busy handler.
-            cas_store::shared_db::install_busy_handler(&conn)
-                .map_err(|e| McpError {
-                    code: ErrorCode::INTERNAL_ERROR,
-                    message: Cow::from(format!("Failed to set busy timeout: {e}")),
-                    data: None,
-                })?;
+            cas_store::shared_db::install_busy_handler(&conn).map_err(|e| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to set busy timeout: {e}")),
+                data: None,
+            })?;
 
             // BEGIN IMMEDIATE, not the DEFERRED default. The block below reads
             // (the dispatch, the capability) before it writes, so a deferred
@@ -1051,7 +1060,12 @@ impl CasCore {
 
         Ok(Self::success(format!(
             "{} Verification {} for task {} - {}: {}{}",
-            status_emoji, id, req.task_id, task.title, verification.summary, close_retry
+            status_emoji,
+            id,
+            req.task_id,
+            truncate_str(&task.title, 120),
+            verification_receipt_summary(&verification),
+            close_retry
         )))
     }
 
@@ -1238,7 +1252,12 @@ impl CasCore {
                 };
                 Ok(Self::success(format!(
                     "{} Latest verification for {}:\n\nID: {}\nStatus: {}\nSummary: {}{}",
-                    status_icon, req.task_id, v.id, v.status, v.summary, issues_info
+                    status_icon,
+                    req.task_id,
+                    v.id,
+                    v.status,
+                    verification_receipt_summary(&v),
+                    issues_info
                 )))
             }
             None => Ok(Self::success(format!(
@@ -1314,6 +1333,19 @@ impl CasCore {
     // ========================================================================
     // Worktree Operations
     // ========================================================================
+}
+
+/// Successful receipts link to the full stored record; findings stay complete.
+fn verification_receipt_summary(verification: &Verification) -> String {
+    if verification.status == VerificationStatus::Approved && verification.issues.is_empty() {
+        format!(
+            "{}\nFull evidence: verification action=show id={}",
+            truncate_str(&verification.summary, 240),
+            verification.id
+        )
+    } else {
+        verification.summary.clone()
+    }
 }
 
 fn verification_status_emoji(status: VerificationStatus) -> &'static str {
@@ -1398,7 +1430,7 @@ mod lifecycle_friction_tests {
     async fn cas_5dc0_first_add_binds_the_unique_active_dispatch_without_retry() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);
-        let summary = "Independent review completed. ".repeat(300);
+        let summary = "Independent review completed. ".repeat(100);
         let result = core
             .cas_verification_add(Parameters(
                 serde_json::from_value(serde_json::json!({
@@ -1413,21 +1445,52 @@ mod lifecycle_friction_tests {
             .unwrap()
             .unwrap();
         assert_eq!(recorded.dispatch_id.as_deref(), Some(dispatch.id.as_str()));
-        let text = |result: CallToolResult| result.content.into_iter().filter_map(|content| {
-            if let rmcp::model::RawContent::Text(text) = content.raw { Some(text.text) } else { None }
-        }).collect::<String>();
+        let text = |result: CallToolResult| {
+            result
+                .content
+                .into_iter()
+                .filter_map(|content| {
+                    if let rmcp::model::RawContent::Text(text) = content.raw {
+                        Some(text.text)
+                    } else {
+                        None
+                    }
+                })
+                .collect::<String>()
+        };
         let receipt = text(result);
-        let latest = text(core.cas_verification_latest(Parameters(VerificationListRequest {
-            task_id: task.id.clone(), limit: None,
-        })).await.unwrap());
-        let full = text(core.cas_verification_show(Parameters(VerificationShowRequest {
-            id: recorded.id.clone(),
-        })).await.unwrap());
-        eprintln!("VERIFICATION_REPLAY summary_bytes={} receipt_bytes={} latest_bytes={} full_bytes={}", summary.len(), receipt.len(), latest.len(), full.len());
+        let latest = text(
+            core.cas_verification_latest(Parameters(VerificationListRequest {
+                task_id: task.id.clone(),
+                limit: None,
+            }))
+            .await
+            .unwrap(),
+        );
+        let full = text(
+            core.cas_verification_show(Parameters(VerificationShowRequest {
+                id: recorded.id.clone(),
+            }))
+            .await
+            .unwrap(),
+        );
+        eprintln!(
+            "VERIFICATION_REPLAY summary_bytes={} receipt_bytes={} latest_bytes={} full_bytes={}",
+            summary.len(),
+            receipt.len(),
+            latest.len(),
+            full.len()
+        );
         for compact in [&receipt, &latest] {
-            assert!(compact.len() <= 2000, "successful verification repeats proof: {compact}");
+            assert!(
+                compact.len() <= 2000,
+                "successful verification repeats proof: {compact}"
+            );
             assert!(compact.contains(&recorded.id));
-            assert!(compact.contains("action=show"), "full proof needs a retrieval command");
+            assert!(
+                compact.contains("action=show"),
+                "full proof needs a retrieval command"
+            );
         }
         assert!(full.contains(&summary), "full proof must remain lossless");
         // A terminal or missing dispatch is never silently inferred as new authority.
@@ -1447,11 +1510,14 @@ mod lifecycle_friction_tests {
     async fn cas_5dc0_request_changes_recovers_a_blocked_parked_verifier_failure() {
         let mut env = TestEnvGuard::temp_home();
         let (_dir, core, task, dispatch) = fixture(&mut env);
-        let findings = "Correction required with detailed findings. ".repeat(200);
+        let findings = "Correction required with detailed findings. ".repeat(75);
         let failure = core.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
             "task_id":task.id,"dispatch_id":dispatch.id,"status":"rejected","summary":findings
         })).unwrap())).await.unwrap();
-        assert!(format!("{failure:?}").contains(&findings), "failure findings must stay complete");
+        assert!(
+            format!("{failure:?}").contains(&findings),
+            "failure findings must stay complete"
+        );
         let tasks = core.open_task_store().unwrap();
         let mut blocked = tasks.get(&task.id).unwrap();
         blocked.status = TaskStatus::Blocked;

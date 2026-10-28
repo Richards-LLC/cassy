@@ -460,6 +460,7 @@ mod tests {
             ws_port: Some(1),
             liveness: DaemonLiveness::Live,
             dormant: false,
+            ended: None,
             last_activity_at: None,
             last_activity: None,
             started_at: None,

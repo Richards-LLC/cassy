@@ -3173,3 +3173,14 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 }
 .worker-timeline-rows .work-row-toggle, .worker-timeline-rows .work-row-line { width: 100%; }
 .worker-timeline-rows .work-row-time { margin-left: auto; padding-left: var(--space-2); }
+
+.session-end-receipt {
+  margin: var(--space-4);
+  padding: var(--space-4);
+  border-top: var(--line-width) solid var(--line-strong);
+  background: var(--bg-panel);
+  color: var(--ink-mid);
+  overflow-wrap: anywhere;
+}
+.session-end-receipt p { margin: var(--space-2) 0 0; }
+.session-end-receipt .session-end-orphans { color: var(--state-warn); }

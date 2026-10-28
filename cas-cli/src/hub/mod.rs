@@ -514,6 +514,8 @@ pub struct HubSession {
     /// default, but can be revealed for recovery.
     #[serde(default)]
     pub dormant: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended: Option<crate::ui::factory::SessionEndOutcome>,
     /// When the session last did anything (cas-55a4): its newest queue row,
     /// Commander-facing or not. Lets Commander tell apart several live
     /// sessions of one project and show activity for a session that has not
@@ -676,6 +678,35 @@ impl LocalSessionReadModel {
             .collect()
     }
 
+    fn project_with_ends(&self, sessions: &[SessionInfo], ended: Vec<crate::ui::factory::EndedSession>) -> Vec<HubSession> {
+        let mut rows = self.project(sessions);
+        for receipt in ended {
+            // A same-name replacement owns the conversation; old receipts cannot end it.
+            if sessions.iter().any(|session| session.name == receipt.metadata.name
+                && session.metadata.created_at != receipt.metadata.created_at) {
+                continue;
+            }
+            rows.retain(|row| row.name != receipt.metadata.name);
+            rows.push(HubSession {
+                name: receipt.metadata.name,
+                project_dir: receipt.metadata.project_dir,
+                supervisor: receipt.metadata.supervisor.name,
+                workers: receipt.ended.orphans.clone(),
+                epic_id: receipt.metadata.epic_id,
+                ws_port: None,
+                liveness: DaemonLiveness::StaleMetadata,
+                dormant: false,
+                last_activity_at: Some(receipt.ended.at.clone()),
+                last_activity: Some("Session ended".into()),
+                started_at: Some(receipt.metadata.created_at),
+                cloud_project_id: None,
+                daemon_identity: None,
+                ended: Some(receipt.ended),
+            });
+        }
+        rows
+    }
+
     fn last_activity(&self, session: &SessionInfo) -> Option<(String, String)> {
         let mut cache = self
             .activity
@@ -791,6 +822,7 @@ fn hub_session(session: &SessionInfo) -> HubSession {
             DaemonLiveness::Live
         },
         dormant: !has_live_supervisor(session),
+        ended: None,
         last_activity_at: None,
         last_activity: None,
         started_at: Some(session.metadata.created_at.clone()).filter(|at| !at.trim().is_empty()),
@@ -842,7 +874,8 @@ fn has_live_supervisor(session: &SessionInfo) -> bool {
 
 impl SessionReadModel for LocalSessionReadModel {
     fn list_sessions(&self) -> Result<Vec<HubSession>> {
-        Ok(self.project(&SessionManager::new().list_sessions()?))
+        let manager = SessionManager::new();
+        Ok(self.project_with_ends(&manager.list_sessions()?, manager.ended_sessions()?))
     }
 }
 
@@ -976,6 +1009,7 @@ pub fn fixture_session(name: &str) -> HubSession {
         ws_port: Some(12345),
         liveness: DaemonLiveness::Live,
         dormant: false,
+        ended: None,
         last_activity_at: None,
         last_activity: None,
         started_at: None,

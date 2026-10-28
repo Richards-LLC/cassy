@@ -4314,15 +4314,49 @@ impl FactoryDaemon {
         // Kill all PTY process groups. Snapshot worker PGIDs first so their
         // durable ownership records can be removed only after death is
         // confirmed; any survivor stays visible to gc_report.
-        let worker_process_groups: Vec<u32> = self
-            .app
-            .worker_names()
-            .iter()
-            .filter_map(|name| self.app.mux.pane_process_group_id(name))
-            .collect();
+        let worker_names = self.app.worker_names().to_vec();
+        let ownership = crate::ui::factory::process_groups::list(self.app.cas_dir())
+            .unwrap_or_default().into_iter()
+            .filter(|record| record.factory_session == self.session_name)
+            .collect::<Vec<_>>();
+        let mut ended = crate::ui::factory::session::SessionEndOutcome {
+            at: String::new(), reason: "unknown".into(),
+            workers_stopped: Vec::new(), orphans: Vec::new(), unverified: Vec::new(),
+        };
+        // Hooks may already have unregistered the supervisor; retain their original reason.
+        if let Ok(store) = cas_store::SqliteAgentStore::open(self.app.cas_dir())
+            && let Ok(rows) = store.recent_session_ends(&cas_types::Agent::get_or_generate_machine_id(), 100)
+            && let Ok(bytes) = std::fs::read(crate::ui::factory::session::metadata_path(&self.session_name))
+            && let Ok(metadata) = serde_json::from_slice::<crate::ui::factory::protocol::SessionMetadata>(&bytes)
+            && let Some(row) = rows.into_iter().find(|row| row.factory_session.as_deref() == Some(self.session_name.as_str())
+                && row.name == self.app.supervisor_name()
+                && chrono::DateTime::parse_from_rfc3339(&row.registered_at).ok().zip(
+                    chrono::DateTime::parse_from_rfc3339(&metadata.created_at).ok())
+                    .is_some_and(|(registered, created)| registered >= created))
+        {
+            ended.reason = row.reason;
+        }
         self.app.mux.kill_all();
-        for pgid in worker_process_groups {
-            self.app.untrack_worker_process_group_if_gone(pgid).await;
+        for record in &ownership {
+            self.app.untrack_worker_process_group_if_gone(record.pgid).await;
+        }
+        let mut names = worker_names;
+        names.extend(ownership.iter().map(|record| record.worker_name.clone()));
+        names.sort(); names.dedup();
+        for name in names {
+            let records: Vec<_> = ownership.iter().filter(|record| record.worker_name == name).collect();
+            use crate::ui::factory::process_groups::{ProcessGroupStatus, status};
+            if records.iter().any(|record| status(record) == ProcessGroupStatus::Live) {
+                ended.orphans.push(name);
+            } else if !records.is_empty() && records.iter().all(|record| status(record) == ProcessGroupStatus::Gone) {
+                ended.workers_stopped.push(name);
+            } else {
+                ended.unverified.push(name);
+            }
+        }
+        ended.at = chrono::Utc::now().to_rfc3339();
+        if let Err(error) = self.session_manager.record_ended(&self.session_name, ended) {
+            tracing::warn!(%error, "could not retain Commander session-end receipt");
         }
 
         // cas-c5ab: a shutdown ends every hold, so re-arm held workers'

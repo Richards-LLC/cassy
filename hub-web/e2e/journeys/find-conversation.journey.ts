@@ -702,3 +702,35 @@ test.describe("on a Mac", () => {
     });
   });
 });
+
+for (const width of [1280, 390]) {
+  test(`HUB-J3 supervisor exit ends the conversation at ${width} (cas-cec1)`, journeyPart, async ({ page, journey }) => {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    const machine: Machine = { ...ATLAS, sessions: [{ ...ATLAS.sessions[0]!, workers: ["worker-a", "worker-b", "worker-c"] }] };
+    const session = machine.sessions[0]!;
+    const hub = await journey.hub({ machines: [machine], paired: [machine.id] });
+    await journey.open();
+    await page.locator(".conversation-row").first().click();
+    await expect(page.locator("#message-text")).toBeVisible();
+    await journey.stage("Supervisor and workers are live", async () => {
+      await expect(page.locator("#conversation-connection")).toContainText("Live");
+      await page.locator("#message-text").fill("Keep this draft");
+    });
+    session.ended = { at: journeyStamp(), reason: "prompt_input_exit", workers_stopped: ["worker-a", "worker-b"], orphans: ["worker-c"], unverified: [] };
+    session.liveness = "stale_metadata";
+    session.workers = ["worker-c"];
+    await hub.announceCatalog(machine.id);
+    await journey.stage("Session ended accounts for every worker", async () => {
+      await expect(page.locator("#conversation-connection")).toContainText("Ended");
+      await expect(page.locator(".session-end-receipt")).toContainText("Supervisor and 2 workers stopped");
+      await expect(page.locator(".session-end-receipt")).toContainText("/exit");
+      await expect(page.locator(".session-end-orphans")).toContainText("Still alive: worker-c");
+      await expect(page.locator("#message-send")).toBeDisabled();
+      await expect(page.locator("#message-status")).toContainText("New session");
+      await expect(page.locator("#message-text")).toHaveValue("Keep this draft");
+      await expect(page.locator(".terminal-disconnected-banner")).toHaveCount(0);
+    });
+    await showConversationList(page);
+    await expect(page.locator(".conversation-row").first()).toContainText("Ended");
+  });
+}

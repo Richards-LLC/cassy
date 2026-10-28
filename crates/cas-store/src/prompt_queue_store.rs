@@ -20256,6 +20256,40 @@ mod cas_bf890_notice_digest_tests {
             .collect()
     }
 
+    /// Replay routine producers through the same idempotent queue path they
+    /// call. No rendering drain may inject bodies or consume action slots.
+    #[test]
+    fn supervisor_noise_routine_episode_replay_uses_one_digest() {
+        let (_temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        let at = Utc::now().to_rfc3339();
+        let fixtures = [
+            ("lifecycle:1", format!("<task-lifecycle transition=\"task_started\" task_id=\"cas-fixture\" old=\"open\" new=\"in_progress\" actor=\"w\" notification_id=\"1\" occurrence=\"{at}\">started, no action</task-lifecycle>")),
+            ("lifecycle:2", format!("<task-lifecycle transition=\"task_closed\" task_id=\"cas-fixture\" old=\"in_progress\" new=\"closed\" actor=\"w\" notification_id=\"2\" occurrence=\"{at}\">closed</task-lifecycle>")),
+            ("lifecycle-wake:worker-attention:3", "<worker-attention kind=\"worker_idle\" worker=\"w\" notification_id=\"3\">idle</worker-attention>".into()),
+            ("lifecycle-wake:worker-attention:4", "<worker-attention kind=\"verification_dispatch_expired\" worker=\"supervisor\" notification_id=\"4\">expired</worker-attention>".into()),
+        ];
+        let mut ids = Vec::new();
+        for (source, body) in &fixtures {
+            for _ in 0..2 {
+                let result = store.enqueue_idempotent(source, "supervisor", body, Some(SESSION), Some(source), None, source, Some(&QueueOrigin::Daemon)).unwrap();
+                let id = match result { EnqueueIdempotentResult::Created(id) | EnqueueIdempotentResult::AlreadyExists(id) => id };
+                if !ids.contains(&id) { ids.push(id); }
+            }
+        }
+        let peer = store.enqueue_worker_peer_with_supervisor_copy("w", "peer", "supervisor", "collision details", "Peer worker message copy — from w to peer: collision details", SESSION, Some("collision"), None, false, Some(&QueueOrigin::RegisteredAgent { agent_id: "id-w".into() })).unwrap();
+        ids.push(peer.supervisor_copy_id);
+        let action = store.enqueue_idempotent("lifecycle-wake:5", "supervisor", "<task-lifecycle transition=\"task_blocked\" task_id=\"cas-fixture\">blocker</task-lifecycle>", Some(SESSION), None, None, "action", Some(&QueueOrigin::Daemon)).unwrap();
+        let action = match action { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
+        assert_eq!(selected(&store), vec![action], "routine and copied bodies must not create transports");
+        assert_eq!(drain(&store, HookDrain::Unseen), vec![action]);
+        assert_eq!(drain(&store, HookDrain::NoticeDigest), ids);
+        assert!(drain(&store, HookDrain::NoticeDigest).is_empty(), "one digest receipt per episode");
+        let full = store.poll_named_for_recipient("supervisor", Some(SESSION), &[peer.supervisor_copy_id]).unwrap();
+        assert_eq!(full[0].prompt, "Peer worker message copy — from w to peer: collision details");
+        assert_eq!(store.peek_for_targets(&["peer"], Some(SESSION), 10).unwrap()[0].id, peer.recipient_id);
+    }
+
     /// Acceptance 2: an abandoned message to a recipient from an earlier
     /// session never wakes the supervisor. The daemon never selects the
     /// notice (no Teams pointer, no pane write), and the rendering drains

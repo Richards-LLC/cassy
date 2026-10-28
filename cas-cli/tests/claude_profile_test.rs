@@ -579,7 +579,11 @@ async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_provide
             r#"#!/bin/sh
 if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true}'; exit 0; fi
 if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
-if [ "$1" = auth ] || [ "$1" = login ]; then echo LOGIN_STARTED; [ -f "$HOME/pause-login" ] && sleep 1; fi
+if [ "$1" = auth ] || [ "$1" = login ]; then
+  # The login child must inherit the terminal's native (canonical) mode.
+  stty -a 2>/dev/null | grep -q -- -icanon && echo CHILD_RAW
+  echo LOGIN_STARTED; [ -f "$HOME/pause-login" ] && sleep 1
+fi
 if [ "$1" = auth ] && [ -n "$CLAUDE_CONFIG_DIR" ]; then
   printf '{"oauthAccount":{"emailAddress":"real@example.com","accountUuid":"one"}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
 fi
@@ -603,12 +607,15 @@ exit 0
         // (keys written with the email, output that triggers the next write,
         // keys written then, succeeds). After the email prompt the terminal
         // owns input natively; only finished type-ahead lines carry over.
-        let cases: [(&[u8], &str, &[u8], bool); 5] = [
+        let cases: [(&[u8], &str, &[u8], bool); 7] = [
             (b"typed@example.com\ry\r", "", b"", true),
+            // Ctrl-U inside the typed-ahead line erases it, as the terminal would.
+            (b"typed@example.com\ry\x15\r", "", b"", false),
             // The undisplayed fragment is dropped; the terminal edits natively.
             (b"typed@example.com\rn", "[y/N] ", b"\x7fy\r", true),
-            // Ctrl-D typed while the login runs is EOF at the question.
+            // Ctrl-D typed while the login runs, or at the question, is EOF.
             (b"typed@example.com\ry", "LOGIN_STARTED", b"\x04", false),
+            (b"typed@example.com\ry", "[y/N] ", b"\x04", false),
             (b"typed@example.com\ry", "[y/N] ", b"\r", false),
             (b"typed@example.com\r\x03", "", b"", false),
         ];
@@ -672,6 +679,7 @@ exit 0
             let output = String::from_utf8_lossy(&output).replace('\r', "");
             let case = String::from_utf8_lossy(with_email);
             let Ok(code) = result else { panic!("{provider} {case:?}: still waiting for input: {output}") };
+            assert!(!output.contains("CHILD_RAW"), "{provider} {case:?}: {output}");
             if succeeds {
                 assert_eq!(code, Some(0), "{provider} {case:?}: {output}");
                 assert!(output.contains("Keep the existing account? [y/N] "), "{provider} {case:?}: {output}");

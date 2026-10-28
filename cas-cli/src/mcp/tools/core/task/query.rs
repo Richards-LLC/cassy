@@ -120,7 +120,7 @@ pub(super) fn excerpt(text: &str, budget: usize) -> String {
 
 pub(super) fn read_hint(id: &str, action: &str) -> String {
     format!(
-        "\nFull: task {action} id={id} full=true\nPage: task {action} id={id} offset=0 limit=1600"
+        "\nRead clipped instructions before acting.\nFull: task {action} id={id} full=true\nPage: task {action} id={id} offset=0 limit=1600"
     )
 }
 
@@ -548,6 +548,13 @@ impl CasCore {
             if task.deliverables.green_merge_commit.is_some()
                 || task.deliverables.merge_ci_admission.is_some()
             {
+                read_status.insert_str(
+                    0,
+                    &format!(
+                        "CI admission: {}\n",
+                        task.deliverables.effective_merge_ci_admission().label()
+                    ),
+                );
                 output.push_str(&format!(
                     "\n  CI admission: {}",
                     task.deliverables.effective_merge_ci_admission().label()

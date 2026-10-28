@@ -110,7 +110,7 @@ pub(super) async fn ticket<R: SessionReadModel>(
         .issue_media_ticket(&context, &session, &artifact, chrono::Utc::now())
     {
         Ok(ticket) => private(Json(ticket).into_response(), &headers),
-        Err(_) => private(unauthorized(), &headers),
+        Err(error) => private(refusal(&error), &headers),
     }
 }
 
@@ -195,16 +195,17 @@ pub(super) async fn content<R: SessionReadModel>(
             _ => return private(unauthorized(), &headers),
         }
     } else {
-        match query.t.as_deref().and_then(|ticket| {
-            auth.authenticate_media_ticket(ticket, &session, &artifact, chrono::Utc::now())
-                .ok()
-        }) {
-            Some(context)
+        let Some(ticket) = query.t.as_deref() else {
+            return private(unauthorized(), &headers);
+        };
+        match auth.authenticate_media_ticket(ticket, &session, &artifact, chrono::Utc::now()) {
+            Ok(context)
                 if origin(&headers).is_none_or(|origin| origin == context.controller_origin) =>
             {
                 context
             }
-            _ => return private(unauthorized(), &headers),
+            Ok(_) => return private(unauthorized(), &headers),
+            Err(error) => return private(refusal(&error), &headers),
         }
     };
     let (root, record) = match scoped(&state, &session, &artifact).await {

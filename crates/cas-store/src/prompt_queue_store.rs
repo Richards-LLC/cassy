@@ -6140,10 +6140,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
 
             let now_text = now.to_rfc3339();
             let priority: i32 = priority.unwrap_or(NotificationPriority::Normal).into();
-            // cas-d9a8: both rows carry the SAME stamp, because both were
-            // written by the same authenticated caller in one transaction. The
-            // supervisor copy is the row that can earn a wake, so getting this
-            // wrong in either direction is the bug.
+            // Both rows retain the authenticated sender. The copy's separate
+            // kind routes it to the supervisor digest; the peer still receives
+            // the complete original message through its normal delivery lane.
             let origin_kind = origin.map(QueueOrigin::kind_str);
             let origin_agent_id = origin.and_then(QueueOrigin::agent_id);
             tx.execute(
@@ -6577,6 +6576,8 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                    COALESCE(q.kind, '') IN ('answer', 'status', 'receipt')
                    OR COALESCE(q.dedupe_key, '') LIKE 'commander-mirror:%'
                ))
+               AND COALESCE(q.kind, '') NOT IN ('receipt', 'informational', 'notice_digest', 'supervisor_digest', 'worker_peer_copy')
+               AND q.prompt NOT LIKE '<cas-message-quiet/>%'
                AND q.source NOT LIKE 'lifecycle:%'
                AND q.source NOT LIKE 'lifecycle-wake:%'
                AND q.factory_session = ?
@@ -20627,6 +20628,19 @@ mod cas_bf890_notice_digest_tests {
                 .id,
             peer.recipient_id
         );
+        for origin in [None, Some(QueueOrigin::Unattributed), Some(QueueOrigin::PairedDevice { device_id: "operator".into() }), Some(QueueOrigin::RegisteredAgent { agent_id: "unregistered".into() })] {
+            for (index, (source, body)) in fixtures.iter().enumerate() {
+                let key = format!("control:{origin:?}:{index}");
+                let id = match store.enqueue_idempotent(source, "supervisor", body, Some(SESSION), None, None, &key, origin.as_ref()).unwrap() {
+                    EnqueueIdempotentResult::Created(id) => id, _ => unreachable!(),
+                };
+                assert!(selected(&store).contains(&id), "routine classification must require daemon authority: {origin:?}");
+            }
+        }
+        let urgent = store.enqueue_idempotent_urgent("lifecycle:urgent", "supervisor", &fixtures[0].1, Some(SESSION), None, None, true, "urgent", Some(&QueueOrigin::Daemon)).unwrap();
+        let urgent = match urgent { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
+        assert!(selected(&store).contains(&urgent), "explicit interrupts keep delivery");
+
     }
 
     /// One parked tip has one merge wake even when three producers relay it.
@@ -20746,8 +20760,8 @@ mod cas_bf890_notice_digest_tests {
         let mut selected_ids = selected(&store);
         selected_ids.sort_unstable();
         assert_eq!(selected_ids, vec![first, fresh, blocker, verdict]);
-        let digested = drain(&store, HookDrain::NoticeDigest);
-        assert_eq!(digested, vec![ready_id, duplicate]);
+        let digested = store.surface_for_recipient_within_budget("lead-sup", Some(SESSION), HookDrain::NoticeDigest, 50, 0).unwrap().rows;
+        assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![ready_id, duplicate]);
         let evidence = store
             .poll_named_for_recipient("lead-sup", Some(SESSION), &[duplicate])
             .unwrap();

@@ -138,7 +138,8 @@ it("never inserts a renderer's scripts, event handlers or foreignObject", async 
 it("renders unified diff lines literally and collapses long changes", async () => {
   const root = document.createElement("div"); document.body.append(root);
   const patch = ['--- a/app.ts', '+++ b/app.ts', '@@ -1,26 +1,26 @@', '-<script>bad()</script>', '+safe()', '--- SQL comment', '+++ counter', ...Array.from({ length: 24 }, (_, i) => ` context ${i}`)].join("\n");
-  root.append(...renderMarkdown(document, `\`\`\`diff\n${patch}\n\`\`\``));
+  const snippet = "-old()\n+new()";
+  root.append(...renderMarkdown(document, `\`\`\`diff\n${patch}\n\`\`\`\n\n\`\`\`diff\n${snippet}\n\`\`\``));
   await vi.waitFor(() => expect(root.querySelector("details")).not.toBeNull());
   expect(root.querySelector("details")?.open).toBe(false);
   expect(root.querySelector("summary")?.textContent).toContain("lines");
@@ -148,5 +149,9 @@ it("renders unified diff lines literally and collapses long changes", async () =
   expect(root.querySelector('[data-change="add"]')?.textContent).toContain("safe()");
   expect([...root.querySelectorAll('[data-change="remove"]')].some((row) => row.textContent?.includes("--- SQL comment"))).toBe(true);
   expect([...root.querySelectorAll('[data-change="add"]')].some((row) => row.textContent?.includes("+++ counter"))).toBe(true);
+  await vi.dynamicImportSettled();
+  const code = [...root.querySelectorAll("pre.markdown-code")].find((node) => node.textContent === snippet)!;
+  expect(code).toBeDefined(); expect(code.hasAttribute("aria-label")).toBe(false);
+  expect(root.querySelectorAll(".rich-diff")).toHaveLength(1);
   expect(root.querySelector("script")).toBeNull(); root.remove();
 });

@@ -364,3 +364,90 @@ fn measure_real_transcript() {
     );
     assert_eq!(before, after);
 }
+
+#[test]
+fn v2_tool_payloads_use_explicit_inputs_and_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("claude.jsonl");
+    write_lines(&path, &[
+        json!({"type":"assistant","timestamp":at(1),"message":{"content":[
+            {"type":"tool_use","id":"r","name":"Read","input":{"file_path":"src/lib.rs"}},
+            {"type":"tool_use","id":"s","name":"Grep","input":{"pattern":"needle","path":"src"}},
+            {"type":"tool_use","id":"c","name":"Bash","input":{"command":"git status","cwd":"/repo"}},
+            {"type":"tool_use","id":"u","name":"future_tool","input":{}}
+        ]}}),
+        json!({"type":"user","timestamp":at(2),"toolUseResult":{"exitCode":7},"message":{"content":[
+            {"type":"tool_result","tool_use_id":"c","is_error":true,"content":"failed"}
+        ]}}),
+    ]);
+    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(events).unwrap();
+    assert_eq!(wire[0]["tool"]["operation"], "read");
+    assert_eq!(wire[0]["tool"]["targets"], json!(["src/lib.rs"]));
+    assert_eq!(wire[0]["tool"]["counts"]["files"], 1);
+    assert_eq!(wire[1]["tool"]["operation"], "search");
+    assert_eq!(wire[2]["tool"]["command"], "git status");
+    assert_eq!(wire[2]["tool"]["exit_code"], 7);
+    assert_eq!(wire[3]["tool"]["operation"], "other");
+}
+
+#[test]
+fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    write_lines(&path, &[
+        json!({"timestamp":at(1),"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status\"}","call_id":"c"}}),
+    ]);
+    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Codex), WorkEventStores::default(), WorkEventIndex::default());
+    let resolve = |_: &SupervisorSource| Some(path.clone());
+    let (started, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let before = index.fingerprint(&scope, &stores, &resolve).unwrap();
+    assert_eq!(serde_json::to_value(&started[0]).unwrap()["lifecycle"]["stage"], "start");
+    write_lines(&path, &[json!({"timestamp":at(2),"type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"{\"exit_code\":0,\"output\":\"clean\"}"}})]);
+    let (ended, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    assert_eq!(started[0].id, ended[0].id);
+    let wire = serde_json::to_value(&ended[0]).unwrap();
+    assert_eq!(wire["lifecycle"]["stage"], "end");
+    assert_eq!(wire["lifecycle"]["outcome"], "success");
+    assert_ne!(index.fingerprint(&scope, &stores, &resolve).unwrap(), before, "settling the newest row must wake live clients");
+}
+
+#[test]
+fn v2_reasoning_publishes_only_recorded_summary_and_detail() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rollout.jsonl");
+    write_lines(&path, &[json!({"timestamp":at(1),"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Published heading\nPublished detail"}],"encrypted_content":"PRIVATE_SENTINEL","content":[{"text":"PRIVATE_SENTINEL"}]}})]);
+    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Codex), WorkEventStores::default(), WorkEventIndex::default());
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&events[0]).unwrap();
+    assert_eq!(wire["reasoning"]["summary"], "Published heading");
+    assert_eq!(wire["reasoning"]["source"], "codex_summary");
+    let detail = serde_json::to_string(&detail(&mut index, &scope, &stores, &path, &events[0].id)).unwrap();
+    assert!(detail.contains("Published detail"));
+    assert!(!detail.contains("PRIVATE_SENTINEL"));
+}
+
+#[test]
+fn v2_changed_files_are_per_turn_successful_edit_provenance() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("claude.jsonl");
+    write_lines(&path, &[
+        json!({"type":"user","promptId":"p1","timestamp":at(1),"message":{"content":"edit"}}),
+        json!({"type":"assistant","timestamp":at(2),"message":{"content":[
+            {"type":"tool_use","id":"a","name":"Edit","input":{"file_path":"a.rs"}},
+            {"type":"tool_use","id":"b","name":"Write","input":{"file_path":"b.rs"}}
+        ]}}),
+        json!({"type":"user","timestamp":at(3),"message":{"content":[
+            {"type":"tool_result","tool_use_id":"a","content":"done"},
+            {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"refused"}
+        ]}}),
+    ]);
+    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
+    let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&events).unwrap();
+    assert_eq!(wire[0]["changed_files"]["files"], json!([{"path":"a.rs","operation":"edit","source_event_id":events[0].id}]));
+    assert_eq!(wire[0]["changed_files"]["provenance"], "successful_tool_calls");
+    assert_eq!(wire[0]["changed_files"]["complete"], false);
+    assert!(wire[1].get("changed_files").is_none(), "failed edit is not a changed file");
+}

@@ -723,8 +723,8 @@ fn cas_bfa1_spawn_closed_or_deleted_epic_is_not_republished() {
             .expect("deleted pinned lane must refuse")
             .to_string();
         assert!(
-            error.contains("epic branch 'epic/round2' doesn't resolve")
-                && error.contains("no lane was recreated"),
+            error.contains("epic branch missing on originating host")
+                && error.contains("Restore epic/round2 from a known commit or backup"),
             "{error}"
         );
         assert!(

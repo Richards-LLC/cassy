@@ -915,13 +915,15 @@ mod tests {
             assert!(rows.iter().all(|row| row.lines().all(|line| text_width(&strip_sgr(line)) <= ROW_WIDTH)));
             // A 5-hour window appears only as the limit that excluded a row.
             accounts[1].windows[0].used_percent = Some(95.0);
+            accounts[1].windows[1].used_percent = None;
+            accounts[1].windows[1].resets_at = None;
             accounts[0].windows.clear();
             apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
             assert_eq!(
                 text(&profiles, PLAIN)[..2],
                 [
                     "main  active\n    weekly usage unknown (no recent report)".to_string(),
-                    format!("alt  [WARN] 5h at 95% (threshold 90%)  disabled\n    weekly 41% left, {}", reset(6)),
+                    "alt  [WARN] 5h at 95% (threshold 90%)  disabled\n    weekly usage unknown (not reported)".to_string(),
                 ]
             );
         }

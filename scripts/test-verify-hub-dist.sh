@@ -17,6 +17,12 @@ prepare_fixture() {
 
 clean_fixture="$scratch_dir/clean"
 prepare_fixture "$clean_fixture"
+printf 'dash\n' > "$clean_fixture/-leading"
+printf 'backslash\n' > "$clean_fixture/back\\slash"
+newline_name="$clean_fixture/"$'line\nbreak'
+printf 'newline\n' > "$newline_name"
+mkdir -p "$clean_fixture/nested"
+printf 'nested\n' > "$clean_fixture/nested/asset.js"
 if DIST_DIR="$clean_fixture" ORIGIN_INDEX="$origin_index" "$verify_script" > "$scratch_dir/clean.log" 2>&1; then
   printf 'PASS: dist without removed assets is accepted\n'
 else
@@ -24,6 +30,13 @@ else
   printf 'FAIL: clean dist was rejected\n' >&2
   exit 1
 fi
+expected_digest='78de393838dafda217de372cf899a152e8adff322359924b3bdbe84625354fb0'
+if ! grep -Fqx "dist_digest $expected_digest" "$scratch_dir/clean.log"; then
+  cat "$scratch_dir/clean.log" >&2
+  printf 'FAIL: safe filename digest changed; expected %s\n' "$expected_digest" >&2
+  exit 1
+fi
+printf 'PASS: digest preserves safe filename bytes and ordering\n'
 
 for stale_asset in ghostty-vt.wasm ghostty-write-pty.wasm symbols.woff2; do
   stale_fixture="$scratch_dir/stale-${stale_asset}"

@@ -25,5 +25,14 @@ if ! cmp --silent "$dist_dir/index.html" "$origin_index"; then
 fi
 printf 'verified root index matches Commander distribution\n'
 
-dist_digest=$(cd "$dist_dir" && find . -type f -printf '%P\0' | LC_ALL=C sort -z | while IFS= read -r -d '' path; do sha256sum "$path"; done | sha256sum | awk '{print $1}')
+dist_digest=$(
+  cd "$dist_dir" &&
+    find . -type f -print0 |
+      LC_ALL=C sort -z |
+      while IFS= read -r -d '' path; do
+        shasum -a 256 -- "${path#./}"
+      done |
+      shasum -a 256 |
+      awk '{print $1}'
+)
 printf 'dist_digest %s\n' "$dist_digest"

@@ -51,4 +51,3 @@ Scored by the implementing worker, 2026-10-28. Public-surface floors hold.
 - Strict QA checks all six rendered states, print and the reviewed JavaScript declaration. Forced colors, reduced motion and increased contrast are captured by HUB-J7. No image assets or animation were added.
 - Vite reports initial JavaScript 190.71 KB gzip and total CSS 36.23 KB gzip. The JavaScript budget holds. The existing stylesheet already exceeds the generic 30 KB budget; reducing the shared stylesheet is outside this panel change and remains a frontend maintenance follow-up.
 - Durable evidence: task artifact directory `cas-5a42/`, including `before/`, `evaluation/`, `qa/visual-qa/`, `LEDGER.md` and `qa/bundle.json`.
-

@@ -84,6 +84,16 @@ fn requester_secure_storage_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
 /// cannot load Cassy' worker contract, then fails sixty seconds later with no
 /// actionable cause (GH #270).
 fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
+    preflight_claude_config_dir_with(raw, cfg!(target_os = "macos"), |_| false)
+}
+
+// The platform credential store is the external boundary; temp-dir tests never
+// consult a developer's Keychain, even when run on macOS.
+fn preflight_claude_config_dir_with(
+    raw: &str,
+    _macos: bool,
+    _keychain_item_exists: impl Fn(&str) -> bool,
+) -> Result<(), String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("config_dir is empty; expected a Claude configuration directory".to_string());
@@ -14568,7 +14578,6 @@ mod tests {
     fn config_dir_preflight_names_each_missing_requirement() {
         let temp = tempfile::tempdir().unwrap();
         let cases = [
-            ("settings.json", "settings.json"),
             (".credentials.json", ".credentials.json"),
             ("agents", "agents"),
             ("skills", "skills"),
@@ -14583,8 +14592,73 @@ mod tests {
             } else {
                 std::fs::remove_file(target).unwrap();
             }
-            let error = preflight_claude_config_dir(profile.to_str().unwrap()).unwrap_err();
+            let error = preflight_claude_config_dir_with(profile.to_str().unwrap(), false, |_| {
+                panic!("Linux must use the credentials file")
+            })
+            .unwrap_err();
             assert!(error.contains(expected), "expected {expected} in {error}");
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_optional_settings() {
+        for state in ["missing", "invalid", "unreadable"] {
+            let profile = tempfile::tempdir().unwrap();
+            valid_claude_config(profile.path());
+            let settings = profile.path().join("settings.json");
+            match state {
+                "missing" => std::fs::remove_file(&settings).unwrap(),
+                "invalid" => std::fs::write(&settings, "{broken").unwrap(),
+                // A directory is reliably unreadable as settings, including root CI.
+                _ => {
+                    std::fs::remove_file(&settings).unwrap();
+                    std::fs::create_dir(&settings).unwrap();
+                }
+            }
+            let result =
+                preflight_claude_config_dir_with(profile.path().to_str().unwrap(), false, |_| {
+                    panic!("Linux must not consult Keychain")
+                });
+            if state == "missing" {
+                assert!(result.is_ok(), "absent settings are empty: {result:?}");
+            } else {
+                // pin: preserve the existing actionable settings error prefix.
+                assert!(
+                    result.unwrap_err().starts_with(
+                        "config_dir preflight failed: missing or unreadable settings.json:"
+                    ),
+                    "{state} settings must fail with the existing message"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_macos_keychain() {
+        for present in [true, false] {
+            let profile = tempfile::tempdir().unwrap();
+            valid_claude_config(profile.path());
+            std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+            let probed = std::cell::Cell::new(false);
+            let result = preflight_claude_config_dir_with(
+                profile.path().to_str().unwrap(),
+                true,
+                |service| {
+                    assert!(service.starts_with("Claude Code-credentials-"), "{service}");
+                    assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
+                    probed.set(true);
+                    present
+                },
+            );
+            assert_eq!(
+                result.is_ok(),
+                present,
+                "Keychain present={present}: {result:?}"
+            );
+            assert!(
+                probed.get(),
+                "darwin must probe the selected profile's Keychain item"
+            );
         }
     }
 

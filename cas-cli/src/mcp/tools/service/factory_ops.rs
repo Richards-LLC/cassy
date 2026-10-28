@@ -84,15 +84,26 @@ fn requester_secure_storage_dir(cli: cas_mux::SupervisorCli) -> Option<String> {
 /// cannot load Cassy' worker contract, then fails sixty seconds later with no
 /// actionable cause (GH #270).
 fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
-    preflight_claude_config_dir_with(raw, cfg!(target_os = "macos"), |_| false)
+    preflight_claude_config_dir_with(raw, cfg!(target_os = "macos"), |service| {
+        let budget = std::time::Duration::from_secs(2);
+        let mut command = std::process::Command::new("/usr/bin/security");
+        // Metadata only: never request, expose or copy the stored password.
+        command.args(["find-generic-password", "-s", service]);
+        crate::bounded_process::run_command(
+            &mut command,
+            crate::bounded_process::Deadline::after(budget),
+            budget,
+        )
+        .is_ok_and(|output| output.status.success())
+    })
 }
 
 // The platform credential store is the external boundary; temp-dir tests never
 // consult a developer's Keychain, even when run on macOS.
 fn preflight_claude_config_dir_with(
     raw: &str,
-    _macos: bool,
-    _keychain_item_exists: impl Fn(&str) -> bool,
+    macos: bool,
+    keychain_item_exists: impl Fn(&str) -> bool,
 ) -> Result<(), String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -106,13 +117,27 @@ fn preflight_claude_config_dir_with(
                 .unwrap_or_else(|| std::path::PathBuf::from(trimmed))
         },
     );
-    let required_files = [
-        ("settings.json", path.join("settings.json")),
-        (".credentials.json", path.join(".credentials.json")),
-    ];
-    for (name, candidate) in required_files {
-        std::fs::File::open(&candidate).map_err(|error| {
-            format!("config_dir preflight failed: missing or unreadable {name}: {error}")
+    let settings_error = |error: &dyn std::fmt::Display| {
+        format!("config_dir preflight failed: missing or unreadable settings.json: {error}")
+    };
+    match std::fs::read_to_string(path.join("settings.json")) {
+        Ok(contents) => {
+            serde_json::from_str::<serde_json::Value>(&contents)
+                .map_err(|error| settings_error(&error))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(settings_error(&error)),
+    }
+    if macos {
+        let service = claude_profile_keychain_service(&path.to_string_lossy());
+        if !keychain_item_exists(&service) {
+            return Err(format!(
+                "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service {service})"
+            ));
+        }
+    } else {
+        std::fs::File::open(path.join(".credentials.json")).map_err(|error| {
+            format!("config_dir preflight failed: missing or unreadable .credentials.json: {error}")
         })?;
     }
     for name in ["agents", "skills"] {
@@ -127,6 +152,20 @@ fn preflight_claude_config_dir_with(
         }
     }
     Ok(())
+}
+
+/// Claude Code 2.1.312's HW(): an explicit config selector scopes the
+/// credentials service by the first eight SHA-256 hex digits of its NFC text.
+/// Do not canonicalize: symlink spellings select distinct credential stores.
+/// This gate only receives explicit config_dir values; unscoped accounts do
+/// not enter it. cas-pty binds explicit profiles to the same storage selector.
+fn claude_profile_keychain_service(config_dir: &str) -> String {
+    use sha2::{Digest, Sha256};
+    use unicode_normalization::UnicodeNormalization;
+
+    let normalized: String = config_dir.nfc().collect();
+    let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
+    format!("Claude Code-credentials-{}", &hash[..8])
 }
 
 /// Resolve and validate an explicit Codex account directory (a `CODEX_HOME`
@@ -14635,6 +14674,11 @@ mod tests {
 
     #[test]
     fn claude_config_dir_preflight_macos_keychain() {
+        // Independent vendor-contract vector: decomposed Unicode hashes as NFC.
+        assert_eq!(
+            claude_profile_keychain_service("/tmp/cafe\u{301}"),
+            "Claude Code-credentials-0873cca0"
+        );
         for present in [true, false] {
             let profile = tempfile::tempdir().unwrap();
             valid_claude_config(profile.path());

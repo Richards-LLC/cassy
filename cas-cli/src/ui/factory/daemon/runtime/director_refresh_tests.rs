@@ -298,15 +298,16 @@ async fn cas_91bab_merge_after_batch_check_never_reaches_teammate_inbox() {
             let mut fixture = crate::ui::factory::app::merge_alert_tests::Fixture::new();
             let cas_dir = fixture.app.cas_dir().to_path_buf();
             let root = cas_dir.parent().unwrap();
+            fixture.app.set_supervisor_cli_for_test(cli);
+            let (_, mut prompts, _) = fixture.app.revalidate_and_prompt_for_delivery(
+                std::slice::from_ref(&fixture.event),
+            );
+            assert_eq!(prompts.len(), 1);
             let mut daemon = daemon_on_lanes(&cas_dir);
             std::mem::swap(&mut daemon.app, &mut fixture.app);
             fixture._env.set("CAS_FACTORY_SESSION", &daemon.session_name);
             attach_supervisor_pty(&mut daemon, root, cli, true).await;
 
-            let (_, mut prompts, _) = daemon.app.revalidate_and_prompt_for_delivery(
-                std::slice::from_ref(&fixture.event),
-            );
-            assert_eq!(prompts.len(), 1);
             assert!(prompts[0].is_merge_ready());
             let expected_text = prompts[0].text.lines().next().unwrap().to_string();
             assert_eq!(daemon.app.deliverability_request().read(None, &mut prompts), vec![true],

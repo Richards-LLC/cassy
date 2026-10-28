@@ -912,7 +912,7 @@ async fn task_show_renders_work_target_and_explicit_trunk_fallback_cas_0094() {
 #[tokio::test]
 async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, core) = setup_cas(&mut test_env);
+    let (temp, core) = setup_cas(&mut test_env);
     let created = core
         .cas_task_create(Parameters(TaskCreateRequest {
             ..basic_create("Structured state target", None)
@@ -940,14 +940,32 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
         .await
         .expect("state update");
 
+    // A newer runtime persisted additional state. Read it through the real
+    // store/tool boundary rather than asking this version's strict patch writer
+    // to accept a field it does not know how to author.
+    let tasks = open_task_store(&temp.path().join(".cas")).unwrap();
+    let mut stored = tasks.get_execution_state(&task_id).unwrap().unwrap();
+    stored["blocker_ask"] = serde_json::json!("pending-operator-decision");
+    stored["future_resume"] = serde_json::json!({"checkpoint": "newer-runtime"});
+    let conn = Connection::open(temp.path().join(".cas/cas.db")).unwrap();
+    conn.execute("UPDATE task_execution_states SET state = ?1 WHERE task_id = ?2",
+        rusqlite::params![stored.to_string(), task_id]).unwrap();
+
     let show: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "show",
         "id": task_id,
+        "full": true,
     }))
     .expect("deserialize show");
     let shown = extract_text(service.task(Parameters(show)).await.expect("show task"));
     assert!(shown.contains("Structured execution state:"), "{shown}");
     assert!(shown.contains("run focused tests"), "{shown}");
+
+    let rendered: serde_json::Value = shown.lines()
+        .find_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .expect("show retains structured execution state");
+    assert_eq!(rendered["blocker_ask"], stored["blocker_ask"]);
+    assert_eq!(rendered["future_resume"], stored["future_resume"]);
 
     let invalid: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "update",
@@ -963,6 +981,7 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
     let show_after_rejection: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
         "action": "show",
         "id": task_id,
+        "full": true,
     }))
     .expect("deserialize second show");
     let shown_after = extract_text(
@@ -972,6 +991,15 @@ async fn task_update_persists_structured_state_and_rejects_invalid_patch() {
             .expect("show task after rejection"),
     );
     assert!(shown_after.contains("run focused tests"), "{shown_after}");
+    // Read compatibility does not weaken validation of known stored fields.
+    stored["files_touched"] = serde_json::json!("not-an-array");
+    conn.execute("UPDATE task_execution_states SET state = ?1 WHERE task_id = ?2",
+        rusqlite::params![stored.to_string(), task_id]).unwrap();
+    let malformed: cas_mcp::TaskRequest = serde_json::from_value(serde_json::json!({
+        "action": "show", "id": task_id, "full": true
+    })).unwrap();
+    let error = service.task(Parameters(malformed)).await.expect_err("known stored field types stay validated");
+    assert!(error.to_string().contains("files_touched"));
 }
 
 // =============================================================================

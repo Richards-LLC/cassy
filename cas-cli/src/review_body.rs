@@ -164,6 +164,13 @@ pub(crate) fn relay_evidence_manifest(
     use crate::artifacts::{PublishContext, paths::PublishRoots};
     use sha2::{Digest, Sha256};
     use std::io::Write;
+    anyhow::ensure!(
+        !task_id.is_empty()
+            && task_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
+        "manifest task id must be a single safe path component"
+    );
     let config = crate::config::Config::load(cas_root).unwrap_or_default();
     let root =
         crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
@@ -529,8 +536,18 @@ mod tests {
         let _env = crate::test_support::TestEnvGuard::temp_home();
         let (temp, base, head) = two_commit_repo();
         let outside = temp.path().join("outside-manifest");
-        assert!(relay_evidence_manifest(&temp.path().join(".cas"), outside.to_str().unwrap(), "proof").is_err());
-        assert!(!outside.exists(), "invalid task IDs must be rejected before any evidence write");
+        assert!(
+            relay_evidence_manifest(
+                &temp.path().join(".cas"),
+                outside.to_str().unwrap(),
+                "proof"
+            )
+            .is_err()
+        );
+        assert!(
+            !outside.exists(),
+            "invalid task IDs must be rejected before any evidence write"
+        );
         let task = Task::new("cas-fixture".into(), "Fixture".into());
         let worker = "status: ready\n\
                       tip: abc on factory/w; worktree: clean\n\

@@ -27801,6 +27801,7 @@ mod merge_state_gate_tests {
         git(p, &["add", ".gitignore", "cas-cli", "delivery.rs"]);
         git(p, &["commit", "-q", "-m", "test(cas-4386): delivery with scoped proof obligation"]);
         let delivery = head_sha(p);
+        git(p, &["push", "-q", "origin", "factory/worker"]);
         let mut tree = rev_parse_local(p, "HEAD^{tree}");
         // A queue's synthetic commit and the landed commit may differ while
         // carrying the same tree. Keep that real Git boundary in the fixture.
@@ -27882,6 +27883,7 @@ esac
         let service = CasService::new(core, None);
         let mut task = worker_task("worker");
         task.id = "cas-4386".into();
+        task.status = TaskStatus::AwaitingMerge;
         task.risk = vec![TaskRisk::None];
         task.deliverables.factory_branch_anchor = Some(delivery.clone());
         task.deliverables.parked_branch = Some("factory/worker".into());

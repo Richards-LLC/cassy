@@ -498,6 +498,7 @@ fn cas_9021_uncertain_attempt_is_settled_by_a_later_definite_refusal() {
     ))
     .unwrap();
     refusal["scope"]["team_id"] = scope.team_id.clone().into();
+    refusal["binding"]["team_id"] = scope.team_id.clone().into();
     for (key, value) in [("code", "no_eligible_readers"), ("reason", "no_eligible_readers"), ("next_action", "retry_later")] {
         refusal[key] = value.into();
     }

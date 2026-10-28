@@ -268,6 +268,99 @@ fn private_file(path: &FsPath, create_new: bool) -> anyhow::Result<File> {
     Ok(options.open(path)?)
 }
 
+/// Resolve only this session's stored upload, never a path supplied by a browser.
+/// Descriptor-relative opens reject replaced directories and symlinks, including
+/// the final file. Keep the opened inode for streaming after verifying its bytes.
+pub(super) fn open_preview(
+    root: &FsPath,
+    session: &str,
+    record: &cas_store::PublishedArtifact,
+) -> anyhow::Result<File> {
+    use std::io::{Read, Seek};
+    anyhow::ensure!(
+        valid_session_name(session)
+            && record.task_id == format!("commander-{session}")
+            && record.status == "local"
+            && record.cloud_artifact_id.is_none()
+            && record.size_bytes > 0
+            && record.size_bytes <= MAX_BYTES as u64
+            && record.name == safe_name(&record.name)
+            && record
+                .id
+                .strip_prefix("art-")
+                .is_some_and(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit())),
+        "upload unavailable"
+    );
+    let config = crate::config::Config::load(root)?;
+    let base =
+        crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref())
+            .canonicalize()?;
+    let path = crate::config::project_factory_artifacts_root(root, &base)
+        .join("commander")
+        .join(session)
+        .join(&record.id)
+        .join(&record.name);
+    #[cfg(unix)]
+    let mut file = {
+        use std::ffi::CString;
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::ffi::OsStrExt;
+        let mut current = File::open(&base)?;
+        let components = path.strip_prefix(&base)?.components().collect::<Vec<_>>();
+        for (index, component) in components.iter().enumerate() {
+            anyhow::ensure!(
+                matches!(component, std::path::Component::Normal(_)),
+                "upload unavailable"
+            );
+            let name = CString::new(component.as_os_str().as_bytes())?;
+            let directory = if index + 1 == components.len() {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+            // O_NONBLOCK also prevents a replaced FIFO from blocking the hub.
+            let fd = unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK
+                        | directory,
+                )
+            };
+            if fd == -1 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            current = unsafe { File::from_raw_fd(fd) };
+        }
+        current
+    };
+    #[cfg(not(unix))]
+    let mut file: File = { anyhow::bail!("upload previews unavailable on this platform") };
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() == record.size_bytes,
+        "upload unavailable"
+    );
+    let mut digest = Sha256::new();
+    let mut remaining = record.size_bytes;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let read = file.read(&mut buffer[..remaining.min(64 * 1024) as usize])?;
+        anyhow::ensure!(read > 0, "upload unavailable");
+        digest.update(&buffer[..read]);
+        remaining -= read as u64;
+    }
+    anyhow::ensure!(
+        format!("{:x}", digest.finalize()) == record.sha256,
+        "upload unavailable"
+    );
+    file.rewind()?;
+    Ok(file)
+}
+
 /// A process-independent lock spans file persistence and artifact registration, so a lost
 /// response or hub restart replays the same identity rather than minting another artifact.
 fn save(

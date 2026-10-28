@@ -361,6 +361,8 @@ fn a_committed_upload_never_persists_or_prints_the_signed_upload_url() {
     let record: serde_json::Value = serde_json::from_str(&stdout).unwrap();
     assert_eq!(record["status"], "committed");
     assert_eq!(record["storage"], "committed");
+    // This fixture deliberately has no task row to carry the peer reference.
+    assert_eq!(record["metadata_state"], "metadata_unavailable");
     assert_eq!(record["cloud_url"], "https://cloud.example/a/cloud-42");
     assert_eq!(record["mime"], "application/octet-stream");
 

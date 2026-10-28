@@ -17,7 +17,7 @@
 //! decision so it can no longer drift per call site.
 
 use cas_mux::{InjectOutcome, SupervisorCli};
-use cas_store::WakeAttempt;
+use cas_store::{PromptQueueStore, WakeAttempt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -1509,7 +1509,7 @@ impl FactoryDaemon {
                 // cas-1f0c: a queued row's body reaches a Claude Teams
                 // recipient through the CAS hook only; its inbox gets a pointer.
                 let inbox_text = if let Some((id, body)) = queued {
-                    let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+                    let queue = cas_store::SqlitePromptQueueStore::open_read_only(self.app.cas_dir())?;
                     let delivery = queue.recipient_delivery(id, target)?
                         .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?;
                     Some(match delivery {

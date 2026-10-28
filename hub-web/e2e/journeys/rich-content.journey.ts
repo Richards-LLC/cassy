@@ -28,7 +28,7 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
   }));
   await journey.stage("A failed image collapses into its own card", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
     hub.supervisorSays(PELICAN, "Keep this image while reading later updates.", { attachments: [file("art-cached-image", "Cached image.png", "image/png")] });
     await expect(preview).toHaveAttribute("data-preview-state", "waiting");
@@ -123,6 +123,13 @@ for (const [index, variant] of variants.entries()) {
         await expect(frame.getByRole("status")).toContainText("Copy failed");
         await expect(copy).toBeEnabled();
         await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
+        const statusSource = "const count = 2;\nconsole.log(count);";
+        hub.supervisorSays(PELICAN, `\`\`\`ts smoke.ts\n${statusSource}\n\`\`\``, { kind: "status" });
+        const statusFrame = log.locator(".code-frame").last();
+        await expect(statusFrame.locator(".code-frame-label")).toHaveText("smoke.ts");
+        await statusFrame.getByRole("button", { name: "Copy source from smoke.ts" }).click();
+        await expect(statusFrame.getByRole("status")).toHaveText("Copied");
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(statusSource);
       });
 
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {

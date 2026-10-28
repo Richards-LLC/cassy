@@ -2333,6 +2333,39 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
     );
 }
 
+/// Large legacy ticket collections must be removed without losing durable identities.
+#[test]
+fn hub_auth_startup_compacts_legacy_tickets_and_keeps_devices() {
+    use chrono::{Duration, Utc};
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    let now = Utc::now();
+    let (_, context) = paired_context(&auth, now, Scope::default_read_only());
+    let path = root.join("auth.json");
+    let mut legacy: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let devices = legacy["devices"].clone();
+    let pairings = legacy["pairings"].clone();
+    let ticket = serde_json::json!({
+        "ticket_hash": "redacted-ticket", "context": context, "session": "fixture",
+        "endpoint": "/v1/sessions/fixture/attach", "issued_at": now - Duration::days(30),
+        "expires_at": now - Duration::days(29), "consumed_at": now - Duration::days(30)
+    });
+    legacy["tickets"] = serde_json::Value::Array(vec![ticket; 10_977]);
+    std::fs::write(&path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+    drop(auth);
+    let reopened = AuthStore::open(&root, "machine-test").unwrap();
+    let compact = std::fs::read(&path).unwrap();
+    assert!(compact.len() < 200_000, "startup left {} bytes of legacy tickets", compact.len());
+    let compact: serde_json::Value = serde_json::from_slice(&compact).unwrap();
+    assert_eq!(compact["devices"], devices);
+    assert_eq!(compact["pairings"], pairings);
+    let before = std::fs::read(&path).unwrap();
+    let ticket = reopened.issue_ws_ticket(&context, "fixture", "/attach", now).unwrap();
+    reopened.consume_ws_ticket(&ticket.ticket, "https://controller.example", "fixture", "/attach", now).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before, "ephemeral ticket traffic must not rewrite durable state");
+}
+
 #[test]
 fn h2_pair_02_independent_store_instances_reload_and_serialize_mutations() {
     use chrono::Utc;

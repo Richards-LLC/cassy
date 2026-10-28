@@ -59,3 +59,14 @@ Unix reset instants are selected; raw input is never persisted. A private atomic
 (default `~/.claude`). It expires after 5 minutes and after an account identity
 change. Unconfigured statuslines and idle sessions therefore show unknown usage.
 This change does not initiate model requests or a separate provider login probe.
+
+## Native Claude observations
+
+Generated statuslines use `cas statusline --with-session`, including factory
+sessions. Init/update upgrade the bare command in existing profile and project
+settings without replacing custom profile statuslines. A Claude percentage may
+outlive five minutes only while its known reset remains in the future; expired
+windows and identity changes still clear it. The picker puts `as of 2:10 PM ET`
+beside weekly capacity, before the reset so truncation cannot hide its age.
+Full and compact limits also label the observation. Account/limits JSON carries
+an optional UTC RFC3339 observation instant; it makes no live-capacity claim.

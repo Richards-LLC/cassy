@@ -2926,7 +2926,7 @@ fn eastern(instant: DateTime<Utc>) -> DateTime<FixedOffset> {
 }
 
 /// `1:04 AM ET`
-fn eastern_time(instant: DateTime<Utc>) -> String {
+pub(crate) fn eastern_time(instant: DateTime<Utc>) -> String {
     eastern(instant).format("%-I:%M %p ET").to_string()
 }
 

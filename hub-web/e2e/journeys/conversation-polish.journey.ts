@@ -85,13 +85,18 @@ test("HUB-J7 actual options and truthful progress (cas-6e3a)", journeyPart, asyn
     await page.getByRole("button", { name: "Supervisor tasks", exact: true }).click();
     await expect(page.locator(".status-task").filter({ hasText: "Another supervisor" })).toHaveCount(0);
     const grip = page.getByRole("separator", { name: "Resize tasks and progress" });
+    const panel = page.locator(".conversation-context");
+    const initialPanelWidth = (await panel.boundingBox())!.width;
     await grip.focus(); await page.keyboard.press("ArrowLeft");
     await expect(grip).toHaveAttribute("aria-valuenow", "336");
+    const keyboardPanelWidth = (await panel.boundingBox())!.width;
+    expect(keyboardPanelWidth).toBe(initialPanelWidth + 16);
     const bounds = (await grip.boundingBox())!;
     await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
     await page.mouse.down(); await page.mouse.move(bounds.x - 64, bounds.y + bounds.height / 2); await page.mouse.up();
     const resized = await grip.getAttribute("aria-valuenow");
     expect(Number(resized)).toBeGreaterThan(336);
+    expect((await panel.boundingBox())!.width).toBeGreaterThan(keyboardPanelWidth);
     expect(await page.evaluate(() => localStorage.getItem("cassy.context-width"))).toBe(resized);
     await page.setViewportSize({ width: 390, height: 844 });
     await expect(grip).toBeHidden();

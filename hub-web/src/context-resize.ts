@@ -26,7 +26,7 @@ export function syncContextResize(shell: HTMLElement, options?: ResizeOptions): 
   const current = () => Math.min(maximum(), Math.max(240, preferred));
   const sync = () => {
     grip.hidden = environment.phone();
-    shell.style.setProperty("--context-panel-width", `${current()}px`);
+    shell.style.setProperty("--worker-collapsed-width", `${current()}px`);
     grip.setAttribute("aria-valuemin", "240"); grip.setAttribute("aria-valuemax", String(maximum())); grip.setAttribute("aria-valuenow", String(current()));
   };
   const save = (width: number) => {

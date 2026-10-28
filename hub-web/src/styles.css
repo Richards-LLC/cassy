@@ -3176,10 +3176,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 
 /* Release ledger: one completion strip, quiet ruled groups, device-local width. */
 .conversation-shell { position: relative; }
-.conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--context-panel-width, 320px); }
+.conversation-shell.context-open { grid-template-columns: var(--conversation-rail-width) minmax(0, 1fr) var(--worker-collapsed-width); }
 .context-resize { display: none; }
 @media (min-width: 53.001rem) {
-  .conversation-shell.context-open > .context-resize:not([hidden]) { display: block; position: absolute; z-index: 4; top: var(--space-4); bottom: var(--space-4); right: calc(var(--context-panel-width, 320px) - var(--space-1)); width: var(--space-2); cursor: col-resize; touch-action: none; border-radius: var(--radius-pill); }
+  .conversation-shell.context-open > .context-resize:not([hidden]) { display: block; position: absolute; z-index: 4; top: var(--space-4); bottom: var(--space-4); right: calc(var(--worker-collapsed-width) - var(--space-1)); width: var(--space-2); cursor: col-resize; touch-action: none; border-radius: var(--radius-pill); }
   .context-resize:hover, .context-resize:focus-visible { background: var(--line-strong); outline: 2px solid var(--color-focus); outline-offset: 2px; }
 }
 .release-progress { padding-bottom: var(--space-4); margin-bottom: var(--space-3); border-bottom: var(--line-width) solid var(--line-subtle); color: var(--ink); }

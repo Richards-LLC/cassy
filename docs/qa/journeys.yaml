@@ -149,6 +149,10 @@ invariants:
     check: Run the supervisor working indicator regression in conversations.test.ts and the single revoked machine part of network-switch.journey.ts with a recent Output frame, then verify an answered real Claude supervisor at its idle prompt and during reconnecting.
     bug:
       task: cas-a252
+  HUB-J12-LOADED-HOST-LIVENESS:
+    statement: Slow catalog or capability reads do not condemn a responding machine; cached pending conversations show its actual connection state, and session retries pause while it is down and stay bounded when it returns.
+    check: Run the busy-catalog machine-pong Rust regression, connection-lifecycle and pending-label regressions, then pair the hosted build to an isolated release hub with 1.8-second reads and a catalog past its deadline; require steady Live and actual hub loss within ten seconds and recovery within five.
+    bug: {task: cas-9957}
   HUB-J11-DEVICE-ATTACHMENT:
     bug:
       task: cas-9e46
@@ -1316,6 +1320,7 @@ journeys:
   invariants:
   - HUB-J12-GOAL
   - HUB-J12-TRUTHFUL-WORKING
+  - HUB-J12-LOADED-HOST-LIVENESS
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null

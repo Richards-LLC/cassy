@@ -147,6 +147,14 @@ describe("Cassy Cloud supervisor send plan", () => {
       .toMatchObject({ kind: "blocked", block: "no-session" });
   });
 
+  it("waits for unknown hub capabilities without asking for an upgrade", () => {
+    const plan = planSupervisorSend(context({ daemonAttach: undefined }));
+    expect(plan).toMatchObject({ kind: "blocked", block: "checking-hub" });
+    if (plan.kind === "blocked") expect(plan.reason).not.toMatch(/old|upgrade/i);
+    expect(planSupervisorSend(context({ ended: true, daemonAttach: undefined })))
+      .toMatchObject({ kind: "blocked", block: "ended" });
+  });
+
   it("always states a reason a person can act on", () => {
     for (const plan of [
       planSupervisorSend(context({ text: "" })),

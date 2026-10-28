@@ -249,6 +249,8 @@ export class HubDouble {
   private readonly sessionSocketsByMachine = new Map<string, Set<WebSocketRoute>>();
   /** Health pings the double answered, per machine. */
   readonly pongs = new Map<string, number>();
+  /** Delay real health responses using the journey's protocol clock. */
+  healthPongDelayMs = 0;
   /**
    * GET /v1/sessions answered, per machine (cas-9772). Every catalog the page
    * renders arrives through one of these, so a journey bounds "the page shows
@@ -1343,7 +1345,9 @@ export class HubDouble {
       if (frame.channel === "health" && typeof frame.ping === "number") {
         this.pongs.set(machineId, (this.pongs.get(machineId) ?? 0) + 1);
         this.observed();
-        ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        const reply = () => ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        if (this.healthPongDelayMs > 0) this.delay(reply, this.healthPongDelayMs);
+        else reply();
         return;
       }
       if (frame.channel === "events") return;

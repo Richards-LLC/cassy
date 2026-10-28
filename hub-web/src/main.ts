@@ -3232,7 +3232,7 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
     machineLabel: machine?.label,
     session: selectedSession,
     supervisor: supervisorTarget(session),
-    daemonAttach: machine ? hubSupports(machine.id, "daemon_attach") : false,
+    daemonAttach: machine ? machineInfo.get(machine.id)?.capabilities.includes("daemon_attach") : undefined,
     scopes: machine?.scopes ?? [],
     leaseHeldByMe: lease?.held_by_me === true,
     leaseControllerLabel: lease?.held_by_me ? undefined : lease?.controller_label,
@@ -4530,7 +4530,7 @@ function renderConversationList(): void {
     const machineOnline = connectionStates.get(machine.id)?.phase === "live" && session.machine_online !== false;
     const history = conversationHistories.get(key);
     const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
-    return { key, ended: session.ended, harness: session.harness, account_email: session.account_email, project: session.project, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    return { key, ended: session.ended, harness: session.harness, account_email: session.account_email, project: session.project, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live", conversationStatusLabel(machine.id, session.name)) ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4596,7 +4596,7 @@ function keptMessagesLine(): string {
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
 function conversationHeaderLabel(machineId: string, session: string | undefined): string {
   if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return "Ended";
-  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live") ?? conversationStatusLabel(machineId, session);
+  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live", conversationStatusLabel(machineId, session)) ?? conversationStatusLabel(machineId, session);
 }
 
 /**

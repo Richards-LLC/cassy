@@ -132,6 +132,8 @@ export function conversationAttentionBadge(count: number): { hidden: boolean; te
   return { hidden: count < 1, text: String(count), label: `Attention: ${count} item${count === 1 ? "" : "s"} for this session` };
 }
 
+/** Show work (cas-ff22): a list with a quiet leading tick, the thread's work rows. */
+const SHOW_WORK_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 7h2M4 12h2M4 17h2M9 7h11M9 12h11M9 17h7"/></svg>';
 const RAW_OUTPUT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg>';
 const INTERRUPT_ICON = '<svg class="action-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
 
@@ -147,7 +149,7 @@ export function interruptLabel(project: string | undefined): string {
  * description beside it (applyActionAvailability), instead of disappearing.
  */
 export function conversationActionsMarkup(project: string | undefined): string {
-  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
+  return `<span class="conversation-header-actions"><button id="conversation-raw-output" class="conversation-action" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Raw output">${RAW_OUTPUT_ICON}<span class="action-label">Raw output</span></button><button id="conversation-interrupt" class="conversation-action conversation-interrupt" type="button" aria-label="${escapeHtml(interruptLabel(project))}">${INTERRUPT_ICON}<span class="action-label">Interrupt</span></button><button id="conversation-show-work" class="conversation-action" type="button" aria-pressed="false" aria-label="Show work">${SHOW_WORK_ICON}<span class="action-label">Show work</span></button><span id="conversation-show-work-reason" hidden></span><span id="conversation-raw-output-reason" hidden></span><span id="conversation-interrupt-reason" hidden></span></span>`;
 }
 
 export function conversationHeaderMarkup(model: ConversationShellModel): string {
@@ -159,17 +161,15 @@ export function conversationHeaderMarkup(model: ConversationShellModel): string 
   return `<header class="conversation-heading thead"><div class="conversation-topline"><button id="conversation-back" type="button" aria-label="‹ Conversations"><span class="back-glyph">‹</span><span class="back-label"> Conversations</span></button>${cloudBrand()}${CONVERSATION_ATTENTION_BUTTON}<button id="conversation-fleet" class="conversation-fleet" type="button" aria-haspopup="dialog" aria-expanded="false" aria-label="Tasks &amp; progress">⋯</button>${conversationActionsMarkup(project)}</div><div class="conversation-identity"><span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(host || model.supervisor || "?"))}</span><div class="id"><h1><b title="${escapeHtml(title)}"${project ? "" : ' class="codename"'}>${escapeHtml(title)}</b></h1><span class="conversation-host"><span class="host-where" title="${escapeHtml(project ? [host, supervisor].filter(Boolean).join(" · ") : host)}">${project ? `${host ? `<span class="host-machine">${hostMarkup(host)}</span><span class="host-sep"> · </span>` : ""}<span class="codename">${escapeHtml(supervisor)}</span>` : `<span class="host-machine">${hostMarkup(host)}</span>`}</span><span id="conversation-connection" role="status"></span></span></div></div></header>`;
 }
 
-/** Attaching files from this browser has no transport yet; the clip stays out of the composer until it does. */
-export const ATTACH_SUPPORTED = false;
-/** The clip's reason, for when it comes back disabled-with-a-reason or enabled. */
-export const ATTACH_DISABLED_REASON = "Attaching files from this device is not supported yet. Supervisors send reports to you; sending files to a supervisor is coming.";
-export const composerClipMarkup = `<button type="button" class="composer-clip" disabled aria-disabled="true" title="${ATTACH_DISABLED_REASON}" aria-label="Attach a file (not yet supported)"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></button>`;
+/** Attachments use the authenticated hub upload API before the durable message send. */
+export const ATTACH_SUPPORTED = true;
+export const composerClipMarkup = `<button type="button" id="message-attach" class="composer-clip" title="Attach files" aria-label="Attach files"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.8 9.1l-5 5a3.2 3.2 0 01-4.6-4.6l6-6a2.1 2.1 0 013 3l-6 6a1 1 0 01-1.4-1.4l5.3-5.3"/></svg></button>`;
 const SEND_GLYPH = '<svg class="send-glyph" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true" focusable="false"><path d="M2.4 9.1l14.3-6.4c.7-.3 1.4.4 1.1 1.1l-6.4 14.3c-.3.7-1.4.6-1.5-.2l-.8-5.3-5.3-.8c-.8-.1-.9-1.2-.2-1.5z"/></svg>';
 
 /**
  * Pebble composer (cas-3800): the field is a pill on --panel with --lift, the
  * send button takes the machine accent from the shell root, and the attach
- * clip sits beside the field, present but disabled. Dresses the existing
+ * clip sits beside the field and opens the native file picker. Dresses the existing
  * `.message` region in place so the ids the live-region updater and the send
  * handler bind to are untouched.
  *
@@ -191,13 +191,11 @@ export function dressComposer(composer: HTMLElement, supervisor?: string, projec
     // still ellipsises on one line as the last guard (journey F9).
     input.dataset.placeholders = JSON.stringify(composerPlaceholders(project));
     fitComposerPlaceholder(input);
-    // dressComposer runs before a rebuild re-attaches the composer: fit again
-    // once it is back in the document.
-    queueMicrotask(() => fitComposerPlaceholder(input));
+    // Fit the reattached field after the shell's task yields. A microtask
+    // forced another whole-page layout inside the conversation-opening click.
+    requestAnimationFrame(() => { if (input.isConnected) fitComposerPlaceholder(input); });
     watchComposerPlaceholder(input);
     input.rows = 1;
-    // Hidden until attaching works (cas-17e3): a control that can never be
-    // used is noise for every reader, and a dead stop for keyboard users.
     if (ATTACH_SUPPORTED && !composer.querySelector(".composer-clip")) input.insertAdjacentHTML("beforebegin", composerClipMarkup);
     if (!ATTACH_SUPPORTED) composer.querySelector(".composer-clip")?.remove();
   }
@@ -270,14 +268,17 @@ export function fitComposerPlaceholder(field: HTMLTextAreaElement): void {
   else if (field.placeholder !== chosen) field.placeholder = chosen;
 }
 
-const watchedComposerFields = new WeakSet<HTMLTextAreaElement>();
+const watchedComposerFields = new WeakMap<HTMLTextAreaElement, ResizeObserver | null>();
 
 /** Refit on every size change of the field (a rotation, a breakpoint, the rail opening) and once web fonts land. */
 function watchComposerPlaceholder(field: HTMLTextAreaElement): void {
   if (watchedComposerFields.has(field)) return;
-  watchedComposerFields.add(field);
-  const view = field.ownerDocument.defaultView as (Window & typeof globalThis) | null;
-  if (view && typeof view.ResizeObserver === "function") new view.ResizeObserver(() => fitComposerPlaceholder(field)).observe(field);
+  // A field built in a <template> has an inert ownerDocument until insertion.
+  const view = (field.ownerDocument.defaultView ?? (typeof window === "undefined" ? null : window)) as (Window & typeof globalThis) | null;
+  const observer = view && typeof view.ResizeObserver === "function"
+    ? new view.ResizeObserver(() => fitComposerPlaceholder(field)) : null;
+  watchedComposerFields.set(field, observer);
+  observer?.observe(field);
   void field.ownerDocument.fonts?.ready.then(() => fitComposerPlaceholder(field));
 }
 

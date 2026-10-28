@@ -1409,6 +1409,10 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
             "merge redelivery with missing source",
         ],
     );
+    std::fs::write(f.dir.path().join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(f.dir.path(), &["add", "footer.css"]);
+    git(f.dir.path(), &["commit", "-qm", "reviewed replacement"]);
+    let replacement = git(f.dir.path(), &["rev-parse", "HEAD"]);
     let output = close_output(&f).await;
     assert!(output.contains("DELIVERY CONTENT DROPPED"), "{output}");
     let dispatch = cas_store::get_latest_verification_dispatch(&cas_dir, TASK)
@@ -1441,6 +1445,22 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
     assert!(proof.anchor_commits.contains(&f.final_tip));
     let supervisor = CasCore::with_daemon(cas_dir.clone(), None, None);
     supervisor.set_agent_id_for_testing("supervisor-session".into());
+    env.set("CAS_AGENT_ROLE", "supervisor");
+    let reviewed_close = |reason: String| supervisor.cas_task_close(Parameters(TaskCloseRequest {
+        no_delivery: None,
+        id: TASK.into(),
+        reason: Some(reason),
+        commit_receipt: Some(f.final_tip.clone()),
+        supervisor_override: Some(true),
+        stranded_branch_override: None,
+        legacy_bypass_code_review: None,
+        search_manifest: None,
+    }));
+    let invalid = text(reviewed_close(format!("reviewed-drop: {} -- not a replacement", f.final_tip)).await.unwrap());
+    assert!(invalid.contains("DELIVERY REVIEW REJECTED") && invalid.contains("must differ from anchor"), "{invalid}");
+    let reason = format!("reviewed-drop: {replacement} -- replace footer; keep the \"reviewed\" spacing.");
+    let pending = text(reviewed_close(reason.clone()).await.unwrap());
+    assert!(pending.contains("VERIFICATION REQUIRED") && !pending.contains("DELIVERY CONTENT DROPPED"), "{pending}");
     supervisor.cas_verification_add(Parameters(serde_json::from_value(serde_json::json!({
         "task_id":TASK,"dispatch_id":dispatch.id,"status":"approved","summary":"Independent review recorded; integration proof remains a separate close obligation"
     })).unwrap())).await.expect("the legitimate independent verdict must be recordable");
@@ -1454,4 +1474,9 @@ async fn cas_5dc0_merged_redelivery_has_a_dispatch_even_when_content_refuses_clo
         TaskStatus::Closed,
         "a dispatch never waives the content gate"
     );
+    let reviewed = text(reviewed_close(reason).await.unwrap());
+    let closed = open_task_store(&cas_dir).unwrap().get(TASK).unwrap();
+    assert_eq!(closed.status, TaskStatus::Closed, "{reviewed}");
+    assert!(closed.notes.contains(&replacement) && closed.notes.contains("reviewed delivery content supersession accepted"), "{}", closed.notes);
+
 }

@@ -244,6 +244,55 @@ impl SqliteEventStore {
     }
 
     /// Parse a row into an Event
+    /// Newest events of `event_types` authored by `session_ids`, at or
+    /// before `until` and at or after `floor`, newest first (cas-8f88 work
+    /// events). `floor` bounds the scan through `idx_events_created`; the
+    /// caller drops rows at the `until` boundary it already served.
+    pub fn list_for_sessions_until(
+        &self,
+        session_ids: &[String],
+        event_types: &[EventType],
+        floor: DateTime<Utc>,
+        until: Option<DateTime<Utc>>,
+        limit: usize,
+    ) -> Result<Vec<Event>> {
+        if session_ids.is_empty() || event_types.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let placeholders = |count: usize, first: usize| {
+            (first..first + count)
+                .map(|index| format!("?{index}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let sql = format!(
+            "SELECT id, event_type, entity_type, entity_id, summary, metadata, created_at, session_id
+             FROM events
+             WHERE created_at >= ?1
+               AND (?2 IS NULL OR julianday(created_at) <= julianday(?2))
+               AND session_id IN ({})
+               AND event_type IN ({})
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3",
+            placeholders(session_ids.len(), 4),
+            placeholders(event_types.len(), 4 + session_ids.len()),
+        );
+        let mut values: Vec<rusqlite::types::Value> = vec![
+            floor.to_rfc3339().into(),
+            until.map(|at| at.to_rfc3339()).into(),
+            (limit as i64).into(),
+        ];
+        values.extend(session_ids.iter().map(|id| id.clone().into()));
+        values.extend(event_types.iter().map(|kind| kind.to_string().into()));
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let mut stmt = conn.prepare(&sql)?;
+        let events = stmt
+            .query_map(rusqlite::params_from_iter(values), Self::row_to_event)?
+            .filter_map(|row| row.ok())
+            .collect();
+        Ok(events)
+    }
+
     fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<Event> {
         let event_type_str: String = row.get("event_type")?;
         let entity_type_str: String = row.get("entity_type")?;

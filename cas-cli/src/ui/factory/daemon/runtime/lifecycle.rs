@@ -347,11 +347,11 @@ pub(super) fn enqueue_worker_delivery_stalled_relay(
     )
 }
 
-pub(super) fn enqueue_usage_limit_switch_relay(
-    cas_dir: &std::path::Path, worker: &str, occurrence: &str, detail: &str, switch_queued: bool,
+pub(super) fn enqueue_usage_limit_relay(
+    cas_dir: &std::path::Path, worker: &str, occurrence: &str, detail: &str,
 ) -> WorkerAttentionRelayOutcome {
     enqueue_worker_attention_relay_inner(cas_dir, "worker_unavailable", worker, None, None,
-        |_| detail.to_owned(), occurrence, None, &[], !switch_queued).0
+        |_| detail.to_owned(), occurrence, None, &[], true).0
 }
 
 /// Surface a terminal harness-side refusal even when its MCP child continues
@@ -1947,14 +1947,15 @@ mod worker_attention_tests {
             },
         );
 
-        let _ = enqueue_usage_limit_switch_relay(&cas_dir, "switched", "episode-2",
-            "Worker switched, task cas-held: usage limit; queued account switch old -> next. Worktree, branch and task bindings kept.", true);
+        let _ = enqueue_usage_limit_relay(&cas_dir, "limited", "episode-2",
+            "Worker limited, task cas-held: usage limit; waiting for reset. No restart queued.");
         let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 5, "a persisted occurrence replays idempotently");
-        let switched = rows.iter().find(|row| row.prompt.contains("old -> next")).unwrap();
-        // pin: a successfully queued switch must not ask the supervisor to recover it.
-        assert!(!switched.prompt.contains("reassign or recover"), "{}", switched.prompt);
+        // pin: find the limit notice by its worker subject before checking recovery guidance.
+        let limited = rows.iter().find(|row| row.prompt.contains("Worker limited,")).unwrap();
+        // pin: a stopped worker must retain supervisor recovery guidance.
+        assert!(limited.prompt.contains("reassign or recover"), "{}", limited.prompt);
         assert!(rows.iter().all(|row| {
             row.target == "supervisor"
                 && crate::mcp::tools::core::task::lifecycle::supervisor_push::is_lifecycle_wake_source(&row.source)
@@ -3271,6 +3272,7 @@ impl FactoryDaemon {
             reported_permission_requests: std::collections::HashSet::new(),
             relay_jobs: Default::default(),
             last_commander_mirror_scan: None,
+            work_events: Default::default(),
             queue_jobs,
         reported_auth_failed_workers: std::collections::HashMap::new(),
             last_auth_failure_scan: None,
@@ -4132,6 +4134,7 @@ impl FactoryDaemon {
 
             // Flush pending WebSocket client output
             if !self.ws_clients.is_empty() {
+                self.deliver_work_events();
                 self.flush_ws_client_output().await;
             }
 

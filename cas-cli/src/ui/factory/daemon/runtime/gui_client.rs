@@ -349,11 +349,14 @@ impl FactoryDaemon {
                 self.send_binding_intake_reply(client_id, reply);
             }
             ClientMessage::OperatorReplyDelivered { .. }
-            | ClientMessage::OperatorReplyPersisted { .. } => {
+            | ClientMessage::OperatorReplyPersisted { .. }
+            | ClientMessage::OperatorNoticePersisted { .. } => {
                 // Delivery receipts are emitted by the authenticated hub
                 // connector, never by the local GUI client.
             }
-            ClientMessage::ConversationHistoryRequest { .. } => {
+            ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::WorkEventsRequest { .. }
+            | ClientMessage::WorkEventDetailRequest { .. } => {
                 // Durable conversation history is a paired Commander surface;
                 // the local GUI has no authenticated device scope to attach.
             }

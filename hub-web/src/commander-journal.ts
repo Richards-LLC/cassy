@@ -20,11 +20,13 @@ export function credentialFence(machine: StoredMachine): CredentialFence {
 export type JournalReceipt = MessageQueued & { sentAt: number };
 export type JournalSend = { key: string; scope: DeliveryScope; send?: PendingSend; receipt?: JournalReceipt; revision: number; updatedAt: number; flight?: CredentialFence; owner?: string; claim?: string };
 export type StoredReply = { key: string; scope: DeliveryScope; reply: OperatorReply; persistedAt: number };
+type ReplyWrite = { scope: DeliveryScope; reply: OperatorReply; fence: CredentialFence; done: (saved: boolean) => void };
 type Block = { key: string; credentialId: string };
 const itemKey = (scope: DeliveryScope, id: string | number) => JSON.stringify([scopeKey(scope), id]);
 const blockKey = (hub: string, fence: CredentialFence) => JSON.stringify(["revoked", hub, fence.credentialId]);
 const sameFence = (a: CredentialFence, b: CredentialFence) => a.credentialId === b.credentialId && a.generation === b.generation;
 
+export const REPLY_WRITE_BATCH = 400; // A batch must fit the durable reply retention bound.
 const RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 const object = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const finiteTime = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
@@ -65,13 +67,16 @@ function normalizedReply(value: unknown): OperatorReply | undefined {
     || !["artifact_id", "name", "mime", "sha256"].every(key => boundedText(a[key], 2_000))
     || !Number.isSafeInteger(a.size_bytes) || (a.size_bytes as number) < 0)) return undefined;
   if (value.options !== undefined && (!Array.isArray(value.options) || value.options.some(option => !boundedText(option)))) return undefined;
-  if (value.operator_label !== undefined && !boundedText(value.operator_label, 2_000)) return undefined;
+  // The live daemon encodes an absent Option<String> as null; history omits
+  // it. Canonicalize both before storage and immutable replay comparison.
+  const operatorLabel = value.operator_label ?? undefined;
+  if (operatorLabel !== undefined && !boundedText(operatorLabel, 2_000)) return undefined;
   if (value.reply_to_session !== undefined && value.reply_to_session !== null && !boundedText(value.reply_to_session, 2_000)) return undefined;
   const reply: OperatorReply = {
     notification_id: value.notification_id as number, reply_to: value.reply_to as number | null,
     message: value.message, summary: value.summary, device_id: value.device_id, kind: kind as OperatorReply["kind"],
     attachments: attachments.map(a => ({ artifact_id: a.artifact_id, name: a.name, mime: a.mime, size_bytes: a.size_bytes, sha256: a.sha256 })),
-    ...(value.operator_label === undefined ? {} : { operator_label: value.operator_label as string }),
+    ...(operatorLabel === undefined ? {} : { operator_label: operatorLabel as string }),
     ...(value.options === undefined || !(value.options as string[]).length ? {} : { options: value.options as string[] }),
     ...(value.reply_to_session === undefined || value.reply_to_session === null ? {} : { reply_to_session: value.reply_to_session as string }),
   };
@@ -101,6 +106,8 @@ export class CommanderJournal {
   // Ordered attempts on this tab's wire, never reconstructed from captions.
   private readonly wireClaims = new Map<string, JournalSend[]>();
   private readonly channel: BroadcastChannel | undefined;
+  private readonly replyWrites: ReplyWrite[] = [];
+  private writingReplies = false;
   /** Why the last reconcile could not commit, for the composer (cas-2904). */
   storageFailure: string | undefined;
   onChange?: () => void;
@@ -120,17 +127,18 @@ export class CommanderJournal {
       if (!this.factory) { reject(new Error("Browser storage is unavailable.")); return; }
       const request = this.factory.open(DELIVERY_DB, 1);
       let settled = false;
-      const timeout = setTimeout(() => { settled = true; reject(new Error("Browser storage did not answer.")); }, 5_000);
+      // IndexedDB events may wait behind rendering or another tab's writer.
+      // Elapsed main-thread time does not prove a failed durable write.
+      request.onblocked = () => { settled = true; reject(new Error("Browser storage upgrade is blocked by another tab.")); };
       request.onupgradeneeded = () => {
         for (const name of ["sends", "replies", "blocks"]) request.result.createObjectStore(name, { keyPath: "key" });
       };
       request.onsuccess = () => {
-        clearTimeout(timeout);
         if (settled) { request.result.close(); return; }
         settled = true;
         resolve(request.result);
       };
-      request.onerror = () => { clearTimeout(timeout); settled = true; reject(request.error); };
+      request.onerror = () => { settled = true; reject(request.error); };
     });
   }
   private async transaction<T>(names: string[], mode: IDBTransactionMode, run: (tx: IDBTransaction, result: (value: T) => void) => void): Promise<T> {
@@ -140,8 +148,9 @@ export class CommanderJournal {
       try { tx = db.transaction(names, mode, mode === "readwrite" ? { durability: "strict" } : undefined); }
       catch (error) { db.close(); reject(error); return; }
       let value: T;
-      const timer = setTimeout(() => { try { tx.abort(); } catch { /* completed */ } }, 5_000);
-      const cleanup = () => { clearTimeout(timer); db.close(); };
+      // A transaction queued behind a busy writer is still valid. Only the
+      // browser's commit/abort events can authorize or refuse its receipt.
+      const cleanup = () => { db.close(); };
       tx.oncomplete = () => { cleanup(); resolve(value!); };
       tx.onabort = () => { cleanup(); reject(tx.error ?? new Error("Browser storage transaction was cancelled.")); };
       tx.onerror = () => { /* onabort is the authoritative failed commit */ };
@@ -516,39 +525,68 @@ export class CommanderJournal {
     if (!validScope(scope)) return false;
     const normalized = normalizedReply(reply);
     if (!normalized) return false;
-    reply = normalized;
-    const accepted = await this.current(scope);
-    if (!accepted || !sameFence(accepted, fence)) return false;
+    return new Promise(resolve => {
+      this.replyWrites.push({ scope, reply: normalized, fence, done: resolve });
+      if (!this.writingReplies) {
+        this.writingReplies = true;
+        queueMicrotask(() => { void this.flushReplyWrites(); });
+      }
+    });
+  }
+  private async flushReplyWrites(): Promise<void> {
     try {
-      let saved = false;
-      await this.transaction<void>(["replies", "blocks"], "readwrite", (tx, done) => {
-        done(undefined);
-        const blocked = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
-        blocked.onsuccess = () => {
-          if ((blocked.result as Block | undefined)?.credentialId === fence.credentialId) return;
-          const store = tx.objectStore("replies");
-          const key = itemKey(scope, reply.notification_id);
-          const get = store.get(key);
-          get.onsuccess = () => {
-            const existing = validReplyRow(get.result) ? get.result : undefined;
-            if (get.result !== undefined && !existing) return;
+      while (this.replyWrites.length) {
+        const groups = new Map<string, ReplyWrite[]>();
+        for (const write of this.replyWrites.splice(0, REPLY_WRITE_BATCH)) {
+          const key = JSON.stringify([scopeKey(write.scope), write.fence.credentialId, write.fence.generation]);
+          const group = groups.get(key) ?? [];
+          group.push(write); groups.set(key, group);
+        }
+        for (const writes of groups.values()) {
+          let saved: boolean[] = [];
+          try { saved = await this.commitReplies(writes); } catch { /* failed commits authorize no ACK */ }
+          writes.forEach((write, index) => write.done(saved[index] === true));
+        }
+      }
+    } finally { this.writingReplies = false; }
+  }
+  private async commitReplies(writes: ReplyWrite[]): Promise<boolean[]> {
+    const { scope, fence } = writes[0];
+    const saved = writes.map(() => false);
+    const accepted = await this.current(scope);
+    if (!accepted || !sameFence(accepted, fence)) return saved;
+    await this.transaction<void>(["replies", "blocks"], "readwrite", (tx, done) => {
+      done(undefined);
+      const blocked = tx.objectStore("blocks").get(blockKey(scope.hub, fence));
+      blocked.onsuccess = () => {
+        if ((blocked.result as Block | undefined)?.credentialId === fence.credentialId) return;
+        const store = tx.objectStore("replies");
+        const all = store.getAll();
+        all.onsuccess = () => {
+          const rows = new Map<string, StoredReply>(all.result.map(row => [row.key, row]));
+          const written = new Set<string>();
+          writes.forEach(({ reply }, index) => {
+            const key = itemKey(scope, reply.notification_id);
+            const raw = rows.get(key);
+            const existing = validReplyRow(raw) ? raw : undefined;
+            if (raw !== undefined && !existing) return;
             if (existing && JSON.stringify(normalizedReply(existing.reply)) !== JSON.stringify(reply)) return;
-            if (!existing || this.now() - existing.persistedAt > RETENTION_MS) store.put({ key, scope, reply, persistedAt: this.now() } satisfies StoredReply);
-            saved = true;
-            const all = store.getAll();
-            all.onsuccess = () => {
-              const rows = survivingRows(store, all.result, validReplyRow, row => row.persistedAt, this.now())
-                .sort((a, b) => b.persistedAt - a.persistedAt || Number(b.key === key) - Number(a.key === key));
-              // Fixed count and age; never unbounded private reply storage.
-              for (const row of rows.slice(400)) store.delete(row.key);
-              for (const row of rows) if (this.now() - row.persistedAt > 90 * 24 * 60 * 60 * 1_000) store.delete(row.key);
-            };
-          };
+            if (!existing || this.now() - existing.persistedAt > RETENTION_MS) {
+              const row = { key, scope, reply, persistedAt: this.now() } satisfies StoredReply;
+              store.put(row); rows.set(key, row); written.add(key);
+            }
+            saved[index] = true;
+          });
+          // Prune once per commit, rather than scanning all private rows for
+          // every frame. All new rows in this bounded batch survive the commit.
+          const survivors = survivingRows(store, [...rows.values()], validReplyRow, row => row.persistedAt, this.now())
+            .sort((a, b) => b.persistedAt - a.persistedAt || Number(written.has(b.key)) - Number(written.has(a.key)));
+          for (const row of survivors.slice(REPLY_WRITE_BATCH)) store.delete(row.key);
         };
-      });
-      if (saved) this.changed();
-      return saved;
-    } catch { return false; }
+      };
+    });
+    if (saved.some(Boolean)) this.changed();
+    return saved;
   }
   async purge(hub: string, fence: CredentialFence): Promise<void> {
     for (const [key, attempts] of this.wireClaims) if (attempts[0]?.scope.hub === hub) this.wireClaims.delete(key);

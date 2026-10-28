@@ -12,6 +12,7 @@
  */
 import type { ConversationEvent, ConversationSend } from "./conversation-history";
 import type { OperatorReply, OperatorTurnKind } from "./types";
+import type { WorkEvent } from "./work-events";
 
 export type ThreadSide = "you" | "supervisor";
 
@@ -55,10 +56,18 @@ export interface ThreadDay { type: "day"; key: string; label: string }
 export interface ThreadSession { type: "session"; key: string; label: string }
 export interface ThreadHistoryEnd { type: "history-end"; key: string; label: string }
 export interface ThreadWorking { type: "working"; key: string }
+/**
+ * One stretch of the supervisor's work between two conversation turns
+ * (cas-ff22): its thinking, tool calls and task events, oldest first.
+ * Keyed by its first event, so events appended to it repaint this one node.
+ */
+export interface ThreadWork { type: "work"; key: string; events: WorkEvent[] }
 
-export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking;
+export type ThreadItem = ThreadDay | ThreadSession | ThreadGroup | ThreadCoalesce | ThreadHistoryEnd | ThreadWorking | ThreadWork;
 
 export interface ThreadModelOptions {
+  /** Bounds a rendered group so a single speaker cannot defeat windowing. */
+  groupSize?: number;
   /** Whether the supervisor is executing: appends the working line. */
   working?: boolean;
   /** Clock used for day labels; injectable for tests. */
@@ -70,6 +79,13 @@ export interface ThreadModelOptions {
    * "session … started" divider: the thread is that session.
    */
   session?: string;
+  /**
+   * Show work (cas-ff22): the session's work events, oldest first. Each run
+   * between two turns becomes one `work` item. Events older than the oldest
+   * loaded turn wait for that turn's page unless history is complete.
+   * Absent, the model is exactly the conversation's.
+   */
+  work?: readonly WorkEvent[];
 }
 
 export function eventKey(event: ConversationEvent): string {
@@ -141,13 +157,18 @@ function dayKey(at: number): string {
   return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`;
 }
 
+// Date#toLocaleDateString constructs a formatter on every call. History
+// presentation reuses these labels across frames and should reuse its formatters.
+const sameYearDay = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short" });
+const otherYearDay = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "numeric" });
+
 export function dayLabel(at: number, now: number): string {
   const key = dayKey(at);
   if (key === dayKey(now)) return "Today";
   if (key === dayKey(now - 86_400_000)) return "Yesterday";
   const date = new Date(at);
   const sameYear = date.getFullYear() === new Date(now).getFullYear();
-  return date.toLocaleDateString(undefined, sameYear ? { weekday: "short", day: "numeric", month: "short" } : { day: "numeric", month: "short", year: "numeric" });
+  return (sameYear ? sameYearDay : otherYearDay).format(date);
 }
 
 function turnOf(event: ConversationEvent): ThreadTurn {
@@ -204,9 +225,33 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group = undefined;
   };
 
+  const work = options.work ?? [];
+  let nextWork = 0;
+  /** Paint the work done before `until` (all of it when undefined) as one item. */
+  const flushWork = (until: number | undefined): void => {
+    const start = nextWork;
+    while (nextWork < work.length && (until === undefined || work[nextWork]!.at < until)) nextWork += 1;
+    if (nextWork === start) return;
+    closeGroup(); coalesce = undefined;
+    const run = work.slice(start, nextWork);
+    // Work that opens the thread sits under its own day, not above the first label.
+    if (lastDay === undefined) {
+      lastDay = dayKey(run[0]!.at);
+      items.push({ type: "day", key: `day:${lastDay}`, label: dayLabel(run[0]!.at, now) });
+    }
+    items.push({ type: "work", key: `work:${run[0]!.id}`, events: run });
+  };
+
   const times = shownTimes(events, now);
   events.forEach((event, index) => {
+    // Queue order survives live catch-up; its arrival sort key can be newer
+    // than the durable turns after it. Place work by the displayed clock too.
     const { at, clockAhead } = times[index]!;
+    if (at !== undefined) {
+      // Work older than the loaded history waits for its page.
+      if (index === 0 && !options.historyEnd) while (nextWork < work.length && work[nextWork]!.at < at) nextWork += 1;
+      else flushWork(at);
+    }
     if (at !== undefined) {
       const day = dayKey(at);
       if (day !== lastDay) {
@@ -261,7 +306,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     // start a new group. (Splitting on the mark alone would regroup a thread
     // on reload, where a first live turn's mark is settled differently.)
     const apart = group !== undefined && at !== undefined && groupLastAt !== undefined && at - groupLastAt >= GROUP_SPLIT_MS;
-    if (!group || group.side !== turn.side || apart) {
+    if (!group || group.side !== turn.side || apart || group.turns.length >= (options.groupSize ?? Infinity)) {
       closeGroup();
       group = { type: "group", key: `group:${turn.key}`, side: turn.side, turns: [], time: undefined };
       items.push(group);
@@ -270,6 +315,7 @@ export function threadModel(events: readonly ConversationEvent[], options: Threa
     group.time = stampLabel(at, now) ?? group.time;
     if (at !== undefined) { group.clockAhead = clockAhead; groupLastAt = at; }
   });
+  if (events.length > 0) flushWork(undefined);
   closeGroup();
   // An empty durable page owns the empty state. Do not let pagination or a
   // transient working signal turn it into a fake history marker/thread.

@@ -426,7 +426,10 @@ test("HUB-J12 network switch: revoked pairing offers accessible Re-pair on deskt
     await clock.advance(1_000);
     await expect(header).toHaveText(" · Needs pairing");
     await expect(page.locator(".status-stale").filter({ visible: true })).toHaveText(/^Not live — this browser needs pairing again\./);
-    await expect(page.getByText(/reconnecting/i).filter({ visible: true })).toHaveCount(0);
+    await expect.poll(async () => {
+      await clock.advance(32);
+      return page.getByText(/reconnecting/i).filter({ visible: true }).count();
+    }).toBe(0);
     await page.setViewportSize({ width: 390, height: 844 });
     const banner = page.locator(".terminal-disconnected-banner");
     await expect(banner.locator(".banner-text")).toHaveText("Atlas · Linux needs pairing again.");
@@ -574,7 +577,7 @@ test("HUB-J12 network switch: single revoked machine stops promising reconnectio
     hub.refuseProofs("atlas", 1_000, "revoked", false);
     await hub.down("atlas", { sockets: "close" });
     await expect(header).toHaveText(" · Reconnecting");
-    await expect(working).toHaveCount(0);
+    await expect.poll(async () => { await clock.advance(32); return working.count(); }).toBe(0);
     await hub.up("atlas");
     await clock.advance(1_000);
     await expect(header).toHaveText(" · Needs pairing");
@@ -738,7 +741,10 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
     // Within a second, before the machine answers: the conversation it last
     // knew, open, with its held message; never "0 conversations".
     await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible({ timeout: 1_000 });
-    await expect(bubble("Keep this through the reload")).toBeVisible({ timeout: 1_000 });
+    await expect.poll(async () => {
+      await clock.advance(32);
+      return bubble("Keep this through the reload").isVisible();
+    }, { timeout: 1_000 }).toBe(true);
     await expect(held).toHaveCount(1, { timeout: 1_000 });
     // On screen, not under the outage card: the point at its centre is the bubble.
     await expect(bubble("Keep this through the reload")).toBeInViewport();
@@ -1089,7 +1095,10 @@ test("HUB-J12 network switch: kept messages show before the session attaches aft
     expect((await next).text).toBe("Kept while the session is away");
     await expect(held).toHaveCount(0);
     // The reader stays in the thread that took over, not on the page.
-    await expect(page.locator(".conversation-reading.thread")).toBeFocused();
+    await expect.poll(async () => {
+      await clock.advance(32);
+      return page.locator(".conversation-reading.thread").evaluate(node => node === document.activeElement);
+    }).toBe(true);
     await expect(page.getByRole("log")).toHaveCount(1);
     await expect(page.getByRole("log").locator(".bub").filter({ hasText: "Kept while the session is away" })).toHaveCount(1);
     await clock.advance(15_000);

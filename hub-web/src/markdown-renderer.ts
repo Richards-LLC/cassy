@@ -268,6 +268,10 @@ export function renderMarkdown(document: Document, source: string): HTMLElement[
       const pre = document.createElement("pre"); pre.className = "markdown-code";
       const code = document.createElement("code"); code.textContent = codeLines.join("\n"); pre.append(code);
       nodes.push(pre);
+      const language = line.trim().replace(/^`+/, "").trim().toLowerCase();
+      if (["mermaid", "diff", "patch"].includes(language)) {
+        void import("./rich-code").then(({ enhanceCode }) => enhanceCode(pre, language)).catch(() => { pre.dataset.richState = "fallback"; });
+      }
       continue;
     }
 

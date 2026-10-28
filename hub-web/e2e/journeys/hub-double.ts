@@ -7,9 +7,12 @@
 // src/pairing-relay.ts. Evidence label: "real-bundle, protocol-double".
 import { expect, type Page, type Route, type WebSocketRoute } from "@playwright/test";
 import { createHash, webcrypto } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { journeyNow } from "./clock";
 
 export const RELAY = "https://petra-stella-cloud.vercel.app";
+/** The hub's visual page policy, the very file it embeds (cas-3aff). */
+const VISUAL_PAGE_CSP = readFileSync(new URL("../../../cas-cli/src/hub/visual_page_csp.txt", import.meta.url), "utf8").trim();
 export const SCOPES = ["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"];
 
 export type Session = {
@@ -38,6 +41,7 @@ export type SentMessage = {
 };
 
 export type HistoryPage = {
+  open_attention?: Array<Record<string, unknown>>;
   messages: Array<Record<string, unknown>>;
   replies: Array<Record<string, unknown>>;
   has_earlier: boolean;
@@ -53,13 +57,23 @@ export type ProtocolTime = {
 };
 
 export type DoubleOptions = {
+  /** Unreceipted daemon replies, independent of the bounded history page. */
+  pendingReplies?: Record<string, Array<Record<string, unknown>>>;
   /** Controlled journeys own the browser and protocol reply clock together. */
   time?: ProtocolTime;
   machines: Machine[];
+  /** A registered hub can serve the bundle while its protocol is doubled on that same origin. */
+  baseUrls?: Record<string, string>;
   /** Seed these machine ids as already paired (IndexedDB), as a returning user. */
   paired?: string[];
   /** Conversation history pages served in order for each session, newest first. */
   history?: Record<string, HistoryPage[]>;
+  /**
+   * Artifacts the machine's visual page route serves, by id (cas-3aff): an
+   * HTML page and the passive assets it names. Served under the real hub's
+   * sandbox policy, read from the same file the hub embeds.
+   */
+  visualPages?: Record<string, { mime: string; body: string | Buffer }>;
   /** Relay pairing: which machine the relay authorizes, and after how many polls. */
   relay?: { machine: string; claimAfter: number; authorizeAfter: number };
   /** How far each session's machine clock runs ahead of this browser (ms): the
@@ -74,6 +88,24 @@ export type DoubleOptions = {
   launch?: Record<string, LaunchWorld>;
   /** cas-a474: each session's fleet, as GET /v1/sessions/<s>/status serves it, mutated by POST /v1/sessions/<s>/operations. */
   fleet?: Record<string, FleetWorld>;
+  /** cas-ff22: each session's work-event stream, as the daemon serves it (docs/guides/commander-work-events.md). */
+  work?: Record<string, WorkWorld>;
+};
+
+/** One work event on the wire (schema v1). */
+export type WorkEventWire = { id: string; kind: string; session: string; agent?: string; turn?: string; at: string; label: string; has_detail: boolean; error?: boolean };
+
+/**
+ * A session's work events in the double (cas-ff22), oldest first. Without an
+ * `agent`, a page is the session stream: every event whose agent is the
+ * supervisor or none, plus task rows. With one, that agent's own events.
+ */
+export type WorkWorld = {
+  events: WorkEventWire[];
+  details?: Record<string, string>;
+  supervisor: string;
+  /** Advertise `work_events_live` (change notices and per-agent timelines). Default true. */
+  live?: boolean;
 };
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
@@ -167,8 +199,16 @@ export class HubDouble {
   readonly historyRequests: Array<Record<string, unknown>> = [];
   /** Browser application ACKs, separate from socket forwarding. */
   readonly persistedReplies: Array<{ session: string; notification_id: number }> = [];
+  readonly pendingReplies = new Map<string, Array<Record<string, unknown>>>();
+  readonly pendingReplyForwards: number[] = [];
+  private readonly pendingReplyFlights = new Map<string, Set<number>>();
   /** Artifact ids Commander asked a signed view URL for (cassy#910). */
   readonly artifactRequests: string[] = [];
+  /** Visual page tickets minted (cas-3aff), with the origin that asked. */
+  readonly pageTickets = new Map<string, { session: string; page: string; origin: string }>();
+  /** Every `/v1/pages/...` path the browser fetched, in order. */
+  readonly pageRequests: string[] = [];
+  readonly previewTicketRequests: string[] = [];
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
   private readonly protocolWaiters = new Set<() => void>();
@@ -242,7 +282,26 @@ export class HubDouble {
   /** Turns pushed live, replayed in history like a real hub after a reload. */
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
-  constructor(private readonly page: Page, private readonly options: DoubleOptions) {}
+  constructor(private readonly page: Page, private readonly options: DoubleOptions) {
+    for (const [session, rows] of Object.entries(options.pendingReplies ?? {})) this.pendingReplies.set(session, [...rows]);
+  }
+
+  private forwardPendingReplies(session: string, ws: WebSocketRoute): void {
+    const flights = this.pendingReplyFlights.get(session) ?? new Set<number>();
+    this.pendingReplyFlights.set(session, flights);
+    for (const reply of this.pendingReplies.get(session) ?? []) {
+      if (flights.size >= 10) break;
+      const id = Number(reply.notification_id);
+      if (flights.has(id)) continue;
+      flights.add(id);
+      this.pendingReplyForwards.push(id);
+      ws.send(JSON.stringify({ OperatorReply: reply }));
+    }
+  }
+
+  private machineIdFor(url: URL): string {
+    return Object.entries(this.options.baseUrls ?? {}).find(([, base]) => new URL(base).host === url.host)?.[0] ?? url.hostname.replace(/\.test$/, "");
+  }
 
   private now(): number { return this.options.time?.now() ?? journeyNow(); }
   private stamp(offset = 0): string { return new Date(this.now() + offset).toISOString(); }
@@ -287,6 +346,19 @@ export class HubDouble {
 
   /** Another device (named `label`) holds control of the session until a take overrides it. */
   holdLease(session: string, label: string): void { this.leaseHolders.set(session, label); }
+
+  /**
+   * The session's stream gains a work event (cas-ff22). A live daemon then
+   * pushes `WorkEventsAppended`; it carries no content, so Commander asks for
+   * the newest page.
+   */
+  appendWork(session: string, event: WorkEventWire, detail?: string): void {
+    const work = this.options.work?.[session];
+    if (!work) throw new Error(`no work world for ${session}`);
+    work.events.push(event);
+    if (detail !== undefined) (work.details ??= {})[event.id] = detail;
+    if (work.live !== false) this.sockets.get(session)?.send(JSON.stringify({ WorkEventsAppended: { schema_version: 1 } }));
+  }
 
   /** Hold the next GET lease response until released, and expose when it reaches the hub. */
   holdNextLeaseRead(session: string): { started: Promise<void>; release: () => void } {
@@ -333,7 +405,8 @@ export class HubDouble {
   /** Install routes; call before the first navigation. */
   async install(page = this.page): Promise<void> {
     // /v1/events is a long-lived event stream the bundle reads with fetch.
-    await page.addInitScript(() => {
+    await page.addInitScript((bases) => {
+      const localHosts = new Set(bases.map((base) => new URL(base).host));
       const original = window.fetch;
       // Outages (journey network cells): a machine the page cannot reach
       // refuses new event streams, and an outage that resets connections
@@ -372,7 +445,7 @@ export class HubDouble {
       };
       window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
         const url = new URL(String(input instanceof Request ? input.url : input), location.href);
-        if (url.hostname.endsWith(".test") && url.pathname === "/v1/events") {
+        if ((url.hostname.endsWith(".test") || localHosts.has(url.host)) && url.pathname === "/v1/events") {
           if (down.has(url.hostname) || !navigator.onLine) return Promise.reject(new TypeError("Failed to fetch"));
           if (init?.signal?.aborted) return Promise.reject(new DOMException("The operation was aborted.", "AbortError"));
           w.__journeyEventStreamOpens[url.hostname] = (w.__journeyEventStreamOpens[url.hostname] ?? 0) + 1;
@@ -397,10 +470,14 @@ export class HubDouble {
         }
         return original(input, init);
       };
-    });
+    }, Object.values(this.options.baseUrls ?? {}));
     await page.route("https://*.test/**", (route) => this.hub(route));
+    // cas-3aff: a visual page opened in its own tab is a new page; its
+    // ticketed route is answered there too.
+    await page.context().route(/^https:\/\/[^/]+\.test\/v1\/pages\//, (route) => this.visualPage(route, new URL(route.request().url()).pathname));
+    for (const base of Object.values(this.options.baseUrls ?? {})) await page.route(`${new URL(base).origin}/v1/**`, (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
-    await page.routeWebSocket(/\.test\/v1\//, (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
+    await page.routeWebSocket((url) => url.pathname.startsWith("/v1/") && (url.hostname.endsWith(".test") || Object.values(this.options.baseUrls ?? {}).some((base) => new URL(base).host === url.host)), (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
     // Every notification id the page's hub sockets deliver (received()). The
     // listener is attached in the constructor, so it runs before the app's
     // own: by the time a later evaluation sees an id, the app has handled it.
@@ -577,7 +654,7 @@ export class HubDouble {
 
   /** Seed paired machines in IndexedDB exactly as a completed pairing stores them. */
   async seedPaired(): Promise<void> {
-    const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label, scopes: this.scopesFor(id) }));
+    const machines = (this.options.paired ?? []).map((id) => ({ id, label: this.machine(id).label, baseUrl: this.options.baseUrls?.[id] ?? `https://${id}.test`, scopes: this.scopesFor(id) }));
     await this.page.evaluate(async ({ machines }) => {
       localStorage.clear();
       const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
@@ -606,7 +683,7 @@ export class HubDouble {
         const tx = db.transaction("machines", "readwrite");
         for (const m of machines) {
           tx.objectStore("machines").put({
-            id: m.id, label: m.label, baseUrl: `https://${m.id}.test`, deviceId: "journey-device",
+            id: m.id, label: m.label, baseUrl: m.baseUrl, deviceId: "journey-device",
             credentialId: "journey-credential", credential: "journey-only", expiresAt: "2099-01-01T00:00:00Z",
             scopes: m.scopes, privateKey: pair.privateKey, publicKey,
           });
@@ -790,9 +867,34 @@ export class HubDouble {
     return this.machine(machineId).sessions;
   }
 
+  /**
+   * The hub's visual page route (hub/server.rs `visual_page`): the page must
+   * be HTML, a sibling only a passive type, and every refusal one plain 404.
+   */
+  private visualPage(route: Route, path: string): Promise<void> {
+    this.pageRequests.push(path);
+    const [, , , ticket, artifact] = path.split("/");
+    const held = this.pageTickets.get(ticket ?? "");
+    const found = this.options.visualPages?.[decodeURIComponent(artifact ?? "")];
+    const type = found?.mime.split(";")[0]!.trim().toLowerCase() ?? "";
+    const allowed = held && found && (decodeURIComponent(artifact!) === held.page ? type === "text/html" : /^(image|video|audio|font)\//.test(type) || type === "text/css");
+    if (!allowed) return route.fulfill({ status: 404, headers: { "x-frame-options": "DENY" } });
+    return route.fulfill({
+      status: 200,
+      headers: {
+        "content-type": found.mime,
+        "content-security-policy": VISUAL_PAGE_CSP.replace("{frame_ancestor}", held.origin),
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
+        "cache-control": "no-store",
+      },
+      body: found.body,
+    });
+  }
+
   private async hub(route: Route): Promise<void> {
     const url = new URL(route.request().url());
-    const machineId = url.hostname.replace(/\.test$/, "");
+    const machineId = this.machineIdFor(url);
     const path = url.pathname;
     const method = route.request().method();
     if (!this.reachable(machineId)) {
@@ -803,6 +905,7 @@ export class HubDouble {
     }
     if (path === "/v1/auth/pairing/protocol") return route.fulfill({ json: { installation_protocol: 1 } });
     if (path === "/v1/health") return route.fulfill({ json: { ok: true, installation_protocol: 1 } });
+    if (path.startsWith("/v1/pages/")) return this.visualPage(route, path);
     if (path === "/v1/auth/pairing/commit" || path === "/v1/auth/pairing/abort") return this.installationAction(route, machineId, path.endsWith("commit"));
     const active = [...this.installations.values()].find((d) => route.request().headers()["authorization"] === `DPoP ${d.credential}` && d.machine === machineId && !d.revoked_at);
     const secret = route.request().headers()["authorization"]?.replace(/^DPoP /, "");
@@ -920,6 +1023,14 @@ export class HubDouble {
     if (path === "/v1/auth/websocket-ticket") return route.fulfill({ json: { ticket: "journey-ticket" } });
     // cassy#910: a signed view URL for an artifact the session published. An
     // id starting `art-local` was never uploaded to Cloud.
+    const previewTicket = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/ticket$/.exec(path);
+    if (previewTicket && method === "POST") {
+      const id = decodeURIComponent(previewTicket[1]!);
+      this.previewTicketRequests.push(id);
+      if (id.startsWith("art-local")) return route.fulfill({ status: 409, json: { error: "artifact_not_in_cloud" } });
+      const count = this.previewTicketRequests.filter((value) => value === id).length;
+      return route.fulfill({ json: { ticket: `fixture-${id}-${count}`, expires_at: this.stamp(60_000) } });
+    }
     const artifactView = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/url$/.exec(path);
     if (artifactView) {
       const id = decodeURIComponent(artifactView[1]!);
@@ -930,6 +1041,14 @@ export class HubDouble {
       if (id.startsWith("art-cloud-down")) return route.fulfill({ status: 502, json: { error: "cloud_failed", status: null } });
       if (id.startsWith("art-offline")) return route.abort("connectionrefused");
       return route.fulfill({ json: { artifact_id: id, cloud_artifact_id: `cloud-${id}`, url: `https://store.test/view/${encodeURIComponent(id)}?sig=journey`, expires_at: this.stamp(600_000), name: `${id}.pdf`, mime: "application/pdf", size_bytes: 1024 } });
+    }
+    // cas-3aff: a ticket for one HTML page, framed only by the asking origin.
+    const pageTicket = /^\/v1\/sessions\/([^/]+)\/artifacts\/([^/]+)\/page$/.exec(path);
+    if (pageTicket && method === "POST") {
+      const ticket = `ticket-${this.pageTickets.size + 1}-${"x".repeat(32)}`;
+      const page = decodeURIComponent(pageTicket[2]!);
+      this.pageTickets.set(ticket, { session: decodeURIComponent(pageTicket[1]!), page, origin: route.request().headers()["origin"] ?? "" });
+      return route.fulfill({ headers: { "cache-control": "no-store" }, json: { artifact_id: page, url: `/v1/pages/${ticket}/${encodeURIComponent(page)}`, expires_at: this.stamp(600_000), mime: "text/html" } });
     }
     const leased = /^\/v1\/sessions\/([^/]+)\/lease$/.exec(path);
     if (leased) {
@@ -1101,7 +1220,7 @@ export class HubDouble {
 
   private socket(ws: WebSocketRoute): void {
     const session = decodeURIComponent(new URL(ws.url()).pathname.split("/")[3] ?? "");
-    const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
+    const machineId = this.machineIdFor(new URL(ws.url()));
     if (this.held.has(session) || !this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: still offline" }); return; }
     this.legacySocketOpens.set(session, (this.legacySocketOpens.get(session) ?? 0) + 1);
     this.sockets.set(session, ws);
@@ -1144,7 +1263,7 @@ export class HubDouble {
       Welcome: {
         state: { panes: [{ id: "supervisor", kind: "Supervisor", title: session, focused: true, exited: false }], cols: 100, rows: 28 },
         protocol_version: 3,
-        capabilities: ["conversation_history", "paged_scrollback"],
+        capabilities: ["conversation_history", "paged_scrollback", ...(this.options.work?.[session] ? ["work_events", ...(this.options.work[session]!.live === false ? [] : ["work_events_live"])] : [])],
         // cas-f285: the pane's rows are paged, not replayed as bytes.
         pane_bootstrap: [{ pane_id: "supervisor", epoch: PANE_EPOCH, cols: 100, rows: 28, scrollback_start_row: 0, scrollback_end_row: PANE_ROWS.length }],
       },
@@ -1157,7 +1276,7 @@ export class HubDouble {
    * wrapped as `{channel, message}`, and health ping/pong.
    */
   private machineSocket(ws: WebSocketRoute): void {
-    const machineId = new URL(ws.url()).hostname.replace(/\.test$/, "");
+    const machineId = this.machineIdFor(new URL(ws.url()));
     if (!this.reachable(machineId)) { void ws.close({ code: 1011, reason: "journey: unreachable" }); return; }
     this.machineSocketOpens.set(machineId, (this.machineSocketOpens.get(machineId) ?? 0) + 1);
     this.observed();
@@ -1212,7 +1331,16 @@ export class HubDouble {
     const kind = typeof message === "string" ? message : Object.keys(message)[0] ?? "";
     this.frames.push({ machine: machineId, session, kind, body: typeof message === "string" ? message : message[kind] });
     this.observed();
-    if (message.OperatorReplyPersisted) this.persistedReplies.push({ session, notification_id: Number(message.OperatorReplyPersisted.notification_id) });
+    if (message.OperatorReplyPersisted || message.OperatorNoticePersisted) {
+      const noticeReceipt = Boolean(message.OperatorNoticePersisted);
+      const id = Number((message.OperatorNoticePersisted ?? message.OperatorReplyPersisted)!.notification_id);
+      if (!noticeReceipt) this.persistedReplies.push({ session, notification_id: id });
+      if (this.pendingReplies.has(session)) {
+        this.pendingReplies.set(session, this.pendingReplies.get(session)!.filter(reply => reply.notification_id !== id || Boolean(reply.notice) !== noticeReceipt));
+        this.pendingReplyFlights.get(session)?.delete(id);
+        this.forwardPendingReplies(session, ws);
+      }
+    }
     if (message.SendMessage) {
       const m = message.SendMessage;
       this.sends.push({
@@ -1230,6 +1358,22 @@ export class HubDouble {
         ? { ScrollbackPage: { pane_id: request.pane_id, generation: request.generation, start_row: request.start_row, next_row: rows.length > 0 ? request.start_row + rows.length : null, rows } }
         : { Error: { message: `scrollback generation expired for pane '${request.pane_id}'` } }));
     }
+    const work = this.options.work?.[session];
+    if (message.WorkEventsRequest && work) {
+      // ws_client.rs WorkEventsRequest: the newest `limit` before the opaque cursor, oldest first.
+      const request = message.WorkEventsRequest as { request_id: string; before?: string; limit?: number; agent?: string };
+      const stream = work.events.filter((event) => request.agent === undefined
+        ? event.kind === "task" || event.agent === undefined || event.agent === work.supervisor
+        : event.agent === request.agent);
+      const end = request.before === undefined ? stream.length : Number(request.before.replace(/^cursor-/, ""));
+      const start = Math.max(0, end - Math.min(100, request.limit || 100));
+      ws.send(JSON.stringify({ WorkEvents: { request_id: request.request_id, schema_version: 1, events: stream.slice(start, end), has_earlier: start > 0, ...(start > 0 ? { next_before: `cursor-${start}` } : {}) } }));
+    }
+    if (message.WorkEventDetailRequest && work) {
+      const request = message.WorkEventDetailRequest as { request_id: string; event_id: string };
+      const detail = work.details?.[request.event_id];
+      ws.send(JSON.stringify({ WorkEventDetail: { request_id: request.request_id, event_id: request.event_id, ...(detail === undefined ? {} : { detail }), truncated: false } }));
+    }
     if (message.ConversationHistoryRequest) {
       const request = message.ConversationHistoryRequest;
       this.historyRequests.push({ session, ...request });
@@ -1240,6 +1384,10 @@ export class HubDouble {
         reply = { ...reply, messages: [...reply.messages, ...live.messages], replies: [...reply.replies, ...live.replies] };
       }
       ws.send(JSON.stringify({ ConversationHistory: { request_id: request.request_id, ...reply } }));
+      if (request.before === undefined && this.pendingReplies.has(session)) {
+        this.pendingReplyFlights.delete(session);
+        this.forwardPendingReplies(session, ws);
+      }
     }
   }
 }

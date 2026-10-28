@@ -32,6 +32,7 @@ import type { ConversationHistoryMessage, ConversationHistoryPage, HubSession, L
 import { sessionsPath } from "./worker-visibility";
 import { dormantRevealed } from "./dormant-visibility";
 import type { PaneBootstrap, ScrollbackPage } from "./raw-output";
+import { workEventDetail, workEventSupport, workEventsPage, type WorkEventDetail, type WorkEventsPage, type WorkEventSupport } from "./work-events";
 
 export type ConnectionState = ConnectionSnapshot;
 
@@ -98,6 +99,13 @@ export interface HubCallbacks {
   /** The session attached without durable history: no first page will come (cas-010f). */
   onConversationHistoryUnavailable?(session: string): void;
   onSessionSummary?(session: string, summary: SessionCardSummary): void;
+  /** A work-events page this client asked for (cas-ff22). */
+  onWorkEvents?(session: string, page: WorkEventsPage): void;
+  onWorkEventDetail?(session: string, detail: WorkEventDetail): void;
+  /** A work-events request was refused or failed; `requestId` is its id. */
+  onWorkEventsFailed?(session: string, requestId: string, detail: string): void;
+  /** The daemon's stream gained events since this client read it (cas-ff22). */
+  onWorkEventsAppended?(session: string): void;
   /** A page of the pane's rendered rows, answering requestScrollback (cas-f285). */
   onScrollbackPage?(session: string, page: ScrollbackPage): void;
   /** The hub dropped output for this session under backpressure: rows read before may be stale. */
@@ -270,6 +278,10 @@ export class HubConnectionSupervisor {
   private readonly sockets = new Map<string, WebSocket>();
   /** Each session's per-pane attach metadata from its last Welcome (cas-f285). */
   private readonly paneBootstraps = new Map<string, PaneBootstrap[]>();
+  /** What each attached session's daemon offers of the work-event stream (cas-ff22). */
+  private readonly workEventSupport = new Map<string, WorkEventSupport>();
+  /** Work-event request ids in flight, so their refusals are not read as sends. */
+  private readonly workEventRequests = new Set<string>();
   private readonly attachLifecycles = new Map<string, AttachSnapshot>();
   private readonly socketAttempts = new Map<string, number>();
   /**
@@ -703,6 +715,23 @@ export class HubConnectionSupervisor {
    * (cassy#910). Unlike `request`, a refusal is an answer, not an exception:
    * the machine's stable error code tells Commander what to say.
    */
+  /** Mint a short-lived, revocable media capability; never put pairing credentials in src. */
+  async artifactPreview(session: string, artifactId: string): Promise<ArtifactViewResult> {
+    return withRequestDeadline(async signal => {
+      const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}`;
+      const { response } = await this.authorizedFetch("POST", `${path}/ticket`, { signal });
+      const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+      if (response.ok && typeof body?.ticket === "string" && body.ticket.length > 0 && body.ticket.length <= 4_096 && typeof body.expires_at === "string" && Number.isFinite(Date.parse(body.expires_at))) {
+        const url = new URL(`${path}/content`, this.machine.baseUrl);
+        url.searchParams.set("t", body.ticket);
+        // Convert the hub's clock to this browser's clock for the expiry fast path.
+        const expiresAt = new Date(Date.parse(body.expires_at) - this.clockOffsetMs).toISOString();
+        return { ok: true, view: { artifact_id: artifactId, url: url.href, expires_at: expiresAt } };
+      }
+      return { ok: false, status: response.ok ? 502 : response.status, code: typeof body?.error === "string" ? body.error : "preview_unavailable" };
+    });
+  }
+
   async artifactView(session: string, artifactId: string): Promise<ArtifactViewResult> {
     return withRequestDeadline(async signal => {
     const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/url`;
@@ -710,6 +739,30 @@ export class HubConnectionSupervisor {
     const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
     if (response.ok && body && typeof body.url === "string") {
       return { ok: true, view: body as unknown as ArtifactView };
+    }
+    return {
+      ok: false,
+      status: response.status,
+      code: typeof body?.error === "string" ? body.error : undefined,
+      detail: typeof body?.status === "string" ? body.status : null,
+    };
+    });
+  }
+
+  /**
+   * A short-lived URL for an HTML page the session published, served by this
+   * machine under its sandbox policy (cas-3aff). Commander frames it inline
+   * and opens it in a tab; the page itself never enters this document.
+   */
+  async visualPage(session: string, artifactId: string): Promise<ArtifactViewResult> {
+    return withRequestDeadline(async signal => {
+    const path = `/v1/sessions/${encodeURIComponent(session)}/artifacts/${encodeURIComponent(artifactId)}/page`;
+    const { response } = await this.authorizedFetch("POST", path, { signal });
+    const body = await response.json().catch(() => undefined) as Record<string, unknown> | undefined;
+    // A frame is only ever pointed at this paired machine's own origin.
+    const url = response.ok && typeof body?.url === "string" ? new URL(body.url, this.machine.baseUrl) : undefined;
+    if (url && url.origin === new URL(this.machine.baseUrl).origin) {
+      return { ok: true, view: { ...(body as unknown as ArtifactView), url: url.href } };
     }
     return {
       ok: false,
@@ -1736,6 +1789,40 @@ export class HubConnectionSupervisor {
     return this.send(session, { ScrollbackRequest: { pane_id: paneId, generation, start_row: startRow, count } });
   }
 
+  /**
+   * Whether the session's daemon serves work events, and whether it pushes
+   * change notices and per-agent timelines (cas-ff22).
+   */
+  workEvents(session: string): WorkEventSupport {
+    return this.workEventSupport.get(session) ?? "none";
+  }
+
+  /** Request one page of work events: the newest, or the page before `before`. Returns its request id. */
+  requestWorkEvents(session: string, options: { before?: string; agent?: string; limit?: number } = {}): string | undefined {
+    if (this.workEvents(session) === "none") return undefined;
+    const request_id = `work-${crypto.randomUUID()}`;
+    const sent = this.send(session, {
+      WorkEventsRequest: {
+        request_id,
+        ...(options.before === undefined ? {} : { before: options.before }),
+        limit: Math.min(100, Math.max(1, options.limit ?? 100)),
+        ...(options.agent === undefined ? {} : { agent: options.agent }),
+      },
+    });
+    if (!sent) return undefined;
+    this.workEventRequests.add(request_id);
+    return request_id;
+  }
+
+  /** Request the redacted detail of one work event. Returns its request id. */
+  requestWorkEventDetail(session: string, eventId: string): string | undefined {
+    if (this.workEvents(session) === "none") return undefined;
+    const request_id = `work-${crypto.randomUUID()}`;
+    if (!this.send(session, { WorkEventDetailRequest: { request_id, event_id: eventId } })) return undefined;
+    this.workEventRequests.add(request_id);
+    return request_id;
+  }
+
   /** Request a private, device-scoped page of durable Commander turns. */
   requestConversationHistory(session: string, before?: number, limit = 50): boolean {
     return this.send(session, {
@@ -1882,6 +1969,8 @@ export class HubConnectionSupervisor {
 
   private handleDaemonObject(session: string, message: Record<string, any>, frameFence = credentialFence(this.machine)): void {
     if (message.Welcome) {
+      // Before the attach turns live: its listeners read what the daemon offers.
+      this.workEventSupport.set(session, workEventSupport(message.Welcome.capabilities));
       const socket = this.sockets.get(session);
       if (socket) {
         this.readySockets.add(socket);
@@ -1946,6 +2035,14 @@ export class HubConnectionSupervisor {
       this.callbacks.onOperatorMessage?.(session, message.OperatorMessage as ConversationHistoryMessage);
     } else if (message.ConversationHistory) {
       this.callbacks.onConversationHistory?.(session, message.ConversationHistory as ConversationHistoryPage, frameFence);
+    } else if (message.WorkEvents) {
+      const page = workEventsPage(message.WorkEvents);
+      if (page && this.workEventRequests.delete(page.request_id)) this.callbacks.onWorkEvents?.(session, page);
+    } else if (message.WorkEventDetail) {
+      const detail = workEventDetail(message.WorkEventDetail);
+      if (detail && this.workEventRequests.delete(detail.request_id)) this.callbacks.onWorkEventDetail?.(session, detail);
+    } else if (message.WorkEventsAppended) {
+      this.callbacks.onWorkEventsAppended?.(session);
     } else if (message.SessionSummary) {
       this.callbacks.onSessionSummary?.(session, message.SessionSummary.summary);
     } else if (message.PaneAdded || message.PaneRemoved || message.PaneExited) {
@@ -1970,7 +2067,8 @@ export class HubConnectionSupervisor {
         if (rejection.retryable) for (const later of this.unansweredAfter(session, clientRef)) this.callbacks.onMessageRejected?.(session, later, detail, rejection);
       } else this.callbacks.onSocketError(session, detail);
     } else if (message.Error) {
-      if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
+      if (typeof message.Error.client_ref === "string" && this.workEventRequests.delete(message.Error.client_ref)) this.callbacks.onWorkEventsFailed?.(session, message.Error.client_ref, String(message.Error.message ?? "Work events failed"));
+      else if (typeof message.Error.client_ref === "string") this.callbacks.onMessageRejected?.(session, message.Error.client_ref, message.Error.message);
       else this.callbacks.onSocketError(session, message.Error.message);
     }
   }

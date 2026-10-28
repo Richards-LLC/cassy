@@ -185,15 +185,92 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
   return sheet;
 }
 
+/**
+ * Where an HTML attachment's sandboxed page URL comes from (cas-3aff): the
+ * machine that published it mints a short-lived ticket URL on its own origin.
+ * Undefined means the page can't be shown here right now.
+ */
+export type VisualPageSource = (artifactId: string, context: TurnRenderContext) => Promise<string | undefined>;
+
+let visualPageSource: VisualPageSource | undefined;
+
+/** Whether an attachment is a page Commander shows inline. */
+export function isVisualPage(attachment: Pick<ArtifactRef, "mime">): boolean {
+  return attachment.mime.split(";")[0]!.trim().toLowerCase() === "text/html";
+}
+
+/**
+ * Visual reply (cas-3aff): the sheet stays the file's card and its tap opens
+ * the page in a tab; beneath it the page itself, in a frame the browser locks
+ * down twice — `sandbox=""` here (no script, no same-origin, no popups, no top
+ * navigation) and the machine's CSP sandbox on the response. The page's
+ * markup never enters this document: the frame only ever gets a URL on the
+ * paired machine's origin. Threat model:
+ * docs/design/hub-web/visual-replies-threat-model.md.
+ */
+export function renderVisualPage(document: Document, attachment: ArtifactRef, sheet: HTMLAnchorElement, pageUrl: () => Promise<string | undefined>): HTMLElement {
+  const figure = document.createElement("figure");
+  figure.className = "visual-page";
+  figure.dataset.artifactId = attachment.artifact_id;
+  const frame = document.createElement("div");
+  frame.className = "visual-frame";
+  const status = document.createElement("p");
+  status.className = "visual-status";
+  status.textContent = "Loading the page…";
+  frame.append(status);
+  figure.append(sheet, frame);
+  let started = false;
+  const load = () => {
+    if (started) return;
+    started = true;
+    void pageUrl().then((url) => {
+      if (!url) { status.textContent = "This page can't be shown here. Open the file above to try it in a tab."; return; }
+      const iframe = document.createElement("iframe");
+      iframe.setAttribute("sandbox", "");
+      iframe.setAttribute("referrerpolicy", "no-referrer");
+      iframe.setAttribute("allow", "");
+      iframe.title = `${attachment.name}, a page from the supervisor`;
+      iframe.src = url;
+      status.remove();
+      frame.append(iframe);
+    }, () => { status.textContent = "This page can't be shown here. Open the file above to try it in a tab."; });
+  };
+  // Mint the ticket only once the page is near the screen, so a long
+  // history full of reports doesn't open every one of them.
+  const view = document.defaultView;
+  if (view && "IntersectionObserver" in view) {
+    const observer = new view.IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) { observer.disconnect(); load(); }
+    }, { rootMargin: "400px 0px" });
+    observer.observe(figure);
+  } else {
+    load();
+  }
+  return figure;
+}
+
 /** The `attachment` kind renderer: one sheet per artifact, in place of the link row. */
 export const attachmentSheetRenderer = (_reply: OperatorReply, context: TurnRenderContext): HTMLElement => {
   const attachment = context.attachment;
   if (!attachment) throw new Error("attachment renderer called without an attachment");
   // cas-d8a5 (journey F32): "from the cas-src supervisor" when the project is known.
-  return renderAttachmentSheet(context.document, attachment, context.spokenSupervisor ? `the ${context.spokenSupervisor}` : context.supervisor);
+  const sheet = renderAttachmentSheet(context.document, attachment, context.spokenSupervisor ? `the ${context.spokenSupervisor}` : context.supervisor);
+  const pages = visualPageSource;
+  return pages && isVisualPage(attachment) ? renderVisualPage(context.document, attachment, sheet, () => pages(attachment.artifact_id, context)) : sheet;
 };
 
-/** Register the sheet with the thread; returns the unregister function. */
-export function installAttachmentSheet(): () => void {
-  return registerTurnRenderer("attachment", attachmentSheetRenderer);
+/**
+ * Register the sheet with the thread; returns the unregister function.
+ * `preview` may wrap a media sheet in its inline preview (cas-9c66). With a
+ * page source, HTML attachments also show their page inline (cas-3aff).
+ */
+export function installAttachmentSheet(preview?: (sheet: HTMLElement, file: ArtifactRef, context: TurnRenderContext) => HTMLElement, pages?: VisualPageSource): () => void {
+  visualPageSource = pages;
+  const unregister = registerTurnRenderer("attachment", (reply, context) => {
+    const sheet = attachmentSheetRenderer(reply, context);
+    const node = preview ? preview(sheet, context.attachment!, context) : sheet;
+    node.dataset.attachmentSignature = JSON.stringify(context.attachment);
+    return node;
+  });
+  return () => { unregister(); if (visualPageSource === pages) visualPageSource = undefined; };
 }

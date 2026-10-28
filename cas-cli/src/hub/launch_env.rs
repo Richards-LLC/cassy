@@ -85,7 +85,10 @@ pub fn resolve_for_project(
                 }),
         ),
     ];
-    let mut remove = Vec::new();
+    // A machine hub can have been started from another project's factory.
+    // The new daemon must resolve its store from --cwd. Also carry this removal
+    // to systemd's UnsetEnvironment, since its manager has a separate environment.
+    let mut remove = vec![OsString::from("CAS_ROOT")];
     let configured = configured_profile(cli)?;
     let recommended = if profile.is_none() && configured.is_none() {
         recommended_profile(cli, &home, cas_root)

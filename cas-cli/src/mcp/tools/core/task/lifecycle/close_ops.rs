@@ -6871,6 +6871,17 @@ impl CasCore {
         let Some(recorded) = task.deliverables.factory_branch_anchor.as_deref() else {
             return parking;
         };
+        // A handoff to a different branch is handled by record_park, which
+        // retains the old branch and anchor together. Pre-advancing here
+        // would make it retain the new tip as the old branch's history.
+        if task.deliverables.parked_branch.as_deref().zip(measured_branch)
+            .is_some_and(|(parked, measured)| {
+                parked.strip_prefix("origin/").unwrap_or(parked)
+                    != measured.strip_prefix("origin/").unwrap_or(measured)
+            })
+        {
+            return parking;
+        }
         let Some(tip) = measured_tip
             .and_then(|tip| resolve_branch_sha(repo_path, &format!("{tip}^{{commit}}")))
         else {
@@ -6926,6 +6937,11 @@ impl CasCore {
         )
         .is_some()
         {
+            if !parking.deliverables.historical_factory_branch_anchors.iter()
+                .any(|known| known.eq_ignore_ascii_case(recorded))
+            {
+                parking.deliverables.historical_factory_branch_anchors.push(recorded.to_string());
+            }
             parking.deliverables.factory_branch_anchor =
                 advanced.deliverables.factory_branch_anchor;
             parking.notes = advanced.notes;
@@ -8924,6 +8940,36 @@ impl CasCore {
                         ) {
                             return Ok(Self::tool_error(unpushed_delivery_tip_refusal(
                                 branch, tip, &pushed,
+                            )));
+                        }
+                    }
+                    // GH #1389: a predecessor or imported target commit is
+                    // not authority to park an older head when the current
+                    // pushed assigned lane proves a later delivery from the
+                    // same task. Refuse before changing the anchor or QA.
+                    if task.status != TaskStatus::AwaitingMerge
+                        && let (Some(receipt), Some(tip), Some(recorded)) = (
+                            req.commit_receipt.as_deref(), anchor.as_deref(),
+                            task.deliverables.factory_branch_anchor.as_deref(),
+                        )
+                        && let Ok(receipt_sha) = resolve_task_commit_receipt_sha(&close_project_root, receipt)
+                        && receipt_sha != tip.as_str()
+                        && git_commit_is_ancestor(&close_project_root, &receipt_sha, tip)
+                        && git_commit_is_ancestor(&close_project_root, recorded, tip)
+                        && current_factory_branch_receipt_for_identity(&close_project_root, &task, tip).is_some()
+                    {
+                        let (target, _) = preferred_live_target_ref_for_delivery(
+                            &close_project_root, &resolved_parent_branch, task.delivery_mode,
+                        );
+                        if self.tip_is_own_task_lineage_with_receipt(
+                            task_store.as_ref(), &task, &close_project_root,
+                            measured_branch.as_deref(), recorded, Some(tip), true,
+                        ) && parked_anchor_advance_with_target_is_attributable(
+                            &close_project_root, recorded, tip, &task.id,
+                            self.sibling_lease_boundary(task_store.as_ref(), &task), &target,
+                        ) {
+                            return Ok(Self::tool_error(format!(
+                                "PARK REFUSED: commit_receipt {receipt_sha} names a prior or unrelated head; the current pushed attributable tip of this task is {tip}. Retry close with commit_receipt={tip}. No anchor or QA round changed."
                             )));
                         }
                     }

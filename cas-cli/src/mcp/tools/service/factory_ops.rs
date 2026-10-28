@@ -133,9 +133,9 @@ fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
 /// directory surviving onto a claude-rewritten spec, checked by
 /// [`preflight_claude_config_dir`] against files (`settings.json`,
 /// `.credentials.json`) a codex directory never has — wrong provider, wrong
-/// file, wrong cause. Call this BEFORE `apply_codex_fallback` so a bad
-/// explicit codex dir is rejected outright instead of ever reaching that
-/// rewrite.
+/// file, wrong cause. Once the CLI is confirmed installed, call this before
+/// account-dependent fallback so a bad explicit directory is rejected
+/// outright instead of ever reaching that rewrite.
 ///
 /// Only checks `auth.json` directly under the (tilde-expanded) directory —
 /// the `CODEX_HOME` layout `push_codex_home_env` (cas-pty) actually spawns
@@ -2841,12 +2841,6 @@ impl CasService {
                 .requester_from_env
                 .then(|| requester_secure_storage_dir(spec.cli))
                 .flatten();
-            if spec.cli == cas_mux::SupervisorCli::Codex
-                && let Some(config_dir) = spec.config_dir.as_deref()
-            {
-                preflight_codex_config_dir(config_dir)
-                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
-            }
         }
 
         // Preserve the existing install refusal when no Codex CLI is on PATH.
@@ -2863,6 +2857,15 @@ impl CasService {
                 Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
             )
             .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+        }
+
+        for spec in &specs {
+            if spec.cli == cas_mux::SupervisorCli::Codex
+                && let Some(config_dir) = spec.config_dir.as_deref()
+            {
+                preflight_codex_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
         }
 
         // Validate the chosen account before strict fallback can hide an

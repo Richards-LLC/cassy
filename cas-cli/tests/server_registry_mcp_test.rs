@@ -253,7 +253,7 @@ else:
         .call(serde_json::json!({
             "action": "server_start",
             "id": "dev-web",
-            "command": format!("python3 '{}' wrapper", fixture.display()),
+            "command": "python3 npm-exec.py wrapper",
             "cwd": env.workdir.to_str().unwrap(),
             "task_id": "cas-7c93",
         }))

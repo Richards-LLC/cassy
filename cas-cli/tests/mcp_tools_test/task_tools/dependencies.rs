@@ -305,7 +305,8 @@ async fn late_blocker_rearms_reopened_task_allows_start_with_warning_and_rejects
         "start warning must identify the actionable blocker: {started}"
     );
     assert!(
-        started.to_ascii_lowercase().contains("warning") || started.contains("⚠️"),
+        started.to_ascii_lowercase().contains("warning")
+            || started.contains("⚠️"),
         "start response must visibly warn about the open blocker: {started}"
     );
 }

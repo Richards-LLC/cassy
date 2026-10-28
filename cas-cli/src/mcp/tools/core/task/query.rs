@@ -637,10 +637,18 @@ impl CasCore {
                     output.push_str("\n\nDependencies:\n");
                 }
                 if !blocked_by.is_empty() {
-                    output.push_str(&format!("  - Blocked by: {}\n", blocked_by.join(", ")));
+                    output.push_str(&format!(
+                        "  - Blocked by: {}\n    {}\n",
+                        blocked_by.join(", "),
+                        super::super::task_extensions::BLOCKED_BY_LIFECYCLE,
+                    ));
                 }
                 if !blocking.is_empty() {
-                    output.push_str(&format!("  - Blocks: {}\n", blocking.join(", ")));
+                    output.push_str(&format!(
+                        "  - Blocks: {}\n    {}\n",
+                        blocking.join(", "),
+                        super::super::task_extensions::BLOCKS_LIFECYCLE,
+                    ));
                 }
                 if !requires_start.is_empty() {
                     output.push_str(&format!(

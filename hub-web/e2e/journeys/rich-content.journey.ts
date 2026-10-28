@@ -123,6 +123,13 @@ for (const [index, variant] of variants.entries()) {
         await expect(frame.getByRole("status")).toContainText("Copy failed");
         await expect(copy).toBeEnabled();
         await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
+        const statusSource = "const count = 2;\nconsole.log(count);";
+        hub.supervisorSays(PELICAN, `\`\`\`ts smoke.ts\n${statusSource}\n\`\`\``, { kind: "status" });
+        const statusFrame = log.locator(".code-frame").last();
+        await expect(statusFrame.locator(".code-frame-label")).toHaveText("smoke.ts");
+        await statusFrame.getByRole("button", { name: "Copy source from smoke.ts" }).click();
+        await expect(statusFrame.getByRole("status")).toHaveText("Copied");
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(statusSource);
       });
 
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {

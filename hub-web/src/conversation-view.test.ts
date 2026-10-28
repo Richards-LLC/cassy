@@ -11,7 +11,7 @@ function reply(id: number, kind: OperatorTurnKind, message = `m${id}`, reply_to:
 }
 
 describe("ConversationView (Pebble thread)", () => {
-  it("copies original fenced bytes through message splitting and retains Wrap on new replies", async () => {
+  it("keeps a short fenced status as a code frame with exact Copy and retained Wrap", async () => {
     const source = '\tconst literal = "雪";  \r\n| literal | source |\r\n| --- | --- |\r\n\r\n  done();';
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
@@ -19,9 +19,10 @@ describe("ConversationView (Pebble thread)", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup");
     document.body.replaceChildren(view.element);
-    history.reply(reply(1, "answer", `\`\`\`ts\r\n${source}\r\n\`\`\``), at(9, 0));
+    history.reply(reply(1, "status", `\`\`\`ts\r\n${source}\r\n\`\`\``), at(9, 0));
     view.update();
     const frame = view.element.querySelector<HTMLElement>(".code-frame")!;
+    expect(frame).not.toBeNull();
     expect(frame.querySelector("code")?.textContent).toBe(source);
     expect(view.element.querySelector('[role="table"]')).toBeNull();
     frame.querySelector<HTMLButtonElement>('[data-action="copy"]')!.click();

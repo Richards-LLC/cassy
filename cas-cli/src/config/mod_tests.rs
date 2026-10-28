@@ -1729,3 +1729,42 @@ fn qa_capture_intent_and_runtime_pointer_findings_cas_db23() {
     config.set("qa.capture.serve", "").unwrap();
     assert!(!config.qa().capture.unwrap().is_configured().unwrap());
 }
+
+#[test]
+fn qa_batch_default_preserves_explicit_per_task_round_trip() {
+    let env = TestEnvGuard::temp_home();
+    let project = env.home().join("project/.cas");
+    std::fs::create_dir_all(&project).unwrap();
+    assert_eq!(Config::default().qa().mode, QaMode::Batch);
+    let mut config = Config::load(&project).unwrap();
+    assert_eq!(config.get("qa.mode").as_deref(), Some("batch"));
+    config.set("qa.mode", "per_task").unwrap();
+    config.save(&project).unwrap();
+    assert_eq!(Config::load(&project).unwrap().get("qa.mode").as_deref(), Some("per_task"));
+}
+
+#[test]
+fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
+    let env = TestEnvGuard::temp_home();
+    let host = env.home().join(".cas");
+    let project = env.home().join("project/.cas");
+    std::fs::create_dir_all(&host).unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(host.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = false\nevidence_gate = false\n[hooks]\ncapture_enabled = false\n").unwrap();
+    let mut loaded = Config::load(&project).unwrap();
+    assert_eq!(loaded.get("qa.mode").as_deref(), Some("batch"));
+    assert!(!loaded.qa().independent_pass);
+    assert!(!loaded.qa().evidence_gate);
+    assert!(loaded.hooks.is_none(), "only qa defaults are inherited");
+    loaded.set("tasks.commit_nudge_on_close", "true").unwrap();
+    loaded.save(&project).unwrap();
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(project.join("config.toml")).unwrap()).unwrap();
+    assert!(saved.get("qa").is_none(), "saving another section must not pin inherited QA defaults");
+    std::fs::write(host.join("config.toml"), "[qa]\nmode = \"per_task\"\nindependent_pass = false\nevidence_gate = false\n").unwrap();
+    assert_eq!(Config::load(&project).unwrap().get("qa.mode").as_deref(), Some("per_task"));
+    std::fs::write(project.join("config.toml"), "[qa]\nmode = \"batch\"\nindependent_pass = true\n").unwrap();
+    let overridden = Config::load(&project).unwrap();
+    assert_eq!(overridden.get("qa.mode").as_deref(), Some("batch"));
+    assert!(overridden.qa().independent_pass);
+    assert!(!overridden.qa().evidence_gate, "a project key does not mask other user defaults");
+}

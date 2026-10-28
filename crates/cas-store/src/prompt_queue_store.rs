@@ -12301,9 +12301,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let attention = plan("SELECT id FROM prompt_queue WHERE factory_session = 'factory-7' AND lower(target) = 'operator' AND COALESCE(kind, CASE WHEN json_valid(prompt) THEN json_extract(prompt, '$.kind') END) IN ('ask', 'blocker')");
-        assert!(attention.contains("idx_prompt_queue_attention"), "{attention}");
         for sql in [
+            conversation_open_attention_sql().replace("?1", "'factory-7'"),
             format!(
                 "SELECT {COMMANDER_HISTORY_COLUMNS} FROM prompt_queue
                  WHERE factory_session = 'factory-7' AND {COMMANDER_HISTORY_LANE}

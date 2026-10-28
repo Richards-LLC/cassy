@@ -752,7 +752,7 @@ export class ConversationView {
       // The button sits above every turn, so the browser's own scroll
       // anchoring has nothing to hold on to; hold the turn ourselves.
       const drift = held.getBoundingClientRect().top - anchor.top;
-      if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+      if (Math.abs(drift) > 0.5) this.element.scrollTop += drift;
       // cas-2093 (F12): the last page landed. The end of history is stated on
       // screen, not left above the fold.
       if (offeredEarlier && !hasEarlier) this.revealHistoryEnd();

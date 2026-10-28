@@ -271,7 +271,7 @@ fn idle_workers_beside_any_ready_work_are_paged_gh1302() {
 fn pending_reviewers_are_not_idle_assignment_candidates_cas_c73a() {
     use cas_factory::{ActiveLeaseSummary, PendingQaSummary};
     let now = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
-    for identity in ["id-reviewer", "reviewer"] {
+    for (identity, claimed) in [("id-reviewer", false), ("reviewer", false), ("id-reviewer", true), ("reviewer", true)] {
         let mut snapshot = data();
         snapshot.ready_tasks.push(task("cas-focused", TaskStatus::Open, None, Some("cas-epic")));
         let mut implementer = worker("implementer", now - Duration::hours(1));
@@ -280,7 +280,7 @@ fn pending_reviewers_are_not_idle_assignment_candidates_cas_c73a() {
             task_id: "cas-review".into(), task_title: "Under review".into(), task_status: TaskStatus::AwaitingMerge,
             close_rejected_reason: None,
             pending_qa: Some(PendingQaSummary { pass_id: "qa-current".into(), round: 1, qa_task_id: None,
-                bound_head: "review-head".into(), reviewer_agent_id: Some(identity.into()), claimed: false,
+                bound_head: "review-head".into(), reviewer_agent_id: Some(identity.into()), claimed,
                 deadline_at: now + Duration::minutes(30) }),
         });
         snapshot.agents = vec![implementer, worker("reviewer", now - Duration::hours(1))];
@@ -699,14 +699,10 @@ fn stall_nudge_never_suggests_foreign_origin_tasks_cas_0c98() {
         }),
         "the stall nudge must name only this project's task"
     );
-    // A foreign epic is not in the session's snapshot, so its children are
-    // never suggested; the session's own ready work still is (GH #1302 E).
+    // An unavailable pin must not expand into the session's unrelated queue.
     assert_eq!(
         nudge(Some("pulse-card"), "cas-foreign-epic"),
-        Some(SupervisorActionableState::AssignReadyWork {
-            task_ids: vec!["cas-local-ready".into()],
-            idle_workers: vec!["gold-fox".into()],
-        }),
+        None,
         "a foreign epic's children are never suggested"
     );
     // Precondition: without a project scope the foreign rows reach the nudge,

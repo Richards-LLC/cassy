@@ -521,7 +521,7 @@ async fn empty_helper_closes_without_qa_or_factory_branch_cas_255b() {
 #[tokio::test]
 async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
     let mut env = TestEnvGuard::temp_home();
-    for own_commit in [false, true] {
+    for (own_commit, legacy_start) in [(false, false), (false, true), (true, false)] {
         let f = fixture(&mut env, "main");
         let repo = f.dir.path();
         let worker_path = f.cas_dir().join("worktrees").join(WORKER);
@@ -544,6 +544,13 @@ async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
         let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
         assert_eq!(f.task(id).status, TaskStatus::InProgress, "{started}");
         assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref().unwrap().branch, own_lane);
+        if legacy_start {
+            // Older starts recorded the reusable lane before isolation.
+            // The allocated task lane still defines B's actual delivery.
+            let mut recorded = f.task(id);
+            recorded.deliverables.factory_branch_start.as_mut().unwrap().branch = LANE.into();
+            f.put(&recorded);
+        }
 
         let c_lane = format!("{LANE}-cas-c3d4");
         git(repo, &["checkout", "-q", "-b", &c_lane, "main"]);

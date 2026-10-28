@@ -85,7 +85,7 @@ fn fixture(test_env: &mut TestEnvGuard, delivered: &[(&str, &str)], demo: &str) 
     std::fs::write(
         repo.join(".cas").join("config.toml"),
         format!(
-            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nindependent_pass = false\n",
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nmode='per_task'\nindependent_pass = false\n",
             artifacts.display().to_string()
         ),
     )

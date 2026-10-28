@@ -99,6 +99,9 @@ impl Config {
             value
         };
 
+        if key.starts_with("qa.") {
+            self.prepare_qa_set();
+        }
         match key {
             "accounts.disabled" => {
                 let disabled: Vec<String> = value.split(',').map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned).collect();
@@ -1710,6 +1713,9 @@ impl Config {
             _ => {
                 return Err(MemError::Other(format!("Unknown config key: {key}")));
             }
+        }
+        if key.starts_with("qa.") {
+            self.record_qa_key(key);
         }
         Ok(())
     }

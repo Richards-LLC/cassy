@@ -355,7 +355,7 @@ pub(crate) fn covering_pass(
 
 pub(crate) fn debt_refusal(task: &str) -> String {
     format!(
-        "QA EVIDENCE REJECTED: {task} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close"
+        "waiting for batch receipt: {task} deferred evidence at its batch park; a valid batch_receipt listing this delivery anchor or a covering passed independent QA round is required before close"
     )
 }
 

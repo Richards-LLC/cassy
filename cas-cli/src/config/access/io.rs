@@ -195,7 +195,120 @@ where
 const RETIRED_JEV_SECTION_NOTE: &str =
     "Note: the [jev] config section is retired and ignored; remove it from config.toml.";
 
+fn empty_qa_table() -> toml::Value {
+    toml::Value::Table(Default::default())
+}
+
+fn qa_value(qa: Option<&QaConfig>) -> toml::Value {
+    qa.map(|qa| toml::Value::try_from(qa).expect("QA config serializes"))
+        .unwrap_or_else(empty_qa_table)
+}
+
+fn read_qa_source(dir: &Path) -> Result<toml::Value, MemError> {
+    let toml_path = dir.join("config.toml");
+    let yaml_path = dir.join("config.yaml");
+    let document: toml::Value = if toml_path.exists() {
+        toml::from_str(&fs::read_to_string(toml_path)?)
+            .map_err(|error| MemError::Parse(format!("Invalid user/project QA config at {}: {error}", dir.display())))?
+    } else if yaml_path.exists() {
+        serde_yaml::from_str(&fs::read_to_string(yaml_path)?)?
+    } else {
+        return Ok(empty_qa_table());
+    };
+    let qa = document.get("qa").cloned().unwrap_or_else(empty_qa_table);
+    // Fail on invalid user policy rather than silently changing its QA mode.
+    let _: QaConfig = qa.clone().try_into().map_err(|error| MemError::Parse(format!("Invalid [qa] at {}: {error}", dir.display())))?;
+    Ok(qa)
+}
+
+fn overlay_qa(base: &mut toml::Value, overrides: &toml::Value) {
+    if let (Some(base), Some(overrides)) = (base.as_table_mut(), overrides.as_table()) {
+        for (key, value) in overrides {
+            if let Some(existing) = base.get_mut(key) {
+                overlay_qa(existing, value);
+            } else {
+                base.insert(key.clone(), value.clone());
+            }
+        }
+    } else {
+        *base = overrides.clone();
+    }
+}
+
+fn apply_qa_changes(local: &mut toml::Value, before: &toml::Value, after: &toml::Value) {
+    let (Some(before), Some(after), Some(local)) = (before.as_table(), after.as_table(), local.as_table_mut()) else {
+        if before != after { *local = after.clone(); }
+        return;
+    };
+    for key in before.keys().chain(after.keys()) {
+        match (before.get(key), after.get(key)) {
+            (Some(old), Some(new)) if old != new => {
+                apply_qa_changes(local.entry(key.clone()).or_insert_with(empty_qa_table), old, new);
+            }
+            (None, Some(new)) => { local.insert(key.clone(), new.clone()); }
+            (Some(_), None) => { local.remove(key); }
+            _ => {}
+        }
+    }
+}
+
+fn copy_qa_key(local: &mut toml::Value, current: &toml::Value, path: &[&str]) {
+    let (key, rest) = path.split_first().expect("QA key");
+    let table = local.as_table_mut().expect("QA table");
+    if rest.is_empty() {
+        if let Some(value) = current.get(*key) {
+            table.insert((*key).into(), value.clone());
+        } else if matches!(*key, "telemetry_sweep" | "preflight_hook") {
+            // TOML has no null; an explicit empty command disables a user default.
+            table.insert((*key).into(), toml::Value::String(String::new()));
+        } else {
+            table.remove(*key);
+        }
+    } else if let Some(current) = current.get(*key) {
+        copy_qa_key(table.entry((*key).to_owned()).or_insert_with(empty_qa_table), current, rest);
+    }
+}
+
 impl Config {
+    /// Resolve user QA defaults without copying them into project serialization.
+    pub(crate) fn resolved_qa(&self) -> QaConfig {
+        let Some(layers) = &self.qa_layers else {
+            return self.qa.clone().unwrap_or_default();
+        };
+        let mut effective = layers.user.clone();
+        overlay_qa(&mut effective, &self.local_qa_value());
+        let mut qa: QaConfig = effective.try_into().expect("validated QA sources and typed updates");
+        qa.telemetry_sweep = qa.telemetry_sweep.filter(|value| !value.trim().is_empty());
+        qa.preflight_hook = qa.preflight_hook.filter(|value| !value.trim().is_empty());
+        qa
+    }
+
+    fn local_qa_value(&self) -> toml::Value {
+        let Some(layers) = &self.qa_layers else { return qa_value(self.qa.as_ref()); };
+        let mut local = layers.local.clone();
+        apply_qa_changes(&mut local, &layers.baseline, &qa_value(self.qa.as_ref()));
+        local
+    }
+
+    /// Fold direct field mutations into local policy before a single-key update.
+    pub(crate) fn prepare_qa_set(&mut self) {
+        let local = self.local_qa_value();
+        let baseline = qa_value(self.qa.as_ref());
+        if let Some(layers) = &mut self.qa_layers {
+            layers.local = local;
+            layers.baseline = baseline;
+        }
+    }
+
+    /// Preserve explicit default-valued setters as well as typed field changes.
+    pub(crate) fn record_qa_key(&mut self, key: &str) {
+        let current = qa_value(self.qa.as_ref());
+        if let Some(layers) = &mut self.qa_layers {
+            copy_qa_key(&mut layers.local, &current, &key[3..].split('.').collect::<Vec<_>>());
+            layers.baseline = current;
+        }
+    }
+
     /// Load configuration from .cas directory
     ///
     /// Tries TOML first (config.toml), falls back to YAML (config.yaml),
@@ -215,6 +328,28 @@ impl Config {
         cas_dir: &Path,
         notice_root: &Path,
     ) -> Result<Self, MemError> {
+        let mut config = Self::load_local_with_notice_root(cas_dir, notice_root)?;
+        let host = dirs::home_dir().map(|home| home.join(".cas"));
+        let user = if let Some(host) = host.filter(|host| {
+            host != cas_dir && host.canonicalize().ok() != cas_dir.canonicalize().ok()
+        }) {
+            read_qa_source(&host)?
+        } else {
+            empty_qa_table()
+        };
+        if let Some(layers) = &mut config.qa_layers {
+            layers.user = user;
+        } else {
+            config.qa_layers = Some(QaLayers {
+                user,
+                local: empty_qa_table(),
+                baseline: qa_value(config.qa.as_ref()),
+            });
+        }
+        Ok(config)
+    }
+
+    fn load_local_with_notice_root(cas_dir: &Path, notice_root: &Path) -> Result<Self, MemError> {
         let toml_path = cas_dir.join("config.toml");
         let yaml_path = cas_dir.join("config.yaml");
 
@@ -230,6 +365,12 @@ impl Config {
                     "Failed to parse config.toml at line {line}: {e}. Restore a known-good config.toml backup, then rerun `cas doctor`."
                 ))
             })?;
+            config.qa_layers = Some(QaLayers {
+                user: empty_qa_table(),
+                local: toml::from_str::<toml::Value>(&content)
+                    .expect("same validated TOML document").get("qa").cloned().unwrap_or_else(empty_qa_table),
+                baseline: qa_value(config.qa.as_ref()),
+            });
             config.note_retired_sections(notice_root);
 
             // If YAML also exists, merge any settings that are missing from TOML.
@@ -238,7 +379,16 @@ impl Config {
             if yaml_path.exists() {
                 if let Ok(yaml_content) = std::fs::read_to_string(&yaml_path) {
                     if let Ok(yaml_config) = serde_yaml::from_str::<Self>(&yaml_content) {
+                        let missing_qa = config.qa.is_none();
                         let changed = config.merge_missing(&yaml_config);
+                        if missing_qa && config.qa.is_some() {
+                            let yaml: toml::Value = serde_yaml::from_str(&yaml_content)?;
+                            config.qa_layers = Some(QaLayers {
+                                user: empty_qa_table(),
+                                local: yaml.get("qa").cloned().unwrap_or_else(empty_qa_table),
+                                baseline: qa_value(config.qa.as_ref()),
+                            });
+                        }
                         if changed {
                             // Persist the merged config and clean up stale YAML
                             let _ = config.save_toml(cas_dir);
@@ -256,7 +406,13 @@ impl Config {
         // Fall back to YAML and auto-migrate
         if yaml_path.exists() {
             let content = std::fs::read_to_string(&yaml_path)?;
-            let config: Self = serde_yaml::from_str(&content)?;
+            let mut config: Self = serde_yaml::from_str(&content)?;
+            config.qa_layers = Some(QaLayers {
+                user: empty_qa_table(),
+                local: serde_yaml::from_str::<toml::Value>(&content)?
+                    .get("qa").cloned().unwrap_or_else(empty_qa_table),
+                baseline: qa_value(config.qa.as_ref()),
+            });
             config.note_retired_sections(notice_root);
 
             // Auto-migrate to TOML
@@ -306,8 +462,8 @@ impl Config {
 
     /// Load project config with host-level `~/.cas/config.toml` staging defaults.
     ///
-    /// Only the `[staging]` section is host-scoped. Project config wins when it
-    /// sets `[staging]`; all other sections remain project-local to avoid
+    /// QA keys inherit user defaults in `load`. Project config wins when it
+    /// sets `[staging]`; other sections remain project-local to avoid
     /// leaking operator-level hooks, telemetry, LLM, or factory settings into
     /// arbitrary repositories.
     pub fn load_with_host_staging_defaults(cas_dir: &std::path::Path) -> Result<Self, MemError> {
@@ -331,7 +487,17 @@ impl Config {
 
     /// Save configuration as TOML
     pub fn save_toml(&self, cas_dir: &std::path::Path) -> Result<(), MemError> {
-        let content = toml::to_string_pretty(self)
+        let mut document = toml::Value::try_from(self)
+            .map_err(|e| MemError::Parse(format!("Failed to serialize config to TOML: {e}")))?;
+        if self.qa_layers.is_some() {
+            let local = self.local_qa_value();
+            if local.as_table().is_some_and(|table| table.is_empty()) && self.qa.is_none() {
+                document.as_table_mut().unwrap().remove("qa");
+            } else {
+                document.as_table_mut().unwrap().insert("qa".into(), local);
+            }
+        }
+        let content = toml::to_string_pretty(&document)
             .map_err(|e| MemError::Parse(format!("Failed to serialize config to TOML: {e}")))?;
         write_project_config_toml(cas_dir, &content)?;
         Ok(())

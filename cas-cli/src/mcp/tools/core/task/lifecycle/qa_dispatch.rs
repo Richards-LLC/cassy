@@ -695,13 +695,15 @@ impl CasCore {
         let config = crate::config::Config::load(&self.cas_root).ok()?;
         let qa = config.qa();
         if qa.mode == crate::config::QaMode::Batch && requested.is_none() {
-            let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
-            if !crate::qa_pass::gate_applies(task, &qa, &passes) {
-                if let Some(head) = head {
+            // Historical rounds (including waivers) do not opt batch deliveries
+            // back into automatic per-task review. Explicit requests still enter below.
+            if let Some(head) = head {
+                let passes = cas_store::list_qa_passes(&self.cas_root, &task.id).unwrap_or_default();
+                if !crate::qa_pass::gate_applies(task, &qa, &passes) {
                     crate::qa_pass::github_gate::publish_not_required(&self.cas_root, repo, head);
                 }
-                return None;
             }
+            return None;
         }
         let implementer = task.assignee.as_deref()?;
         // cas-7877: the close backstop reaches here for a delivery that is not
@@ -2051,7 +2053,7 @@ mod squash_close_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+            "[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n",
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -2487,7 +2489,7 @@ mod squash_close_tests {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+            "[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n",
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -2651,7 +2653,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         env.set("XDG_CONFIG_HOME", env.home().join(".config"));
         std::fs::write(
             cas_dir.join("config.toml"),
-            "[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n",
+            "[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n",
         )
         .unwrap();
         open_store(&cas_dir).unwrap().init().unwrap();
@@ -2844,7 +2846,7 @@ mod stale_anchor_rebind_tests_cas_00eb {
         git(repo, &["push", "-q", "origin", "main", WORKER_TASK_BRANCH]);
         let cas_dir = repo.join(".cas");
         std::fs::write(cas_dir.join("config.toml"),
-                "[project]\ncanonical_id='cas-9668-fixture'\n[verification]\nenabled=false\n[qa]\nevidence_gate=false\nindependent_pass=true\n").unwrap();
+                "[project]\ncanonical_id='cas-9668-fixture'\n[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate=false\nindependent_pass=true\n").unwrap();
         f.task.deliverables.work_target = Some(cas_types::WorkTarget {
             repo_selector: "project:cas-9668-fixture".into(),
             target_branch: "main".into(),

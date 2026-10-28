@@ -132,7 +132,7 @@ fn fixture_with_surface(env: &mut TestEnvGuard, surface: &str, evidence_gate: bo
     env.set("CAS_FACTORY_MODE", "1");
     env.set("XDG_CONFIG_HOME", env.home().join(".config"));
     std::fs::write(cas_dir.join("config.toml"),
-        format!("[project]\ncanonical_id=\"cas-c6e1-fixture-project\"\n[verification]\nenabled=false\n[qa]\nevidence_gate={evidence_gate}\nindependent_pass=true\n")).unwrap();
+        format!("[project]\ncanonical_id=\"cas-c6e1-fixture-project\"\n[verification]\nenabled=false\n[qa]\nmode='per_task'\nevidence_gate={evidence_gate}\nindependent_pass=true\n")).unwrap();
     open_store(&cas_dir).unwrap().init().unwrap();
     open_rule_store(&cas_dir).unwrap().init().unwrap();
     open_skill_store(&cas_dir).unwrap().init().unwrap();

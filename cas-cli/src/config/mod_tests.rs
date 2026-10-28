@@ -1767,4 +1767,32 @@ fn qa_user_defaults_apply_without_project_section_and_project_keys_win() {
     assert_eq!(overridden.get("qa.mode").as_deref(), Some("batch"));
     assert!(overridden.qa().independent_pass);
     assert!(!overridden.qa().evidence_gate, "a project key does not mask other user defaults");
+    let mut overridden = overridden;
+    overridden.save(&project).unwrap();
+    assert!(!Config::load(&project).unwrap().qa().evidence_gate);
+    overridden.set("qa.evidence_gate", "true").unwrap();
+    overridden.save(&project).unwrap();
+    assert!(Config::load(&project).unwrap().qa().evidence_gate,
+        "an explicit built-in value overrides a different user value");
+    std::fs::write(host.join("config.toml"), "[qa]\nmode='per_task'\n[qa.capture]\nbase_url='http://localhost:3000'\n").unwrap();
+    let nested = env.home().join("nested/.cas");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("config.yaml"), "qa:\n  independent_pass: false\n").unwrap();
+    let mut loaded = Config::load(&nested).unwrap();
+    loaded.set("qa.capture.ready_path", "/ready").unwrap();
+    loaded.save(&nested).unwrap();
+    let reloaded = Config::load(&nested).unwrap();
+    assert_eq!(reloaded.qa().mode, QaMode::PerTask, "YAML migration must not pin the mode");
+    let capture = reloaded.qa().capture.unwrap();
+    assert_eq!(capture.base_url, "http://localhost:3000");
+    assert_eq!(capture.ready_path, "/ready");
+    assert!(!reloaded.qa().independent_pass);
+    std::fs::write(host.join("config.toml"), "[qa]\ntelemetry_sweep='scripts/sweep.sh'\npreflight_env_files=['USER_ENV']\n").unwrap();
+    let mut loaded = Config::load(&nested).unwrap();
+    loaded.set("qa.telemetry_sweep", "").unwrap();
+    loaded.set("qa.preflight_env_files", "").unwrap();
+    loaded.save(&nested).unwrap();
+    let reloaded = Config::load(&nested).unwrap();
+    assert!(reloaded.qa().telemetry_sweep.is_none());
+    assert!(reloaded.qa().preflight_env_files.is_empty());
 }

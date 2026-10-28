@@ -97,6 +97,17 @@ enter awaiting supervisor review:
 Other blockers use the same sequence. Finished deliveries follow MERGE REQUIRED.
 Wake eligibility never guarantees a turn.
 
+## Batch QA
+
+`qa.mode=batch` is the built-in default; `per_task` is the explicit opt-in.
+Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+A batch park defers evidence and opens no automatic per-task round, including
+when older waived rounds exist. Capture visual before/after evidence while
+building. The supervisor owns the hourly epic-tip candidate, shared PASS ledger
+and `verification action=batch_receipt` listing delivery anchors. Close deferred
+deliveries after that receipt exists; "waiting for batch receipt" is a pending
+obligation. Explicit `qa_request` reviews remain available.
+
 ## Browser checks
 
 Run vitest, tsc and affected journeys for browser changes. Use

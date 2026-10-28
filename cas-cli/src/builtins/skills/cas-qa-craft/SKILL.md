@@ -19,6 +19,18 @@ for API-only reasons; otherwise follow
 [references/independent-pass.md](references/independent-pass.md). Record its verdict with
 `verification action=qa_record`, naming the round's `LEDGER.md`.
 
+## Batch default
+
+`qa.mode=batch` is the built-in default; `per_task` explicitly selects per-delivery
+reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+For batch work, capture before/after evidence during implementation. The supervisor
+builds an hourly candidate at the exact epic tip and walks one combined matrix.
+Publish the PASS ledger, then record `verification action=batch_receipt` with the
+listed task IDs, their delivery anchors, `staging_sha`, `ledger_artifact_id` and
+`ledger_path`. Close only after the receipt covers those anchors. A deferred close
+reports "waiting for batch receipt" until then. An explicit `qa_request` still uses
+the independent-pass procedure below.
+
 ## Procedure
 
 1. Read the active task with `task action=show`; name the binary version or commit SHA ([map the

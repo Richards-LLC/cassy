@@ -105,7 +105,7 @@ fn fixture_with_project(
         format!(
             // The implementer's own evidence gate (cas-0cd5) is covered by
             // qa_evidence_gate.rs; these tests exercise the independent pass.
-            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nevidence_gate = false\n{project_config}",
+            "[factory]\nartifacts_root = {:?}\n[verification]\nenabled = false\n[qa]\nmode='per_task'\nevidence_gate = false\n{project_config}",
             repo.join("artifacts").display().to_string()
         ),
     )

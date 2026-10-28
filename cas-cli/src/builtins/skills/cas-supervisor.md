@@ -60,6 +60,15 @@ Request one child from a peer with `factory action=epic_split id=<epic> target=<
 
 Use `cas-codex-supervisor-checklist` on Codex, `cas-supervisor-checklist` elsewhere. After the closure pass, dispatch with `spawn_workers count=1 lane=<lane> isolate=true task_id=<task-id>`; assign idle live workers with `update` (not `transfer`), then end the turn.
 
+Batch QA is the built-in default; `qa.mode=per_task` explicitly enables per-delivery
+reviews. Project QA keys override user `~/.cas/config.toml`, then built-in defaults.
+Every hour with new deliveries, build a candidate at the exact epic tip, walk the
+combined matrix and publish its PASS ledger. Record `verification action=batch_receipt`
+with `task_ids`, `staging_sha`, `ledger_artifact_id` and `ledger_path`; every listed
+delivery anchor must be contained in that reviewed target commit. Then close those
+deliveries. A deferred close waits for this receipt. Explicit `qa_request` reviews
+remain available.
+
 Mixed harnesses and `cli=`/`model=`/`effort=`: [worker controls](references/reference.md#worker-controls).
 
 ## On-demand references

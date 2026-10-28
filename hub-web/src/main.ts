@@ -987,8 +987,7 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
         // the reader's position after Load earlier (HUB-J4).
         history.hydrateReply(reply.session === undefined || reply.session === session ? { ...reply, device_persisted: false } : reply);
       }
-      updateConversationViews();
-      renderConversationList();
+      scheduleReplyPresentation();
       // cas-ff22: older turns on screen may want the work done between them.
       workPicture.coverHistory(machine.id, session, history.visibleEvents()[0]?.at);
       if (selectedMachineId === machine.id && selectedSession === session) render();
@@ -2155,7 +2154,12 @@ function bindPairBarFrost(dialog: HTMLDialogElement): void {
   const bar = scroller?.querySelector<HTMLElement>(":scope > .dialog-actions");
   if (!scroller || !bar || pairBarBound.has(scroller)) return;
   pairBarBound.add(scroller);
-  const sync = () => bar.classList.toggle("fields-beneath", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1);
+  const sync = () => {
+    // A closed dialog has no scrolling fields. Reading its geometry here
+    // would nevertheless force layout of the newly opened conversation.
+    if (!dialog.open) return;
+    bar.classList.toggle("fields-beneath", scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 1);
+  };
   scroller.addEventListener("scroll", sync, { passive: true });
   if (typeof ResizeObserver !== "undefined") {
     const observer = new ResizeObserver(sync);

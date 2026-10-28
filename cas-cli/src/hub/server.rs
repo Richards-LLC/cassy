@@ -53,9 +53,8 @@ pub struct HubState<R: SessionReadModel> {
     usage: Option<super::usage::UsageStore>,
     #[cfg(test)]
     artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
-    /// Visual reply page tickets and the artifact fetch behind them (cas-3aff).
+    /// Visual reply page tickets (cas-3aff).
     pages: super::visual_pages::PageTickets,
-    page_fetch: super::visual_pages::PageFetch,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -83,15 +82,7 @@ impl<R: SessionReadModel> HubState<R> {
             #[cfg(test)]
             artifact_cloud_client: None,
             pages: super::visual_pages::PageTickets::default(),
-            page_fetch: super::visual_pages::default_page_fetch(),
         }
-    }
-
-    /// Replace where visual reply pages come from (tests use a fixed store).
-    #[cfg(test)]
-    pub(crate) fn with_page_fetch(mut self, fetch: super::visual_pages::PageFetch) -> Self {
-        self.page_fetch = fetch;
-        self
     }
 
     pub fn with_auth(mut self, auth: AuthStore) -> Self {
@@ -2531,18 +2522,19 @@ async fn artifact_view_url<R: SessionReadModel>(
     response
 }
 
-/// Mint a ticket that opens one HTML page the session published, framed only
-/// by the calling Commander origin (cas-3aff). The page itself is served by
-/// [`visual_page`]; an iframe or tab can't send DPoP, so the ticket is the
-/// capability. Nothing is fetched here: an unknown or non-HTML artifact is
-/// refused when the page is opened.
+/// Mint a ticket that opens one HTML page attached to the session's thread,
+/// framed only by the minting device's Commander origin (cas-3aff). The page
+/// is served by [`visual_page`]; an iframe or tab can't send DPoP, so the
+/// ticket is the capability. The shared artifact path refuses, before any
+/// fetch, a page that isn't committed HTML in this session's thread.
 async fn visual_page_ticket<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path((session, artifact)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
+    use super::visual_pages::PAGE_MIME_ALLOWLIST;
     let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/page");
-    if let Err(error) = authorize(
+    let context = match authorize(
         &state,
         HubAction::SessionRead,
         Scope::SessionRead,
@@ -2550,18 +2542,25 @@ async fn visual_page_ticket<R: SessionReadModel>(
         "POST",
         &uri,
     ) {
-        return with_cors(unauthorized_for(&error), &headers);
-    }
-    // authorize() has already required an exact Origin for a POST.
-    let Some(origin) = origin(&headers) else {
-        return unauthorized();
+        Ok(Some(context)) => context,
+        // A page needs a paired device's live context to recheck per fetch.
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
     };
-    if !valid_session_name(&session) {
-        return with_cors(generic_not_found(), &headers);
+    if let Err(refused) = super::artifact_proxy::issue_session_artifact_ticket(
+        &state,
+        &context,
+        &session,
+        &artifact,
+        PAGE_MIME_ALLOWLIST,
+    )
+    .await
+    {
+        return with_cors(refused, &headers);
     }
     let (ticket, expires) = state
         .pages
-        .issue(&session, &artifact, &origin, Instant::now());
+        .issue(&session, &artifact, &context, Instant::now());
     let expires_at = chrono::Utc::now()
         + chrono::Duration::from_std(expires.saturating_duration_since(Instant::now()))
             .unwrap_or_default();
@@ -2583,44 +2582,42 @@ async fn visual_page_ticket<R: SessionReadModel>(
 }
 
 /// Serve a visual reply page, or a passive asset it references by artifact
-/// id, under the sandbox policy (cas-3aff). Every refusal is the same plain
-/// 404, so a ticket says nothing about artifacts it doesn't open.
+/// id, under the sandbox policy (cas-3aff). Bytes come through the shared
+/// session artifact path with the minting device's context, rechecked live;
+/// every refusal keeps Commander's own strict policy.
 async fn visual_page<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path((ticket, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
 ) -> Response {
-    use super::visual_pages::{is_page, page_csp, sub_asset_allowed};
+    use super::visual_pages::{PAGE_MIME_ALLOWLIST, SUB_ASSET_MIME_ALLOWLIST, page_csp};
     let Some(held) = state.pages.resolve(&ticket, Instant::now()) else {
         return generic_not_found();
     };
-    let fetch = state.page_fetch.clone();
-    let session = held.session.clone();
-    let wanted = artifact.clone();
-    let Ok(Some(found)) = tokio::task::spawn_blocking(move || fetch(&session, &wanted)).await
-    else {
-        return generic_not_found();
-    };
-    let allowed = if artifact == held.page {
-        is_page(&found.mime)
+    let allowlist = if artifact == held.page {
+        PAGE_MIME_ALLOWLIST
     } else {
-        sub_asset_allowed(&found.mime)
+        SUB_ASSET_MIME_ALLOWLIST
     };
-    let (Ok(content_type), Ok(policy)) = (
-        HeaderValue::from_str(&found.mime),
-        HeaderValue::from_str(&page_csp(&held.origin)),
-    ) else {
+    let Ok(policy) = HeaderValue::from_str(&page_csp(&held.context.controller_origin)) else {
         return generic_not_found();
     };
-    if !allowed {
-        return generic_not_found();
+    let mut response = super::artifact_proxy::fetch_session_artifact(
+        &state,
+        held.context,
+        &held.session,
+        &artifact,
+        &headers,
+        allowlist,
+    )
+    .await;
+    // A page is navigated to, never read by script: no origin may read it.
+    response.headers_mut().remove("access-control-allow-origin");
+    if response.status().is_success() {
+        let output = response.headers_mut();
+        output.insert("content-security-policy", policy);
+        output.insert("content-disposition", HeaderValue::from_static("inline"));
     }
-    let mut response = Response::new(Body::from(found.bytes));
-    let headers = response.headers_mut();
-    headers.insert("content-type", content_type);
-    headers.insert("content-security-policy", policy);
-    headers.insert("content-disposition", HeaderValue::from_static("inline"));
-    // The ticket is a capability in the URL: keep it out of every cache.
-    headers.insert("cache-control", HeaderValue::from_static("no-store"));
     response
 }
 

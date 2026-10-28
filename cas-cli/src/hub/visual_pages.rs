@@ -13,8 +13,10 @@
 //!   `allow-scripts` or `allow-same-origin` (no script, opaque origin, no
 //!   popups or top navigation), no network beyond the hub's own assets and
 //!   `data:`, and `frame-ancestors` naming only the minting origin.
-//! - The page itself must be `text/html`; sibling artifacts it references are
-//!   served only for the passive types in [`sub_asset_allowed`].
+//! - Bytes come through the shared session artifact path (`artifact_proxy`):
+//!   only committed refs attached to that session's thread, within the size
+//!   cap, with Range, never forwarding a bearer. The page must be `text/html`;
+//!   siblings only the passive types in [`SUB_ASSET_MIME_ALLOWLIST`].
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -22,6 +24,8 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+use super::AuthContext;
 
 /// How long a minted page ticket opens the page and its assets.
 pub(crate) const PAGE_TICKET_TTL: Duration = Duration::from_secs(10 * 60);
@@ -38,38 +42,22 @@ pub(crate) fn page_csp(frame_ancestor: &str) -> String {
         .replace("{frame_ancestor}", frame_ancestor)
 }
 
-/// Whether a sibling artifact of this type may load inside a page: passive
-/// media, fonts and stylesheets only. A second HTML document, script, JSON or
-/// anything unknown is refused.
-pub(crate) fn sub_asset_allowed(mime: &str) -> bool {
-    let mime = mime
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    ["image/", "video/", "audio/", "font/"]
-        .iter()
-        .any(|prefix| mime.starts_with(prefix))
-        || mime == "text/css"
-}
+/// The page itself: HTML only. Passed to the shared artifact byte path
+/// (`artifact_proxy`), which keeps the thread, size, Range and no-bearer rules.
+pub(crate) const PAGE_MIME_ALLOWLIST: &[&str] = &["text/html"];
 
-/// Whether this artifact type is a page.
-pub(crate) fn is_page(mime: &str) -> bool {
-    mime.split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .eq_ignore_ascii_case("text/html")
-}
+/// Sibling artifacts a page may load: passive media, fonts and stylesheets.
+/// A second HTML document, script, JSON or anything unknown is refused.
+pub(crate) const SUB_ASSET_MIME_ALLOWLIST: &[&str] =
+    &["image/*", "video/*", "audio/*", "font/*", "text/css"];
 
-/// What a ticket opens.
+/// What a ticket opens, and on whose authority: the minting device's
+/// context, rechecked live on every fetch, so revoking it closes the page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PageTicket {
     pub session: String,
     pub page: String,
-    /// The exact Commander origin allowed to frame the page.
-    pub origin: String,
+    pub context: AuthContext,
     pub expires: Instant,
 }
 
@@ -85,7 +73,7 @@ impl PageTickets {
         &self,
         session: &str,
         page: &str,
-        origin: &str,
+        context: &AuthContext,
         now: Instant,
     ) -> (String, Instant) {
         let ticket = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
@@ -100,7 +88,7 @@ impl PageTickets {
             PageTicket {
                 session: session.to_owned(),
                 page: page.to_owned(),
-                origin: origin.to_owned(),
+                context: context.clone(),
                 expires,
             },
         );
@@ -118,59 +106,6 @@ impl PageTickets {
     }
 }
 
-/// One artifact's bytes and recorded type, as the page route serves them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PageBytes {
-    pub mime: String,
-    pub bytes: Vec<u8>,
-}
-
-/// Fetches one artifact of one session for the page route. Blocking: the
-/// route calls it on the blocking pool. `None` means unknown or unavailable;
-/// the route answers a plain 404 either way, so a ticket holder learns nothing
-/// about other artifacts.
-pub(crate) type PageFetch = Arc<dyn Fn(&str, &str) -> Option<PageBytes> + Send + Sync>;
-
-/// The production fetch: the session's artifact record, its bytes from the
-/// committed Cloud copy, checked against the recorded digest and size cap.
-pub(crate) fn default_page_fetch() -> PageFetch {
-    Arc::new(|session, artifact| fetch_committed(session, artifact).ok().flatten())
-}
-
-fn fetch_committed(session: &str, artifact: &str) -> anyhow::Result<Option<PageBytes>> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let session = crate::bridge::server::session::resolve_session_by_name(session)?;
-    let root = crate::bridge::server::session::cas_root_for_session_with_fallback(&session, None)?;
-    let store = cas_store::SqliteArtifactStore::open(&root)?;
-    let client = crate::artifacts::cloud_client(&root);
-    let Ok(signed) = crate::artifacts::signed_view(&store, client.as_ref(), artifact) else {
-        return Ok(None);
-    };
-    // The signed URL is itself a credential: it is never logged.
-    let response = ureq::get(&signed.view.url)
-        .timeout(Duration::from_secs(60))
-        .call()?;
-    let mut bytes = Vec::new();
-    response
-        .into_reader()
-        .take(cas_types::ARTIFACT_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() as u64 <= cas_types::ARTIFACT_MAX_BYTES,
-        "artifact exceeds the size cap"
-    );
-    let digest = hex::encode(Sha256::digest(&bytes));
-    anyhow::ensure!(
-        digest.eq_ignore_ascii_case(&signed.artifact.sha256),
-        "artifact bytes do not match the recorded digest"
-    );
-    Ok(Some(PageBytes {
-        mime: signed.artifact.mime,
-        bytes,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,13 +114,18 @@ mod tests {
     fn a_ticket_opens_only_until_it_expires() {
         let tickets = PageTickets::default();
         let now = Instant::now();
-        let (ticket, expires) =
-            tickets.issue("factory-a", "art-page", "https://controller.example", now);
+        let context = AuthContext {
+            device_id: "device".into(),
+            credential_id: "credential".into(),
+            device_label: "Phone".into(),
+            operator_label: "Daniel".into(),
+            controller_origin: "https://controller.example".into(),
+            scopes: Default::default(),
+            request_id: "request".into(),
+        };
+        let (ticket, expires) = tickets.issue("factory-a", "art-page", &context, now);
         assert_eq!(expires, now + PAGE_TICKET_TTL);
-        assert_eq!(
-            tickets.resolve(&ticket, now).unwrap().origin,
-            "https://controller.example"
-        );
+        assert_eq!(tickets.resolve(&ticket, now).unwrap().context, context);
         assert_eq!(tickets.resolve(&ticket, expires), None);
         assert_eq!(tickets.resolve("not-a-ticket", now), None);
     }

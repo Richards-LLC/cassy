@@ -11,7 +11,7 @@ This note covers the attack surface and the controls that hold the line. The nor
 3. Commander asks the machine for a page ticket with a DPoP-authenticated `POST /v1/sessions/{session}/artifacts/{artifact}/page`. The machine answers with `/v1/pages/{ticket}/{artifact}`, and that URL becomes the frame's `src`.
 4. Tapping the file card opens the same ticket URL in a new tab, never the raw blob URL. Both views get the same response headers.
 
-The page can reference sibling artifacts from the same session by id, for example `<img src="art-1a2b3c4d">`. The URL is relative, so it resolves under the same ticket path. A page can also inline its images, SVG diagrams and fonts as `data:` URIs.
+The page can reference sibling artifacts by id, for example `<img src="art-1a2b3c4d">`. The URL is relative, so it resolves under the same ticket path. A sibling must also be attached to a reply in the same conversation. A page can also inline its images, SVG diagrams and fonts as `data:` URIs.
 
 ## Assets
 
@@ -80,13 +80,13 @@ The machine's general `X-Frame-Options: DENY` is left off these responses only. 
 
 *Attack.* A page names another session's artifact id, or replays a ticket after the device is revoked.
 
-*Controls.* The machine issues a ticket only after a DPoP `SessionRead` check on that exact session. The ticket stores the session, the page artifact and the origin. Sub-assets resolve through that session's artifact store only, and only these types are served as sub-assets: `image/*`, `video/*`, `audio/*`, `font/*` and `text/css`. The page itself must be `text/html`. A ticket expires after 10 minutes and lives only in memory, so a machine restart drops it. Revoking a device stops it from minting new tickets. A ticket that was already minted keeps working until it expires, which is the same bound as a WebSocket ticket.
+*Controls.* The machine issues a ticket only after a DPoP `SessionRead` check on that exact session, and only for committed HTML attached to an operator reply in that session's thread. The ticket stores the session, the page artifact and the minting device's context. Every byte, page or sub-asset, goes through the shared session artifact path (`hub/artifact_proxy.rs`). That path rechecks the device's live permission on every fetch and serves only committed artifacts attached to that session's thread, within the 25 MiB cap, with Range support, and never forwards a Cloud bearer. A page is served only if it is `text/html`. A sub-asset is served only if it is `image/*`, `video/*`, `audio/*`, `font/*` or `text/css`. A ticket expires after 10 minutes and lives only in memory, so a machine restart drops it. Revoking the device closes its pages at the next fetch.
 
-*Proof.* Rust route tests cover: an unknown ticket gives 404, an expired ticket gives 404, a page whose type isn't HTML gives 404, a sub-asset of a disallowed type gives 404, and minting without DPoP is refused.
+*Proof.* Rust tests cover the following. Minting without DPoP is refused. Minting for a non-HTML file, a missing file or another session's file gives 404. A second page, a sub-asset of a disallowed type, another session's file and an unknown ticket each give 404. A revoked device's page stops opening. A unit test covers expiry.
 
 ## Limits, stated plainly
 
 - No page script, ever, in this version. That means no interactive charts. A diagram reaches the page as SVG, either inline or as a sibling artifact. Allowing scripts would need a separate review covering self-navigation exfiltration and a dedicated origin.
 - Agent-published video and audio files can't upload to Cloud yet, because the upload type list excludes them; a separate follow-up owns that change. For now a page carries video inline as a `data:` URI, within the 25 MiB artifact cap.
 - The hosted Commander origin (`hub.petrastella.io`) sets its CSP outside this repository. It needs the same `frame-src` amendment before inline pages render there. Until then, a hosted Commander still opens the page in a tab.
-- Pages are fetched server-side from the committed Cloud copy. A page that never reached Cloud can't render, and the card says why, exactly as it does for any other file.
+- The machine fetches pages server-side from the committed Cloud copy, through the same session artifact path that inline media uses. A page that never reached Cloud can't render, and the card says why, exactly as it does for any other file.

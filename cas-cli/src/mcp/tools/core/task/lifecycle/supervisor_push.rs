@@ -2015,6 +2015,7 @@ mod tests {
         let rows = queue.peek_all(10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target, "wait-worker");
+        // pin: the retry prompt must name the task whose wait was approved.
         assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wait now"));
 
         let held = blocked("cas-verdict-held", "Waiting on the operator's decision about scope.");

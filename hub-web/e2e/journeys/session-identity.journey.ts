@@ -350,12 +350,16 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     for (const width of [1280, 390]) for (const scheme of ["light", "dark", "forced-colors"] as const) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none", reducedMotion: "reduce" });
+      expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);
       await expect(studio().locator(".project-card-toggle")).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
       if (process.env.FULL_NAV_CAPTURE_DIR) await page.screenshot({ path: `${process.env.FULL_NAV_CAPTURE_DIR}/${width}-${scheme}.png` });
     }
+    await page.emulateMedia({ colorScheme: "light", forcedColors: "none", contrast: "more" });
+    expect(await page.evaluate(() => matchMedia("(prefers-contrast: more)").matches)).toBe(true);
+    if (process.env.FULL_NAV_CAPTURE_DIR) await page.screenshot({ path: `${process.env.FULL_NAV_CAPTURE_DIR}/a11y-contrast-more.png` });
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+    await page.emulateMedia({ colorScheme: "light", forcedColors: "none", contrast: "no-preference" });
   });
 
   await journey.stage("Filters intersect search, and a decision opens its own session", async () => {

@@ -7262,8 +7262,12 @@ mod tests {
             "cas-bad".into(),
             "broken/repo#9, broken/repo#10, broken/repo#11: fix".into(),
         ));
-        // Three invalid repos sort before the default and fill the lookup cap.
-        for (id, title) in [("cas-bada", "broken/a#1"), ("cas-badb", "broken/b#2")] {
+        // Earlier invalid repos fill the lookup cap; another proves omitted counts.
+        for (id, title) in [
+            ("cas-bada", "broken/a#1"),
+            ("cas-badb", "broken/b#2"),
+            ("cas-badz", "broken/z#3"),
+        ] {
             mixed.push(crate::types::Task::new(id.into(), title.into()));
         }
         let check = shipped_issues_check(&mixed, repo, &States(Ok([1158].into())), &tags);
@@ -7287,8 +7291,20 @@ mod tests {
             check.message
         );
         assert!(!check.message.contains("skipped:"), "{}", check.message);
-        assert_eq!(check.message.matches("broken/repo#").count(), 1, "{}", check.message);
+        assert_eq!(
+            check.message.matches("broken/repo#").count(),
+            1,
+            "{}",
+            check.message
+        );
         assert!(check.message.contains("+2 more"), "{}", check.message);
+        assert!(
+            check
+                .message
+                .contains("1 more unchecked repository (1 reference)"),
+            "{}",
+            check.message
+        );
 
         let check = shipped_issues_check(&mixed, repo, &States(Ok([].into())), &tags);
         assert!(

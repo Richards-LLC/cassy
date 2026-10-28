@@ -23,3 +23,26 @@ reduce the Cassy payloads that feed those cards.
 
 Sources: [hooks](https://learn.chatgpt.com/docs/hooks),
 [configuration](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+## Critique
+
+terminal-qa: PASS codex-handoff · 11 runs · 0 fail · 0 warn · 16 allowed.
+Captures: task artifact `terminal-qa/report.json` (80/120 columns, four palettes,
+C locale, NO_COLOR and pipe). Two explicit exceptions repeat across the eight
+TTY runs: preserve the exact copyable receipt path and inherited safety prose;
+Codex's native cards own their paragraph wrapping. Original findings are saved
+in `terminal-qa/original-report.json`.
+
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Hierarchy | 4 | First two handoff lines name the predecessor/end reason and task/worker/pending counts. |
+| Fit | 4 | Real 11/14/110 snapshot projects to 20 human lines and 1036 bytes, from 2205 bytes of raw JSON; at most two rows per group. |
+| Craft | 4 | Task names, assignees and parked branches lead; retired worker identifiers and queue payloads remain in the receipt. |
+| Theme safety | 5 | ASCII text has no custom color; all four palettes and non-TTY captures agree. |
+| Machine contract | 5 | Actual native Codex 0.165 PTY rejects the installed hook and accepts the candidate's two-field SessionStart shape; full receipt arrays are identical. |
+
+Scored on 2026-10-28. Evidence: task `LEDGER.md`, `before-real-pane.ansi`,
+`after-final-pane.ansi`, `metadata-and-identity.json`, and candidate receipt at
+revision `62d05b091db5844b89829a6ef59b7f583ac53cbf`. The native proof uses an
+offline provider; authenticated supervisor adoption remains a live preview
+observation. Native tool cards remain visible.

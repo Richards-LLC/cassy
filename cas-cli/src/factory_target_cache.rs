@@ -20,6 +20,7 @@ use walkdir::WalkDir;
 use crate::config::FactoryConfig;
 
 mod lane;
+mod named;
 mod unknown;
 pub(crate) mod legacy;
 #[cfg(unix)]
@@ -235,6 +236,17 @@ fn inspect_with_probe(
 pub(crate) fn inspect_until(cas_root: &Path, policy: TargetCachePolicy,
     known: &[PathBuf], live: &[PathBuf], deadline: Instant) -> io::Result<TargetCacheReport> {
     inspect_scoped_with_probe(cas_root, policy, known, live, true, false, capacity_status, Some(deadline))
+}
+
+/// Inspect one explicitly named retired worker target.
+pub(crate) fn inspect_named(
+    cas_root: &Path,
+    policy: TargetCachePolicy,
+    path: &Path,
+    live: &[PathBuf],
+    dry_run: bool,
+) -> io::Result<TargetCacheReport> {
+    named::inspect(cas_root, policy, path, live, dry_run)
 }
 
 /// Admission reclaims verified relocated worker and resolved review targets. Keep full factory

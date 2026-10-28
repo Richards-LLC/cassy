@@ -56,6 +56,10 @@ invariants:
     statement: The pairing-code dialog fits or scrolls inside a landscape phone viewport; Copy command, Send the code and Cancel remain reachable without clipped content.
     check: 'Run npm run visual-qa in hub-web (pairing-code, landscape, light and dark) and the landscape pairing-code case in hub-web/e2e/installed-safe-area.spec.ts; every action can receive focus wholly inside the dialog.'
     bug: {task: cas-f300}
+  HUB-J1-RELAY-DEADLINE-STABLE:
+    statement: One pairing request keeps the expires_at it was created with across every relay poll; only a newly created request gets a fresh deadline, so polling never reads as a new pairing step.
+    check: 'Run the "cas-fa56" case in hub-web/e2e/journeys/pairing-deadline.journey.ts: each poll repeats the 201 deadline and a request created after Cancel carries a later one.'
+    bug: {task: cas-fa56}
   HUB-J2-GOAL:
     statement: the link pairs this browser and I reach the supervisor
     check: 'Walk HUB-J2 in hub-web/e2e/journeys/pair-link.journey.ts; verify the expected experience and edge paths
@@ -257,6 +261,12 @@ bug_families:
     tasks: [cas-f300]
     invariants: [HUB-J1-LANDSCAPE-CODE-ACCESS]
     journeys: [HUB-J1]
+  relay-double-deadline-drift:
+    title: The relay double restamped a pairing request's deadline on every poll, so each poll looked like a new pairing step and reset the code view
+    found: '2026-10-27'
+    tasks: [cas-fa56]
+    invariants: [HUB-J1-RELAY-DEADLINE-STABLE]
+    journeys: [HUB-J1]
 journeys:
 - id: HUB-J1
   name: First open and pair a machine with a code
@@ -329,6 +339,7 @@ journeys:
   invariants:
   - HUB-J1-GOAL
   - HUB-J1-LANDSCAPE-CODE-ACCESS
+  - HUB-J1-RELAY-DEADLINE-STABLE
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'

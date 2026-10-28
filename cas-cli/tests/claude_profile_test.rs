@@ -561,9 +561,10 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
     }
 }
 
-/// Picker new-login on a real terminal: the email and the answer to the later
-/// duplicate question arrive in one write. inquire's reader takes both at the
-/// email prompt; the duplicate confirmation must still receive the `y`.
+/// Picker new-login on a real terminal: keys typed together with the email
+/// are read by inquire's reader at the email prompt. A finished `y` line still
+/// answers the duplicate question, an unfinished one stays editable there, and
+/// a typed-ahead Ctrl-C still cancels.
 #[cfg(unix)]
 #[tokio::test]
 async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_providers() {
@@ -598,64 +599,81 @@ exit 0
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .unwrap();
-        let mut pty = Pty::spawn(
-            "picker-type-ahead",
-            PtyConfig {
-                command: cas::test_paths::cas_binary().to_string_lossy().into_owned(),
-                args: vec![provider.into(), "--bare".into()],
-                cwd: Some(home.path().to_path_buf()),
-                env: vec![
-                    ("HOME".into(), home.path().to_string_lossy().into_owned()),
-                    ("XDG_CONFIG_HOME".into(), home.path().join(".xdg").to_string_lossy().into_owned()),
-                    ("PATH".into(), path.to_string_lossy().into_owned()),
-                    ("TERM".into(), "xterm-256color".into()),
-                    ("CAS_SKIP_FACTORY_TOOLING".into(), "1".into()),
-                ],
-                env_remove: vec![
-                    "CAS_ROOT".into(),
-                    "CLAUDE_CONFIG_DIR".into(),
-                    "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
-                    "CODEX_HOME".into(),
-                ],
-                ..PtyConfig::default()
-            },
-        )
-        .expect("spawn Cassy with terminal stdin/stdout");
-        let (mut output, mut step) = (Vec::new(), 0);
-        let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
-            loop {
-                match pty.recv().await {
-                    Some(PtyEvent::Output(bytes)) => {
-                        output.extend(bytes);
-                        let text = String::from_utf8_lossy(&output).into_owned();
-                        if step == 0 && text.contains("list-profiles") {
-                            // End selects the last row: the new-login entry.
-                            pty.write(b"\x1b[F\r").await.unwrap();
-                            step = 1;
-                        } else if step == 1 && text.contains("Email for the new") {
-                            pty.write(b"typed@example.com\ry\r").await.unwrap();
-                            step = 2;
+        // (keys written with the email, keys written at the question, succeeds)
+        let cases: [(&[u8], &[u8], bool); 3] = [
+            (b"typed@example.com\ry\r", b"", true),
+            (b"typed@example.com\rn", b"\x7fy\r", true),
+            (b"typed@example.com\r\x03", b"", false),
+        ];
+        for (with_email, at_question, succeeds) in cases {
+            let mut pty = Pty::spawn(
+                "picker-type-ahead",
+                PtyConfig {
+                    command: cas::test_paths::cas_binary().to_string_lossy().into_owned(),
+                    args: vec![provider.into(), "--bare".into()],
+                    cwd: Some(home.path().to_path_buf()),
+                    env: vec![
+                        ("HOME".into(), home.path().to_string_lossy().into_owned()),
+                        ("XDG_CONFIG_HOME".into(), home.path().join(".xdg").to_string_lossy().into_owned()),
+                        ("PATH".into(), path.to_string_lossy().into_owned()),
+                        ("TERM".into(), "xterm-256color".into()),
+                        ("CAS_SKIP_FACTORY_TOOLING".into(), "1".into()),
+                    ],
+                    env_remove: vec![
+                        "CAS_ROOT".into(),
+                        "CLAUDE_CONFIG_DIR".into(),
+                        "CLAUDE_SECURESTORAGE_CONFIG_DIR".into(),
+                        "CODEX_HOME".into(),
+                    ],
+                    ..PtyConfig::default()
+                },
+            )
+            .expect("spawn Cassy with terminal stdin/stdout");
+            let (mut output, mut step) = (Vec::new(), 0);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                loop {
+                    match pty.recv().await {
+                        Some(PtyEvent::Output(bytes)) => {
+                            output.extend(bytes);
+                            let text = String::from_utf8_lossy(&output).into_owned();
+                            if step == 0 && text.contains("list-profiles") {
+                                // End selects the last row: the new-login entry.
+                                pty.write(b"\x1b[F\r").await.unwrap();
+                                step = 1;
+                            } else if step == 1 && text.contains("Email for the new") {
+                                pty.write(with_email).await.unwrap();
+                                step = 2;
+                            } else if step == 2 && text.contains("[y/N] ") && !at_question.is_empty() {
+                                pty.write(at_question).await.unwrap();
+                                step = 3;
+                            }
                         }
+                        Some(PtyEvent::Exited(code)) => return code,
+                        Some(PtyEvent::Error(error)) => panic!("picker PTY: {error}"),
+                        None => panic!("picker exited without status"),
                     }
-                    Some(PtyEvent::Exited(code)) => return code,
-                    Some(PtyEvent::Error(error)) => panic!("picker PTY: {error}"),
-                    None => panic!("picker exited without status"),
                 }
+            })
+            .await;
+            pty.kill_tree_force();
+            let output = String::from_utf8_lossy(&output).replace('\r', "");
+            let case = String::from_utf8_lossy(with_email);
+            let Ok(code) = result else { panic!("{provider} {case:?}: still waiting for input: {output}") };
+            if succeeds {
+                assert_eq!(code, Some(0), "{provider} {case:?}: {output}");
+                assert!(output.contains("Keep the existing account? [y/N] y"), "{provider} {case:?}: {output}");
+            } else {
+                assert_ne!(code, Some(0), "{provider} {case:?}: {output}");
+                assert!(!output.contains("Keep the existing account?"), "{provider} {case:?}: {output}");
             }
-        })
-        .await;
-        pty.kill_tree_force();
-        let output = String::from_utf8_lossy(&output).replace('\r', "");
-        let Ok(code) = result else { panic!("{provider}: still waiting for input: {output}") };
-        assert_eq!(code, Some(0), "{provider}: {output}");
-        assert!(output.contains("Keep the existing account? [y/N] y"), "{provider}: {output}");
-        let left: Vec<_> = std::fs::read_dir(home.path())
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with(&format!(".{provider}-")))
-            .collect();
-        assert_eq!(left.len(), 1, "{provider}: one account, no staging: {left:?}");
+            let left: Vec<_> = std::fs::read_dir(home.path())
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(&format!(".{provider}-")))
+                .collect();
+            assert_eq!(left.len(), 1, "{provider} {case:?}: one account, no staging: {left:?}");
+        }
     }
 }
 

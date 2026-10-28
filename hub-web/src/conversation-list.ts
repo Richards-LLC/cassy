@@ -44,6 +44,16 @@ export interface ConversationRow {
   activityAt?: number;
   /** When the session started (ms epoch): ranks Most recent when no session of a group has activity (cas-6acf). */
   startedAt?: number;
+  /** Optional additive hub metadata (older hubs omit these fields). */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  machine_online?: boolean;
+  workerCount?: number;
+  mergesPerHour?: number;
+  needsYou?: boolean;
+  operatorReason?: string;
+  supervisorState?: "working" | "idle" | "needs-you" | "offline";
   /**
    * One of several live sessions of a project on one machine (cas-55a4). The
    * rows sit together under one heading; the most recently active one is
@@ -157,12 +167,12 @@ export function machineName(host: string): string {
 }
 
 /** The words a list search matches: project, machine and supervisor codename. */
-export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "host" | "supervisor">): string {
-  return `${projectTitle(row.projectDir) ?? ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
+export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "project" | "host" | "supervisor">): string {
+  return `${row.project || projectTitle(row.projectDir) || ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
 }
 
 /** Rows whose project, machine or supervisor contains every word of the query (case-insensitive). */
-export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
+export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "project" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
   const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return [...rows];
   return rows.filter((row) => { const text = conversationSearchText(row); return words.every((word) => text.includes(word)); });
@@ -175,13 +185,16 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
  * time in words, unread and waiting.
  */
 export function conversationRowSpokenName(row: ConversationRow): string {
-  const project = projectTitle(row.projectDir);
+  const project = row.project || projectTitle(row.projectDir);
   const fallback = row.group ? row.activityLine || row.connection : row.connection;
   const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
   const unread = row.unread ?? 0;
   return joinSpoken([
     `${project ?? row.supervisor} on ${machineName(row.host)}`,
     project ? row.supervisor : undefined,
+    row.harness,
+    row.account_email,
+    row.supervisorState === "needs-you" ? "needs you" : row.supervisorState,
     row.group?.active ? "most recent" : undefined,
     preview,
     row.when ? row.whenSpoken ?? row.when : undefined,
@@ -225,7 +238,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
-  const project = projectTitle(row.projectDir);
+  const project = row.project || projectTitle(row.projectDir);
   // The title is "project · machine": the project leads, never a dot (P13);
   // the one separator rides with the machine, so a dot never dangles at a
   // line end when a long project pushes the machine to the next line. The
@@ -235,8 +248,12 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // running under the time stamp (cas-1ca1). The codename sits beneath.
   // cas-55a4: among one project's sessions, the most recently active one says so.
   const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
-  return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}</span>`
+  const harnesses = { claude: "✳", codex: ">_", grok: "/", opencode: "[ ]" };
+  const harness = row.harness && Object.hasOwn(harnesses, row.harness) ? row.harness : undefined;
+  const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
+  const state = row.supervisorState ? `<span class="supervisor-state ${row.supervisorState}" title="${row.supervisorState === "needs-you" ? "Needs you" : row.supervisorState}" aria-hidden="true"></span>` : "";
+  return `<span class="conversation-avatar${harness ? " harness-mark" : ""}"${harness ? ` data-harness="${harness}" title="${harness}"` : ""} aria-hidden="true">${escapeHtml(harness ? harnesses[harness] : machineMonogram(row.host))}${state}</span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}${account}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks

@@ -297,19 +297,23 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
     for (const width of [1280, 390]) for (const scheme of ["light", "dark", "forced-colors"] as const) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none" });
-      await expect(list.locator(".conversation-group-head")).toBeVisible();
+      await expect(list.locator(".project-card-name").first()).toBeVisible();
       await expect(list.locator(".conversation-row")).toHaveCount(3);
       if (process.env.GROUP_BOUNDARY_CAPTURE_DIR) await page.screenshot({ path: `${process.env.GROUP_BOUNDARY_CAPTURE_DIR}/${width}-${scheme}.png` });
     }
     const group = list.getByRole("group", { name: "gabber-studio · 2 conversations on Atlas", exact: true });
     await expect(group.locator(".conversation-row")).toHaveCount(2);
-    await expect(list.locator(":scope > .conversation-row")).toContainText("pulse-card");
+    await expect(list.getByRole("group", { name: "pulse-card · 1 conversation on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(1);
     await expect(group.locator(".conversation-session-mark")).toHaveText("Most recent");
     await group.locator(".conversation-row").first().focus();
     await page.keyboard.press("Tab");
     await expect(group.locator(".conversation-row").last()).toBeFocused();
-    await page.keyboard.press("Tab");
-    await expect(list.locator(":scope > .conversation-row")).toBeFocused();
+    const singleton = list.getByRole("group", { name: "pulse-card · 1 conversation on Atlas", exact: true });
+    await singleton.locator(".project-card-toggle").focus();
+    await page.keyboard.press("Enter");
+    await expect(singleton.locator(".project-card-toggle")).toHaveAttribute("aria-expanded", "false");
+    await page.keyboard.press("Enter");
+    await singleton.locator(".conversation-row").focus();
     await page.keyboard.press("Enter");
     await expect(page.getByRole("button", { name: "Send to the pulse-card supervisor", exact: true })).toBeVisible();
     await expect(page.locator('.conversation-row[aria-current="true"]')).toHaveCount(1);

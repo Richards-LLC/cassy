@@ -281,6 +281,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  missing-terminal-operator-input:
+    title: Genuine supervisor terminal input appears live before the answer, persists across devices, and excludes injected traffic
+    tasks: [cas-69b3f]
+    invariants: [HUB-J4-GOAL, HUB-J12-GOAL]
+    journeys: [HUB-J4, HUB-J12]
   stale-worker-and-delivery-projection:
     title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
     tasks: [cas-0a75]

@@ -1590,7 +1590,7 @@ impl QueueJobs {
                         );
                     }
                 }
-                QueueJobOutcome::Mirrored(state) => {
+                QueueJobOutcome::Mirrored(mut state) => {
                     #[cfg(test)]
                     {
                         self.mirror_results_seen += 1;
@@ -1599,6 +1599,7 @@ impl QueueJobs {
                     // back; a scan whose drop was already reported is stale.
                     if self.mirror_in_flight && result.generation == self.mirror_generation {
                         self.mirror_in_flight = false;
+                        self.operator_messages.append(&mut state.operator_messages);
                         self.mirror_state = Some(state);
                     }
                 }

@@ -908,8 +908,13 @@ fn a_stale_mirror_result_is_ignored() {
     assert!(!jobs.mirror_in_flight);
     let (release_current, current_held) = mpsc::channel::<()>();
     let current_held = Mutex::new(current_held);
-    jobs.submit_mirror_scan(move |_| {
+    jobs.submit_mirror_scan(move |state| {
         let _ = current_held.lock().unwrap().recv();
+        state.operator_messages.push(crate::ui::factory::ConversationHistoryMessage {
+            notification_id: 77, target: "terminal-history".into(), text: "Typed in the terminal".into(),
+            state: "delivered".into(), stamped: false, reply_to: None, device_id: "terminal".into(),
+            operator_label: Some("Terminal".into()), session: "factory-1".into(), at: chrono::Utc::now().to_rfc3339(),
+        });
     });
     let current = jobs.mirror_generation;
     assert!(current > stale && jobs.mirror_in_flight);
@@ -926,6 +931,8 @@ fn a_stale_mirror_result_is_ignored() {
     release_current.send(()).unwrap();
     settle(&mut jobs, |jobs| !jobs.mirror_in_flight);
     assert!(jobs.mirror_state.is_some(), "the current scan handed its cursors back");
+    assert_eq!(jobs.take_operator_messages().iter().map(|row| row.notification_id).collect::<Vec<_>>(), vec![77]);
+    assert!(jobs.take_operator_messages().is_empty(), "a completed scan publishes only once");
 }
 
 /// cas-4272: a terminal stamp now lands on the writer, so until it does the

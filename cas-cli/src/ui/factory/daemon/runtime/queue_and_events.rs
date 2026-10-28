@@ -8719,7 +8719,7 @@ impl FactoryDaemon {
         self.resolve_urgent_wake_probes();
         self.resolve_normal_delivery_probes(queue.as_ref()).await;
         super::loop_watchdog::mark(super::loop_watchdog::Step::prompt_queue("prompt queue: commander mirror"));
-        if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(5)) {
+        if self.last_commander_mirror_scan.is_none_or(|last| last.elapsed() >= Duration::from_secs(1)) {
             self.last_commander_mirror_scan = Some(std::time::Instant::now());
             // cas-d2a2: transcript reads and mirror writes run as a job.
             let cas_dir = self.app.cas_dir().to_path_buf();

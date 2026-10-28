@@ -1,11 +1,11 @@
-//! Mirror completed supervisor final answers into the durable Commander lane.
+//! Capture supervisor terminal input and completed answers in the durable Commander lane.
 //! The daemon observes both Claude and Codex transcripts; Codex has no Stop
 //! hook, so a hook-only mirror would silently omit its supervisor turns.
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -89,6 +89,88 @@ fn transcript_tail(path: &Path) -> std::io::Result<Vec<Value>> {
         .collect())
 }
 
+/// Read text/image user input without treating tool results as operator input.
+fn claude_prompt(value: &Value) -> Option<String> {
+    value.pointer("/message/content").and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| text_blocks(value, "/message/content", "text"))
+}
+
+fn human_provenance(value: &Value) -> bool {
+    if ["isMeta", "isSidechain", "isCompactSummary"].iter()
+        .any(|key| value.get(key).and_then(Value::as_bool) == Some(true)) {
+        return false;
+    }
+    // Old harness records omit provenance. Explicit machine provenance always
+    // wins, including a perfectly ordinary-looking injected message body.
+    for (path, allowed) in [
+        ("/origin/kind", &["human", "operator", "user"][..]),
+        ("/promptSource", &["typed", "queued"][..]),
+        ("/turnOrigin", &["human", "operator", "user"][..]),
+        ("/userType", &["external"][..]),
+    ] {
+        if value.pointer(path).and_then(Value::as_str)
+            .is_some_and(|kind| !allowed.contains(&kind)) {
+            return false;
+        }
+    }
+    ["machine_prompt_provenance", "machinePromptProvenance"].iter()
+        .all(|key| value.get(key).is_none_or(Value::is_null))
+}
+
+struct TerminalInput {
+    key: String,
+    at: DateTime<Utc>,
+    prompt: String,
+}
+
+/// User input is owed while the assistant is still working. Keep this reader
+/// independent of completed_turns, which only settles the reply half.
+fn terminal_inputs(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<TerminalInput> {
+    let mut inputs = Vec::new();
+    let mut codex_turn: Option<String> = None;
+    let mut seen = HashSet::new();
+    for value in values {
+        let Some(at) = timestamp(value) else { continue };
+        let (key, prompt) = match cli {
+            cas_mux::SupervisorCli::Claude
+                if value.get("type").and_then(Value::as_str) == Some("user") => {
+                let Some(key) = value.get("promptId").or_else(|| value.get("uuid"))
+                    .and_then(Value::as_str).filter(|id| !id.is_empty()) else { continue };
+                let Some(prompt) = claude_prompt(value) else { continue };
+                (key.to_owned(), prompt)
+            }
+            cas_mux::SupervisorCli::Codex => {
+                if value.get("type").and_then(Value::as_str) == Some("event_msg")
+                    && matches!(value.pointer("/payload/type").and_then(Value::as_str), Some("task_started" | "turn_started")) {
+                    codex_turn = value.pointer("/payload/turn_id").and_then(Value::as_str).map(str::to_owned);
+                }
+                if value.get("type").and_then(Value::as_str) != Some("response_item")
+                    || value.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+                    || value.pointer("/payload/role").and_then(Value::as_str) != Some("user") {
+                    continue;
+                }
+                let Some(turn) = codex_turn.as_deref() else { continue };
+                let Some(prompt) = text_blocks(value, "/payload/content", "input_text") else { continue };
+                (format!("{turn}:{}", at.to_rfc3339()), prompt)
+            }
+            _ => continue,
+        };
+        let prompt = prompt.trim().to_owned();
+        if prompt.is_empty() || !human_provenance(value)
+            || value.get("payload").is_some_and(|payload| !human_provenance(payload))
+            || crate::hooks::handlers::handlers_middle::is_harness_prompt(&prompt) {
+            continue;
+        }
+        // Claude can append a second text-only projection of a text/image
+        // record, with another UUID but the identical input timestamp.
+        if seen.insert((at, prompt.clone())) {
+            inputs.push(TerminalInput { key, at, prompt });
+        }
+    }
+    inputs
+}
+
 fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<CompletedTurn> {
     let mut turns = Vec::new();
     let mut started: Option<(String, DateTime<Utc>, Option<i64>)> = None;
@@ -101,7 +183,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                 if value.get("type").and_then(Value::as_str) == Some("user")
                     && value.get("isMeta").and_then(Value::as_bool) != Some(true)
                     && value.get("isSidechain").and_then(Value::as_bool) != Some(true)
-                    && let Some(prompt) = value.pointer("/message/content").and_then(Value::as_str)
+                    && let Some(prompt) = claude_prompt(value)
                 {
                     let key = value
                         .get("promptId")
@@ -110,7 +192,7 @@ fn completed_turns(values: &[Value], cli: cas_mux::SupervisorCli) -> Vec<Complet
                         .unwrap_or("")
                         .to_owned();
                     if !key.is_empty() {
-                        started = Some((key, at, commander_marker(prompt)));
+                        started = Some((key, at, commander_marker(&prompt)));
                         started_prompt = Some(prompt.to_owned());
                         final_text = None;
                     }
@@ -297,6 +379,8 @@ fn resume_floor(
 #[derive(Default)]
 pub(crate) struct MirrorScanState {
     cursors: HashMap<String, TranscriptCursor>,
+    published_inputs: HashSet<i64>,
+    pub(super) operator_messages: Vec<crate::ui::factory::ConversationHistoryMessage>,
     #[cfg(test)]
     transcript_reads: usize,
 }
@@ -413,6 +497,30 @@ pub(super) fn scan_supervisor_replies(
             continue;
         };
         let mut written = true;
+        for input in terminal_inputs(&values, cli) {
+            if input.at < active_since || resumed_since.is_some_and(|floor| input.at < floor) {
+                continue;
+            }
+            match queue.record_terminal_transcript_turn(session, session_id, &input.key, &input.prompt, input.at) {
+                Ok(id) if !state.published_inputs.contains(&id) => {
+                    // Hook-created rows also need their first live broadcast.
+                    // Read on this job's store lane, just like QueueStamp.
+                    match queue.queued_prompt(id).map(|row| row.and_then(|row|
+                        super::queue_and_events::commander_history_send(queue, row, session))) {
+                        Ok(Some(message)) => {
+                            state.operator_messages.push(message);
+                            state.published_inputs.insert(id);
+                        }
+                        _ => written = false,
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    written = false;
+                    tracing::warn!(%error, "terminal Commander input capture failed");
+                }
+            }
+        }
         for turn in completed_turns(&values, cli) {
             if resumed_since.is_some_and(|floor| turn.completed_at < floor) {
                 continue;
@@ -1271,22 +1379,94 @@ mod tests {
 
     #[test]
     fn terminal_operator_prompt_is_captured_before_the_supervisor_finishes() {
-        let now = Utc::now();
-        let question = "Please check the terminal conversation capture";
-        // A real Codex terminal turn has no UserPromptSubmit hook and may run
-        // for minutes before a final answer. Its input must already be visible.
-        let (temp, root, queue) = terminal_session(vec![
-            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"terminal-pending"}}),
-            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":question}]}}),
-        ]);
-        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
-        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
-        for device in ["phone", "desktop"] {
-            let rows = queue.conversation_history("factory-1", device, None, 50).unwrap();
-            assert_eq!(rows.len(), 1, "terminal input is owed before any assistant answer");
-            assert_eq!(rows[0].source, "terminal");
-            assert_eq!(rows[0].prompt, question);
-            assert!(rows[0].processed_at.is_some(), "history must never re-inject the prompt");
+        for cli in [cas_mux::SupervisorCli::Codex, cas_mux::SupervisorCli::Claude] {
+            let now = Utc::now();
+            let question = "Please check the terminal conversation capture";
+            let input = |id: &str, text: &str, at: DateTime<Utc>| match cli {
+                cas_mux::SupervisorCli::Claude => vec![serde_json::json!({
+                    "timestamp":at.to_rfc3339(),"type":"user","uuid":format!("uuid-{id}"),"promptId":id,
+                    "origin":{"kind":"human"},"promptSource":"typed","turnOrigin":"human","userType":"external",
+                    "message":{"role":"user","content":[{"type":"image","source":{}},{"type":"text","text":text}]}
+                })],
+                _ => vec![
+                    serde_json::json!({"timestamp":at.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":id}}),
+                    serde_json::json!({"timestamp":at.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}}),
+                ],
+            };
+            let mut values = input("pending", question, now);
+            // Reject explicit machine origins even with ordinary message text,
+            // as well as legacy unmarked CAS/Commander envelopes.
+            for (index, (field, provenance)) in [
+                ("origin", serde_json::json!({"kind":"task-notification"})),
+                ("promptSource", serde_json::json!("system")),
+                ("turnOrigin", serde_json::json!("task_notification")),
+                ("userType", serde_json::json!("internal")),
+                ("machine_prompt_provenance", serde_json::json!({"origin":"agent_authored"})),
+                ("isMeta", serde_json::json!(true)),
+                ("isSidechain", serde_json::json!(true)),
+            ].into_iter().enumerate() {
+                let mut records = input(&format!("injected-{index}"), "Ordinary looking machine text", now);
+                records.last_mut().unwrap()[field] = provenance;
+                values.extend(records);
+            }
+            for (index, text) in [
+                "[cas #77 operator Daniel@Phone verified 0s first] Commander send",
+                "<task-notification>completed</task-notification>",
+                "CAS wake: message 7 from supervisor is in your inbox",
+                "Plain prefix\n<teammate-message teammate_id=\"director\">agent text</teammate-message>",
+            ].into_iter().enumerate() {
+                values.extend(input(&format!("envelope-{index}"), text, now));
+            }
+            if cli == cas_mux::SupervisorCli::Claude {
+                // Same-turn text-only projection has a different UUID and no
+                // provenance. It must not become another operator bubble.
+                values.push(serde_json::json!({"timestamp":now.to_rfc3339(),"type":"user","uuid":"projection",
+                    "message":{"role":"user","content":[{"type":"text","text":question}]}}));
+            }
+            let (temp, root, queue) = terminal_session(values.clone());
+            let agents = SqliteAgentStore::open(&root).unwrap();
+            let mut supervisor = agents.get("supervisor-id").unwrap();
+            supervisor.metadata.insert("supervisor_cli".into(), cli.to_string());
+            agents.update(&supervisor).unwrap();
+            let path = if cli == cas_mux::SupervisorCli::Claude {
+                let directory = temp.path().join("account/projects").join(temp.path().to_string_lossy().replace(['/', '.'], "-"));
+                std::fs::create_dir_all(&directory).unwrap();
+                let path = directory.join("supervisor-id.jsonl");
+                std::fs::write(&path, values.iter().map(Value::to_string).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+                path
+            } else {
+                temp.path().join("account/sessions/2026/10/10/rollout-2026-10-10T12-00-00-terminal.jsonl")
+            };
+            let mut state = MirrorScanState::default();
+            let scan = |state: &mut MirrorScanState| scan_supervisor_replies(
+                &root, temp.path(), "factory-1", &queue, &agents.list(None).unwrap(), state,
+            );
+            scan(&mut state);
+            scan(&mut state);
+            assert_eq!(state.operator_messages.len(), 1, "{cli}: live input before final answer");
+            assert_eq!(state.operator_messages[0].text, question);
+            assert_eq!(state.operator_messages[0].operator_label.as_deref(), Some("Terminal"));
+            assert_eq!(state.operator_messages[0].device_id, "terminal");
+            assert_eq!(state.operator_messages[0].state, "delivered");
+            assert!(!state.operator_messages[0].stamped);
+            for device in ["phone", "desktop"] {
+                let rows = queue.conversation_history("factory-1", device, None, 50).unwrap();
+                assert_eq!(rows.len(), 1, "{cli}: terminal input is owed before any assistant answer");
+                assert_eq!(rows[0].source, "terminal");
+                assert_eq!(rows[0].prompt, question);
+                assert_eq!(rows[0].created_at, now);
+                assert!(rows[0].processed_at.is_some(), "history must never re-inject the prompt");
+            }
+            // A new turn with identical text is a distinct question; replaying
+            // the transcript after a daemon restart still retains exactly two.
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            for record in input("pending-again", question, now + chrono::Duration::seconds(1)) {
+                writeln!(file, "{record}").unwrap();
+            }
+            scan(&mut state);
+            assert_eq!(state.operator_messages.len(), 2);
+            scan(&mut MirrorScanState::default());
+            assert_eq!(queue.conversation_history("factory-1", "phone", None, 50).unwrap().len(), 2);
         }
     }
 

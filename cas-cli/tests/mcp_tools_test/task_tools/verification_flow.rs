@@ -1183,6 +1183,10 @@ async fn test_close_retry_keeps_live_dispatch_for_original_supervisor_verdict() 
     let shown = extract_text(
         supervisor
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id: task_id.clone(),
                 with_deps: false,
             }))
@@ -12268,7 +12272,8 @@ async fn approved_no_code_wait_queues_the_workers_close_retry_cas_7fc3() {
     let mut waiting = tasks.get(&task.id).unwrap();
     waiting.status = TaskStatus::Blocked;
     waiting.notes.push_str(&format!(
-        "\n[2026-10-27 15:00] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+        "\n[{}] 🚫 BLOCKER Verification required: exact dispatch {} must record a verdict before close.",
+        dispatch.requested_at.format("%Y-%m-%d %H:%M"),
         dispatch.id
     ));
     tasks.update(&waiting).unwrap();

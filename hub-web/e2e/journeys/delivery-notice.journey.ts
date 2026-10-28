@@ -1,4 +1,4 @@
-import { test, expect, expectWholeFocusRing, RECEIPTS, settle } from "./journey";
+import { test, expect, expectWholeFocusRing, RECEIPTS, settle, journeyPart } from "./journey";
 import { join } from "node:path";
 import { journeyDay, journeyStamp } from "./clock";
 import type { Machine } from "./hub-double";
@@ -62,11 +62,16 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("The delivery problem is one attention item", async () => {
     await expect(attentionItems).toHaveCount(1);
+    const receiptIds = () => hub.frames.filter(frame => frame.kind === "OperatorNoticePersisted")
+      .map(frame => (frame.body as { notification_id: number }).notification_id);
+    await expect.poll(receiptIds, { message: "attention commit sends its own persistence receipt" }).toEqual([901]);
+    expect(hub.persistedReplies.some(reply => reply.notification_id === 901)).toBe(false);
     // The watchdog raises it again (a repeat and a live replay): still one.
     const repeat = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: false } });
     // The page has handled the repeat before it is counted, rather than after
     // a fixed pause a loaded host can outrun (cas-c4b2).
     await hub.received(repeat);
+    await expect.poll(receiptIds).toEqual([901, repeat]);
     await settle(page);
     await expect(attentionItems).toHaveCount(1);
     await expect(log).not.toContainText("never reached it");
@@ -255,6 +260,15 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await attentionItems.getByRole("button", { name: "Copy" }).click();
     await expect(page.locator("#toast")).toHaveText("Details copied");
     expect(await page.evaluate(() => navigator.clipboard.readText()), "Copy copies the Details text").toBe(`${NOTICE_SUMMARY}\n\n${NOTICE_TEXT}`);
+    const deliveryCount = () => page.evaluate(() => {
+      const stored = JSON.parse(localStorage.getItem("commander.usage.v1") ?? "null") as { days?: Record<string, Record<string, number>> } | null;
+      return Object.values(stored?.days ?? {}).reduce((sum, actions) => sum + (actions["attention.delivery"] ?? 0), 0);
+    });
+    const beforeResolution = await deliveryCount();
+    const resolved = hub.supervisorSays(SESSION, NOTICE_TEXT, { kind: "blocker", summary: NOTICE_SUMMARY, device_id: "*", notice: { source: "relay-watchdog", subject: SUBJECT, resolved: true } });
+    await hub.received(resolved);
+    await expect(attentionItems).toHaveCount(0);
+    await expect.poll(deliveryCount, { message: "a self-resolved notice records attention.delivery once" }).toBe(beforeResolution + 1);
     hub.send(SESSION, { OperatorNoticeResolved: { notification_id: 901, subject: SUBJECT } });
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
@@ -262,6 +276,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
+    expect(await deliveryCount(), "resolved history and explicit resolution do not count twice").toBe(beforeResolution + 1);
     // cas-d043 G03: yesterday's blocker reads as the visit showed it; the time
     // this browser stored it is not a machine stamp to measure a clock by.
     await expect(log.locator(".turn time").first()).toHaveText("Sep 29, 17:20");
@@ -287,5 +302,49 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(answer.locator(".reply-quote")).toHaveText("Reply to “Did the bank feed reconcile?” · wise-lion-31");
     await expect(answer).toHaveAttribute("data-reply-to", "3196200");
     await expect(page.getByRole("region", { name: "Earlier sessions" }).locator("details[open]")).toHaveCount(0);
+  });
+});
+
+// More than one daemon batch, absent from the bounded conversation history.
+test("HUB-J15 pending attention notices drain once across reconnect", journeyPart, async ({ page, journey }) => {
+  const pending = Array.from({ length: 12 }, (_, index) => ({
+    ...notice(20_000 + index, journeyStamp(-60_000)),
+    notice: { source: "relay-watchdog", subject: 10_000 + index, resolved: index === 11 },
+  }));
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"], multiplex: true, pendingReplies: { [SESSION]: pending } });
+  const noticeIds = () => hub.frames.filter(frame => frame.kind === "OperatorNoticePersisted")
+    .map(frame => (frame.body as { notification_id: number }).notification_id);
+  const stored = () => page.evaluate(() => new Promise<Array<{ acknowledgedAt?: string }>>((resolve, reject) => {
+    const open = indexedDB.open("cas-commander-v1");
+    open.onsuccess = () => {
+      const db = open.result, tx = db.transaction("attention");
+      const request = tx.objectStore("attention").getAll();
+      tx.oncomplete = () => { db.close(); resolve(request.result); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+    open.onerror = () => reject(open.error);
+  }));
+  const choose = async () => {
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+  };
+  await journey.stage("Offline notices commit only to attention and drain every pending batch", async () => {
+    await journey.open(); await choose();
+    await expect.poll(() => hub.pendingReplies.get(SESSION)?.length).toBe(0);
+    expect(noticeIds().sort()).toEqual(pending.map(row => row.notification_id).sort());
+    expect(hub.persistedReplies).toEqual([]);
+    const rows = await stored();
+    expect(rows).toHaveLength(12);
+    expect(rows.filter(row => row.acknowledgedAt)).toHaveLength(1);
+    await expect(page.locator(".turn").filter({ hasText: "never reached it" })).toHaveCount(0);
+  });
+  await journey.stage("A fresh attach retains attention without resending drained notices", async () => {
+    const requests = hub.historyRequests.length;
+    await page.reload(); await choose();
+    await expect.poll(() => hub.historyRequests.length).toBeGreaterThan(requests);
+    expect(hub.pendingReplies.get(SESSION)).toEqual([]);
+    expect(hub.pendingReplyForwards).toHaveLength(12);
+    expect(noticeIds()).toHaveLength(12);
+    expect(await stored()).toHaveLength(12);
+    await expect(page.locator("#attention-panel article", { hasText: NOTICE_HEADLINE })).toHaveCount(11);
   });
 });

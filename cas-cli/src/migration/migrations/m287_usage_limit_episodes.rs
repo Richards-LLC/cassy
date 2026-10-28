@@ -1,10 +1,10 @@
-//! One durable account-switch decision per harness limit episode.
+//! Durable records of harness usage-limit episodes, including legacy decisions.
 use crate::migration::{Migration, Subsystem};
 pub const MIGRATION: Migration = Migration {
     id: 287,
     name: "usage_limit_episodes",
     subsystem: Subsystem::Agents,
-    description: "Persist limit-switch and no-eligible decisions beyond spawn cleanup",
+    description: "Persist usage-limit episode records beyond spawn cleanup",
     up: &[cas_store::USAGE_LIMIT_EPISODE_SCHEMA],
     detect: Some(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='usage_limit_episodes'",

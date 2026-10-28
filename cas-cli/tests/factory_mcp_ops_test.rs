@@ -369,11 +369,61 @@ enum IsolatedCodexState {
     Unavailable,
 }
 
+/// A real ChatGPT catalogue keeps model admission active in spawn fixtures.
+fn write_codex_account_fixture(account: &std::path::Path, models: &[&str]) {
+    std::fs::create_dir_all(account).expect("create synthetic Codex account");
+    std::fs::write(account.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#)
+        .expect("write synthetic Codex auth");
+    std::fs::write(
+        account.join("models_cache.json"),
+        serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "client_version": "0.0.0-test",
+            "models": models.iter().map(|slug| serde_json::json!({"slug": slug})).collect::<Vec<_>>(),
+        })
+        .to_string(),
+    )
+    .expect("write synthetic Codex model catalogue");
+}
+
+const ACCOUNT_SELECTOR_ENV: &[&str] = &[
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+    "GROK_HOME",
+];
+
+fn clear_account_selectors(command: &mut std::process::Command) {
+    for name in ACCOUNT_SELECTOR_ENV {
+        command.env_remove(name);
+    }
+}
+
+fn assert_no_account_selectors() {
+    let codex_child = std::env::var_os("CAS_FACTORY_CODEX_ISOLATED_CHILD").is_some();
+    for name in ACCOUNT_SELECTOR_ENV {
+        let fixture = match (*name, codex_child) {
+            ("CODEX_HOME", true) => Some(".codex"),
+            ("CLAUDE_CONFIG_DIR", true) => Some(".claude"),
+            _ => None,
+        };
+        let expected = fixture.map(|directory| {
+            std::path::PathBuf::from(std::env::var_os("HOME").expect("isolated child HOME"))
+                .join(directory)
+        });
+        assert_eq!(
+            std::env::var_os(name).map(std::path::PathBuf::from),
+            expected,
+            "isolated child leaked or changed account selector {name}"
+        );
+    }
+}
+
 /// Run one availability-sensitive integration test in its own process.
 ///
-/// The production probe reads process HOME/PATH internally, so a per-Command
-/// environment can reach it only when the whole service call runs in this
-/// child. The parent test process never mutates PATH.
+/// The production probe reads HOME/PATH and the requesting account selectors,
+/// so the whole service call runs in a child with a synthetic account and
+/// model catalogue. The parent test process never mutates PATH.
 fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     // libtest names include the suite module in a grouped integration harness.
     // Strip the binary crate name; keep standalone and nested-module support.
@@ -388,31 +438,40 @@ fn run_isolated_codex_test(child_test: &str, state: IsolatedCodexState) {
     });
     std::fs::create_dir(&bin_dir).expect("create isolated child PATH");
 
+    let account = home.path().join(".codex");
     if matches!(state, IsolatedCodexState::Available) {
         let codex = bin_dir.join("codex");
         cas::test_paths::warm_stub(&codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0-test\\n'\n");
 
-        let auth = home.path().join(".codex/auth.json");
-        std::fs::create_dir_all(auth.parent().expect("auth parent"))
-            .expect("create fake codex auth directory");
-        std::fs::write(auth, "{}").expect("write fake codex auth marker");
+        write_codex_account_fixture(
+            &account,
+            &[cas::config::STOCK_WORKER_MODEL, "o3", "o4-mini"],
+        );
     }
 
-    let output = std::process::Command::new(
+    let mut command = std::process::Command::new(
         std::env::current_exe().expect("current integration-test executable"),
-    )
-    .args(["--exact", &child_filter, "--ignored", "--nocapture"])
-    .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
-    // The child deliberately supplies HOME/PATH itself, so it cannot inherit
-    // the TestEnvGuard-owned override from the parent test process. Keep the
-    // factory build probe deterministic in this process too.
-    .env("CAS_FACTORY_BUILD_GUARD", "off")
-    .env("HOME", home.path())
-    .env("CODEX_HOME", home.path().join(".codex"))
-    .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"))
-    .env("PATH", &bin_dir)
-    .output()
-    .expect("spawn isolated Codex integration test");
+    );
+    command
+        .args(["--exact", &child_filter, "--ignored", "--nocapture"])
+        .env("CAS_FACTORY_CODEX_ISOLATED_CHILD", child_test)
+        // The child deliberately supplies HOME/PATH itself, so it cannot inherit
+        // the TestEnvGuard-owned override from the parent test process. Keep the
+        // factory build probe deterministic in this process too.
+        .env("CAS_FACTORY_BUILD_GUARD", "off")
+        .env("HOME", home.path())
+        // Account overrides otherwise escape the temporary HOME and make model
+        // preflight read the operator's real auth/catalogue (cas-cba9, cas-0ad2).
+        .env("XDG_CONFIG_HOME", home.path().join(".config"))
+        .env("PATH", &bin_dir);
+    clear_account_selectors(&mut command);
+    // Only these synthetic homes may override the default in a Codex child.
+    command
+        .env("CODEX_HOME", &account)
+        .env("CLAUDE_CONFIG_DIR", home.path().join(".claude"));
+    let output = command
+        .output()
+        .expect("spawn isolated Codex integration test");
 
     assert!(
         output.status.success(),
@@ -429,6 +488,7 @@ fn factory_env_in_isolated_codex_child(child_test: &str) -> FactoryTestEnv {
         Ok(child_test),
         "isolated helper must run only through its matching parent test"
     );
+    assert_no_account_selectors();
     FactoryTestEnv::with_agent_id_and_env("test-agent-id", None)
 }
 
@@ -2287,6 +2347,53 @@ async fn test_spawn_workers_codex_unavailable_fails_loudly_in_isolated_child() {
         "caller must see the loud refusal: {}",
         error.message
     );
+    assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
+}
+
+#[test]
+fn test_spawn_workers_logged_out_default_names_account_remedies() {
+    run_isolated_codex_test(
+        "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
+        IsolatedCodexState::Available,
+    );
+}
+
+#[tokio::test]
+#[ignore = "subprocess helper for deterministic logged-out default Codex probe"]
+async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child() {
+    let env = factory_env_in_isolated_codex_child(
+        "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
+    );
+    // This scenario exercises the default home, not the common selected fixture.
+    let mut selector = TestEnvGuard::new();
+    selector.remove("CODEX_HOME");
+    env.create_epic("Test Epic");
+    let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
+    cas::test_paths::warm_stub(
+        &home.join("fake-bin/codex"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'codex-cli 0.0.0-test\\n'; exit 0; fi\nif [ \"$1 $2\" = 'login status' ]; then if [ -f \"$CODEX_HOME/auth.json\" ]; then printf 'Logged in\\n'; else printf 'Not logged in\\n'; exit 1; fi; fi\nexit 2\n",
+    );
+    std::fs::remove_file(home.join(".codex/auth.json")).expect("log out default account");
+    let registered = home.join(".codex-registered@example.com");
+    std::fs::create_dir_all(&registered).expect("registered account directory");
+    std::fs::write(registered.join("auth.json"), "{}").expect("registered auth marker");
+
+    let mut req = factory_req("spawn_workers");
+    req.count = Some(1);
+    req.cli = Some("codex".to_string());
+    let error = env
+        .service
+        .factory_request(Parameters(req))
+        .await
+        .expect_err("logged-out default must refuse before enqueue");
+    for detail in [
+        "default Codex home is absent or logged out",
+        "Pass config_dir",
+        "project worker config_dir",
+        registered.to_str().unwrap(),
+    ] {
+        assert!(error.message.contains(detail), "missing {detail:?}: {error}");
+    }
     assert!(env.spawn_queue().peek(10).expect("peek").is_empty());
 }
 
@@ -7273,15 +7380,17 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
         .unwrap();
         let filter =
             "factory_mcp_ops_test::test_gc_retains_file_written_after_dirty_probe_cas_75ae";
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", filter, "--nocapture"])
             .env(CHILD, "1")
             .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join(".config"))
             .env("REVIEW_GC_REAL_GIT_75AE", real_git)
             .env("REVIEW_GC_RACE_CONTROL_75AE", home.path().join("armed"))
-            .env("PATH", path)
-            .output()
-            .unwrap();
+            .env("PATH", path);
+        clear_account_selectors(&mut command);
+        let output = command.output().unwrap();
         assert!(
             output.status.success(),
             "isolated late-write GC failed: {}\n{}",
@@ -7291,6 +7400,7 @@ exec "$REVIEW_GC_REAL_GIT_75AE" "$@"
         child_test_evidence::assert_passed(&String::from_utf8_lossy(&output.stdout), filter);
         return;
     }
+    assert_no_account_selectors();
     let env = FactoryTestEnv::with_server_supervisor();
     init_sync_repo(&env, "review-race-control");
     let project = env.cas_root.parent().unwrap();
@@ -9888,6 +9998,10 @@ async fn test_coordination_interrupt_action_is_urgent() {
 /// caught at test time, not at factory-start time.
 #[test]
 fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
+    // An inherited account need not exist: the child owns its account fixture.
+    let account = TempDir::new().expect("ambient account parent");
+    let missing = account.path().join("absent-account");
+    let _guard = EnvGuard::set(&[("CODEX_HOME", missing.to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child",
         IsolatedCodexState::Available,
@@ -9949,6 +10063,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
         "cas-efc4 AC2: worker_spec must encode the effort override: {spec_json}"
     );
 
+    let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid Codex spec");
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert_eq!(spec.requester_config_dir.as_deref(), expected_account.to_str());
+
     // Second entry: omitted overrides now resolves to the safe Codex worker floor
     // instead of inheriting the supervisor/session defaults.
     let claude_entry = &entries[1];
@@ -9971,6 +10089,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
 /// break the other.
 #[test]
 fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness() {
+    // A valid but incompatible inherited account must not select the child's models.
+    let account = TempDir::new().expect("incompatible ambient Codex account");
+    write_codex_account_fixture(account.path(), &["unrelated-model"]);
+    let _guard = EnvGuard::set(&[("CODEX_HOME", account.path().to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child",
         IsolatedCodexState::Available,
@@ -10043,6 +10165,24 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
         claude_spec.contains("medium"),
         "claude effort in spec: {claude_spec}"
     );
+
+    // The fixture exercises catalogue admission, rather than bypassing it via
+    // API-key auth or a missing/stale cache. Refusal must not enqueue work.
+    let unlisted = "fixture-unlisted-model";
+    let mut rejected = factory_req("spawn_workers");
+    rejected.count = Some(1);
+    rejected.cli = Some("codex".into());
+    rejected.model = Some(unlisted.into());
+    let error = env.service.factory_request(Parameters(rejected)).await
+        .expect_err("an unlisted model must still be refused");
+    assert!(
+        error.message.contains(unlisted) && error.message.contains("models_cache.json"),
+        "{error}"
+    );
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert!(error.message.contains(expected_account.to_str().unwrap()), "{error}");
+    assert_eq!(env.spawn_queue().peek(10).expect("peek after refusal").len(), 2);
+
 }
 
 /// cas-efc4 AC4: `worker_status` must surface worktree/git metadata
@@ -10588,6 +10728,10 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         .service
         .inner
         .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            read: cas::mcp::tools::TaskReadOptions {
+                full: true,
+                ..Default::default()
+            },
             id: clean_id.clone(),
             with_deps: false,
         }))
@@ -10603,6 +10747,9 @@ async fn test_a844_show_and_list_distinguish_merge_conflict() {
         .service
         .inner
         .cas_task_show(Parameters(cas::mcp::tools::TaskShowRequest {
+            read: cas::mcp::tools::TaskReadOptions {
+                ..Default::default()
+            },
             id: conflict_id.clone(),
             with_deps: false,
         }))
@@ -13965,12 +14112,13 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
     task.assignee = Some("cas-8725-close-worker".to_string());
     env.task_store().add(&task).expect("add task");
 
+    let reason = "envelopes shipped with complete proof. ".repeat(40);
     let close = get_text(
         &env.service
             .task(Parameters(task_req(serde_json::json!({
                 "action": "close",
                 "id": task.id,
-                "reason": "envelopes shipped",
+                "reason": reason,
             }))))
             .await
             .expect("close returns verification guidance rather than an error"),
@@ -14008,6 +14156,18 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
         "CAS composed every byte of this row, so it is Daemon-stamped: {handoff:?}"
     );
 
+    eprintln!("DISPATCH_REPLAY reason_bytes={} queued_bytes={}", reason.len(), handoff.prompt.len());
+    assert!(!handoff.prompt.contains(&reason));
+    let artifacts = cas_store::SqliteArtifactStore::open(&env.cas_root).unwrap()
+        .list_for_task(&task.id).unwrap();
+    let manifest = artifacts.iter().find(|artifact| artifact.name.starts_with("relay-evidence-"))
+        .expect("verification dispatch must preserve complete evidence in a manifest");
+    assert!(handoff.prompt.contains(&manifest.id));
+    let config = cas::config::Config::load(&env.cas_root).unwrap_or_default();
+    let root = cas::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+    let roots = cas::artifacts::paths::PublishRoots::new(&env.cas_root, &root, &task.id);
+    assert!(std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap().contains(&reason));
+
     // The gate, driven for real: this row wakes an idle supervisor pane.
     let agents = env.agent_store().list(None).expect("roster");
     let sender = cas::ui::factory::FactoryDaemon::wake_sender_from_origin(
@@ -14037,7 +14197,7 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
         .task(Parameters(task_req(serde_json::json!({
             "action": "close",
             "id": task.id,
-            "reason": "envelopes shipped",
+            "reason": reason,
         }))))
         .await;
     let handoffs = env

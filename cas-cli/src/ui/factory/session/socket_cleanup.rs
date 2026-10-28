@@ -5,8 +5,7 @@
 use std::{fs, io, path::Path};
 
 #[cfg(unix)]
-pub(super) fn transition_lock(base: &Path) -> io::Result<fs::File> {
-    use std::io::Write;
+pub(super) fn namespace_lock(base: &Path) -> io::Result<fs::File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let directory = fs::symlink_metadata(base)?;
     let uid = unsafe { libc::geteuid() };
@@ -16,7 +15,7 @@ pub(super) fn transition_lock(base: &Path) -> io::Result<fs::File> {
             "factory socket directory is not owned",
         ));
     }
-    let mut lock = fs::OpenOptions::new()
+    let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
@@ -31,10 +30,22 @@ pub(super) fn transition_lock(base: &Path) -> io::Result<fs::File> {
         ));
     }
     fs2::FileExt::lock_exclusive(&lock)?;
-    // A run-owned binding inventory must notice a bind or metadata writer
-    // without rescanning the machine registry for every project/channel.
+    Ok(lock)
+}
+
+#[cfg(unix)]
+fn record_transition(lock: &mut fs::File) -> io::Result<()> {
+    use std::io::Write;
     lock.write_all(uuid::Uuid::new_v4().as_bytes())?;
-    lock.set_len(16)?;
+    lock.set_len(16)
+}
+
+#[cfg(unix)]
+pub(super) fn transition_lock(base: &Path) -> io::Result<fs::File> {
+    let mut lock = namespace_lock(base)?;
+    // Fence socket bind/reap operations. Metadata identities are checked by
+    // the inventory itself; lock acquisition alone is not a transition.
+    record_transition(&mut lock)?;
     Ok(lock)
 }
 
@@ -179,7 +190,7 @@ pub(super) fn remove_if_unheld(path: &Path, sessions: &Path) -> io::Result<()> {
     let Some(base) = sessions.parent() else {
         return Ok(());
     };
-    let _lock = match transition_lock(base) {
+    let mut lock = match namespace_lock(base) {
         Ok(lock) => lock,
         Err(error)
             if matches!(
@@ -191,7 +202,11 @@ pub(super) fn remove_if_unheld(path: &Path, sessions: &Path) -> io::Result<()> {
         }
         Err(error) => return Err(error),
     };
-    remove_locked(path, sessions, false)
+    remove_locked(path, sessions, false)?;
+    if fs::symlink_metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        record_transition(&mut lock)?;
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

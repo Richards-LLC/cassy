@@ -201,7 +201,6 @@ async fn cas_7b6b_round4_recycle_forgets_expired_pane_grace() {
         request_id: 1,
         name: "worker-a".into(),
         spec: None,
-        limit_recycle: None,
     }))
     .await;
 }

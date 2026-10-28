@@ -3061,6 +3061,11 @@ async fn check_observation_recovery(conclusion: &str, ci_override: bool) {
         if conclusion == "neutral" {
             assert!(tasks.get(task_id).unwrap().notes.contains("CI unconfirmed"), "{text}");
         }
+        let self_handoffs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM prompt_queue WHERE source LIKE 'verification-dispatch:%'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(self_handoffs, 0, "worktree_merge already returned this dispatch to its owning supervisor");
     } else {
         assert!(!retry.is_error.unwrap_or(false), "{text}");
         assert!(dispatch.is_none(), "override merges do not auto-close");

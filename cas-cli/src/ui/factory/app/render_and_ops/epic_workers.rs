@@ -592,11 +592,10 @@ pub(crate) fn task_epic_base(
         }
     };
 
-    let branch = epic
-        .branch
-        .clone()
-        .filter(|b| !b.trim().is_empty())
-        .unwrap_or_default();
+    let branch = crate::mcp::tools::core::task::repo_context::effective_epic_branch(&epic)
+        .filter(|_| epic.branch.as_deref().is_some_and(|branch| !branch.trim().is_empty()))
+        .unwrap_or_default()
+        .to_string();
     let branch_is_title_slug_fallback = false;
     let branch_exists = !branch.is_empty() && ref_exists(repo_root, &branch);
     if !branch_exists {
@@ -3496,18 +3495,6 @@ impl FactoryApp {
         teams: Option<cas_mux::TeamsSpawnConfig>,
         requested_spec: Option<cas_mux::WorkerSpec>,
     ) -> anyhow::Result<()> {
-        self.respawn_worker_with_resume(name, teams, requested_spec, None, None)
-    }
-
-    /// Limit recovery supplies the existing directory to bypass worktree provisioning.
-    pub fn respawn_worker_with_resume(
-        &mut self,
-        name: &str,
-        teams: Option<cas_mux::TeamsSpawnConfig>,
-        requested_spec: Option<cas_mux::WorkerSpec>,
-        resume_session: Option<&str>,
-        preserved_cwd: Option<&std::path::Path>,
-    ) -> anyhow::Result<()> {
         // cas-9bc6: re-read live LlmConfig so harness/model/effort changes made
         // via `cas config set` after daemon boot are reflected in this respawn.
         self.sync_worker_config_from_live_settings();
@@ -3549,10 +3536,7 @@ impl FactoryApp {
 
         // Check if worktree exists. If it has to be created, use the same base
         // selection as normal worker spawn.
-        let (cwd, cas_root) = if let Some(cwd) = preserved_cwd {
-            anyhow::ensure!(cwd.is_dir(), "Preserved worker worktree is missing");
-            (cwd.to_path_buf(), Some(self.cas_dir.clone()))
-        } else if let Some(manager) = &mut self.worktree_manager {
+        let (cwd, cas_root) = if let Some(manager) = &mut self.worktree_manager {
             let worker_base = worker_base_for_spawn(self.epic_branch.as_deref(), manager);
             let worktree = match manager.ensure_worker_worktree_from(name, &worker_base) {
                 Ok(worktree) => worktree,
@@ -3572,14 +3556,13 @@ impl FactoryApp {
         };
 
         // Add pane to mux (spawns new Claude process)
-        if let Err(e) = self.mux.add_worker_resuming(
+        if let Err(e) = self.mux.add_worker(
             name,
             cwd,
             cas_root.as_ref(),
             &self.supervisor_name,
             teams.as_ref(),
             requested_spec,
-            resume_session,
         ) {
             crate::telemetry::track(
                 "factory_worker_respawn_result",

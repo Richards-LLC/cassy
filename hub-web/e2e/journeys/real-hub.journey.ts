@@ -1,6 +1,6 @@
 import { test, expect, type Request } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { claimReceiptDirectory } from "./receipt-directory.mjs";
 import {
   saveQaTrace,
@@ -600,6 +600,125 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
     } finally {
       await context.close().catch(() => undefined);
       await command("cleanup");
+    }
+  }
+});
+
+// The disposable project's config must load when the real upload stores bytes;
+// protocol doubles cannot catch a malformed config in real-hub-server.mjs.
+test("HUB-J24 real hub composer upload stores the picked file", {
+  annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
+}, async ({ page }) => {
+  try {
+    const fixture = await command("reset", { messageControl: true });
+    const pairing = new URL(fixture.pairUrl);
+    pairing.pathname = "/commander/";
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable upload QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    const bytes = Buffer.from("Real fixture upload must load the project config.\n");
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Attach files", exact: true }).click();
+    await (await chooser).setFiles({ name: "fixture-config.txt", mimeType: "text/plain", buffer: bytes });
+    const uploaded = page.waitForResponse(response =>
+      response.request().method() === "POST" && new URL(response.url()).pathname.includes("/uploads/"));
+    await page.getByRole("button", { name: /^Send to the .+ supervisor$/, exact: true }).click();
+    const response = await uploaded;
+    expect(response.status(), await response.text()).toBe(200);
+    const stored = await response.json();
+    expect(await readFile(stored.path)).toEqual(bytes);
+    await expect(page.locator(".composer-uploads")).toBeHidden();
+  } finally {
+    await command("cleanup");
+  }
+});
+
+test("HUB-J13 real fixture keeps cleanup state when removal is refused", {
+  annotation: { type: "journey-part", description: "real hub, failed removal and explicit recovery" },
+}, async () => {
+  const fixture = await command("reset", { newSession: true });
+  const home = dirname(fixture.project);
+  try {
+    // A real filesystem refusal, without racing a writer or mocking rm.
+    await chmod(home, 0o500);
+    await expect(command("cleanup")).rejects.toThrow(/EACCES/);
+    await chmod(home, 0o700);
+    await command("cleanup");
+    await expect(access(home)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await chmod(home, 0o700).catch(error => { if (error.code !== "ENOENT") throw error; });
+    await command("cleanup");
+  }
+});
+
+// Unlike the protocol double, this crosses POST /v1/sessions and the real
+// reaper/daemon/PTY bootstrap. Only provider and OS service placement are inert.
+test("HUB-J13 real hub starts a supervisor and carries a conversation", {
+  annotation: { type: "journey-part", description: "real New session launch" },
+}, async ({ page, context }, info) => {
+  const directory = resolve(process.env.JOURNEY_RECEIPTS ??
+    join(process.env.JOURNEY_OUTPUT ?? "e2e/.results/real-hub", "journeys"),
+    "HUB-J13", "parts", `real-hub-run-${info.repeatEachIndex}`);
+  claimReceiptDirectory(directory, info.title);
+  const fixture = await command("reset", { newSession: true });
+  const pairing = new URL(fixture.pairUrl);
+  pairing.pathname = "/commander/";
+  const secrets = [fixture.pairUrl, new URLSearchParams(pairing.hash.slice(1)).get("pair") ?? ""];
+  const redactions: Promise<void>[] = [];
+  page.on("response", (response) => {
+    if (!new URL(response.url()).pathname.startsWith("/v1/auth/")) return;
+    redactions.push(response.json().then((body) => {
+      for (const [key, value] of Object.entries(body)) {
+        if (/credential|ticket|token/i.test(key) && typeof value === "string") secrets.push(value);
+      }
+    }).catch(() => undefined));
+  });
+  let passed = false;
+  let tracing = false;
+  await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+  try {
+    // Pair outside the trace, as with the other real-hub parts.
+    await page.goto(pairing.href);
+    const dialog = page.locator("#pair-dialog");
+    await dialog.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Launch journey");
+    await dialog.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await context.tracing.start({ screenshots: false,
+      snapshots: { dom: true, aria: true, screen: true }, sources: true });
+    tracing = true;
+    await page.getByRole("button", { name: "New session", exact: true }).click();
+    const sheet = page.getByRole("dialog", { name: "New session" });
+    await sheet.getByRole("tab", { name: "Browse" }).click();
+    await sheet.getByRole("radio", { name: /^project/ }).check();
+    await page.screenshot({ path: join(directory, "J01-choose-project.png") });
+    await sheet.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(sheet).toBeHidden({ timeout: 30_000 });
+    await expect(page.getByRole("log").getByText("Supervisor ready", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await page.screenshot({ path: join(directory, "J02-first-message.png") });
+    await page.getByRole("textbox", { name: "Your message", exact: true }).fill("ping launch supervisor");
+    await page.getByRole("button", { name: "Send to the project supervisor", exact: true }).click();
+    await expect(page.getByRole("log").getByText("Launch supervisor answered", { exact: true })).toBeVisible({ timeout: 30_000 });
+    await page.screenshot({ path: join(directory, "J03-answer.png") });
+    passed = true;
+  } finally {
+    try {
+      await writeFile(join(directory, "hub-evidence.json"), JSON.stringify(await command("evidence"), null, 2));
+      await writeFile(join(directory, "final.aria.yml"), await page.locator("body").ariaSnapshot().catch(() => "# unavailable"));
+      await writeFile(join(directory, "result.json"), JSON.stringify({
+        id: "HUB-J13", status: passed ? "PASS" : "FAIL", binary: fixture.version,
+        label: "real-bundle, real-hub, real-reaper, real-factory-daemon, inert-provider-and-placement",
+        viewport: page.viewportSize(),
+      }, null, 2));
+      await Promise.all(redactions);
+      if (tracing) await saveQaTrace(context, join(directory, "trace.zip"), { secrets });
+    } finally {
+      await context.close().catch(() => undefined);
+      await command("cleanup");
+      await expect(access(dirname(fixture.project))).rejects.toMatchObject({ code: "ENOENT" });
     }
   }
 });

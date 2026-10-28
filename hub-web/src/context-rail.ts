@@ -112,15 +112,19 @@ export function entryText(message: string): string {
 }
 
 /** Bring a thread turn into view and give it focus, so a jump from the rail lands somewhere a keyboard user can continue from. */
-function jumpToTurn(document: Document, notificationId: number): void {
-  const turn = document.querySelector<HTMLElement>(`.thread [data-key="reply:${notificationId}"]`);
+function jumpToTurn(document: Document, history: ConversationHistory | undefined, notificationId: number): void {
+  const detail: { history?: ConversationHistory; notificationId: number; turn?: HTMLElement } = { history, notificationId };
+  for (const thread of document.querySelectorAll(".conversation-reading.thread")) {
+    thread.dispatchEvent(new CustomEvent("conversation-reveal-turn", { detail }));
+  }
+  const turn = detail.turn;
   if (!turn) return;
   if (!turn.hasAttribute("tabindex")) turn.tabIndex = -1;
   turn.scrollIntoView?.({ block: "center" });
   turn.focus({ preventScroll: true });
 }
 
-function renderWaiting(document: Document, list: HTMLElement, waiting: readonly OperatorReply[], pinned?: number): void {
+function renderWaiting(document: Document, list: HTMLElement, waiting: readonly OperatorReply[], pinned?: number, history?: ConversationHistory): void {
   list.replaceChildren(...[...waiting].reverse().map((reply) => {
     const item = document.createElement("li");
     const jump = document.createElement("button"); jump.type = "button"; jump.className = "context-jump";
@@ -132,7 +136,7 @@ function renderWaiting(document: Document, list: HTMLElement, waiting: readonly 
     // A blocker says how it clears (journey F12); the jump alone did not.
     if (reply.kind === "blocker") { const hint = document.createElement("span"); hint.className = "context-hint"; hint.textContent = BLOCKER_HINT; jump.append(hint); }
     if (reply.notification_id === pinned) { const mark = document.createElement("span"); mark.className = "context-hint context-pinned"; mark.textContent = PINNED_MARK; jump.append(mark); jump.dataset.pinned = "true"; }
-    jump.onclick = () => jumpToTurn(document, reply.notification_id);
+    jump.onclick = () => jumpToTurn(document, history, reply.notification_id);
     item.append(jump);
     return item;
   }));
@@ -161,6 +165,8 @@ function renderAttachments(document: Document, list: HTMLElement, attachments: r
  * whether the rail is open. Safe to call on every region update: lists are
  * only rebuilt when their content changed.
  */
+const waitingHistories = new WeakMap<HTMLElement, ConversationHistory | undefined>();
+
 export function syncContextRail(root: ParentNode, input: ContextRailInput): boolean {
   const rail = root.querySelector<HTMLElement>(".conversation-context");
   if (!rail) return false;
@@ -171,9 +177,10 @@ export function syncContextRail(root: ParentNode, input: ContextRailInput): bool
   const waitingList = rail.querySelector<HTMLElement>(".context-waiting");
   const pinned = input.history?.pinnedAsk()?.notification_id;
   const waitingSignature = JSON.stringify([pinned, waiting.map((reply) => [reply.notification_id, reply.kind, reply.message])]);
-  if (waitingList && waitingList.dataset.signature !== waitingSignature) {
+  if (waitingList && (waitingList.dataset.signature !== waitingSignature || waitingHistories.get(waitingList) !== input.history)) {
     waitingList.dataset.signature = waitingSignature;
-    renderWaiting(document, waitingList, waiting, pinned);
+    waitingHistories.set(waitingList, input.history);
+    renderWaiting(document, waitingList, waiting, pinned, input.history);
   }
   const attachmentList = rail.querySelector<HTMLElement>(".context-attachments");
   const attachmentSignature = JSON.stringify(attachments.map(({ attachment }) => [attachment.artifact_id, attachment.name, attachment.mime, attachment.size_bytes]));

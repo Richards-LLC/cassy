@@ -20,7 +20,10 @@ fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
     let home = tempfile::TempDir::new().unwrap();
     let _env = crate::test_support::TestEnvGuard::with_vars(&[
         ("HOME", home.path().to_str().unwrap()),
-        ("XDG_CONFIG_HOME", home.path().join(".config").to_str().unwrap()),
+        (
+            "XDG_CONFIG_HOME",
+            home.path().join(".config").to_str().unwrap(),
+        ),
         ("CAS_PUSH_EPIC_BRANCH", "0"),
     ]);
     let origin = temp.path().join("origin.git");
@@ -51,6 +54,8 @@ fn with_fixture(check: impl FnOnce(&Path, &Path, &Path, &str)) {
     let mut epic = cas_types::Task::new("cas-unpublished".into(), "Unpublished epic".into());
     epic.task_type = cas_types::TaskType::Epic;
     epic.branch = Some("epic/unpublished".into());
+    epic.deliverables.epic_branch_origin =
+        crate::mcp::tools::core::task::lifecycle::epic_lane::branch_origin("epic/unpublished");
     epic.deliverables.work_target = Some(cas_types::WorkTarget {
         repo_selector: "project:publication-test".into(),
         target_branch: "main".into(),
@@ -88,23 +93,61 @@ fn focus(root: &Path) -> String {
 
 #[test]
 fn cas_bfa1_focus_publishes_missing_epic_and_advances_stale_local() {
-    with_fixture(|repo, origin, root, base| {
-        let receipt = focus(root);
-        assert_eq!(
-            git(&origin, &["rev-parse", "refs/heads/epic/unpublished"]),
-            base,
-            "focus must publish the missing remote epic at its recorded base"
-        );
-        assert_eq!(git(&repo, &["rev-parse", "epic/unpublished"]), base);
-        assert!(
-            receipt.contains("published") && receipt.contains("epic/unpublished"),
-            "{receipt}"
-        );
-        assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
-        assert!(receipt.contains("CAS_PUSH_EPIC_BRANCH=0"), "{receipt}");
-        let repeated = focus(root);
-        assert!(!repeated.contains("FAST-FORWARDED"), "{repeated}");
-    });
+    for provenance in ["matching", "missing", "renamed"] {
+        with_fixture(|repo, origin, root, base| {
+            let tasks = crate::store::open_task_store(root).unwrap();
+            let mut epic = tasks.get("cas-unpublished").unwrap();
+            match provenance {
+                "missing" => epic.deliverables.epic_branch_origin = None,
+                "renamed" => {
+                    epic.deliverables
+                        .epic_branch_origin
+                        .as_mut()
+                        .unwrap()
+                        .branch = "epic/previous".into()
+                }
+                _ => {}
+            }
+            tasks.update(&epic).unwrap();
+            let previous = git(repo, &["rev-parse", "epic/unpublished"]);
+            let receipt = focus(root);
+            if provenance != "matching" {
+                assert!(
+                    git(
+                        origin,
+                        &[
+                            "for-each-ref",
+                            "--format=%(refname)",
+                            "refs/heads/epic/unpublished"
+                        ]
+                    )
+                    .is_empty(),
+                    "{receipt}"
+                );
+                assert_eq!(
+                    git(repo, &["rev-parse", "epic/unpublished"]),
+                    previous,
+                    "unowned or renamed refs must not be advanced before publication is refused: {receipt}"
+                );
+                assert!(receipt.contains("UNVERIFIED"), "{receipt}");
+                return;
+            }
+            assert_eq!(
+                git(&origin, &["rev-parse", "refs/heads/epic/unpublished"]),
+                base,
+                "focus must publish the missing remote epic at its recorded base"
+            );
+            assert_eq!(git(&repo, &["rev-parse", "epic/unpublished"]), base);
+            assert!(
+                receipt.contains("published") && receipt.contains("epic/unpublished"),
+                "{receipt}"
+            );
+            assert!(receipt.contains("FAST-FORWARDED"), "{receipt}");
+            assert!(receipt.contains("CAS_PUSH_EPIC_BRANCH=0"), "{receipt}");
+            let repeated = focus(root);
+            assert!(!repeated.contains("FAST-FORWARDED"), "{repeated}");
+        });
+    }
 }
 
 #[test]
@@ -255,19 +298,30 @@ fn cas_bfa1_round3_focus_refuses_deleted_local_and_remote_lane() {
         ] {
             match local_id {
                 Some(id) => crate::cloud::device::DeviceConfig {
-                    device_id: id.into(), name: None, registered_at: "now".into(),
-                }.save().unwrap(),
+                    device_id: id.into(),
+                    name: None,
+                    registered_at: "now".into(),
+                }
+                .save()
+                .unwrap(),
                 None => crate::cloud::device::DeviceConfig::delete().unwrap(),
             }
             let mut wire = serde_json::to_value(&epic).unwrap();
             wire["deliverables"]["epic_branch_origin"]["device_id"] = serde_json::json!(source_id);
-            wire["deliverables"]["epic_branch_origin"]["host"] = serde_json::json!(
-                if same_host { host.clone() } else { format!("peer-{host}") });
-            tasks.update(&serde_json::from_value(wire).unwrap()).unwrap();
+            wire["deliverables"]["epic_branch_origin"]["host"] = serde_json::json!(if same_host {
+                host.clone()
+            } else {
+                format!("peer-{host}")
+            });
+            tasks
+                .update(&serde_json::from_value(wire).unwrap())
+                .unwrap();
             let receipt = focus(root);
             // pin: source identity chooses restore advice, while peers must publish.
             if receipt.contains("missing on originating host") != source_here {
-                failures.push(format!("source={source_id:?} local={local_id:?} same_host={same_host}: {receipt}"));
+                failures.push(format!(
+                    "source={source_id:?} local={local_id:?} same_host={same_host}: {receipt}"
+                ));
             }
         }
         assert!(failures.is_empty(), "{}", failures.join("\n"));

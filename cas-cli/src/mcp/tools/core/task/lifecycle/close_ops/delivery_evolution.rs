@@ -30,6 +30,191 @@ fn text(repo: &Path, args: &[&str]) -> Result<String, String> {
     String::from_utf8(output.stdout).map_err(|_| "delivery line history is not UTF-8".into())
 }
 
+/// A worktree merge deliberately keeps the target bundle, then the merged
+/// tree's regeneration script commits its replacement. Dist-only handoff tips
+/// have no source in their immediate diff, so measure the source range from
+/// the integrating merge base instead. Commit text alone is insufficient:
+/// bind it to the direct merge parent, the generated-only diff, the final
+/// target path setters, and surviving source effects.
+pub(super) fn worktree_regeneration_supersession(
+    repo: &Path,
+    anchor: &str,
+    parent_branch: &str,
+    paths: &[String],
+) -> Option<(Vec<String>, String)> {
+    if paths.is_empty() || paths.iter().any(|path| !path.starts_with("hub-web/dist/")) {
+        return None;
+    }
+    let anchor = super::resolve_branch_sha(repo, &format!("{anchor}^{{commit}}"))?;
+    let origin = format!("origin/{parent_branch}");
+    let target = if super::git_ref_exists(repo, &origin)
+        && super::git_commit_is_ancestor(repo, &anchor, &origin)
+    {
+        origin
+    } else {
+        parent_branch.to_string()
+    };
+    let target = super::resolve_branch_sha(repo, &format!("{target}^{{commit}}"))?;
+    if !super::git_commit_is_ancestor(repo, &anchor, &target) {
+        return None;
+    }
+    let history = text(
+        repo,
+        &[
+            "log",
+            "--ancestry-path",
+            "--fixed-strings",
+            "--grep=build(hub-web): regenerate dist from merged sources",
+            "--format=%H%x1f%B%x1e",
+            &format!("{anchor}..{target}"),
+            "--",
+        ],
+    )
+    .ok()?;
+    let mut rebuilds = Vec::new();
+    for record in history.split('\u{1e}') {
+        let Some((sha, message)) = record.trim().split_once('\u{1f}') else {
+            continue;
+        };
+        if message.lines().next() != Some("build(hub-web): regenerate dist from merged sources") {
+            continue;
+        }
+        let parents = text(repo, &["rev-list", "--parents", "-n", "1", sha]).ok()?;
+        let parents: Vec<_> = parents.split_whitespace().collect();
+        if parents.len() != 2 {
+            continue;
+        }
+        let merged = parents[1];
+        let provenance = format!(
+            "Rebuilt by scripts/regenerate-generated-artifacts.sh after merging {} (cas-0c988).",
+            &merged[..9],
+        );
+        if !message.lines().any(|line| line == provenance) {
+            continue;
+        }
+        let merge_parents = text(repo, &["rev-list", "--parents", "-n", "1", merged]).ok()?;
+        let merge_parents: Vec<_> = merge_parents.split_whitespace().collect();
+        if merge_parents.len() != 3 {
+            continue;
+        }
+        let changed = text(
+            repo,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                merged,
+                sha,
+                "--",
+            ],
+        )
+        .ok()?;
+        if changed.is_empty()
+            || changed
+                .split('\0')
+                .filter(|p| !p.is_empty())
+                .any(|p| !p.starts_with("hub-web/dist/"))
+        {
+            continue;
+        }
+        rebuilds.push((
+            sha.to_string(),
+            merge_parents[1].to_string(),
+            merge_parents[2].to_string(),
+        ));
+    }
+    // Later manual edits/deletions cannot borrow an older regeneration's
+    // authority. Different output paths may be set by different rebuilds.
+    let mut setters = Vec::new();
+    for path in paths {
+        let setter = text(
+            repo,
+            &[
+                "log",
+                "-1",
+                "--first-parent",
+                "--format=%H",
+                &target,
+                "--",
+                path,
+            ],
+        )
+        .ok()?;
+        let setter = setter.trim();
+        if !rebuilds.iter().any(|(sha, _, _)| sha == setter) {
+            return None;
+        }
+        if !setters.iter().any(|sha| sha == setter) {
+            setters.push(setter.to_string());
+        }
+    }
+    for (_, first, second) in &rebuilds {
+        // Find where this delivery entered the target, not a later sibling's
+        // integration whose merge base already includes the delivery.
+        if super::git_commit_is_ancestor(repo, &anchor, first)
+            || !super::git_commit_is_ancestor(repo, &anchor, second)
+        {
+            continue;
+        }
+        let base = text(repo, &["merge-base", first, &anchor]).ok()?;
+        let changed = text(
+            repo,
+            &[
+                "diff",
+                "--name-only",
+                "--no-renames",
+                "-z",
+                base.trim(),
+                &anchor,
+                "--",
+            ],
+        )
+        .ok()?;
+        let sources: Vec<_> = changed
+            .split('\0')
+            .filter(|path| !path.is_empty() && !super::regenerable_build_artifact(repo, path))
+            .collect();
+        if sources.is_empty() {
+            continue;
+        }
+        let source_present = sources.iter().all(|path| {
+            text(
+                repo,
+                &[
+                    "diff",
+                    "--name-only",
+                    "--no-renames",
+                    &anchor,
+                    &target,
+                    "--",
+                    path,
+                ],
+            )
+            .is_ok_and(|changed| changed.is_empty())
+                || matches!(
+                    line_content_presence(repo, base.trim(), &anchor, &target, path),
+                    Ok(Some(
+                        super::DeliveryContentPresence::Present { .. }
+                            | super::DeliveryContentPresence::Superseded { .. }
+                    ))
+                )
+        });
+        if source_present {
+            return Some((
+                setters.clone(),
+                format!(
+                    "worktree_merge regeneration supersedes {} at commit(s) {}; source path(s) {} from delivery `{anchor}` are present on target `{target}` (cas-c765)",
+                    paths.join(", "),
+                    setters.join(", "),
+                    sources.join(", "),
+                ),
+            ));
+        }
+    }
+    None
+}
+
 fn span(field: &str) -> Option<(usize, usize)> {
     let (start, count) = field[1..].split_once(',').unwrap_or((&field[1..], "1"));
     Some((start.parse().ok()?, count.parse().ok()?))

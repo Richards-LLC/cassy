@@ -392,7 +392,7 @@ fn supervisor_terminal_input_enters_history_but_harness_envelopes_do_not() {
 
 /// cas-0337: this is the actual factory supervisor turn path, not a direct
 /// retriever unit seam. A long active-task title must not hide a same-day
-/// Learning whose vocabulary is present in the submitted turn.
+/// Learning bound to the task explicitly named in the submitted turn.
 #[test]
 fn supervisor_turn_surfaces_matching_same_day_learnings() {
     let mut env = TestEnvGuard::new();
@@ -402,14 +402,14 @@ fn supervisor_turn_surfaces_matching_same_day_learnings() {
     let entries = crate::store::open_store_local(&cas_root).unwrap();
     let mut stale_refs = Entry::new(
         "2026-08-14-5".into(),
-        "epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into(),
+        "cas-ambient: epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into(),
     );
     stale_refs.entry_type = EntryType::Learning;
     stale_refs.importance = 0.85;
     entries.add(&stale_refs).unwrap();
     let mut hermetic_ci = Entry::new(
         "2026-08-14-3".into(),
-        "Local green is insufficient merge evidence: a populated developer HOME masks inherited git identity and CAS_AGENT_NAME failures that clean CI exposes".into(),
+        "cas-ci: Local green is insufficient merge evidence: a populated developer HOME masks inherited git identity and CAS_AGENT_NAME failures that clean CI exposes".into(),
     );
     hermetic_ci.entry_type = EntryType::Learning;
     hermetic_ci.importance = 0.90;
@@ -422,18 +422,24 @@ fn supervisor_turn_surfaces_matching_same_day_learnings() {
     );
     task.status = TaskStatus::InProgress;
     tasks.add(&task).unwrap();
+    let mut ci_task = task.clone();
+    ci_task.id = "cas-ci".into();
+    tasks.add(&ci_task).unwrap();
 
+    // cab9d45f0 deliberately restricts supervisor procedure recall to exact
+    // task/epic bindings. Similar vocabulary alone must not recall another task.
     let mut stale_input = input("supervisor");
     stale_input.cwd = project.path().to_string_lossy().into_owned();
     stale_input.user_prompt =
-        Some("Investigate epic_status before trusting stale refs on main".into());
+        Some("Investigate cas-ambient epic_status before trusting stale refs on main".into());
     let stale_context =
         context_of(&handle_user_prompt_submit(&stale_input, Some(&cas_root)).unwrap());
     assert!(stale_context.contains("2026-08-14-5"), "{stale_context}");
+    assert!(!stale_context.contains("2026-08-14-3"), "{stale_context}");
 
     let mut ci_input = stale_input;
     ci_input.user_prompt =
-        Some("Local green diverged from clean CI; audit inherited HOME, git identity, and CAS_AGENT_NAME".into());
+        Some("For cas-ci, local green diverged from clean CI; audit inherited HOME, git identity, and CAS_AGENT_NAME".into());
     let ci_context = context_of(&handle_user_prompt_submit(&ci_input, Some(&cas_root)).unwrap());
     assert!(ci_context.contains("2026-08-14-3"), "{ci_context}");
 }
@@ -655,17 +661,21 @@ fn post_tool_second_prompt_recovers_recall_and_skips_repeated_tools() {
     let project = TempDir::new().unwrap();
     let cas_root = crate::store::init_cas_dir(project.path()).unwrap();
     let entries = crate::store::open_store_local(&cas_root).unwrap();
-    let mut memory = Entry::new("recall-hook-recovery".into(), "epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into());
+    // cab9d45f0: recovery must obey the same current-task scope as turn-start recall.
+    let mut memory = Entry::new("recall-hook-recovery".into(), "cas-recall-hook: epic_status compares child branches against stale local main; fast-forward origin/main before trusting its unmerged report".into());
     memory.entry_type = EntryType::Learning;
     memory.importance = 0.95;
     entries.add(&memory).unwrap();
+    let mut task = Task::new("cas-recall-hook".into(), "Investigate stale refs".into());
+    task.status = TaskStatus::InProgress;
+    crate::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
     let transcript = project.path().join("session.jsonl");
     let mut hook = input("supervisor");
     hook.cwd = project.path().to_string_lossy().into_owned();
     hook.transcript_path = Some(transcript.to_string_lossy().into_owned());
     hook.prompt_id = Some("first".into());
     crate::hooks::turn_context::record_prompt_hook(&cas_root, &hook);
-    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate epic_status before trusting stale refs on main\"}}}}\n", hook.session_id)).unwrap();
+    std::fs::write(&transcript, format!("{{\"type\":\"user\",\"sessionId\":\"{}\",\"promptId\":\"second\",\"message\":{{\"content\":\"Investigate cas-recall-hook epic_status before trusting stale refs on main\"}}}}\n", hook.session_id)).unwrap();
     hook.hook_event_name = "PostToolUse".into();
     hook.tool_name = Some("Read".into());
     let output = crate::hooks::handle_post_tool_use(&hook, Some(&cas_root)).unwrap();
@@ -1971,7 +1981,8 @@ fn cas_bf890_peer_messages_lead_and_fifteen_notices_fold_into_one_digest_row() {
     assert!(local_at < digest_at && cloud_at < digest_at, "{context}");
     // One digest row standing for all fifteen notices; no notice body as a row.
     assert_eq!(context.matches("[digest]").count(), 1, "{context}");
-    assert!(context.contains("15 system notices"), "{context}");
+    // pin: 5092b8d5f includes routine lifecycle and peer-copy updates in this digest.
+    assert!(context.contains("15 inbox updates"), "{context}");
     assert!(!context.contains("was abandoned as undeliverable"), "notice bodies stay out: {context}");
     assert!(!context.contains("--- from delivery-watchdog"), "{context}");
     // Every notice is retired by the digest; none comes back next turn.

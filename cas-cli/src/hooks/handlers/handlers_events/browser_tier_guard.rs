@@ -4,19 +4,17 @@ use cas_core::hooks::types::HookInput;
 
 fn selected(args: &[String]) -> bool {
     let mut i = 0;
+    let mut targeted = false;
     while i < args.len() {
         let arg = &args[i];
-        if arg.starts_with('>') || arg == "2>&1" {
-            break;
-        }
         let grep = arg.strip_prefix("--grep=").or_else(|| {
             (arg == "--grep" || arg == "-g")
                 .then(|| args.get(i + 1).map(String::as_str))
                 .flatten()
         });
-        if grep.is_some_and(|s| {
-            !s.is_empty()
-                && s.split('|').all(|id| {
+        if let Some(grep) = grep {
+            targeted |= !grep.is_empty()
+                && grep.split('|').all(|id| {
                     let id = id.trim_matches(|c| c == '(' || c == ')' || c == '^' || c == '$');
                     let Some((surface, number)) = id.split_once("-J") else {
                         return false;
@@ -25,9 +23,9 @@ fn selected(args: &[String]) -> bool {
                         && surface.chars().all(|c| c.is_ascii_uppercase())
                         && !number.is_empty()
                         && number.chars().all(|c| c.is_ascii_digit())
-                })
-        }) {
-            return true;
+                });
+            i += if arg == "--grep" || arg == "-g" { 2 } else { 1 };
+            continue;
         }
         if matches!(
             arg.as_str(),
@@ -40,26 +38,83 @@ fn selected(args: &[String]) -> bool {
                 | "--timeout"
                 | "--grep-invert"
                 | "--shard"
+                | "--retries"
+                | "-j"
+                | "--trace"
+                | "--repeat-each"
+                | "--max-failures"
+                | "--browser"
+                | "--global-timeout"
+                | "--tsconfig"
         ) {
             i += 2;
             continue;
         }
-        if !arg.starts_with('-')
-            && (arg.ends_with(".spec.ts") || arg.ends_with(".journey.ts"))
-            && !arg.chars().any(|c| matches!(c, '*' | '$' | '`'))
-        {
-            return true;
+        if !arg.starts_with('-') {
+            let mut spec = arg.as_str();
+            // Playwright accepts file:line and file:line:column selectors.
+            for _ in 0..2 {
+                let Some((file, _)) = spec.rsplit_once(':').filter(|(_, coordinate)| {
+                    !coordinate.is_empty() && coordinate.bytes().all(|c| c.is_ascii_digit())
+                }) else {
+                    break;
+                };
+                spec = file;
+            }
+            let filename = std::path::Path::new(spec)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            if arg.starts_with('.')
+                || filename.starts_with('.')
+                || arg.chars().any(|c| {
+                    matches!(
+                        c,
+                        '\\' | '+'
+                            | '('
+                            | ')'
+                            | '|'
+                            | '{'
+                            | '}'
+                            | '^'
+                            | '*'
+                            | '?'
+                            | '['
+                            | ']'
+                            | '$'
+                            | '`'
+                    )
+                })
+            {
+                return false;
+            }
+            let Some(stem) = [
+                ".spec.ts",
+                ".spec.mjs",
+                ".spec.js",
+                ".spec.tsx",
+                ".journey.ts",
+            ]
+            .iter()
+            .find_map(|suffix| filename.strip_suffix(suffix)) else {
+                // Playwright ORs file filters, so a plain word can widen the run too.
+                return false;
+            };
+            if !stem.chars().any(char::is_alphanumeric) {
+                return false;
+            }
+            targeted = true;
         }
         i += 1;
     }
-    false
+    targeted
 }
 
 fn unfiltered(command: &str, depth: usize) -> bool {
     if depth > 4 {
         return true;
     }
-    for words in super::pre_tool::shell_statement_words(command) {
+    for words in super::pre_tool::shell_statement_arguments(command) {
         if words.first().is_some_and(|w| w.starts_with('#')) {
             continue;
         }
@@ -109,7 +164,15 @@ fn unfiltered(command: &str, depth: usize) -> bool {
             let verified = words[..i]
                 .iter()
                 .any(|w| w.ends_with("run-verified-tests.mjs"));
-            if (verified || args.iter().any(|a| a == "test")) && !selected(args) {
+            let needs_selection = verified || args.iter().any(|a| a == "test");
+            // The direct CLI consumes its subcommand; the verified runner adds
+            // that subcommand itself, so all of its args are filters/options.
+            let args = if !verified && args.first().is_some_and(|arg| arg == "test") {
+                &args[1..]
+            } else {
+                args
+            };
+            if needs_selection && !selected(args) {
                 return true;
             }
         }

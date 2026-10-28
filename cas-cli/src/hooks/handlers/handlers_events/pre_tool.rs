@@ -2748,26 +2748,47 @@ fn factory_shell_tokens(command: &str) -> Vec<ShellToken> {
 /// Single-quoted words are literal; numeric status/PID parameters cannot inject
 /// shell syntax. The effect collector still checks their use as commands/paths.
 fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bool>) {
+    factory_shell_tokens_for_projection(command, false)
+}
+
+// Argument-only consumers omit attached IO numbers. Security/effect consumers
+// retain the original tokens, including every redirect target.
+fn factory_shell_tokens_for_projection(
+    command: &str,
+    arguments_only: bool,
+) -> (Vec<ShellToken>, Vec<bool>) {
     let mut tokens = Vec::new();
     let mut literals = Vec::new();
     let mut word = String::new();
     let mut literal = true;
+    let mut word_quoted = false;
     let mut quote = None;
     let mut escaped = false;
     let mut comment = false;
-    let push_word = |tokens: &mut Vec<ShellToken>, literals: &mut Vec<bool>, word: &mut String, literal: &mut bool| {
+    let push_word = |tokens: &mut Vec<ShellToken>,
+                     literals: &mut Vec<bool>,
+                     word: &mut String,
+                     literal: &mut bool,
+                     word_quoted: &mut bool| {
         if !word.is_empty() {
             tokens.push(ShellToken::Word(std::mem::take(word)));
             literals.push(*literal);
             *literal = true;
         }
+        *word_quoted = false;
     };
     let mut chars = command.chars().peekable();
     while let Some(ch) = chars.next() {
         if comment {
             if matches!(ch, '\n' | '\r') {
                 comment = false;
-                push_word(&mut tokens, &mut literals, &mut word, &mut literal);
+                push_word(
+                    &mut tokens,
+                    &mut literals,
+                    &mut word,
+                    &mut literal,
+                    &mut word_quoted,
+                );
                 tokens.push(ShellToken::Operator(';'));
                 literals.push(true);
             }
@@ -2797,7 +2818,11 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
             }
         }
         if quote != Some('\'') {
-            if ch == '$' && chars.peek().is_some_and(|next| matches!(next, '?' | '$' | '!')) {
+            if ch == '$'
+                && chars
+                    .peek()
+                    .is_some_and(|next| matches!(next, '?' | '$' | '!'))
+            {
                 word.push(ch);
                 word.push(chars.next().unwrap());
                 continue;
@@ -2810,20 +2835,54 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
             Some(active) if ch == active => quote = None,
             Some(_) => word.push(ch),
             None => match ch {
-                '\\' => escaped = true,
-                '\'' | '"' => quote = Some(ch),
+                '\\' => {
+                    escaped = true;
+                    word_quoted = true;
+                }
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    word_quoted = true;
+                }
                 '#' if word.is_empty() => comment = true,
                 '>' | '<' | '|' | '&' | ';' | '(' | ')' => {
-                    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
+                    // Only an unquoted number attached to the operator is an
+                    // IO descriptor: `2>log`, not the positional `2 >log`.
+                    if arguments_only
+                        && matches!(ch, '>' | '<')
+                        && !word_quoted
+                        && !word.is_empty()
+                        && word.bytes().all(|c| c.is_ascii_digit())
+                    {
+                        word.clear();
+                    }
+                    push_word(
+                        &mut tokens,
+                        &mut literals,
+                        &mut word,
+                        &mut literal,
+                        &mut word_quoted,
+                    );
                     tokens.push(ShellToken::Operator(ch));
                     literals.push(true);
                 }
                 '\n' | '\r' => {
-                    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
+                    push_word(
+                        &mut tokens,
+                        &mut literals,
+                        &mut word,
+                        &mut literal,
+                        &mut word_quoted,
+                    );
                     tokens.push(ShellToken::Operator(';'));
                     literals.push(true);
                 }
-                ch if ch.is_whitespace() => push_word(&mut tokens, &mut literals, &mut word, &mut literal),
+                ch if ch.is_whitespace() => push_word(
+                    &mut tokens,
+                    &mut literals,
+                    &mut word,
+                    &mut literal,
+                    &mut word_quoted,
+                ),
                 _ => word.push(ch),
             },
         }
@@ -2831,7 +2890,13 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
     if escaped {
         word.push('\\');
     }
-    push_word(&mut tokens, &mut literals, &mut word, &mut literal);
+    push_word(
+        &mut tokens,
+        &mut literals,
+        &mut word,
+        &mut literal,
+        &mut word_quoted,
+    );
     (tokens, literals)
 }
 
@@ -2847,7 +2912,41 @@ fn factory_shell_tokens_with_literals(command: &str) -> (Vec<ShellToken>, Vec<bo
 /// and an unmatched `)` (a `case` pattern) still end the statement as before.
 pub(super) fn shell_statement_words(command: &str) -> Vec<Vec<String>> {
     let shell_command = shell_command_without_heredoc_bodies(command);
-    let tokens = factory_shell_tokens(&shell_command);
+    shell_statements_from_tokens(factory_shell_tokens(&shell_command))
+}
+
+/// Command arguments for browser selection, without shell redirections. Keep
+/// this opt-in: workspace/effect guards must still inspect redirect targets.
+pub(super) fn shell_statement_arguments(command: &str) -> Vec<Vec<String>> {
+    let command = shell_command_without_heredoc_bodies(command);
+    let (tokens, _) = factory_shell_tokens_for_projection(&command, true);
+    let mut tokens = tokens.into_iter().peekable();
+    let mut arguments = Vec::new();
+    while let Some(token) = tokens.next() {
+        // Bash's combined stdout/stderr redirect starts with `&>`.
+        if token == ShellToken::Operator('&') && tokens.peek() == Some(&ShellToken::Operator('>')) {
+            continue;
+        }
+        if matches!(token, ShellToken::Operator('>' | '<')) {
+            // Consume the operator's remaining characters (>>, <<, <>, >|,
+            // >& and <&) and its one target, without ending the statement.
+            while matches!(
+                tokens.peek(),
+                Some(ShellToken::Operator('>' | '<' | '&' | '|'))
+            ) {
+                tokens.next();
+            }
+            if matches!(tokens.peek(), Some(ShellToken::Word(_))) {
+                tokens.next();
+            }
+            continue;
+        }
+        arguments.push(token);
+    }
+    shell_statements_from_tokens(arguments)
+}
+
+fn shell_statements_from_tokens(tokens: Vec<ShellToken>) -> Vec<Vec<String>> {
     let mut statements = Vec::new();
     let mut words: Vec<String> = Vec::new();
     // One entry per open `(`: the enclosing statement an argument

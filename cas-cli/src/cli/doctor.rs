@@ -6933,6 +6933,10 @@ mod tests {
                 Some("cas-d6b9"),
             )
             .unwrap();
+        queue.park_for_busy_recipient(lost, Some("recipient has a tool call in flight"),
+            chrono::Utc::now() + chrono::Duration::seconds(120)).unwrap();
+        assert!(matches!(supervisor_relay_check(temp.path()).status, CheckStatus::Ok),
+            "fresh readiness holds must not warn before the sixty-second grace");
         queue
             .mark_undelivered_lifecycle_relay(lost, Some("recipient unavailable"))
             .unwrap();

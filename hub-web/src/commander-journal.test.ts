@@ -1,5 +1,5 @@
-import { IDBFactory } from "fake-indexeddb";
-import { describe, expect, it } from "vitest";
+import { IDBFactory, IDBDatabase } from "fake-indexeddb";
+import { describe, expect, it, vi } from "vitest";
 import { CommanderJournal, deliveryScope, DELIVERY_DB, scopeKey, type CredentialFence, type DeliveryScope, type StoredReply } from "./commander-journal";
 import type { PendingSend } from "./conversation-store";
 import { ConversationHistory, RECEIPT_TIMEOUT_MS } from "./conversation-history";
@@ -460,6 +460,42 @@ describe("atomic Commander journal", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0].reply.message).toBe("Reply");
   });
+  it("a reply waiting behind a busy writer commits before authorizing ACK even after five seconds (cas-c641)", async () => {
+    const { a, db, make } = journals();
+    await a.read(scope);
+    const peer = await new Promise<IDBDatabase>((resolve) => { const request = db.open(DELIVERY_DB, 1); request.onsuccess = () => resolve(request.result); });
+    const busy = peer.transaction("replies", "readwrite");
+    let release = false;
+    const hold = () => { if (!release) busy.objectStore("replies").get("peer").onsuccess = hold; };
+    hold();
+    const finished = new Promise<void>(resolve => { busy.oncomplete = () => resolve(); });
+    let queued!: () => void;
+    const waiting = new Promise<void>(resolve => { queued = resolve; });
+    const transact = IDBDatabase.prototype.transaction;
+    vi.spyOn(IDBDatabase.prototype, "transaction").mockImplementation(function(this: IDBDatabase, names, mode, options) {
+      const tx = transact.call(this, names, mode, options);
+      if (Array.isArray(names) && names.includes("blocks")) queued();
+      return tx;
+    });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let authorized = false;
+    const backlog = Array.from({ length: 24 }, (_, index) => ({ ...reply, notification_id: reply.notification_id + index }));
+    const persisted = Promise.all(backlog.map(item => a.persistReply(scope, item, fence))).then(saved => { authorized = saved.some(Boolean); return saved; });
+    try {
+      await waiting;
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(authorized, "no ACK before the queued write commits").toBe(false);
+      release = true;
+      await finished;
+      expect(await persisted, "a busy browser must not discard valid pending replies").toEqual(backlog.map(() => true));
+      expect((await make().read(scope)).replies.map(row => row.reply.notification_id).sort()).toEqual(backlog.map(item => item.notification_id).sort());
+    } finally {
+      release = true;
+      await finished;
+      peer.close(); a.close();
+      vi.useRealTimers(); vi.restoreAllMocks();
+    }
+  });
   it("storage failure and oversized content authorize neither send nor application ACK", async () => {
     const a = new CommanderJournal(undefined, async () => fence, () => 1_000, false);
     expect(await a.reconcile(scope, [], [send("a")], fence)).toBe("not-saved");
@@ -507,7 +543,10 @@ describe("journal privacy and immutable replay", () => {
   });
   it("live/history defaults dedupe but changed attachments cannot authorize an ACK", async () => {
     const { a } = journals(); expect(await a.persistReply(scope, reply, fence)).toBe(true);
-    expect(await a.persistReply(scope, { ...reply, kind: "answer", attachments: [] }, fence)).toBe(true);
+    // Live absent Option<String> is null; history omits it.
+    const live = JSON.parse(JSON.stringify({ ...reply, kind: "answer", attachments: [], operator_label: null }));
+    expect(await a.persistReply(scope, live, fence)).toBe(true);
+    expect(await a.persistReply(scope, { ...reply, operator_label: 17 } as unknown as typeof reply, fence)).toBe(false);
     expect(await a.persistReply(scope, { ...reply, attachments: [{ artifact_id: "art-other", name: "changed", mime: "text/plain", size_bytes: 1, sha256: "a".repeat(64) }] }, fence)).toBe(false);
     expect((await a.read(scope)).replies).toHaveLength(1);
   });

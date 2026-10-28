@@ -2,7 +2,7 @@
 name = "cas"
 # Tests are modules of the explicit harnesses below; do not auto-link each source.
 autotests = false
-version = "3.85.0"
+version = "3.86.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Coding Agent System - unified tasks, memory, rules, and skills for AI agents"
@@ -190,6 +190,7 @@ zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # Self-update from GitHub releases
 self_update = { version = "0.42", default-features = false, features = ["archive-tar", "archive-zip", "compression-flate2", "compression-zip-deflate", "rustls"] }
 sha2 = "0.10.9"
+hmac = "0.12"
 base64 = "0.22"
 p256 = { version = "0.13", features = ["ecdsa"] }
 subtle = "2.6"

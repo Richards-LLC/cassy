@@ -372,7 +372,7 @@ impl SessionManager {
             .sessions_dir
             .parent()
             .ok_or_else(|| std::io::Error::other("missing session base"))?;
-        let _lock = socket_cleanup::transition_lock(base)?;
+        let _lock = socket_cleanup::namespace_lock(base)?;
         let path = self.sessions_dir.join(format!("{}.json", metadata.name));
         let json = serde_json::to_string_pretty(metadata)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -977,7 +977,12 @@ mod tests {
         manager.ensure_dir().unwrap();
         let path = socket_path("lease");
         stale_socket(&path);
+        let inventory = crate::coordination::binding_repair::RuntimeSnapshot::capture(false);
         let live = bind_factory_socket(&path).unwrap();
+        assert!(
+            inventory.validate().is_err(),
+            "socket binding invalidates inventory"
+        );
         assert_eq!(
             bind_factory_socket(&path).unwrap_err().kind(),
             std::io::ErrorKind::AddrInUse

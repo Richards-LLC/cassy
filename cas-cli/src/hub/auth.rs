@@ -4,6 +4,8 @@
 
 mod account;
 mod installation;
+mod media;
+pub(crate) use media::MediaTicket;
 pub use account::{CHALLENGE_TTL_SECONDS, EnrollmentAssertion, EnrollmentRefusal};
 pub use installation::{AccountEnrollment, InstallationAction, InstallationProof};
 
@@ -238,7 +240,10 @@ pub fn required_scope(message: &ClientMessage) -> Option<Scope> {
         ClientMessage::RequestPaneKeyframe { .. }
         | ClientMessage::ScrollbackRequest { .. }
         | ClientMessage::ConversationHistoryRequest { .. }
-        | ClientMessage::OperatorReplyPersisted { .. } => Some(Scope::PaneRead),
+        | ClientMessage::WorkEventsRequest { .. }
+        | ClientMessage::WorkEventDetailRequest { .. }
+        | ClientMessage::OperatorReplyPersisted { .. }
+        | ClientMessage::OperatorNoticePersisted { .. } => Some(Scope::PaneRead),
         ClientMessage::SendMessage { .. } => Some(Scope::MessageSend),
         ClientMessage::InterruptPane { .. } => Some(Scope::PaneInterrupt),
         ClientMessage::SpawnWorkers { .. }
@@ -786,6 +791,10 @@ struct AuthInner {
     /// The writer's failure as last recorded, loaded from AUDIT_HEALTH_FILE at
     /// open so a success after a restart still clears it (cas-0140).
     audit_health: Mutex<Option<AuditHealth>>,
+    // Per-process key: restarting the hub safely invalidates short-lived media tickets.
+    media_ticket_key: [u8; 32],
+    #[cfg(test)]
+    active_context_checks: std::sync::atomic::AtomicUsize,
 }
 
 struct AuthFileLock<'a>(&'a File);
@@ -849,6 +858,9 @@ impl AuthStore {
             lock_file,
             revocations,
             audit_health: Mutex::new(None),
+            media_ticket_key: rand::random(),
+            #[cfg(test)]
+            active_context_checks: std::sync::atomic::AtomicUsize::new(0),
         }));
         // A failure recorded by a previous hub process stays visible until
         // this one writes a row. An unreadable record says nothing true, so
@@ -1750,8 +1762,15 @@ impl AuthStore {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn active_context_check_count(&self) -> usize {
+        self.0.active_context_checks.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn ensure_active_context(&self, context: &AuthContext, now: DateTime<Utc>) -> Result<()> {
-        let state = self.lock()?;
+        #[cfg(test)]
+        self.0.active_context_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let state = self.lock().map_err(store_failure)?;
         Self::ensure_active_context_in_state(&state, context, now)
     }
 

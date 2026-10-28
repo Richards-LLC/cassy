@@ -431,10 +431,7 @@ pub(crate) fn focus_epic(
 fn focus_epic_branch_receipt(cas_root: &Path, epic: &cas_types::Task) -> String {
     use crate::mcp::tools::core::task::repo_context;
     use crate::worktree::GitOperations;
-    let Some(branch) = epic
-        .branch
-        .as_deref()
-        .filter(|branch| !branch.trim().is_empty())
+    let Some(branch) = repo_context::effective_epic_branch(epic)
     else {
         return "\nEpic branch not checked: no recorded lane.".into();
     };

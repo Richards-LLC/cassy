@@ -1,6 +1,6 @@
 # Cassy - Codemap
 
-> Structural map of the assembled 3.84 release source (accounts epic + burn-down v66) at `88922c00a`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
+> Structural map of the assembled 3.86 release source (Commander rich content and open-fast, Codex supervisor parity, the 3.85 batch and burn-down v66) at `8527f015d`: 18 Rust packages and TypeScript clients. Regenerate with `/codemap` when modules move.
 
 ## Top-level layout
 
@@ -10,7 +10,7 @@
 - `cas-cli/` - executable composition, CLI, MCP server, hooks and factory terminal UI.
 - `crates/` - shared Rust libraries and terminal bindings.
 - `contrib/` - installable shell helpers and their tests.
-- `docs/` - architecture, design briefs, QA journeys, operations, investigation notes (`docs/notes/`) and release records.
+- `docs/` - architecture, design briefs, QA journeys, operations, investigation notes (`docs/notes/`), measured analyses (`docs/analysis/`, scripts in `docs/analysis/scripts/`) and release records.
 - `fixtures/`, `homebrew/` - retrieval parity baselines and Homebrew packaging helpers.
 - `hub-web/` - Commander Vite/TypeScript application and browser journeys.
 - `slack-bridge/` - TypeScript Slack routing and per-user daemon.
@@ -58,6 +58,7 @@
 - `cas-cli/src/cli/project_files.rs`, `cas-cli/src/cli/project_files/` - managed files, Git reconciliation and locking.
 - `cas-cli/src/cli/config/`, `cas-cli/src/config/` - configuration commands, key registry and operator policy; `cas-cli/src/config/qa_capture.rs` owns project capture intent and credential-file pointers.
 - `cas-cli/src/capability.rs`, `cas-cli/src/cli/hub_service.rs` - account probes, bounded auth cache and readiness.
+- `cas-cli/src/factory_preflight.rs`, `crates/cas-factory/src/routing.rs` - spawn preflight (`config_dir` checks, macOS Keychain auth) and lane routing through usable registered accounts.
 - `cas-cli/src/claude_credentials.rs` - shared Claude Keychain service identity for capability and usage probes and account lifecycle (remove, rename and new-login Keychain items).
 - `cas-cli/src/cli/codemap_cmd.rs`, `cas-cli/src/hooks/handlers/handlers_events/docs_freshness.rs` - map commands, immutable documentation measurements and calling-checkout document reads.
 - `cas-cli/src/cli/factory/`, `cas-cli/src/cli/integrate/` - factory operations, cache GC and integration commands.
@@ -91,7 +92,7 @@
 - `cas-cli/src/ui/factory/director/`, `cas-cli/src/ui/factory/server_registry/` - dispatch, reminders, stalls and owned servers.
 - `cas-cli/src/supervisor_continuity.rs`, `cas-cli/src/supervisor_branch_recovery.rs` - durable succession and authenticated worker-branch recovery.
 - `cas-cli/src/factory_session_scope.rs`, `cas-cli/src/mcp/tools/service/factory_ops.rs` - session ownership, adopted-orphan worker routing, reset and fingerprinted shutdown.
-- `cas-cli/src/mcp/tools/service/factory_ops/limit_switch.rs` - durable account-limit recycle decisions, pre-stop validation and transcript continuation.
+- `cas-cli/src/mcp/tools/service/factory_ops/usage_limits.rs` - report-only usage-limit episodes, current-account reset dates and durable supervisor notice dedupe; never queues a replacement.
 - `cas-cli/src/ui/factory/app/merge_alert.rs`, `cas-cli/src/ui/factory/app/director_refresh.rs` - pushed-green signals, shared external probes, readiness cache and durable per-tip admission.
 - `cas-cli/src/factory_capacity_wait.rs` - lease-bound capacity episodes, retry visibility and assistance deadlines.
 - `cas-cli/src/factory_build_guard.rs`, `cas-cli/src/factory_review_scratch.rs` - build-pressure admission, review checkouts, inherited flags, target reuse and freeable-inode accounting.
@@ -125,10 +126,18 @@
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/history/` - composed retrieval and Git-history search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - Commander startup, conversation state and reply grants.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - machine streams, recovery and session subscriptions.
-- `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts` - paged history, receipt progress and unopened conversation previews.
+- `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - paged history, receipt progress, unopened conversation previews and windowed thread rendering.
+- `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts` - lazy safe Markdown diagrams and unified diffs.
+- `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - reserved inline media, lifecycle and PDF first-page pixels.
+- `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
+- `cas-cli/src/hub/composer_upload.rs` - DPoP-authenticated, bounded upload storage, host MIME sniffing and persistent upload identity.
+- `hub-web/src/composer-uploads.ts`, `hub-web/src/composer-uploads.css` - lazy composer file/text previews and upload-before-send integration.
+- `cas-cli/src/hub/artifact_proxy.rs`, `cas-cli/src/hub/auth/media.rs` - session-scoped media tickets and bounded artifact Range streaming.
+- `cas-cli/src/hub/chunk_assets.rs`, `cas-cli/src/hub/visual_pages.rs` - allowlisted hashed Commander lazy chunks; ticketed sandbox route for supervisor-published HTML pages.
 - `cas-cli/src/ui/factory/daemon/runtime/ws_client.rs`, `cas-cli/src/mcp/tools/service/agent_search_system/message.rs` - Commander attachment/input delivery and durable operator replies.
+- `cas-cli/src/ui/factory/daemon/runtime/work_events.rs` - paged Commander work events (thinking, tool calls, task and worker events) from transcripts and the task DB; schema in `docs/guides/commander-work-events.md`.
 - `hub-web/src/usage.ts` - per-journey usage counter (action to HUB journey map), flushed to every paired machine.
 - `hub-web/e2e/journeys/`, `hub-web/preview/` - browser journeys and isolated previews; `hub-web/e2e/journeys/real-hub-server.mjs` owns the real hub/daemon recovery fixture.
 - `slack-bridge/src/router-main.ts`, `slack-bridge/src/daemon-main.ts` - Slack routing and daemon entrypoints.
@@ -136,6 +145,8 @@
 ## Cross-cutting
 
 - **Tests:** inline Rust modules, `crates/cas-store/tests/`, explicit `cas-cli/tests/` harnesses and `cas-cli/tests/integration/` modules.
+- `hub-web/scripts/rich-content-visual-qa.mjs`, `hub-web/e2e/journeys/rich-content.journey.ts` - four-view rich-content polish and browser proof.
+- `hub-web/scripts/conversation-open-perf.mjs`, `hub-web/e2e/journeys/conversation-open.perf.ts`, `hub-web/e2e/conversation-perf.config.ts` - conversation-open performance measurement.
 - **Browser proof:** `hub-web/src/` Vitest, `hub-web/e2e/` Playwright and `scripts/journey-eval.sh` affected selection.
 - **Two-machine Commander rig:** `scripts/qa-rig/commander-two-machine/` (`rig.sh` start/stop/status/pair, `browser.mjs` saved paired profile, README) for real soundwave + prowl QA.
 - **Contributor policy / Rust proof:** `cas-cli/docs/CONTRIBUTING.md`, `cas-cli/docs/ARCHITECTURE.md`, and capped named `cargo nextest` / `cargo check` commands.

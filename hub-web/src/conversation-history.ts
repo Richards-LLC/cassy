@@ -69,7 +69,7 @@ export const RESTORED_MATCH_WINDOW_MS = 10 * 60_000;
  * supervisor posts progress while it waits, and a question it is still
  * waiting on keeps its pin and its choices (cas-16eed QA F01).
  */
-export type AskRetirement = "dismissed" | "session-ended";
+export type AskRetirement = "dismissed" | "session-ended" | "handled";
 /** `at` is when this client saw the event (ms epoch); it stamps the thread's
  * day separators and group timestamps and is never a delivery receipt. */
 /** `at` is the sort key. `shownAt`, when set, is the time to display: a live
@@ -127,6 +127,12 @@ export interface EarlierSession {
 
 /** In-memory per-thread evidence. A submitted socket frame is never a receipt. */
 export class ConversationHistory {
+  private attentionSnapshot?: { through: number; open: Set<number> };
+  /** An authoritative first-page decision snapshot never discards readable turns. */
+  setOpenAttention(replies: readonly ConversationHistoryReply[], through: number): void {
+    for (const reply of replies) this.hydrateReply(reply);
+    this.attentionSnapshot = { through, open: new Set(replies.map(reply => reply.notification_id)) };
+  }
   readonly events: ConversationEvent[] = [];
   /** Other sessions' turns, by session (cas-55a4). Never waiting, pinned or previewed. */
   private readonly others = new Map<string, ConversationEvent[]>();
@@ -583,6 +589,7 @@ export class ConversationHistory {
     const reply = event.value;
     if (reply.kind === "ask" && this.answered(reply.notification_id)) return undefined;
     if (this.dismissedAsks.has(reply.notification_id)) return "dismissed";
+    if (this.attentionSnapshot && reply.notification_id <= this.attentionSnapshot.through && !this.attentionSnapshot.open.has(reply.notification_id)) return "handled";
     const later = this.events.slice(index + 1);
     // Asked by a session that has ended: the thread is attached to another
     // one now, or a later turn already came from another one.
@@ -827,7 +834,9 @@ export class ConversationHistory {
     // cas-9e33: keep the mark this visit shows, so a reload shows it too.
     if (!this.liveMarks.has(id) && !this.events.some((event) => event.kind === "reply" && event.value.notification_id === reply.notification_id)) this.liveMarks.set(id, this.machineAhead);
     const key = Math.max(at, this.latestAt());
-    this.reply(reply, key, session, key === at ? undefined : at, at, "time", this.machineAhead, true);
+    // Catch-up uses the same frame as a fresh reply. Its queue id still
+    // precedes the durable tail, even though this browser sees it just now.
+    this.reply(reply, key, session, key === at ? undefined : at, at, "durable", this.machineAhead, true);
   }
 
   /** Merge a durable supervisor turn in the machine's sequence, keeping its own stamp (cas-1f13). */

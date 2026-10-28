@@ -2649,6 +2649,9 @@ pub(crate) struct StallNudgeRead {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
     pub(crate) answered_blocker: bool,
+    /// Daemon green readiness, refreshed off the loop. Ok(None) withdraws a
+    /// positively stale signal; Err retains the action for a later retry.
+    pub(crate) director_ready: Option<Result<Option<crate::ui::factory::director::Prompt>, String>>,
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
@@ -2713,6 +2716,43 @@ pub(crate) fn read_row_facts(
         },
         ..RowFacts::default()
     };
+    if row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && let Some(mut prompt) = super::delivery::parse_merge_ready_prompt(&row.target, &row.prompt)
+    {
+        use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+        let evidence = prompt.merge_alert.as_ref().expect("parsed readiness evidence").clone();
+        let task = tasks.and_then(|tasks| tasks.get(&evidence.task_id).ok());
+        let repo_root = task.as_ref()
+            .and_then(|task| task.deliverables.work_target.as_ref())
+            .and_then(|target| resolve_repo_context(cas_dir, target).ok())
+            .map(|repo| repo.repo_root)
+            .unwrap_or_else(|| cas_dir.parent().unwrap_or(cas_dir).to_path_buf());
+        facts.director_ready = Some(crate::ui::factory::director::DirectorData::load_with_stores_for_project(
+            cas_dir, None, false, None, None,
+        ).map_err(|error| error.to_string()).and_then(|data| {
+            if crate::ui::factory::director::refresh_ci_merge_signal(
+                &mut prompt, &data, cas_dir, &repo_root,
+            ) {
+                return Ok((!prompt.text.starts_with("Superseded delivery ")).then_some(prompt));
+            }
+            // A failed fetch is not evidence that the merge action went away.
+            // Releasing its episode would leave the later digest copies with
+            // no action to supplement. Only positive live evidence withdraws.
+            if let Some(task) = task {
+                let active = matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked);
+                let moved = active && crate::git_evidence::resolve_ref_commit_sha(&repo_root, &evidence.factory_branch)
+                    .is_some_and(|head| head != evidence.factory_tip);
+                let integrated = task.deliverables.work_target.as_ref().is_some_and(|target| matches!(
+                    crate::prompt_revalidation::revalidate_merge_request(&repo_root, &evidence.factory_tip, &target.target_branch),
+                    crate::prompt_revalidation::MergeRequestDecision::AlreadyIntegrated { .. }
+                ));
+                if (!active && task.status != cas_types::TaskStatus::AwaitingMerge) || moved || integrated {
+                    return Ok(None);
+                }
+            }
+            Err("live readiness evidence unavailable; retaining queued action".into())
+        }));
+    }
     if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt)
         && let Some(tasks) = tasks
     {
@@ -3662,13 +3702,18 @@ pub(super) fn record_undelivered_relay_alerts(
     let mut alerts = Vec::new();
     for queued in candidates {
         let envelope = crate::prompt_revalidation::parse_lifecycle_envelope(&queued.prompt);
-        let (summary, message) = undelivered_relay_operator_alert(
+        let (summary, mut message) = undelivered_relay_operator_alert(
             &queued,
             envelope.as_ref(),
             supervisor_name,
             supervisor_harness,
             now,
         );
+        if let Ok(Some(report)) = queue.message_delivery_report(queued.id) {
+            if let Some(detail) = report.pending_detail {
+                message.push_str(&format!(" Current delivery hold: {detail}."));
+            }
+        }
         let payload = match serde_json::to_string(&crate::ui::factory::OperatorReplyPayload {
             schema_version: 2,
             reply_to: None,
@@ -3853,24 +3898,24 @@ impl FactoryDaemon {
                     }
                 }
                 UsageLimitEvidence::Limited { first_evidence } => {
-                    let occurrence = crate::mcp::tools::service::factory_ops::limit_switch::episode_key(&self.session_name, &worker, &first_evidence);
+                    let occurrence = crate::mcp::tools::service::factory_ops::usage_limits::episode_key(&self.session_name, &worker, &first_evidence);
                     if self.reported_unavailable_workers.get(&agent_id) == Some(&occurrence) {
                         continue;
                     }
                     let cas_dir = self.app.cas_dir().to_path_buf();
                     let key = format!("usage-limit:{agent_id}");
                     self.relay_jobs.submit_write(&mut self.queue_jobs, &key, Some(basis), move || {
-                        let (detail, switch_queued) = match crate::mcp::tools::service::factory_ops::limit_switch::queue_limit_switch(&cas_dir, &agent_id, &occurrence) {
-                            Ok(decision) => (decision.detail, decision.switch_queued),
+                        let detail = match crate::mcp::tools::service::factory_ops::usage_limits::record_usage_limit(&cas_dir, &agent_id, &occurrence) {
+                            Ok(detail) => detail,
                             Err(error) => {
-                                tracing::warn!(%error, worker, "usage-limit decision failed; notifying supervisor");
-                                (format!("Worker {worker} hit its usage limit; blocked switch: {error:#}. Existing pane kept."), false)
+                                tracing::warn!(%error, worker, "usage-limit report failed; notifying supervisor");
+                                format!("Worker {worker} hit its usage limit; reset time unavailable: {error:#}. Waiting; no restart queued.")
                             }
                         };
                         // The same durable occurrence key dedupes failures too,
                         // including a daemon restart after the fallback notice.
-                        let persisted = matches!(super::lifecycle::enqueue_usage_limit_switch_relay(
-                            &cas_dir, &worker, &occurrence, &detail, switch_queued),
+                        let persisted = matches!(super::lifecycle::enqueue_usage_limit_relay(
+                            &cas_dir, &worker, &occurrence, &detail),
                             super::lifecycle::WorkerAttentionRelayOutcome::Persisted { .. });
                         super::relay_jobs::RelayOutput::UsageLimitWritten {
                             agent_id,
@@ -6676,6 +6721,9 @@ impl FactoryDaemon {
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
             WakeSender::Daemon => {
+                if super::delivery::parse_merge_ready_prompt(supervisor_name, prompt).is_some() {
+                    return Some(SupervisorWakeClass::MergeRequest);
+                }
                 // cas-8725: the verification-dispatch handoff is composed and
                 // enqueued by the close path itself, so it carries its own
                 // envelope and its own source (`verification-dispatch:<id>`)
@@ -7430,6 +7478,13 @@ impl FactoryDaemon {
             }
         }
         let (messages, replies) = commander_history_turns(queue.as_ref(), rows, &self.session_name, &notices);
+        let open_attention = if before.is_none() && !device_id.trim().is_empty() {
+            let mut decisions = queue.conversation_open_attention(&self.session_name, device_id)?;
+            decisions.retain(|row| !is_operator_notice(row));
+            Some(commander_history_turns(queue.as_ref(), decisions, &self.session_name, &std::collections::HashMap::new()).1)
+        } else {
+            None
+        };
         // cas-55a4: other sessions' Commander turns travel beside the page,
         // never in it, so Commander can show them only as a labelled, collapsed
         // earlier-session section. They come once, with the newest page.
@@ -7458,6 +7513,7 @@ impl FactoryDaemon {
             request_id,
             messages,
             replies,
+            open_attention,
             has_earlier,
             next_before,
             earlier_messages,
@@ -7597,8 +7653,24 @@ impl FactoryDaemon {
         device_id: &str,
     ) -> anyhow::Result<()> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)?;
-        self.queue_jobs.operator_reply_retries.clear();
+        // cas-59da: only a receipt that closes the row proves its addressee
+        // is reachable. A non-addressee's stored receipt leaves the row
+        // pending; clearing the backoff then re-forwarded it every tick.
+        if queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)? {
+            self.queue_jobs.operator_reply_retries.clear();
+        }
+        Ok(())
+    }
+
+    pub(super) fn persist_operator_notice_receipt(
+        &mut self,
+        notification_id: i64,
+        device_id: &str,
+    ) -> anyhow::Result<()> {
+        let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+        if queue.record_operator_notice_persisted(notification_id, &self.session_name, device_id)? {
+            self.queue_jobs.operator_reply_retries.clear();
+        }
         Ok(())
     }
 
@@ -7674,9 +7746,18 @@ impl FactoryDaemon {
             mut wake_deferred,
             prior_copy_unread,
             nudge_only,
+            renudge_granted,
             urgent_wake_probe_opened,
             delivery_started_at_utc,
         } = delivery;
+        // A safety deferral is not a transport attempt. The in-flight owner
+        // prevents duplicate attempts until completion, including urgent
+        // settles where the operator starts a draft after the turn break.
+        if renudge_granted && !inject_result.as_ref().is_ok_and(|report|
+            report.outcome == cas_mux::InjectOutcome::DeferredComposerDirty)
+        {
+            self.reserve_renudge_attempt(queued.id);
+        }
         if inject_result.as_ref().is_ok_and(|report| report.outcome == cas_mux::InjectOutcome::Delivered)
             && !wake_deferred && !message_senders.is_empty() {
             self.queue_jobs.stamp(self.app.cas_dir(),queued.id,&queued.target,
@@ -7694,7 +7775,7 @@ impl FactoryDaemon {
             self.finish_direct_delivery(super::inject_commands::DirectDelivery {
                 queued: member, pane_target: pane_target.clone(), generation,
                 message_batch: Vec::new(), message_senders: Vec::new(), wake_deferred,
-                prior_copy_unread, nudge_only, urgent_wake_probe_opened: false, delivery_started_at_utc,
+                prior_copy_unread, nudge_only, renudge_granted: false, urgent_wake_probe_opened: false, delivery_started_at_utc,
             },report);
         }
         let target = &queued.target;
@@ -7801,6 +7882,22 @@ impl FactoryDaemon {
                     target_agent = %pane_target,
                     "prompt_queue message remains durable pending a clean composer"
                 );
+                let detail = if self.app.mux.pane_composer_dirty(&pane_target) {
+                    "composer protected: operator draft is unsubmitted"
+                } else if self.app.mux.pane_submit_pending(&pane_target) {
+                    "composer protected: pending submit for an earlier payload"
+                } else if self.app.mux.inject_pending(&pane_target) {
+                    if self.urgent_injects.owners.values().any(|owner| matches!(owner,
+                        super::inject_commands::UrgentInject::NormalRow { delivery, .. }
+                            if delivery.pane_target == pane_target)) {
+                        "composer protected: pending payload write completion"
+                    } else {
+                        "composer protected: urgent inject is still settling"
+                    }
+                } else {
+                    "composer protected: input readiness changed during delivery; rechecking"
+                };
+                self.queue_jobs.inline_parked.insert(queued.id, (queued.clone(), chrono::Utc::now()));
                 self.queue_jobs.stamp(
                     self.app.cas_dir(),
                     queued.id,
@@ -7811,7 +7908,7 @@ impl FactoryDaemon {
                     // Park durably; the independent relay watchdog still
                     // alerts the operator while this pane cannot accept input.
                     super::prompt_queue_jobs::QueueStamp::ParkBusy {
-                        detail: "composer protected: operator draft or prior injection/submit still pending".into(),
+                        detail: detail.into(),
                         recheck_at: chrono::Utc::now()
                             + chrono::Duration::from_std(BUSY_RECIPIENT_RECHECK_INTERVAL).unwrap(),
                     },
@@ -7823,7 +7920,7 @@ impl FactoryDaemon {
                         &queued.target,
                         &pane_target,
                         "deferred",
-                        Some("composer protected: operator draft or prior injection/submit still pending".to_string()),
+                        Some(detail.to_string()),
                     );
                 }
             }
@@ -8070,8 +8167,16 @@ impl FactoryDaemon {
                     // supervisor is told once per row.
                     warn_supervisor: self.app.supervisor_name().to_string(),
                     session: self.session_name.clone(),
+                    claim_token: self.queue_jobs.inject_claim_token(queued.id, &queued.target),
                 },
             );
+            // cas-dd2e: the Teams write completed, but the turn is still
+            // owed. Keeping this reservation makes NOT_ALREADY_CONSUMED_SQL
+            // hide the row from every later selection, so readiness can
+            // never grant its deferred wake. Persist the held-copy marker
+            // first, and release only if that write succeeds; retry dedup
+            // and hook recovery continue to use it. The token-scoped release
+            // cannot erase a recipient's newer receipt.
             self.lifecycle_redelivery_attempts
                 .entry(queued.id)
                 .or_insert_with(std::time::Instant::now);
@@ -8435,7 +8540,7 @@ impl FactoryDaemon {
             .insert(target.to_string(), Instant::now());
     }
 
-    /// Re-offer a parked inline row only when the pane becomes input-ready
+    /// Re-offer a parked inline or composer-held row when the pane becomes input-ready
     /// or a newer turn completion arrives. No queue/store work is repeated
     /// on the 100ms busy polls; ParkBusy's existing deadline survives restart.
     fn retry_ready_inline_rows(&mut self) {
@@ -8818,6 +8923,27 @@ impl FactoryDaemon {
             // but replace the envelope's enqueue-time target tip with the
             // ref resolved at this pop/injection point.
             let mut prompt_with_instructions = queued.prompt.clone();
+
+            if let Some(ready) = facts.director_ready.as_ref() {
+                if let Err(error) = ready {
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                            detail: format!("director readiness read unavailable: {error}"),
+                            recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                        });
+                    continue;
+                }
+                let Ok(Some(ready)) = ready else {
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Superseded {
+                            detail: "director readiness withdrawn by live delivery check".into(),
+                        });
+                    self.forget_row_delivery_state(queued.id);
+                    continue;
+                };
+                merge_request_task = ready.retract_task.clone();
+                prompt_with_instructions = ready.text.clone();
+            }
 
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)
@@ -10198,9 +10324,6 @@ impl FactoryDaemon {
                         super::prompt_queue_jobs::Admission::InFlight | super::prompt_queue_jobs::Admission::NotClaimed => {},
                     }
                 }
-                if renudge_granted {
-                    self.reserve_renudge_attempt(queued.id);
-                }
                 tracing::info!(stage = "prompt_inject_attempt", message_id = queued.id,
                     target_agent = %pane_target, "Attempting prompt injection to '{}': {}", target,
                     queued.prompt.chars().take(50).collect::<String>());
@@ -10261,6 +10384,7 @@ impl FactoryDaemon {
                                         wake_deferred: false,
                                         prior_copy_unread,
                                         nudge_only,
+                                        renudge_granted,
                                         urgent_wake_probe_opened: false,
                                         delivery_started_at_utc,
                                     }),
@@ -10417,9 +10541,6 @@ impl FactoryDaemon {
                         );
                         match self.app.mux.begin_inject(&pane_target, &payload) {
                             Ok(cas_mux::InjectStart::Started(ticket)) => {
-                                if inline_supervisor_body {
-                                    self.reserve_renudge_attempt(queued.id);
-                                }
                                 self.urgent_injects.owners.insert(ticket,
                                     super::inject_commands::UrgentInject::NormalRow {
                                         inline_supervisor: inline_supervisor_body,
@@ -10427,7 +10548,7 @@ impl FactoryDaemon {
                                             message_batch, message_senders: facts.message_senders.clone(),
                                             queued: queued.clone(), pane_target: pane_target.clone(),
                                             generation: inject_generation, wake_deferred: false,
-                                            prior_copy_unread, nudge_only, urgent_wake_probe_opened: false,
+                                            prior_copy_unread, nudge_only, renudge_granted: renudge_granted || inline_supervisor_body, urgent_wake_probe_opened: false,
                                             delivery_started_at_utc,
                                         }),
                                     });
@@ -10481,6 +10602,7 @@ impl FactoryDaemon {
                         wake_deferred,
                         prior_copy_unread,
                         nudge_only,
+                        renudge_granted,
                         urgent_wake_probe_opened: false,
                         delivery_started_at_utc,
                     },
@@ -10792,34 +10914,25 @@ impl FactoryDaemon {
                         .worker_spec
                         .as_deref()
                         .and_then(|json| serde_json::from_str::<cas_mux::WorkerSpec>(json).ok());
-                    let limit_recycle = match request
-                        .worker_spec
-                        .as_deref()
+                    // Refuse persisted pre-upgrade automatic switches before they
+                    // can reach shutdown or respawn. Even null/malformed metadata
+                    // belongs to the retired limit-switch path.
+                    if request.worker_spec.as_deref()
                         .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
-                        .and_then(|v| v.get("limit_recycle").cloned())
-                        .map(serde_json::from_value)
-                        .transpose()
+                        .is_some_and(|value| value.get("limit_recycle").is_some())
                     {
-                        Ok(meta) => meta,
-                        Err(error) => {
-                            record_terminal_spawn_state(
-                                self.app.cas_dir(),
-                                request.id,
-                                cas_store::SpawnLifecycleState::Failed,
-                                None,
-                                &format!(
-                                    "Invalid limit recycle metadata; nothing stopped: {error}"
-                                ),
-                            );
-                            continue;
-                        }
-                    };
+                        record_terminal_spawn_state(
+                            self.app.cas_dir(), request.id,
+                            cas_store::SpawnLifecycleState::Failed, None,
+                            "Automatic account switching removed; usage-limited worker kept waiting on its current account.",
+                        );
+                        continue;
+                    }
                     for name in request.worker_names {
                         self.pending_spawns.push_back(PendingSpawn::Recycle {
                             request_id: request.id,
                             name,
                             spec: spec.clone(),
-                            limit_recycle: limit_recycle.clone(),
                         });
                     }
                 }
@@ -11725,7 +11838,6 @@ impl FactoryDaemon {
                 request_id,
                 name,
                 spec,
-                limit_recycle,
             } => {
                 // cas-c1a2 (GH #1178): the replacement reuses this pane name,
                 // and pane buffers are keyed by name and append-only. Without
@@ -11763,10 +11875,6 @@ impl FactoryDaemon {
                             "recipe refused before stopping {name}; the worker keeps running: {error}"
                         )
                     })?;
-                    let (resume_id, resume_note) = if let Some(meta) = limit_recycle.as_ref() {
-                        let (id, note) = crate::mcp::tools::service::factory_ops::limit_switch::prepare_limit_resume(self.app.cas_dir(), &name, meta, &spec)?;
-                        (id, Some(note))
-                    } else { (None, None) };
                     self.app.shutdown_worker_for_recycle(&name).await?;
                     // cas-981e: the relaunch queues the worker's intro and
                     // tracks its process group; give it the same bounded
@@ -11776,12 +11884,12 @@ impl FactoryDaemon {
                     );
                     let launch_floor = crate::factory_hook_canary::launch_floor();
                     self.app
-                        .respawn_worker_with_resume(&name, teams_config, Some(spec), resume_id.as_deref(), limit_recycle.as_ref().map(|meta| meta.cwd.as_path()))
-                        .map(|()| (launch_floor, resume_note))
+                        .respawn_worker_with_spec(&name, teams_config, Some(spec))
+                        .map(|()| launch_floor)
                 }
                 .await;
                 match result {
-                    Ok((launch_floor, resume_note)) => {
+                    Ok(launch_floor) => {
                         self.dead_workers.remove(&name);
                         // cas-0f5b: a recycled worker must prove its hooks run too.
                         self.verify_respawned_worker(&name, Some(request_id), launch_floor);
@@ -11796,15 +11904,9 @@ impl FactoryDaemon {
                         );
                         // cas-a622: the fresh conversation knows nothing; tell
                         // it what it still holds and how to resume.
-                        let resume_result = if let Some(note) = resume_note {
-                            let tasks = crate::ui::factory::app::render_and_ops::epic_workers::recycle_resume_brief(self.app.cas_dir(), &name, &self.session_name).unwrap_or_default();
-                            crate::store::open_prompt_queue_store(self.app.cas_dir()).and_then(|queue| {
-                                Ok(queue.enqueue_with_summary(self.app.supervisor_name(), &name, &format!("{note}\n{tasks}"), Some(&self.session_name), Some("Account switched: resume your assigned work"))?)
-                            }).map(Some).map_err(anyhow::Error::from)
-                        } else {
-                            crate::ui::factory::app::render_and_ops::epic_workers::enqueue_recycle_resume_brief(self.app.cas_dir(), self.app.supervisor_name(), &self.session_name, &name)
-                        };
-                        if let Err(error) = resume_result { tracing::warn!(worker = %name, %error, "recycle resume brief could not be queued"); }
+                        if let Err(error) = crate::ui::factory::app::render_and_ops::epic_workers::enqueue_recycle_resume_brief(self.app.cas_dir(), self.app.supervisor_name(), &self.session_name, &name) {
+                            tracing::warn!(worker = %name, %error, "recycle resume brief could not be queued");
+                        }
                         if self.app.record_enabled() {
                             if let Err(e) = self.app.start_recording_for_pane(&name).await {
                                 tracing::error!(
@@ -11815,12 +11917,12 @@ impl FactoryDaemon {
                         }
                     }
                     Err(e) => {
-                        let detail = if limit_recycle.is_some() { format!("blocked switch for {name}: {e}") } else { format!("Failed to recycle {name}: {e}") };
+                        let detail = format!("Failed to recycle {name}: {e}");
                         // cas-a622: the recycle kept the bindings for a
                         // replacement that never started. Once the old process
                         // is gone, release them as a shutdown would, rather
                         // than leave tasks bound to a dead name.
-                        if limit_recycle.is_none() && !self.app.worker_names().iter().any(|worker| worker == &name) {
+                        if !self.app.worker_names().iter().any(|worker| worker == &name) {
                             crate::ui::factory::app::render_and_ops::epic_workers::release_worker_task_bindings(
                                 self.app.cas_dir(),
                                 &name,
@@ -12905,7 +13007,7 @@ fn is_exact_agent_name_match(agent: &AgentSummary, worker_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn limit_switch_error_notifies_once_per_episode_even_after_daemon_restart() {
+    fn limit_notice_reports_reset_once_without_switch_even_after_daemon_restart() {
         use crate::mcp::tools::service::factory_ops::UsageLimitEvidence;
         let mut env = crate::test_support::TestEnvGuard::temp_home();
         env.set("CAS_FACTORY_SESSION", "provision-test");
@@ -12919,6 +13021,17 @@ mod tests {
             let mut worker = cas_types::Agent::new_with_role(cli.into(), cli.into(), cas_types::AgentRole::Worker);
             worker.factory_session = Some("provision-test".into());
             worker.metadata.insert("worker_cli".into(), cli.into());
+            let account = env.home().join(format!(".{cli}-limited"));
+            worker.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into());
+            std::fs::create_dir_all(account.join("sessions")).unwrap();
+            if cli == "codex" {
+                std::fs::write(account.join("sessions/rollout.jsonl"), serde_json::json!({
+                    "payload": {"rate_limits": {"primary": {
+                        "used_percent": 100.0, "window_minutes": 300,
+                        "resets_at": 4071038400i64
+                    }}}
+                }).to_string()).unwrap();
+            }
             agents.register(&worker).unwrap();
             let mut task = cas_types::Task::new(format!("cas-{cli}"), "held task".into());
             task.assignee = Some(cli.into());
@@ -12939,15 +13052,51 @@ mod tests {
             }
         }
         let rows = crate::store::open_prompt_queue_store(&root).unwrap().peek_all(20).unwrap();
-        assert_eq!(rows.len(), 4, "one fallback for each provider and distinct episode, including restart: {rows:?}");
+        assert_eq!(rows.len(), 4, "one notice for each provider and distinct episode, including restart: {rows:?}");
         for row in rows {
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
             assert_eq!(row.target, "supervisor");
-            // pin: a fallback must preserve the concrete switch error for the supervisor.
-            assert!(row.prompt.contains("worker worktree missing; nothing stopped"), "{}", row.prompt);
-            // pin: a failed switch still needs the existing recovery instruction.
-            assert!(row.prompt.contains("reassign or recover"), "fallback still needs attention: {}", row.prompt);
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
+            assert!(row.prompt.contains("limited"), "account must be named: {}", row.prompt);
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
+            if row.prompt.contains("Worker codex") {
+                let reset = chrono::DateTime::from_timestamp(4071038400, 0).unwrap()
+                    .with_timezone(&chrono::Local).format("%Y-%m-%d %I:%M %p %Z").to_string();
+                // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
+                assert!(row.prompt.contains(&reset), "absolute local reset missing: {}", row.prompt);
+            } else {
+                // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
+                assert!(row.prompt.contains("reset time unavailable"), "{}", row.prompt);
+            }
+            // pin: the supervisor notice must identify account/reset availability and retain recovery guidance.
+            assert!(row.prompt.contains("reassign or recover"), "{}", row.prompt);
         }
         assert!(crate::store::open_spawn_queue_store(&root).unwrap().peek(10).unwrap().is_empty());
+        let queue = crate::store::open_spawn_queue_store(&root).unwrap();
+        for cli in ["claude", "codex"] {
+            assert_eq!(agents.get(cli).unwrap().metadata["worker_account_dir"],
+                env.home().join(format!(".{cli}-limited")).to_string_lossy());
+            for stamp in ["first", "next"] {
+                let episode = crate::mcp::tools::service::factory_ops::usage_limits::episode_key("provision-test", cli, stamp);
+                assert!(queue.limit_episode(&episode).unwrap().unwrap().0.is_none());
+            }
+        }
+        // A queued 3.84 switch must also be inert after upgrading.
+        let mut legacy = serde_json::to_value(cas_mux::WorkerSpec::builtin_default()).unwrap();
+        legacy["limit_recycle"] = serde_json::json!({
+            "agent_id":"codex", "episode":"old", "session":"provision-test",
+            "old_account":"/old", "task_ids":["cas-codex"], "cwd":"/kept"
+        });
+        let id = queue.enqueue_recycle("codex", Some(&legacy.to_string()), Some("provision-test")).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        daemon.enqueue_spawn_requests().unwrap();
+        assert!(daemon.pending_spawns.is_empty(), "legacy limit switches must never reach the stop/respawn path");
+        assert!(queue.peek(10).unwrap().is_empty(), "legacy row was consumed");
+        // recent_spawn_lifecycle only exposes action=spawn, so read the
+        // persisted recycle outcome directly, as the shutdown tests do.
+        let state: String = rusqlite::Connection::open(root.join("cas.db")).unwrap()
+            .query_row("SELECT spawn_state FROM spawn_queue WHERE id=?", [id], |row| row.get(0)).unwrap();
+        assert_eq!(state, cas_store::SpawnLifecycleState::Failed.as_str());
     }
 
     #[tokio::test]
@@ -13188,6 +13337,50 @@ mod tests {
             log_count(),
             attempts,
             "invalid persistence receipt cannot reset retries"
+        );
+        // cas-59da: a row addressed to an away phone, viewed by this desktop.
+        // The desktop's stored receipts leave the row pending, so they must not
+        // clear its backoff (that re-forwarded it at the select-loop rate).
+        let mut phone_payload: serde_json::Value = serde_json::from_str(
+            &crate::supervisor_notices::operator_prompt("phone reply", "reply").unwrap(),
+        )
+        .unwrap();
+        phone_payload["device_id"] = "phone".into();
+        let addressed = queue
+            .enqueue_with_session("supervisor", "operator", &phone_payload.to_string(), "provision-test")
+            .unwrap();
+        queue.stamp_recipient_device(addressed, "phone").unwrap();
+        let cas_store::EnqueueIdempotentResult::Created(notice) = queue
+            .enqueue_idempotent(
+                "relay-watchdog", "operator", "notice", Some("provision-test"), None, None,
+                "notice", Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        else {
+            panic!("expected a new notice");
+        };
+        queue.stamp_recipient_device(notice, "phone").unwrap();
+        let addressed_reply = super::read_operator_replies(
+            &root, queue.as_ref(), "provision-test", false, &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|row| row.queued.id == addressed)
+        .unwrap();
+        daemon.forward_operator_replies(vec![addressed_reply.clone()]);
+        attempts += 1;
+        daemon.persist_operator_reply_receipt(addressed, "paired-device").unwrap();
+        daemon.persist_operator_notice_receipt(notice, "paired-device").unwrap();
+        daemon.forward_operator_replies(vec![addressed_reply.clone()]);
+        assert_eq!(log_count(), attempts, "non-addressee receipts keep the backoff");
+        daemon.persist_operator_reply_receipt(addressed, "phone").unwrap();
+        assert!(queue.queued_prompt(addressed).unwrap().unwrap().processed_at.is_some());
+        assert!(
+            !super::read_operator_replies(&root, queue.as_ref(), "provision-test", false, &Default::default())
+                .unwrap()
+                .iter()
+                .any(|row| row.queued.id == addressed),
+            "the addressee's receipt closes the row: it is never forwarded again"
         );
         daemon
             .persist_operator_reply_receipt(other, "paired-device")
@@ -13435,6 +13628,32 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    #[tokio::test]
+    async fn notice_receipt_frames_drain_only_the_attention_lane_after_reconnect() {
+        use cas_store::QueueOrigin;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let payload = crate::supervisor_notices::operator_prompt("notice", "notice").unwrap();
+        let cas_store::EnqueueIdempotentResult::Created(notice) = queue.enqueue_idempotent("relay-watchdog", "operator", &payload,
+            Some("provision-test"), None, None, "notice-receipt", Some(&QueueOrigin::Daemon)).unwrap() else { panic!("expected a new notice"); };
+        let reply = queue.enqueue_with_session("supervisor", "operator", &payload, "provision-test").unwrap();
+        for id in [reply, notice, notice] {
+            let frame = serde_json::from_value(serde_json::json!({ "OperatorNoticePersisted": {
+                "notification_id": id, "device_id": "phone"
+            }})).unwrap();
+            daemon.handle_ws_message(0, frame).await;
+        }
+        let reconnected = crate::store::open_prompt_queue_store(&root).unwrap();
+        assert_eq!(reconnected.peek_operator_replies("provision-test", 10).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![reply]);
+        let row = reconnected.queued_prompt(notice).unwrap().unwrap();
+        assert!(row.processed_at.is_some());
+        assert!(row.acked_at.is_none(), "persistence is not an operator read");
+    }
+
     /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
     /// names the relay it is about and whether that relay has since been
     /// seen; a supervisor turn carries no notice.
@@ -13532,6 +13751,38 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].session, "acct-wise-lion-31");
         assert_eq!(messages[0].operator_label.as_deref(), Some("Terminal"));
+    }
+
+    #[test]
+    fn commander_tail_includes_open_attention_without_loading_older_pages() {
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let session = daemon.session_name.clone();
+        let turn = |kind: &str| {
+            let payload = serde_json::json!({"schema_version":2,"reply_to":null,"message":"decision","summary":"","device_id":"*","kind":kind,"attachments":[]});
+            let id = queue.enqueue_with_session("supervisor", "operator", &payload.to_string(), &session).unwrap();
+            queue.stamp_operator_reply(id, kind, &[]).unwrap();
+            id
+        };
+        let open = turn("ask");
+        let answered = turn("ask");
+        let retired_blocker = turn("blocker");
+        queue.record_terminal_operator_turn(&session, &format!("[CAS reply: explicitly acknowledges notification_id={answered}]\nProceed")).unwrap();
+        let blocker = turn("blocker");
+        let newest = turn("answer");
+        let page = daemon.conversation_history_page("tail".into(), "phone", None, 1).unwrap();
+        let json = serde_json::to_value(page).unwrap();
+        let page = &json["ConversationHistory"];
+        assert_eq!(page["replies"].as_array().unwrap().len(), 1);
+        assert_eq!(page["replies"][0]["notification_id"], newest);
+        let attention = page["open_attention"].as_array().expect("first page independently includes old open decisions");
+        assert_eq!(attention.iter().map(|reply| reply["notification_id"].as_i64().unwrap()).collect::<Vec<_>>(), vec![open, blocker]);
+        assert!(!attention.iter().any(|reply| reply["notification_id"] == retired_blocker));
+        let older = serde_json::to_value(daemon.conversation_history_page("older".into(), "phone", Some(newest), 1).unwrap()).unwrap();
+        assert!(older["ConversationHistory"].get("open_attention").is_none(), "summary is first-page only");
     }
 
     #[test]

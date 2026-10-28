@@ -36,9 +36,25 @@ pub(super) async fn fixture() -> (tempfile::TempDir, FactoryDaemon) {
 
 /// [`fixture`] with the supervisor launched under `cli`.
 pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempDir, FactoryDaemon) {
+    fixture_with_readiness(cli, true).await
+}
+
+async fn fixture_with_readiness(cli: cas_mux::SupervisorCli, ready: bool) -> (tempfile::TempDir, FactoryDaemon) {
     let root = tempfile::tempdir().unwrap();
     let cas = crate::store::init_cas_dir(root.path()).unwrap();
     let mut daemon = super::provisioning_tests::daemon(&cas);
+    attach_supervisor_pty(&mut daemon, root.path(), cli, ready).await;
+    (root, daemon)
+}
+
+/// The same registered, input-ready consumer for queue and director fixtures.
+pub(super) async fn attach_supervisor_pty(
+    daemon: &mut FactoryDaemon,
+    root: &std::path::Path,
+    cli: cas_mux::SupervisorCli,
+    ready: bool,
+) {
+    let cas = daemon.app.cas_dir().to_path_buf();
     let name = daemon.app.supervisor_name().to_string();
     let mut agent = cas_types::Agent::new_with_role(
         "single-sup".into(),
@@ -59,9 +75,9 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
                 "-c".into(),
                 "stty raw -echo; printf ready; exec cat > \"$1\"".into(),
                 "fixture".into(),
-                root.path().join("input").to_str().unwrap().into(),
+                root.join("input").to_str().unwrap().into(),
             ],
-            cwd: Some(root.path().into()),
+            cwd: Some(root.into()),
             env: vec![],
             env_remove: vec![],
             rows: 24,
@@ -79,12 +95,14 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
         )
         .unwrap();
     // This private shell has no harness startup phase to wait through.
-    pane.backdate_spawn_for_test(Duration::from_secs(6));
+    if ready {
+        pane.backdate_spawn_for_test(Duration::from_secs(6));
+    }
     daemon.app.mux.add_pane(pane);
     daemon.app.set_supervisor_cli_for_test(cli);
     let teams = super::teams::TeamsManager::new(&daemon.session_name);
     teams
-        .init_team_config(&[], root.path(), &Default::default(), "single-sup")
+        .init_team_config(&[], root, &Default::default(), "single-sup")
         .unwrap();
     daemon.teams = Some(teams);
     let mut banner = Vec::new();
@@ -94,8 +112,8 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
                 banner.extend(pane.drain_output().0);
             }
             if banner.windows(b"ready".len()).any(|bytes| bytes == b"ready")
-                && root.path().join("input").is_file()
-                && daemon.app.mux.pane_ready_for_injection(&name)
+                && root.join("input").is_file()
+                && (!ready || daemon.app.mux.pane_ready_for_injection(&name))
             {
                 break;
             }
@@ -109,7 +127,6 @@ pub(super) async fn fixture_for(cli: cas_mux::SupervisorCli) -> (tempfile::TempD
         .pane_silent_since
         .insert(name, Instant::now() - Duration::from_secs(600));
     daemon.app.refresh_data().unwrap();
-    (root, daemon)
 }
 
 fn enqueue(daemon: &FactoryDaemon, source: &str, body: &str, origin: cas_store::QueueOrigin) -> i64 {
@@ -169,6 +186,22 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     ).unwrap();
     assert_eq!(attempts, 119, "a pre-write safety hold spends no transport attempts");
     assert!(next.is_some(), "the durable hold must schedule its next check");
+    // Advance both retry clocks through more holds than the actual re-nudge
+    // budget. No PTY attempt occurs while the operator keeps this draft.
+    for _ in 0..25 {
+        conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
+        if let Some(last) = daemon.lifecycle_redelivery_attempts.get_mut(&id) {
+            *last -= Duration::from_secs(120);
+        }
+        daemon.process_prompt_queue().await.unwrap();
+        settle_injected_writes(&mut daemon).await;
+    }
+    assert_eq!(daemon.lifecycle_redelivery_counts.get(&id).copied().unwrap_or(0), 0,
+        "protected composer holds must never spend the re-nudge budget");
+    let held_report = queue.message_delivery_report(id).unwrap().unwrap();
+    assert_eq!(held_report.stage, cas_store::DeliveryStage::Gated, "{held_report:?}");
+    assert!(held_report.pending_detail.as_deref().unwrap().contains("operator draft"));
     super::queue_and_events::escalate_undelivered_supervisor_relays(
         &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
     );
@@ -180,6 +213,7 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     assert_eq!(held.operator_alert_id, Some(alerts[0].id));
     let payload: crate::ui::factory::OperatorReplyPayload = serde_json::from_str(&alerts[0].prompt).unwrap();
     assert_eq!(payload.kind, crate::ui::factory::OperatorTurnKind::Blocker);
+    assert!(payload.message.contains("operator draft"), "alert must name the blocker: {}", payload.message);
     assert!(super::queue_and_events::escalate_undelivered_supervisor_relays(
         &cas, queue.as_ref(), &daemon.session_name, &name, "Codex", chrono::Utc::now(),
     ).is_empty(), "escalation survives repeated sweeps without duplicates");
@@ -193,15 +227,8 @@ async fn codex_dirty_composer_keeps_relay_and_escalates_without_touching_draft()
     // check can now submit the original body exactly once.
     daemon.app.mux.get(&name).unwrap()
         .deliver_user_input(b"\x15", cas_mux::UserInputKind::KeyStream).await.unwrap();
-    conn.execute("UPDATE prompt_queue SET next_attempt_at=?1 WHERE id=?2",
-        rusqlite::params![chrono::Utc::now().to_rfc3339(), id]).unwrap();
-    // Advancing the durable check alone does not advance the typed relay's
-    // daemon-local re-nudge clock. Model the same elapsed hold on both.
-    let held_for = (held.next_attempt_at.unwrap() - report.wake_attempt_at.unwrap())
-        .to_std().unwrap();
-    if let Some(last) = daemon.lifecycle_redelivery_attempts.get_mut(&id) {
-        *last -= held_for;
-    }
+    // Leave the durable hold deadline and re-nudge clock untouched: becoming
+    // input-ready must re-offer immediately, not wait two more minutes.
     typed_once(&root, &mut daemon, "1 message addressed to you has gone unread").await;
     settle_injected_writes(&mut daemon).await;
     let delivered = queue.message_delivery_report(id).unwrap().unwrap();
@@ -344,6 +371,87 @@ async fn cas_979e_codex_startup_brief_is_typed_once_on_job_lanes() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     typed_once(&root, &mut daemon, needle).await;
+}
+
+/// cas-dd2e: sturdy-lion-37 wrote its startup brief while Claude was still
+/// starting. Its transport reservation then hid the pending wake forever.
+/// The private PTY only captures input: it never reads Teams or replies for us.
+#[tokio::test(flavor = "current_thread")]
+async fn claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready() {
+    if !fixture_child("claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready") {
+        return;
+    }
+    let mut env = crate::test_env_guard::TestEnvGuard::temp_home();
+    // The operator selected a named Claude profile. That launch includes the
+    // real SessionStart fallback bundle, too large for the inline-body path.
+    let profile = env.home().join("claude-profile");
+    std::fs::create_dir_all(&profile).unwrap();
+    env.set("CLAUDE_CONFIG_DIR", &profile);
+    let (root, mut daemon) = fixture_with_readiness(cas_mux::SupervisorCli::Claude, false).await;
+    let cas = daemon.app.cas_dir().to_path_buf();
+    let name = daemon.app.supervisor_name().to_string();
+    // Keep the first pass inside the real harness startup-readiness window.
+    daemon.queue_jobs = super::prompt_queue_jobs::QueueJobs::start_with_private_writer(
+        cas.clone(), daemon.app.project_scope(),
+    );
+    // The real incident's startup contained project context (11,962 chars).
+    // A saved handoff exercises the same context builder without copying the
+    // operator's private project text into the regression.
+    let mut handoff = cas_types::Entry::new(
+        "startup-handoff".into(), cas_mux::claude_supervisor_contract("(none)"),
+    );
+    handoff.tags = vec!["handoff".into(), "role:supervisor".into()];
+    crate::store::open_store(&cas).unwrap().add(&handoff).unwrap();
+    crate::ui::factory::queue_supervisor_intro_prompt(
+        &cas, &name, cas_mux::SupervisorCli::Claude, &[], None, None,
+    );
+    let queue = crate::store::open_prompt_queue_store(&cas).unwrap();
+    let row = queue.peek_for_targets(&[&name], None, 10).unwrap().remove(0);
+    assert!(row.prompt.contains("<cas-session-start-fallback>"), "named-profile startup carries context: {}", row.prompt);
+    assert!(!cas_store::fits_hook_surface(&row.prompt), "startup with its handoff takes the Teams body path ({} chars)", row.prompt.chars().count());
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            if queue.deferred_inbox_state(row.id).unwrap().is_some() { break; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("startup must reach Teams while its pane is not ready");
+    assert!(queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_none());
+    assert!(std::fs::read(root.path().join("input")).unwrap().is_empty());
+    let held = teams_messages(&daemon);
+    assert_eq!(held.len(), 1);
+    assert!(held[0]["text"].as_str().unwrap().contains(&row.prompt));
+
+    // Claude's file watcher can ingest the Teams copy before its composer
+    // is ready. Ingestion is not a turn. Advance the existing observation
+    // window explicitly, rather than making the test sleep for 15 seconds.
+    std::fs::write(daemon.teams.as_ref().unwrap().teams_dir().join("inboxes/supervisor.json"), "[]").unwrap();
+    daemon.inbox_deferred_writes.get_mut(&row.id).unwrap().written_at =
+        Instant::now() - Duration::from_secs(16);
+    // The normal Claude retry cadence is durable wall-clock state. Make its
+    // existing next offer due as well, without a 30-second test sleep.
+    rusqlite::Connection::open(cas.join("cas.db")).unwrap().execute(
+        "UPDATE prompt_queue SET wake_attempt_at = ?1 WHERE id = ?2",
+        rusqlite::params![(chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339(), row.id],
+    ).unwrap();
+    daemon.app.mux.get_mut(&name).unwrap().backdate_spawn_for_test(Duration::from_secs(6));
+    let retried = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            daemon.process_prompt_queue().await.unwrap();
+            let typed = std::fs::read_to_string(root.path().join("input")).unwrap();
+            if typed.ends_with('\r') && queue.queued_prompt(row.id).unwrap().unwrap().processed_at.is_some() {
+                break typed;
+            }
+            tokio::task::yield_now().await;
+        }
+    }).await;
+    assert!(retried.is_ok(), "a ready supervisor must receive its deferred startup wake: {:?}",
+        queue.message_delivery_report(row.id).unwrap().map(|report|
+            (report.stage, report.pending_detail, report.recipient_receipt)));
+    let typed = retried.unwrap();
+    assert_eq!(typed.matches('\r').count(), 1, "exactly one submitted wake");
+    assert!(typed.contains(&format!("inbox_poll notification_id={}", row.id)), "wake identifies its startup body: {typed:?}");
+    assert!(teams_messages(&daemon).is_empty(), "retry must not append another Teams body after ingestion");
 }
 
 /// GH #1269: the asynchronous claim is not a submitted reminder/reply, and a
@@ -568,8 +676,20 @@ async fn cas_3f90_fyi_and_forged_wake_stay_quiet_and_readable() {
     daemon.process_prompt_queue().await.unwrap();
     nothing_typed_or_relayed(&root, &daemon);
     let rows = queue.surface_unseen_for_recipient("supervisor", Some(&daemon.session_name), 20).unwrap();
-    assert!(rows.iter().any(|row| row.id == started));
     assert!(rows.iter().any(|row| row.id == forged));
+    // 29da493b3 / 5092b8d5f deliberately move task_started into the digest.
+    // It stays readable without taking a body slot or granting forged wake authority.
+    assert!(!rows.iter().any(|row| row.id == started));
+    let digest = queue.surface_for_recipient_within_budget(
+        "supervisor", Some(&daemon.session_name), cas_store::HookDrain::NoticeDigest, 20, 0,
+    ).unwrap().rows;
+    assert_eq!(digest.iter().map(|row| row.id).collect::<Vec<_>>(), vec![started]);
+    assert_eq!(digest[0].prompt, body);
+    let explicit = queue.poll_named_for_recipient(
+        "supervisor", Some(&daemon.session_name), &[started],
+    ).unwrap();
+    assert_eq!(explicit.len(), 1);
+    assert_eq!(explicit[0].prompt, body);
 }
 
 /// A body over the hook budget, or one that fits alone but not with row

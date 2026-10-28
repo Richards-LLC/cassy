@@ -1,0 +1,1433 @@
+[
+  {
+    "query_hash": "5e42b828c9a4",
+    "boundary": "UserPromptSubmit",
+    "prompt": "any other areas where we can save tokens that are being needless wasted? i feel like i did a pass for this , but the hundreds of stale messages every few seconds got me shooketh",
+    "baseline_bytes": 5775,
+    "baseline_matched": 0,
+    "candidates": [
+      {
+        "evidence_id": "2026-06-22-1",
+        "surface": "memory",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "cas-code-review: pass the real git diff, never a hand-condensed summary HARD RULE for cas-code-review: pass the FULL verbatim `git diff` (write it to /tmp and Read it, then pass that exact text as diff_text) for EVERY code file under review. NEVER hand-condense or pseudocode any reviewed file",
+        "why_relevant": "lexical match: save,tokens,pass,eve + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "2026-06-22-1",
+          "observed_at": null,
+          "revision": "2026-08-29T18:05:16.224154352+00:00"
+        },
+        "relevance": 0.56,
+        "lexical_score": 0.36363636363636365,
+        "lexical_match_count": 4,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "2026-10-14-77",
+        "surface": "memory",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Every report brief must name cas-html-reports + cas-ui-craft; \"HTML if readable\" produced a 1992-Word-doc report On 2026-10-14 the operator reacted to the cas-447d communication-review HTML: \"did the worker really not look at any of the design skills\u2026 I feel like I'm looking at a 1992 Word doc.\" **Cause:** - My brief",
+        "why_relevant": "lexical match: feel,like,eve + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "2026-10-14-77",
+          "observed_at": null,
+          "revision": "2026-10-22T21:55:18.982760378+00:00"
+        },
+        "relevance": 0.5,
+        "lexical_score": 0.2727272727272727,
+        "lexical_match_count": 3,
+        "recency_score": 0.08,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "2026-08-16-6",
+        "surface": "memory",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Enabling previously-unrun test suites always surfaces latent failures",
+        "why_relevant": "lexical match: pass,stale,eve + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "2026-08-16-6",
+          "observed_at": null,
+          "revision": "2026-08-29T23:05:35.207842971+00:00"
+        },
+        "relevance": 0.42000000000000004,
+        "lexical_score": 0.2727272727272727,
+        "lexical_match_count": 3,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "sym-8bc0e7349eb31d34",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "factory_shell_tokens factory_shell_tokens home/pippenz/Petrastella/cassy/cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs Split just enough shell syntax to distinguish command arguments from redirections. In particular, metacharacters inside a quoted commit message stay inside one word and can never be mistaken f",
+        "why_relevant": "lexical + semantic match 0.348",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "factory_shell_tokens",
+          "observed_at": null,
+          "revision": "dd360d729427b84fd3dafcee49e52855593f909b60d816f342a49fa75de215e0"
+        },
+        "relevance": 0.3993107790296728,
+        "lexical_score": 0.18181818181818182,
+        "lexical_match_count": 2,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.3483249247074127,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-77cc4fe6733a271f",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "script_tokens script_tokens home/pippenz/Petrastella/cassy/cas-cli/src/hooks/handlers/handlers_events/pre_tool.rs Tokenize only enough Python/JavaScript syntax to identify known write APIs. Comments and string contents are opaque; in particular, `</script>`, Vue interpolation text, and template literals cannot become p",
+        "why_relevant": "lexical + semantic match 0.339",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "script_tokens",
+          "observed_at": null,
+          "revision": "3ec3780079419e94a440ef32764450284fd3b32bf6b6427c0d27f48e49b4ab19"
+        },
+        "relevance": 0.3945199877565558,
+        "lexical_score": 0.18181818181818182,
+        "lexical_match_count": 2,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.339111864566803,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-3c8af22ae376518e",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "TaskDepth TaskDepth home/pippenz/Petrastella/cassy/crates/cas-types/src/task.rs Execution depth of a task (EPIC cas-1255",
+        "why_relevant": "lexical + semantic match 0.338 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "TaskDepth",
+          "observed_at": null,
+          "revision": "923c265e2150a3ca22ac7a0e45ce37e9c81ceea520baf99f2ed151e0e6b8deda"
+        },
+        "relevance": 0.3941114658659155,
+        "lexical_score": 0.18181818181818182,
+        "lexical_match_count": 2,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.33832624554634094,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-dd11aa26e7",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "cas-e2e2 (P1, unverified): disallowed_tools may be dropped in cas-core sync",
+        "why_relevant": "lexical + semantic match 0.520 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/cas-e2e2-p1-unverified-disallowed-tools-may-be-dropped-in-cas-core-sync-shipped-dd11aa26e7.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.867+00:00"
+        },
+        "relevance": 0.37927300843325534,
+        "lexical_score": 0.09090909090909091,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5195809602737427,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-bdd219e1bd",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Decision: Workflow-hybrid for deterministic-fan-out CAS skills (cas-code-review shipped v2.19.0) #6 strategic fork resolved 2026-06-02: native Claude Code Workflow vs CAS factory = HYBRID, not either/or. context",
+        "why_relevant": "semantic match 0.563 + outcome history -0.010",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/decision-workflow-hybrid-for-deterministic-fan-out-cas-skills-cas-code-review-sh-bdd219e1bd.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.932+00:00"
+        },
+        "relevance": 0.36300077676773074,
+        "lexical_score": 0.0,
+        "lexical_match_count": 0,
+        "recency_score": 0.0,
+        "lexical_eligible": false,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.563463032245636,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-8c51370552",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Codex CLI integration reference (config schema, AGENTS.md, effort, paths) Verified against developers.openai.com/codex/config-{reference,sample} and github.com/openai/codex/docs: **Config file locations** (TOML): - User-level: `~/.codex/config.toml` - Project-level: `<repo> context",
+        "why_relevant": "lexical + semantic match 0.488 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/codex-cli-integration-reference-config-schema-agents-md-effort-paths-8c51370552.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.575+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-6e6fe57abc",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "CAS fork architecture and codebase overview We manage a fork of CAS (Coding Agent System). context",
+        "why_relevant": "semantic match 0.531 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/cas-fork-architecture-and-codebase-overview-6e6fe57abc.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.905+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-ded0e7e13b",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "TencentDB-Agent-Memory review (2026-08-06): findings + CAS adoption list Reviewed Tencent's open-source TencentDB-Agent-Memory (repo zip extracted to ~/Petrastella/research/tencentdb-agent-memory/) via 5 spike agents on 2026-08-06. context",
+        "why_relevant": "semantic match 0.516 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/tencentdb-agent-memory-review-2026-08-06-findings-cas-adoption-list-ded0e7e13b.md",
+          "observed_at": null,
+          "revision": "2026-08-06T11:57:45.483+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      }
+    ]
+  },
+  {
+    "query_hash": "a4ff16032d1f",
+    "boundary": "PostToolUse:mcp__cas__factory",
+    "prompt": "any other areas where we can save tokens that are being needless wasted? i feel like i did a pass for this , but the hundreds of stale messages every few seconds got me shooketh",
+    "baseline_bytes": 6145,
+    "baseline_matched": 0,
+    "candidates": [
+      {
+        "evidence_id": "cas-d5c5",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Browser tier guard accepts a bare suffix (`npx playwright test .journey.ts`) as a named spec, which Playwright runs as every matching file From the cas-57262 verifier (ver-4da7a68c8639). browser_tier_guard.rs selected() accepts any positional argument that ends with an allowed suffix. Playwright treats positional argum",
+        "why_relevant": "exact task/file/symbol binding",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-d5c5",
+          "observed_at": null,
+          "revision": "2026-10-27T22:28:30.384894628+00:00"
+        },
+        "relevance": 1.62875,
+        "lexical_score": 0.9375,
+        "lexical_match_count": 15,
+        "recency_score": 0.22,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 1.0,
+        "role_score": 0.31,
+        "binding": true,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-464bd32cc588b071",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied home/pippenz/Petrastella/cassy/cas-cli/src/hooks/handlers/handlers_tests/browser_tier_guard.rs fn cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied()",
+        "why_relevant": "lexical + semantic match 0.598",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas_c082_worker_and_qa_unfiltered_browser_runs_are_denied",
+          "observed_at": null,
+          "revision": "227ea960b48cae2e421c5564638ebd92f3ecb8575eca046696d8870cf1e9585c"
+        },
+        "relevance": 0.7308089590072633,
+        "lexical_score": 0.3125,
+        "lexical_match_count": 5,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5977095365524292,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-a1ba314980b07fa6",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "worker_spec_named_replaces_matching_slot worker_spec_named_replaces_matching_slot home/pippenz/Petrastella/cassy/crates/cas-factory/tests/spec_resolver.rs fn worker_spec_named_replaces_matching_slot()",
+        "why_relevant": "lexical + semantic match 0.507 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "worker_spec_named_replaces_matching_slot",
+          "observed_at": null,
+          "revision": "727a705fbab170e6d9c975ac6f8bb5da481a99d63393d04b9a9343494af2ee5b"
+        },
+        "relevance": 0.6634408760070801,
+        "lexical_score": 0.25,
+        "lexical_match_count": 4,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5066170692443848,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-0f80cd46e5c15173",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "worker_suites_run_unwrapped_without_memory_admission_cas_38e7 worker_suites_run_unwrapped_without_memory_admission_cas_38e7 home/pippenz/Petrastella/cassy/cas-cli/src/hooks/handlers/handlers_tests/unscoped_test_guard.rs cas-38e7: the shared-host memory admission is retired. A worker's browser or JS suite is never rewri",
+        "why_relevant": "lexical + semantic match 0.583",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "worker_suites_run_unwrapped_without_memory_admission_cas_38e7",
+          "observed_at": null,
+          "revision": "3348519576e91613e8937fec2af1e8a64dcd61c4b833456e472d0152832abcde"
+        },
+        "relevance": 0.6031204223632812,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5829238891601562,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "2026-08-07-33",
+        "surface": "memory",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "cas-src: cargo runs exit 0 while doing nothing",
+        "why_relevant": "lexical match: test,named,runs,file + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "2026-08-07-33",
+          "observed_at": null,
+          "revision": "2026-10-26T16:30:01.237359510+00:00"
+        },
+        "relevance": 0.565,
+        "lexical_score": 0.25,
+        "lexical_match_count": 4,
+        "recency_score": 0.08,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "2026-09-06-12",
+        "surface": "memory",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Skill-text trims must be proven against every test that pins substrings, in one pass, before the gate 3.17.3 gate run 2 (2026-09-06) failed on issue_intake_directive_test because a supervisor-skill trim (cas-ca96) rephrased the pinned sentence \"file a ticket in the matching repo before moving on\"; a supervisor pre-chec",
+        "why_relevant": "lexical match: guard,test,matching,file + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "2026-09-06-12",
+          "observed_at": null,
+          "revision": "2026-10-22T22:44:07.107150108+00:00"
+        },
+        "relevance": 0.565,
+        "lexical_score": 0.25,
+        "lexical_match_count": 4,
+        "recency_score": 0.08,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-fd3d3145aa16a0cc",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "cas_2567_named_spec_still_wins_for_its_worker cas_2567_named_spec_still_wins_for_its_worker home/pippenz/Petrastella/cassy/crates/cas-mux/src/mux_tests/tests.rs cas-2567: a spec that already carries a worker's name keeps precedence. fn cas_2567_named_spec_still_wins_for_its_worker()",
+        "why_relevant": "lexical + semantic match 0.494",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas_2567_named_spec_still_wins_for_its_worker",
+          "observed_at": null,
+          "revision": "95f4a9d72410dd76e9540acea1698f44bfc9e773a4c42fb981f6b9cc35854a14"
+        },
+        "relevance": 0.556859769821167,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.4939610958099365,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "spec-4c5b",
+        "surface": "spec",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Factory loop v2: typing never waits (GH #1211) Design spec for epic cas-759c. Full text: docs/specs/2026-10-15-factory-loop-v2.md. Maps every step of today's daemon loop with file:line and measured cost, then splits the loop into three lanes: io (input, echo, PTY, render), control (decisions only, no I/O) and jobs (sto",
+        "why_relevant": "lexical match: test,spec,file + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "spec-4c5b",
+          "observed_at": null,
+          "revision": "2026-10-15T20:01:43.571502088+00:00"
+        },
+        "relevance": 0.52375,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.02,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.22,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-fbf0700060",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "project_cas_codemap.md See [.claude/CODEMAP.md](.claude/CODEMAP.md)",
+        "why_relevant": "lexical + semantic match 0.575 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/project-cas-codemap-md-fbf0700060.md",
+          "observed_at": null,
+          "revision": "2026-07-28T14:41:03.875+00:00"
+        },
+        "relevance": 0.49914746522903447,
+        "lexical_score": 0.125,
+        "lexical_match_count": 2,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5752835869789124,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-630b377c00",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Global agent setup at ~/.claude/agents/ ## Global Claude Code Agents (~/.claude/agents/) ### Decision: Global only, no project-specific agents All agents live at ~/.claude/agents/",
+        "why_relevant": "lexical + semantic match 0.561 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/global-agent-setup-at-claude-agents-630b377c00.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.982+00:00"
+        },
+        "relevance": 0.491786322593689,
+        "lexical_score": 0.125,
+        "lexical_match_count": 2,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5611275434494019,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-f1848ee25f",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "OpenClaw key files, skills, and next steps Auto-loaded OpenClaw workspace files (only these 8 filenames work, custom names silently ignored): - SOUL.md, AGENTS.md, USER.md, TOOLS.md, IDENTITY.md, HEARTBEAT.md, BOOTSTRAP.md, MEMORY.md **Limits: context",
+        "why_relevant": "lexical + semantic match 0.615 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/openclaw-key-files-skills-and-next-steps-f1848ee25f.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:34.005+00:00"
+        },
+        "relevance": 0.41989949703216556,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.6151913404464722,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-fcae28bb39",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "cas-nuxt-playwright builtin skill shipped (b95db72, 2026-05-26) Unified Nuxt 3 + Playwright E2E skill shipped as a compiled builtin, replacing the project-local cas-playwright-debug. context",
+        "why_relevant": "lexical + semantic match 0.600 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/cas-nuxt-playwright-builtin-skill-shipped-b95db72-2026-05-26-fcae28bb39.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.931+00:00"
+        },
+        "relevance": 0.4119714975357056,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5999451875686646,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      }
+    ]
+  },
+  {
+    "query_hash": "a8e4ab1ebfca",
+    "boundary": "UserPromptSubmit",
+    "prompt": "\n\n<pasted_content id=\"d36a\">\n[cas #4212009 lifecycle-relay 0s first]\n\n<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"cas-d5d8\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"watchful-octopus-75\" notification_id=\"26530\" occurrence=\"2026-10-27T22:46:09.337378934+00:00\" branch_tip=\"87536a7a56132078e6dde91501f3abaec28da56b\">\nTask cas-d5d8 \u2014 Browser tier guard: regex-shaped spec arguments (`..journey.ts`, `\\.journey.ts`, `.+.journey.ts`) still match every journey file\nReason: MERGE REQUIRED\nSession: cassy-solid-dragon-94\n</task-lifecycle>\n</pasted_content id=\"d36a\">\n",
+    "baseline_bytes": 5278,
+    "baseline_matched": 0,
+    "candidates": [
+      {
+        "evidence_id": "cas-dd2e",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "A session started from Commander's New session comes up blank, with no supervisor in it Operator, 2026-10-27: \"i want it to spawn sessions that actually have supervisors (last time i tried it it was blank)\". HUB-J13 promises: \"I start a supervisor on a project from my phone, without SSH, and land in its conversation\".",
+        "why_relevant": "exact task/file/symbol binding",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-dd2e",
+          "observed_at": null,
+          "revision": "2026-10-27T22:45:51.520587065+00:00"
+        },
+        "relevance": 1.21625,
+        "lexical_score": 0.3125,
+        "lexical_match_count": 5,
+        "recency_score": 0.22,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 1.0,
+        "role_score": 0.31,
+        "binding": true,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-46db",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Hub launch account catalog reads provider credential files for plan and identity metadata Observed while isolating official-provider reproduction for cas-dd2e. Hub GET /v1/launch/profiles calls launch_env.rs profiles_for_project -> account_registry::collect_for/discover -> account_registry.rs metadata. metadata reads f",
+        "why_relevant": "exact task/file/symbol binding + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-46db",
+          "observed_at": null,
+          "revision": "2026-10-27T22:09:57.402496073+00:00"
+        },
+        "relevance": 0.54,
+        "lexical_score": 0.0,
+        "lexical_match_count": 0,
+        "recency_score": 0.22,
+        "lexical_eligible": false,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 1.0,
+        "role_score": 0.08,
+        "binding": true,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-ee90eea304",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Session summary 2026-07-23 cas-src factory: 142d + d767 on main Supervisor happy-tiger-8 factory session cas-src-keen-marten-65: - Epic cas-142d CLOSED on origin/main a46d459: cas-7a16 macOS u64 statvfs casts in tmpfs_guardrail; cas-3f7f additive-only post-merge t context",
+        "why_relevant": "lexical + semantic match 0.712 + outcome history -0.017",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/session-summary-2026-07-23-cas-src-factory-142d-d767-on-main-ee90eea304.md",
+          "observed_at": null,
+          "revision": "2026-07-31T17:45:00.047+00:00"
+        },
+        "relevance": 0.4536986192067465,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.7122409343719482,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-31f4edd199b63bdc",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file home/pippenz/Petrastella/cassy/cas-cli/src/hub/tests.rs `GET /v1/sessions` reported \"0 workers\" for a session running five, because the read model trusted the session fil",
+        "why_relevant": "lexical + semantic match 0.471",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "h5_session_worker_roster_comes_from_the_live_registry_not_the_session_file",
+          "observed_at": null,
+          "revision": "e1db11cdc6d39c904ef4718d313bf2824426e46cee1e784f3be8df71d50efebd"
+        },
+        "relevance": 0.4447834157943726,
+        "lexical_score": 0.125,
+        "lexical_match_count": 2,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.4707373380661011,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-f2fc1bf7d2",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Session summary 2026-03-24: Jill Pepper epic, post-launch feedback, timer fixes Major session covering two epics: **Epic cas-d983 (Jill Pepper issues)**: All 11 subtasks closed. context",
+        "why_relevant": "lexical + semantic match 0.633 + outcome history -0.010",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/session-summary-2026-03-24-jill-pepper-epic-post-launch-feedback-timer-fixes-f2fc1bf7d2.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.836+00:00"
+        },
+        "relevance": 0.4192665982246399,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.633204996585846,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-1bd90ce32b",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Harness changelog diaries: Claude/Codex/Grok under docs/notes CAS tracks harness drift in docs/notes/*-changelog-diary.md (newest-first CAS response ledgers). context",
+        "why_relevant": "semantic match 0.557 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/harness-changelog-diaries-claude-codex-grok-under-docs-notes-1bd90ce32b.md",
+          "observed_at": null,
+          "revision": "2026-07-27T18:00:44.390+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-606cc8c9b6bf7ca2",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "hub_session hub_session home/pippenz/Petrastella/cassy/cas-cli/src/hub/mod.rs Project one discovered session onto the wire shape Commander consumes. The roster comes from `SessionInfo::worker_names()`",
+        "why_relevant": "lexical match: session,commander,comes",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "hub_session",
+          "observed_at": null,
+          "revision": "2b58670dbe3c7bda893d1532b86c294fb6abe217f38e714839b1273a34ee326d"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-c652e5b8b9",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "docs/requests Jul-14 Ozer bugs shipped; open copies must leave only completed/ Five Ozer-reported factory bugs (2026-07-14) were fixed and landed on main via epic cas-b015 / PR #49 (merge f81f1bb): orphan InProgress death signal, double-close detection, worktree_list cross-sessi context",
+        "why_relevant": "semantic match 0.559 + outcome history -0.010",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/docs-requests-jul-14-ozer-bugs-shipped-open-copies-must-leave-only-completed-c652e5b8b9.md",
+          "observed_at": null,
+          "revision": "2026-07-27T18:00:44.390+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-fbc8",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "EPIC: verified operator channel",
+        "why_relevant": "lexical match: session,commander,comes + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-fbc8",
+          "observed_at": null,
+          "revision": "2026-10-06T08:51:40.662178491+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": true,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-8ec5",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Commander review fix: cancellation-safe pairing lifecycle, storage fallback, and stable confirmation UI Final assembled review of epic cas-bec9 found late poll/exchange responses can resurrect cancelled or superseded pairing state and persist secrets; sessionStorage access before fragment consumption can blank boot and",
+        "why_relevant": "lexical match: session,commander,blank",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-8ec5",
+          "observed_at": null,
+          "revision": "2026-08-13T15:56:34.624195414+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": true,
+        "conflict_key": null,
+        "body_available": true
+      }
+    ]
+  },
+  {
+    "query_hash": "322b4a88c3f3",
+    "boundary": "UserPromptSubmit",
+    "prompt": "i had to step away, update please",
+    "baseline_bytes": 5800,
+    "baseline_matched": 0,
+    "candidates": [
+      {
+        "evidence_id": "cas-326e8",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Pre-existing: After connection toast fades, #toast retains connected text at opacity0; stri... (found in QA of cas-c797) Independent QA round 1 of cas-c797 (A supervisor answer to the operator is dropped (\"No Commander device is attached\u2026 Nothing was queued\") when the phone is momentarily not counted; it must be held",
+        "why_relevant": "exact task/file/symbol binding + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-326e8",
+          "observed_at": null,
+          "revision": "2026-10-27T22:47:24.227433957+00:00"
+        },
+        "relevance": 1.46375,
+        "lexical_score": 0.6875,
+        "lexical_match_count": 11,
+        "recency_score": 0.22,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 1.0,
+        "role_score": 0.31,
+        "binding": true,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-2754",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Pre-existing: cas hub --help has 4 lines over 80 columns (authorize, operator, --no-tailsca... (found in QA of cas-8089) Independent QA round 1 of cas-8089 (cas-1ba5 follow-up: `hub restart --json` error must say the old hub was stopped when start fails; scope help text to detached hubs; consistent stop object keys) @b",
+        "why_relevant": "lexical match: pre-existing,text,found",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-2754",
+          "observed_at": null,
+          "revision": "2026-10-27T22:02:04.676807871+00:00"
+        },
+        "relevance": 0.81375,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.22,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.31,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-7b24",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "QA trace scrubber retains opaque WebSocket ticket query values in trace resources During cas-d53c evidence hygiene, post-saveQaTrace actual real-build-fixed/trace.zip contains1 UTF-8 resource with an opaque /v1/attach?ticket=<16+chars> value; only count emitted, no value logged/published. Source scripts/visual-qa.mjs12",
+        "why_relevant": "lexical match: connection,retains,text",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-7b24",
+          "observed_at": null,
+          "revision": "2026-10-27T06:20:31.685255126+00:00"
+        },
+        "relevance": 0.81375,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.22,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.31,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-a768",
+        "surface": "task",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Pre-existing: visual-qa --strict javascript-disabled-loss x4 on /commander/ (noscript body ... (found in QA of cas-0739) Independent QA round 1 of cas-0739 (hub-web: Paired machines shows the machine that isn't connected first, and the footer names it) @540d3c18 found this defect on the base build as well, so it was re",
+        "why_relevant": "lexical match: pre-existing,connected,stri,found + outcome history +0.014",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "cas-a768",
+          "observed_at": null,
+          "revision": "2026-10-04T01:44:21.344756759+00:00"
+        },
+        "relevance": 0.749,
+        "lexical_score": 0.25,
+        "lexical_match_count": 4,
+        "recency_score": 0.02,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0.0,
+        "role_score": 0.31,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-8944d7d34cee7418",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "parses_branches_and_connection_strings_from_tool_text parses_branches_and_connection_strings_from_tool_text home/pippenz/Petrastella/cassy/cas-cli/src/db_branch_tests.rs fn parses_branches_and_connection_strings_from_tool_text()",
+        "why_relevant": "lexical + semantic match 0.461",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "parses_branches_and_connection_strings_from_tool_text",
+          "observed_at": null,
+          "revision": "03644039358ab802d03b4da400e66d7ed3b7b7321949e83b000c4b5034f80ff8"
+        },
+        "relevance": 0.5395760440826416,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.4607231616973877,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-feed96559e859084",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "redact_connection_strings redact_connection_strings home/pippenz/Petrastella/cassy/cas-cli/src/db_branch.rs `text` with every connection string replaced, so upstream errors can be shown without leaking a password. fn redact_connection_strings(text: &str) String",
+        "why_relevant": "lexical + semantic match 0.346",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "redact_connection_strings",
+          "observed_at": null,
+          "revision": "74193ba394159df4b45849aeb8eb671eecda0cde4474c66c9621c8142ed2b887"
+        },
+        "relevance": 0.4800760495662689,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.3463000953197479,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-2536fc143f3f1869",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "extract_connection_string extract_connection_string home/pippenz/Petrastella/cassy/cas-cli/src/db_branch.rs The first `postgres(ql)://` URL in a tool result. fn extract_connection_string(text: &str) Option<String>",
+        "why_relevant": "lexical + semantic match 0.280",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "extract_connection_string",
+          "observed_at": null,
+          "revision": "8df965865eb9fabb678755c5b562eeb62e0aaa0ced771a0e3557d57aa2248839"
+        },
+        "relevance": 0.4458104836940765,
+        "lexical_score": 0.1875,
+        "lexical_match_count": 3,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.2804047763347626,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "cas-kn-mig-90f015593d",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Performance audit epic completed 2026-03-30",
+        "why_relevant": "lexical + semantic match 0.597 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/performance-audit-epic-completed-2026-03-30-45-tasks-across-6-review-areas-90f015593d.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.811+00:00"
+        },
+        "relevance": 0.4105897355079651,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5972879528999329,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-30b0a4322e",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Factory epic cas-6cfe: 5 reliability fixes shipped 2026-03-30 Epic: Factory agent reliability",
+        "why_relevant": "lexical + semantic match 0.586 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/factory-epic-cas-6cfe-5-reliability-fixes-shipped-2026-03-30-30b0a4322e.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.954+00:00"
+        },
+        "relevance": 0.4047395086288453,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5860375165939331,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-1c9bb68e7a",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Grok Build CLI is a Claude-Code-shaped harness",
+        "why_relevant": "lexical + semantic match 0.504 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/grok-build-cli-is-a-claude-code-shaped-harness-strong-spawn-type-candidate-1c9bb68e7a.md",
+          "observed_at": null,
+          "revision": "2026-07-22T09:26:38.381+00:00"
+        },
+        "relevance": 0.3619075202941895,
+        "lexical_score": 0.0625,
+        "lexical_match_count": 1,
+        "recency_score": 0.0,
+        "lexical_eligible": true,
+        "lexical_weak": true,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": 0.5036683082580566,
+        "structural_score": 0.0,
+        "role_score": 0.08,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": false
+      },
+      {
+        "evidence_id": "cas-kn-mig-24df38d2eb",
+        "surface": "knowledge",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "Slack bridge architecture decisions (cas-84a9) ## CAS Slack Bridge Architecture (decided 2026-04-10) **Routing model:** - Channel = project: #cas-gabber-studio \u2192 ~/projects/gabber-studio - Slack user = Linux user: Ben \u2192 ben, Daniel \u2192 daniel - Each context",
+        "why_relevant": "lexical + semantic match 0.496 + outcome history +0.000",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "context/slack-bridge-architecture-decisions-cas-84a9-24df38d2eb.md",
+          "observed_at": null,
+          "revision": "2026-07-01T12:07:33.884+00:00"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      },
+      {
+        "evidence_id": "sym-0798411c6019ed0e",
+        "surface": "code",
+        "scope": {
+          "kind": "project",
+          "id": "project-a"
+        },
+        "snippet": "connection_start connection_start home/pippenz/Petrastella/cassy/cas-cli/src/db_branch.rs fn connection_start(text: &str) Option<usize>",
+        "why_relevant": "lexical + semantic match 0.300",
+        "provenance": {
+          "source": "cas.db/read-only",
+          "locator": "connection_start",
+          "observed_at": null,
+          "revision": "4e6cbc370258a9eed22dace726665e8807a75fc6182b3424e0d65dc4cc7c77ad"
+        },
+        "relevance": 0.8,
+        "lexical_score": 0.8,
+        "lexical_match_count": 3,
+        "recency_score": 0,
+        "lexical_eligible": true,
+        "lexical_weak": false,
+        "strong_session_signal": false,
+        "focus_mismatch": false,
+        "semantic_score": null,
+        "structural_score": 0,
+        "role_score": 0,
+        "binding": false,
+        "stale": false,
+        "conflict_key": null,
+        "body_available": true
+      }
+    ]
+  }
+]

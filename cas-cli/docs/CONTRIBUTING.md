@@ -1162,6 +1162,14 @@ explicit `config_dir` removes `ANTHROPIC_API_KEY`, because that key overrides
 Claude subscription OAuth; propagated supervisor settings retain existing API
 key inheritance.
 
+Explicit Claude profiles may omit `settings.json` (empty settings); an existing
+file must be readable JSON. Preflight checks macOS OAuth credentials by Keychain
+item existence, using Claude Code's `Claude Code-credentials-<8 hex>` service
+(first eight SHA-256 hex digits of the NFC-normalized config path). It uses the
+current user's default Keychain search list and never requests the password.
+Other platforms still require `.credentials.json`. Both paths require resolvable
+`agents` and `skills` directories before queueing a spawn.
+
 For CLI chores that need operator credentials, explicitly grant environment
 names in the project's `.cas/config.toml`:
 
@@ -1436,7 +1444,12 @@ use `coordination action=message_status` to inspect handoff and recipient eviden
 For a gated message, status distinguishes a **held inbox** (a successful Teams
 write; surfaces at the next tool call or turn start without expiring while the
 recipient remains in the session) from a **delivery retry** (no held handoff
-recorded; transport retry budget still applies, including operator drafts).
+recorded; transport failures spend the retry budget). A protected operator draft,
+pending submit or settling urgent inject is a recoverable readiness hold: it
+spends neither transport retries nor re-nudges and is re-offered when the pane
+becomes input-ready, with a two-minute durable recheck as a restart fallback.
+Default status and doctor warnings allow pending relays sixty seconds to arrive;
+explicit detailed status also lists fresh holds and their blocking cause.
 A fresh transport reservation clears any older inbox deferral before injecting,
 so a worker that changes harness cannot have its PTY delivery replayed by a hook.
 The actual primary channel decides whether a handoff can be held: a missing
@@ -2914,6 +2927,16 @@ revalidation, so cached source refs cannot suppress it as already landed.
 Unsafe source refnames still refuse. Local-merge tasks and repositories without
 origin retain their local source authority.
 
+Renaming an epic's lane keeps the immutable epic ID in the factory branch name.
+Task display, close, worktree merge, spawn and sync resolve inherited previous
+names to that epic's current lane, without redirecting an unrelated explicit
+repository or branch pin. First publication requires creation provenance for
+that exact current name; close never recreates a lane deleted from origin.
+To repair a proof-locked target, a live registered supervisor can use
+`task action=update id=<task> target_branch=<current-epic-lane> proof_scope_fix=true reason="repair target after epic rename"`.
+This audits and invalidates the old proof cycle and reopens the task; workers
+cannot use this recovery, and ordinary close proofs still apply.
+
 A live registered supervisor may repair an incorrect execution methodology with
 `task action=update id=<task> proof_scope_fix=true execution_note="" reason="<why>"`
 to clear it, or supply a valid replacement methodology. Switching to `no-code`
@@ -3235,6 +3258,30 @@ earlier registration, so concurrent supervisors should use the default session
 slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
+
+## Bounded MCP task reads
+
+`task show` (including `get`), `task notes` reads and `task start` default to
+responses of at most 2,000 UTF-8 bytes. Show/start include the current scope;
+large note histories keep the latest decision, proof and checkpoint with cursors.
+A clipping notice marks shortened fields; literal ellipses in task text do not
+trigger it. Read clipped instructions before acting.
+
+For show/notes, `full=true` returns complete text. `offset=0 limit=1600`
+starts a byte page of that same text; follow its `next=` cursor until `end`.
+The page header is separate from the body, and concatenated bodies reproduce
+the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
+boundaries. Note summary cursors address the full `task notes` response.
+For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
+context. Start's default still performs the same claim and epic lifecycle work.
+Complete start advisories, including worktree directory instructions, are saved
+as a START CONTEXT task note before budgeting. An unchanged latest context reuses
+its note and cursor; transient claim/lease text stays in the start response.
+Warnings take precedence over scope, notes and recall; an oversized warning block
+is replaced by an explicit instruction to read its saved note before acting.
+The start response gives a byte cursor into `task notes` and a full-notes path.
+Default show retains Type and Demo for builtin gates, and names full-only sections
+(including dependencies, design, deliverables and terminal outcomes) explicitly.
 
 ## Durable task artifacts
 

@@ -321,6 +321,11 @@ impl GitOperations {
         let local = self
             .resolve_commit(&refname)
             .ok_or_else(|| Self::missing_epic_branch_message(branch, origin, false))?;
+        // Provenance restricts the name eligible for first publication; it
+        // never substitutes for the fresh Git observation above.
+        if !origin.is_some_and(|origin| origin.branch == branch) {
+            return Err("automatic publication refused: the factory did not record creating this lane under its current name; no local ref advanced or remote ref created".into());
+        }
         if let Some(base) = base {
             let base_label = Self::visible_git_label(base);
             if !observation.base_fetched {

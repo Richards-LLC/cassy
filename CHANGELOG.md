@@ -7,6 +7,195 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.86.0] - 2026-10-28
+
+### Added — Commander without the terminal
+
+- **Conversations open fast** — Was: opening a long supervisor conversation
+  built every turn at once and redrew the whole thread as each pending reply
+  arrived. On the measured real thread (354 turns, 327 pending replies) a
+  throttled phone took 37 seconds to settle after a cold open and 58 seconds
+  after a reload. → Now: Commander opens on the newest turns. Older history
+  pages in as you scroll up, keeping your place, and only the rows on screen
+  plus a margin are drawn. Open asks and blockers deep in history are indexed
+  by the daemon, so the attention list does not need the whole history.
+  Scrolling up reuses the rows already drawn, and a jump from the context rail
+  follows only the thread it targets.
+- **The whole picture of the work** — Was: Commander showed only the
+  supervisor's final replies, and seeing what a worker was doing meant opening
+  its terminal. → Now: a Show work switch, remembered per device, adds the
+  supervisor's recorded thinking summaries, one-line tool rows that expand to
+  their detail, and task events (started, parked, merged, blocked) between the
+  replies. Opening a worker from the fleet sheet shows a live timeline of its
+  task, recent tool rows and state. The hub daemon reads these from local
+  Claude transcripts, Codex rollouts, hook events and the task database, pages
+  them like history and spends no model tokens. Returning to a thread re-reads
+  its newest work, so work done while you were away shows up.
+- **Paste anything into the composer** — Was: Commander had no paste or
+  attach path, so a screenshot or file had to reach the supervisor some other
+  way. → Now: pasted text goes into the composer. A very long paste becomes an
+  attached text block with a preview. Pasted screenshots and picked or dropped
+  files show as chips with thumbnails before sending. On send, the hub stores
+  each file on the host under the session's project, idempotently and only for
+  an authenticated device, and the supervisor receives the local paths to read
+  with its own tools. Uploads get a deadline sized to the payload, so a large
+  photo on a slow phone link finishes. A refusal names the file that failed and
+  keeps your attachments. Phone photo and video types (HEIC, AVIF, QuickTime)
+  are recognized.
+- **Rich evidence in Commander** — Was: diagrams, diffs and media arrived as
+  raw text or bare file links. → Now: Mermaid diagrams follow the current
+  theme, with sanitized SVG and readable source on errors. Unified diffs show
+  line numbers and changes, with long patches collapsed. Images, video, audio
+  and PDF first-page previews sit above their original file links in reserved
+  space. Renderers, diagram types and preview styles load on demand.
+- **Visual replies** — Was: an HTML report or page the supervisor produced
+  could only be opened outside Commander. → Now: the supervisor can attach an
+  HTML page to a reply, and Commander shows it inline in a locked-down sandbox:
+  no same-origin access, no top navigation and no network beyond its own
+  assets, with an open-in-tab action. The frame follows Commander's light or
+  dark theme instead of showing a white card in dark mode.
+- **Media stays on Commander's own origin** — Was: attachments resolved to
+  signed blob-store URLs on an unfixed origin, which Commander's strict content
+  policy could not load, and lazy script chunks could not be served at all. →
+  Now: the hub streams attachment bytes through a session-authorized proxy with
+  Range support for seeking, checks the type against a media allowlist,
+  serves SVG under a sandbox policy and rechecks pairing about once a second
+  per stream. Lazy JS and CSS chunks are served from the embedded build
+  through a strict hashed-name allowlist with extension-derived types and no
+  path traversal.
+
+### Changed
+
+- **A usage-limited worker waits on its current account** — Was: a worker
+  that hit its usage limit could be switched automatically to another
+  account. → Now: automatic account switching has been removed. One notice per
+  limit episode names the worker, account, held tasks and absolute local reset
+  date and time, or states that the reset time is unavailable. No replacement
+  is queued, no account directory is rewritten, and queued switches from older
+  versions are refused. Episode records and supervisor notice dedupe survive
+  restarts. Picker recommendations and account selection for a new spawn
+  without `config_dir` are unchanged.
+- **Smaller task reads** — Was: `task show` and task notes returned every note
+  body in full, which was the largest single source of agent input (6.5% of
+  recorded input). → Now: default reads show the current scope, the latest
+  decision and proof references within about 2,000 bytes, with an explicit full
+  read or byte-page for the rest. Brief, scoped reads are the factory default.
+  A start no longer fails after claiming when a recalled note carries a marker
+  line, its worktree instructions survive, and repeated starts reuse unchanged
+  start context instead of appending it again.
+- **Quieter recall** — Was: every prompt could carry ambient recall packets,
+  including code-symbol cards, that rarely matched later work (3.6% of recorded
+  input). → Now: packets lead with exact task and epic evidence, return IDs
+  with a short reason and bodies on demand, and stay near 800 characters.
+  Supervisors get code recall only when they ask for it.
+- **One evidence reference per relay** — Was: merge requests and relays copied
+  QA-bundle link lists and proof prose, successful verification and search
+  receipts were returned in full, and resumed sessions re-sent unchanged
+  startup context. → Now: relays carry one durable evidence-manifest
+  reference, successful receipts are compact while failures keep their full
+  findings, and session-start context is fingerprinted so an unchanged base is
+  not repeated.
+- **Fewer supervisor interruptions** — Was: routine lifecycle events (task
+  started, worker idle, expired verification dispatch) each woke the
+  supervisor, and receipts or finished recipients could raise delivery-stalled
+  alarms. → Now: routine events are folded into digests while actionable wakes
+  are kept, one actionable merge wake is kept per delivery, and receipts and
+  terminal recipients never raise delivery-stalled alarms.
+- **Codex supervisors start from the resident core** — Was: the Codex
+  supervisor's startup prompt and checklist still pointed it at the full
+  supervisor skill, which brought back the re-reads the resident core
+  removed. → Now: startup runs the short Codex checklist once and triages from
+  the resident core.
+- **Honest restart guidance** — Was: Cassy's notices and skills said a
+  supervisor restart was safe because workers keep running, but a supervisor
+  exit shuts down the whole factory. → Now: they say a supervisor restart stops
+  every worker, and name the MCP reconnect control (Claude Code: `/mcp`) as the
+  way to reload without losing workers.
+
+### Fixed
+
+- **Codex lanes use the registered accounts** — Was: with `~/.codex` retired,
+  the capability probe checked only that default home, so
+  `spawn_workers lane=standard` refused with "no active recipe candidates"
+  while the same recipe spawned when named explicitly. → Now: lane routing
+  admits the registered, usable Codex accounts, keeps the requester's own
+  account, and leaves an unscoped choice to the shared account recommender.
+- **macOS spawn preflight** — Was: the `config_dir` preflight required Linux
+  Claude files, so a logged-in macOS profile with no `settings.json` and its
+  login in Keychain was refused. → Now: a missing `settings.json` is treated
+  as empty settings, as Claude Code does, and on macOS a Keychain login counts
+  as authenticated (checked by metadata only). An unreadable or invalid
+  settings file is still refused.
+- **New session from Commander starts its supervisor** — Was: a session
+  started from Commander's New session could come up blank, because a deferred
+  startup message kept its delivery reservation and never retried. → Now: the
+  reservation is released once the deferral is recorded, so the startup
+  message is delivered and the supervisor comes up.
+- **Commander reply replay** — Was: replies whose optional operator label was
+  null were rejected, so pending replies replayed on every attach. → Now: such
+  replies are accepted and persisted before delivery is acknowledged, and
+  previously pending replies drain. History and live replies share the same
+  canonical label representation. Reply writes and receipt checks batch under
+  load, and a valid IndexedDB write waiting behind another writer no longer
+  expires after five seconds.
+- **Attention notices are acknowledged** — Was: Commander stored daemon
+  attention notices but never acknowledged them, so they stayed pending in the
+  daemon queue (178 on one project). → Now: Commander acknowledges a notice
+  after it is durably stored, the hub checks the notice's identity before
+  clearing it, and self-resolved notices still count in usage.
+- **Device-addressed rows stop bouncing** — Was: a queue row addressed to one
+  device was forwarded and acknowledged about ten times a second. → Now: a
+  receipt clears the retry backoff only when it actually closes the row.
+- **Commander evidence previews** — Was: a transient preview failure stayed
+  failed, a diff with no hunks was mislabelled, and the lazy bundle's license
+  notice was incomplete. → Now: attachment previews retry after reconnect,
+  hunk-less diff snippets stay readable code, and full renderer license
+  notices ship in the lazy bundle.
+- **Toast and pairing messages** — Was: a faded connection toast kept its
+  invisible text, and a rate-limited pairing code said only that the service
+  refused. → Now: an expired toast is retired properly, and a rate-limited
+  pairing request says there are too many codes just now and to try again in a
+  minute.
+- **Relays held behind a draft keep their budget** — Was: each recheck of a
+  relay held behind the operator's unsent draft spent one of its re-nudges, so
+  a draft left for about 40 minutes made the relay undeliverable. → Now: held
+  rechecks do not spend the re-nudge budget, and the relay is delivered once
+  the draft clears.
+- **Quoted `/finish` no longer ends a task** — Was: a Codex worker treated
+  `/finish` quoted in a task or issue as a live operator request and released
+  its task. → Now: session wrap-up runs only on a current operator request.
+- **Renamed epic targets** — Was: after an epic branch was renamed, the close
+  merge guard checked the retired ref while `task show` reported the new one.
+  → Now: every delivery path, including director snapshots, resolves the
+  current lane, and a retired ref is never published.
+- **Close gate accepts a regenerated Commander build** — Was: when a merge
+  regenerated `hub-web/dist`, close flagged it as dropped delivery content and
+  refused the documented reviewed-drop override. → Now: regeneration is
+  accepted when the merged source and regeneration provenance are present, and
+  the reviewed-drop override is recorded on close.
+- **`cas integrate violet` respects your accounts** — Was: with `CODEX_HOME`
+  unset it recreated a retired `~/.codex`, pinned the proxy allowlist to two
+  tools the hub had outgrown (so the doctor's drift error could not clear),
+  stopped on one malformed account config, and claimed live hub routes it had
+  not checked. → Now: it registers Violet only in discovered Codex homes, keeps
+  the hub's current tool contract, skips a malformed account with a named
+  warning, and its receipt states exactly what it matched.
+- **`cas update` finishes Slack binding with factories running** — Was: the
+  session inventory revision changed every few seconds under any live
+  factory, so Slack binding never finished. → Now: the revision changes only
+  on real socket transitions.
+- **Browser test guard** — Was: the guard that keeps targeted runs from
+  selecting the whole journey suite missed bare suffixes, regex-shaped
+  arguments and a plain word after a named spec, and rejected an explicitly
+  named `.spec.mjs` test. → Now: every Playwright file filter is validated, a
+  named spec needs a real basename, line selectors are allowed, and named
+  `.spec.mjs` tests run.
+- **Test isolation** — Was: factory Codex spawn tests read the real account
+  catalogues, and the real-hub journey fixture wrote an invalid config and
+  could lose its state during cleanup. → Now: those tests use fixture accounts,
+  the fixture writes a valid config, and cleanup waits for launched children
+  before removing its temporary home.
+
 ## [3.85.0] - 2026-10-28
 
 ### Changed — a Codex supervisor that acts on signals, answers and stays quiet
@@ -160,14 +349,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   Now: `cas doctor` reports account link drift in one row, `cas doctor --fix`
   restores the links with a backup, and every launch checks and restores the
   chosen account's shared links before starting.
-- **A worker that hits its usage limit restarts on the next account** — Was: a
-  limited worker stopped until someone switched it by hand. → Now: the factory
-  restarts it once per limit episode on the next recommended account, resuming
-  its task in the same worktree and branch, and tells the supervisor which
-  account it moved to. When no account is eligible, the notice says when the
-  first one will be ("no eligible account until …"). A switch error still sends
-  one notice that names the error. The supervisor itself is never switched.
-  `worker_status` labels Claude and Codex limits correctly.
+- **Worker limit notices** — `worker_status` labels Claude and Codex limits
+  correctly. The automatic account rotation originally shipped in this release
+  was subsequently removed; see Unreleased for the current wait-and-report policy.
 
 ### Changed
 

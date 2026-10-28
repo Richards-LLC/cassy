@@ -25,6 +25,11 @@ use super::{
 };
 use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid_session_name};
 
+#[path = "composer_upload.rs"]
+mod composer_upload;
+#[path = "artifact_proxy.rs"]
+pub(crate) mod artifact_proxy;
+
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
 
@@ -48,6 +53,12 @@ pub struct HubState<R: SessionReadModel> {
     recovery: super::connection_recovery::RecoveryTelemetry,
     /// Commander usage counts beside the auth store (cas-0b3d).
     usage: Option<super::usage::UsageStore>,
+    #[cfg(test)]
+    artifact_cloud_client: Option<crate::artifacts::cloud::ArtifactUploadClient>,
+    /// Visual reply page tickets (cas-3aff).
+    pages: super::visual_pages::PageTickets,
+    #[cfg(test)]
+    artifact_stream_clock: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
 }
 
 impl<R: SessionReadModel> HubState<R> {
@@ -72,12 +83,29 @@ impl<R: SessionReadModel> HubState<R> {
             operations: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             recovery: super::connection_recovery::RecoveryTelemetry::default(),
             usage: None,
+            #[cfg(test)]
+            artifact_cloud_client: None,
+            pages: super::visual_pages::PageTickets::default(),
+            #[cfg(test)]
+            artifact_stream_clock: None,
         }
     }
 
     pub fn with_auth(mut self, auth: AuthStore) -> Self {
         self.usage = Some(super::usage::UsageStore::new(auth.root()));
         self.auth = Some(auth);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_cloud_client(mut self, client: crate::artifacts::cloud::ArtifactUploadClient) -> Self {
+        self.artifact_cloud_client = Some(client);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_artifact_stream_clock(mut self, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
+        self.artifact_stream_clock = Some(clock);
         self
     }
 
@@ -109,6 +137,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
+        .route("/commander/{*asset}", get(commander_chunk).options(preflight::<R>))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -197,11 +226,28 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
                 .delete(release_lease::<R>)
                 .options(preflight::<R>),
         )
+        .route(
+            "/v1/sessions/{session}/uploads/{upload_id}",
+            post(composer_upload::upload::<R>).options(preflight::<R>),
+        )
         .route("/v1/sessions/{session}/attach", get(attach::<R>))
         .route(
             "/v1/sessions/{session}/artifacts/{artifact}/url",
             get(artifact_view_url::<R>).options(preflight::<R>),
         )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/ticket",
+            post(crate::hub::artifact_proxy::ticket::<R>).options(preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/content",
+            get(crate::hub::artifact_proxy::content::<R>).options(crate::hub::artifact_proxy::preflight::<R>),
+        )
+        .route(
+            "/v1/sessions/{session}/artifacts/{artifact}/page",
+            post(visual_page_ticket::<R>).options(preflight::<R>),
+        )
+        .route("/v1/pages/{ticket}/{artifact}", get(visual_page::<R>))
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)
         .layer(middleware::from_fn_with_state(recovery, connection_evidence))
@@ -253,6 +299,29 @@ fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response
     response.headers_mut().insert(
         "cache-control",
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+const COMMANDER_CHUNKS: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/commander_chunks.rs"));
+
+async fn commander_chunk(OriginalUri(uri): OriginalUri) -> Response {
+    // Use the original, encoded path: Path<String> would decode forbidden `%`
+    // sequences before validation. Never consult the filesystem at runtime.
+    let Some(name) = uri.path().strip_prefix("/commander/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(mime) = super::chunk_assets::content_type(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((_, bytes)) = COMMANDER_CHUNKS.iter().find(|(asset, _)| *asset == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = commander_asset(bytes, mime);
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
     );
     response
 }
@@ -370,6 +439,12 @@ async fn security_headers(
     next: Next,
 ) -> Response {
     let mut response = next.run(request).await;
+    let additional_csp = response.extensions_mut()
+        .remove::<artifact_proxy::AdditionalContentSecurityPolicy>();
+    // A visual reply page carries its own sandbox policy in place of
+    // Commander's (cas-3aff); every other response gets Commander's.
+    let page_policy = response.extensions_mut()
+        .remove::<super::visual_pages::PageContentSecurityPolicy>();
     let headers = response.headers_mut();
     if matches!(
         transport,
@@ -385,6 +460,13 @@ async fn security_headers(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    if let Some(page) = page_policy {
+        headers.insert("content-security-policy", page.0);
+        if let Some(policy) = additional_csp {
+            headers.append("content-security-policy", policy.0);
+        }
+        return response;
+    }
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     // connect-src: `https:`/`wss:` reach the paired machines the operator
     // chose (arbitrary hub hosts) and the loopback hub. Two cloud services are
@@ -392,14 +474,20 @@ async fn security_headers(
     // OPERATOR_INBOX_CSP_SOURCE, the production cloud operator inbox API
     // (`/api/operator/` only, no wildcard, nothing for non-production). They
     // are the embedded page's only external origins (`h4_csp_03`).
+    // frame-src: Commander frames visual reply pages from the same paired
+    // machines (cas-3aff); each page carries its own sandbox policy.
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(concat!(
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:* ",
             "https://petra-stella-cloud.vercel.app/api/operator/",
-            "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; manifest-src 'self'"
+            "; frame-src 'self' https: http://127.0.0.1:*",
+            "; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'self'; manifest-src 'self'"
         )),
     );
+    if let Some(policy) = additional_csp {
+        headers.append("content-security-policy", policy.0);
+    }
     response
 }
 
@@ -2191,6 +2279,39 @@ fn spawn_factory_daemon(
 mod launch_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn machine_hub_launch_does_not_inherit_its_originating_project_store() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let bin = env.home().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let grok = bin.join("grok");
+        std::fs::write(&grok, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&grok, std::fs::Permissions::from_mode(0o755)).unwrap();
+        env.set("CAS_ROOT", "/hub-origin/.cas");
+        let environment = super::super::launch_env::resolve(cas_mux::SupervisorCli::Grok, None).unwrap();
+        // Execute with the same environment application as the direct/cgroup
+        // daemon path: --cwd must choose the store, not the hub's launch cwd.
+        let mut child = std::process::Command::new("/bin/sh");
+        child.args(["-c", "printf '%s' \"${CAS_ROOT-unset}\""]);
+        apply_launch_environment(&mut child, &environment);
+        let output = child.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "unset");
+        #[cfg(target_os = "linux")]
+        {
+            let command = systemd_unit_command(
+                std::path::Path::new("/usr/bin/cas"),
+                std::path::Path::new("/projects/chosen"), "chosen", 0,
+                cas_mux::SupervisorCli::Grok, &environment,
+                std::path::Path::new("/tmp/chosen.log"),
+            );
+            assert!(command.get_args().any(|arg| arg == "--property=UnsetEnvironment=CAS_ROOT"),
+                "the login manager's environment must also drop the originating store");
+        }
+    }
+
     #[test]
     fn daemon_arguments_keep_project_path_as_one_argument() {
         let args = factory_daemon_args(
@@ -2423,6 +2544,118 @@ async fn artifact_view_url<R: SessionReadModel>(
     response
         .headers_mut()
         .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Mint a ticket that opens one HTML page attached to the session's thread,
+/// framed only by the minting device's Commander origin (cas-3aff). The page
+/// is served by [`visual_page`]; an iframe or tab can't send DPoP, so the
+/// ticket is the capability. The shared artifact path refuses, before any
+/// fetch, a page that isn't committed HTML in this session's thread.
+async fn visual_page_ticket<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((session, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    use super::visual_pages::PAGE_MIME_ALLOWLIST;
+    let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/page");
+    let context = match authorize(
+        &state,
+        HubAction::SessionRead,
+        Scope::SessionRead,
+        &headers,
+        "POST",
+        &uri,
+    ) {
+        Ok(Some(context)) => context,
+        // A page needs a paired device's live context to recheck per fetch.
+        Ok(None) => return with_cors(unauthorized(), &headers),
+        Err(error) => return with_cors(unauthorized_for(&error), &headers),
+    };
+    if let Err(refused) = super::artifact_proxy::issue_session_artifact_ticket(
+        &state,
+        &context,
+        &session,
+        &artifact,
+        PAGE_MIME_ALLOWLIST,
+    )
+    .await
+    {
+        return with_cors(refused, &headers);
+    }
+    let (ticket, expires) = state
+        .pages
+        .issue(&session, &artifact, &context, Instant::now());
+    let expires_at = chrono::Utc::now()
+        + chrono::Duration::from_std(expires.saturating_duration_since(Instant::now()))
+            .unwrap_or_default();
+    let url = format!("/v1/pages/{ticket}/{}", urlencoding::encode(&artifact));
+    let mut response = with_cors(
+        Json(serde_json::json!({
+            "artifact_id": artifact,
+            "url": url,
+            "expires_at": expires_at.to_rfc3339(),
+            "mime": "text/html",
+        }))
+        .into_response(),
+        &headers,
+    );
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-store"));
+    response
+}
+
+/// Serve a visual reply page, or a passive asset it references by artifact
+/// id, under the sandbox policy (cas-3aff). Bytes come through the shared
+/// session artifact path with the minting device's context, rechecked live;
+/// every refusal keeps Commander's own strict policy.
+async fn visual_page<R: SessionReadModel>(
+    State(state): State<HubState<R>>,
+    Path((ticket, artifact)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    use super::visual_pages::{PAGE_MIME_ALLOWLIST, SUB_ASSET_MIME_ALLOWLIST, page_csp};
+    let Some(held) = state.pages.resolve(&ticket, Instant::now()) else {
+        return generic_not_found();
+    };
+    let allowlist = if artifact == held.page {
+        PAGE_MIME_ALLOWLIST
+    } else {
+        SUB_ASSET_MIME_ALLOWLIST
+    };
+    let Ok(policy) = HeaderValue::from_str(&page_csp(&held.context.controller_origin)) else {
+        return generic_not_found();
+    };
+    let mut response = super::artifact_proxy::fetch_session_artifact(
+        &state,
+        held.context,
+        &held.session,
+        &artifact,
+        &headers,
+        allowlist,
+    )
+    .await;
+    // A page is navigated to, never read by script: no origin may read it.
+    response.headers_mut().remove("access-control-allow-origin");
+    if response.status().is_success() {
+        let svg = response.headers().get("content-type").is_some_and(|mime| {
+            mime.to_str()
+                .is_ok_and(|mime| mime.eq_ignore_ascii_case("image/svg+xml"))
+        });
+        response
+            .headers_mut()
+            .insert("content-disposition", HeaderValue::from_static("inline"));
+        let extensions = response.extensions_mut();
+        extensions.insert(super::visual_pages::PageContentSecurityPolicy(policy));
+        // cas-a473: SVG is a document when opened alone; it keeps the media
+        // route's own sandbox on top of the page policy.
+        if svg {
+            extensions.insert(artifact_proxy::AdditionalContentSecurityPolicy(
+                HeaderValue::from_static("default-src 'none'; sandbox"),
+            ));
+        }
+    }
     response
 }
 
@@ -2771,7 +3004,8 @@ async fn handle_client_message(
         *attribution = verified_attribution(context);
     }
     if let ClientMessage::ConversationHistoryRequest { device_id, .. }
-        | ClientMessage::OperatorReplyPersisted { device_id, .. } = &mut message {
+        | ClientMessage::OperatorReplyPersisted { device_id, .. }
+        | ClientMessage::OperatorNoticePersisted { device_id, .. } = &mut message {
         // History is private to the authenticated paired device. Do not trust
         // a browser-supplied selector, even though this is a read operation.
         *device_id = context.device_id.clone();
@@ -2852,7 +3086,10 @@ pub(crate) fn is_pane_read_message(message: &ClientMessage) -> bool {
         ClientMessage::RequestPaneKeyframe { .. }
             | ClientMessage::ScrollbackRequest { .. }
             | ClientMessage::ConversationHistoryRequest { .. }
+            | ClientMessage::WorkEventsRequest { .. }
+            | ClientMessage::WorkEventDetailRequest { .. }
             | ClientMessage::OperatorReplyPersisted { .. }
+            | ClientMessage::OperatorNoticePersisted { .. }
     )
 }
 
@@ -3343,8 +3580,12 @@ fn client_message_ref(bytes: &[u8]) -> Option<String> {
     client_ref
 }
 
+/// The request id of a private read whose answer only its requester may
+/// receive: a history page, or a work-events page or detail (cas-8f88).
 fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
-    let ClientMessage::ConversationHistoryRequest { request_id, .. } =
+    let (ClientMessage::ConversationHistoryRequest { request_id, .. }
+    | ClientMessage::WorkEventsRequest { request_id, .. }
+    | ClientMessage::WorkEventDetailRequest { request_id, .. }) =
         serde_json::from_slice::<ClientMessage>(bytes).ok()?
     else {
         return None;
@@ -3359,13 +3600,21 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 pub(crate) enum PendingRefKind {
     Send,
     History,
+    /// Not a pending answer: this socket has read a work-events page, so the
+    /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
+    /// [`WORK_EVENTS_FOLLOWER`] and never consumed.
+    WorkEventsFollower,
 }
+
+/// The `PendingRefs` key that marks a socket following a session's work
+/// events. A NUL never appears in a browser-supplied request id.
+const WORK_EVENTS_FOLLOWER: &str = "\u{0}work-events";
 
 /// One authenticated socket's outstanding references, keyed by session and
 /// client reference.
 pub(crate) type PendingRefs = HashMap<(String, String), PendingRefKind>;
 
-fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
+pub(crate) fn client_correlation_ref(bytes: &[u8]) -> Option<(String, PendingRefKind)> {
     client_message_ref(bytes)
         .map(|client_ref| (client_ref, PendingRefKind::Send))
         .or_else(|| client_history_request_ref(bytes).map(|request_id| (request_id, PendingRefKind::History)))
@@ -3508,7 +3757,7 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
             Some(PendingRefKind::History) => Correlation::Consumed(None),
-            None => Correlation::Refused,
+            Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
@@ -3524,7 +3773,26 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             client_ref: Some(client_ref),
             message,
         }) => consume(client_ref, Some(Err(message))),
-        Ok(DaemonMessage::ConversationHistory { request_id, .. }) => consume(request_id, None),
+        Ok(DaemonMessage::WorkEvents { request_id, .. }) => {
+            let answered = consume(request_id, None);
+            if matches!(answered, Correlation::Consumed(_)) {
+                pending.insert(
+                    (session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned()),
+                    PendingRefKind::WorkEventsFollower,
+                );
+            }
+            answered
+        }
+        // Only a socket that reads work events hears that more arrived.
+        Ok(DaemonMessage::WorkEventsAppended { .. }) => {
+            if pending.contains_key(&(session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned())) {
+                Correlation::Uncorrelated
+            } else {
+                Correlation::Refused
+            }
+        }
+        Ok(DaemonMessage::ConversationHistory { request_id, .. })
+        | Ok(DaemonMessage::WorkEventDetail { request_id, .. }) => consume(request_id, None),
         _ => Correlation::Uncorrelated,
     }
 }
@@ -4043,6 +4311,10 @@ async fn release_lease<R: SessionReadModel>(
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("scope denied")]
+struct ScopeDenied;
+
 fn authorize<R: SessionReadModel>(
     state: &HubState<R>,
     action: HubAction,
@@ -4069,7 +4341,7 @@ fn authorize<R: SessionReadModel>(
             target_uri,
             chrono::Utc::now(),
         )?;
-        anyhow::ensure!(context.has(scope), "scope denied");
+        if !context.has(scope) { return Err(ScopeDenied.into()); }
         Ok(Some(context))
     } else if state
         .authorizer

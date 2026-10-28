@@ -1890,6 +1890,7 @@ impl FactoryApp {
                     }
                 }
                 if let Some(ready) = ready {
+                    prompt.merge_ready = ready.ci == "success";
                     prompt.merge_alert = Some(ready.evidence.clone());
                     if ready.ci == "success" && !merge_alert::admit_ready(&self.cas_dir, &ready) {
                         continue;
@@ -3179,7 +3180,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
     let mut prompt = match supervisor_cli {
         cas_mux::SupervisorCli::Codex => format!(
             "Codex supervisor startup:\n\
-- Use skills: cas-supervisor, cas-codex-supervisor-checklist, cas-codebase-design\n\
+- Run cas-codex-supervisor-checklist once now; triage from the supervisor core in your developer instructions. Open cas-supervisor or cas-codebase-design only for epic planning, releases, worker recovery or an unfamiliar refusal\n\
 - No hooks: call MCP tools explicitly (tasks/memory/rules/search)\n\
 - Canonical current workers for this session: {worker_list}\n\
 - First steps: mcp__cs__coordination action=whoami; mcp__cs__task action=list task_type=epic; mcp__cs__task action=ready"
@@ -4180,9 +4181,11 @@ mod tests {
         open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
             "codex-supervisor-ambient".to_string(),
-            "Current Codex release recovery audit preserves operator intent".to_string(),
+            "Operator prefers Codex release recovery audit receipts that preserve intent".to_string(),
         );
         entry.title = Some("Current Codex release recovery guidance".to_string());
+        // Exercise launch delivery with evidence the supervisor policy admits.
+        entry.entry_type = crate::types::EntryType::Preference;
         entry.tags = vec!["release".to_string(), "recovery".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();
@@ -4224,6 +4227,11 @@ mod tests {
             );
         }
         assert!(!prompt.contains("/cas-supervisor-checklist"));
+        // cas-ef39: startup triage comes from the resident core, not a full
+        // skill load that compaction would make the supervisor repeat.
+        // pin: this sentence is the routing instruction under test.
+        let routes_to_core = prompt.contains("triage from the supervisor core in your developer instructions");
+        assert!(routes_to_core, "Codex startup must point triage at the resident core: {prompt}");
         for skill in ["cas-supervisor", "cas-codex-supervisor-checklist"] {
             assert!(
                 prompt.contains(skill),
@@ -4258,9 +4266,10 @@ mod tests {
         open_task_store_local(&cas_dir).unwrap().add(&task).unwrap();
         let mut entry = Entry::new(
             "grok-supervisor-ambient".to_string(),
-            "Current Grok release recovery audit preserves operator intent".to_string(),
+            "Operator prefers Grok release recovery audit receipts that preserve intent".to_string(),
         );
         entry.title = Some("Current Grok release recovery guidance".to_string());
+        entry.entry_type = crate::types::EntryType::Preference;
         entry.tags = vec!["release".to_string(), "recovery".to_string()];
         entry.importance = 0.95;
         open_store(&cas_dir).unwrap().add(&entry).unwrap();

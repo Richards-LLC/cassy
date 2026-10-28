@@ -121,6 +121,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 #### Expected experience
 
+- Reply receipt regression (cas-c641): a live daemon reply with `operator_label: null` commits to IndexedDB before exactly one application ACK. Pending replies outside the bounded history page drain across batches of ten; after a fresh attach the drained backlog is not replayed. Lost ACKs remain safe to re-ACK without duplicate turns. A reply queued behind a busy browser writer for more than five seconds still commits before authorizing its ACK.
+
 - Rows read project first, then machine, so two machines never look alike; the generated codename is tertiary.
 - New replies and questions waiting for me are visible on the row without opening it.
 - A visible search field finds a conversation by project, machine or supervisor; the palette does too, from anywhere.
@@ -149,6 +151,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 4. Open a report the supervisor sent — opening the file shows the hosted copy in a new tab through a short-lived signed link from the machine; every failure is said on the file card itself, never in a toast far from it, and leaves no tab open; a file that was never uploaded to Cloud says so, and opening it again opens no tab at all; Cloud failing ("wait a minute, then open it again") says what to do; a connected machine that sends nothing says it is connected but didn't send the file, never that it is off; when the connection then drops, that card says it in the banner's words ("Lost connection to <machine>. Reconnecting… Open the file again when it's back") without another click and without a second announcement, never "is connected" beside Reconnecting
 5. The machine reconnects as the reader tabs back to Load earlier — a separate part on a multiplex machine: the reader has loaded one earlier page and moved on to the composer; the machine drops and comes back, and the reader tabs back to "Load earlier" the moment the header reads Live; focus stays on the button through the shell rebuild, and Enter loads the start of the conversation, landing on "No earlier history" (cas-d362)
 6. The reader tabs to Load earlier as the machine comes back, and sees it — four separate parts on a multiplex machine with a tall history, at desktop 1280 and phone 390, with the reader resting in the composer (the thread follows its tail) or outside the thread (the thread stays on their earlier page): the focused "Load earlier" stays inside the thread through the reconnect, never pinned or put back above it, and Enter still loads the start of the conversation (cas-c2cb)
+7. See a page the supervisor sent, inline — at desktop 1280 and phone 390, an HTML attachment shows its page beneath the file card in a frame with every sandbox permission withheld, on the machine's own origin through a short-lived ticket; its diagram, images and video load; a hostile page runs no script, leaves Commander's storage untouched, can't move the top window, open a window, submit a form or reach another host, and another site can't frame it; in dark mode the frame follows the theme and a page that supports dark renders dark (cas-2326); the card opens the same page in its own tab, still sandboxed, never the raw stored file (cas-3aff)
 
 #### Expected experience
 
@@ -161,6 +164,32 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - The hub never answers a history request ("Loading earlier…" has no timeout).
 - The socket closes while loading.
 - A hub without history support: the thread starts empty.
+
+### HUB-J23 · Read older turns by scrolling
+
+- **Entry:** a long conversation on desktop or phone
+- **Goal:** I reach the latest exchange immediately and scroll back through older turns without losing my place
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/thread-window.ts`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/history-window.journey.ts`
+- **Gaps:** the hub double supplies cursor pages; frozen real-thread performance is measured separately
+
+#### Steps
+
+1. Open directly at the latest exchange — one bounded tail request; newest turn in view
+2. Scroll up to request one older page — upward reading gesture requests its cursor and the mounted window remains bounded
+3. Return to the latest exchange without fetching history — Jump to latest restores the tail; mounted turns remain unique and ordered
+4. Answer a decision from before the loaded tail — first-page attention summary keeps the old ask actionable; its quick reply preserves the notification id without loading older pages
+
+#### Expected experience
+
+- Opening does not stream older pages or scroll visibly through history.
+- Scroll-up paging retains the reading anchor; keyboard Load earlier remains available.
+- New replies append without detaching unchanged focused content.
+
+#### Edge paths
+
+- A mount, reconnect or focus-restoring scroll does not request older history.
+- A long same-speaker run remains bounded; Jump to latest returns from an older window.
 
 ### HUB-J5 · Reply by typing
 
@@ -319,7 +348,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 5. Scroll back through a long thread — "Jump to latest" takes its own row above the composer, never over a turn, and one tap returns to the newest turn
 6. Jump from the palette with the keyboard's Enter — opened with a tap, the palette's filter takes the phone keyboard; Enter opens the match with the keyboard gone, not in the reply box
 7. See the switched-off machine named plainly — the footer counts it with a warning dot, and Paired machines says "Can't reach · retrying", shows times on the thread's 24-hour clock and "Version unknown until it connects"
-8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row
+8. Pair another machine and read its header at once — pairing from the phone opens its conversation, and the "connected" toast sits below the thread header, never over the back link, project and host, and on the list below the brand row. After its 3.2-second lifetime, the status region is empty so the expired notice is no longer read.
 9. Turn the phone sideways with the notch at one edge — at 844×390 with 44 px side insets, no conversation row, Write to a supervisor, footer control, thread chip, Waiting-on-you strip, composer field or Send, or Raw output title and Close sits under either notch band (cas-5072; separate parts at 844×390, where Raw output is a bottom sheet, and 932×430, where it is a side drawer with no empty left gutter, in dark)
 
 #### Expected experience
@@ -433,9 +462,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` on a 390 px phone paired with full control access but without `session:launch`
 - **Goal:** I start a supervisor on a project from my phone, without SSH, and land in its conversation
-- **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`, `cas-cli/src/hub/launch_env.rs`, `cas-cli/src/account_selection.rs`
+- **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`, `cas-cli/src/hub/launch_env.rs`, `cas-cli/src/hub/server.rs`, `cas-cli/src/account_selection.rs`, `hub-web/e2e/journeys/real-hub-server.mjs`
 - **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
-- **Gaps:** the hub's project catalog, folder browse and session start are doubled; that a hub-started session survives a hub restart and the tab closing is proven at epic assembly on a real machine
+- **Gaps:** the catalog suite doubles the hub protocol. The separate HUB-J13 part in `real-hub.journey.ts` crosses the real project browse, session start, reaper, daemon, PTY startup, first message and operator reply with the production-shaped absence of CAS_ROOT. Provider and service placement alone are inert. The Rust startup regression separately proves that a Teams write before pane readiness retries into the PTY once ready, without a provider generating replies. Official-login model action and surviving a hub restart remain real-machine assembly checks.
 
 #### Steps
 
@@ -463,6 +492,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Keyboard focus moves from Allow to Confirm to the project search after grant, and a very long machine label stays readable on a phone.
 - The session does not come up within 90 s: the sheet says it was started and may still be starting.
 - A machine without launch folders hides Browse.
+- A machine hub starts the chosen project's supervisor, observes its first message and answers one reply (the separate real-hub part). Foreign CAS_ROOT isolation has its own Rust hardening regression.
+- A named-profile startup brief written to Teams before pane readiness retries its wake once ready, submits once and leaves one Teams body (the real queue/PTY regression for cas-dd2e).
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
 - The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.
 
@@ -531,6 +562,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - A notice from another session never appears here, in the thread or its earlier sections.
 - A dismissed notice stays dismissed when history replays it.
+- Pending notices commit to attention before their separate persistence receipt; more than one batch drains to zero, and reconnect never resends drained notices. A receipt cannot consume a conversation reply.
 - A session that leaves the catalog retires its open notices.
 
 ### HUB-J16 · End a session from my phone
@@ -698,3 +730,95 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Edge paths
 
 - With no cloud origin configured, Explorer is a disabled item that says so.
+
+### HUB-J22 · Read diagrams, media and diffs in the conversation
+
+- **Entry:** `/commander/`, a paired machine and its supervisor conversation, at 1280×800 and 390×844 in light and dark
+- **Goal:** inspect a Mermaid diagram, a collapsible unified diff, an image, a PDF first page and playable video/audio without leaving the conversation, with source and original files reachable
+- **Touches:** `hub-web/src/markdown-renderer.ts`, `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts`, `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts`, `hub-web/src/rich-content.css`, `hub-web/src/attachment-sheet.ts`, `hub-web/src/main.ts`, `hub-web/vite.config.ts`
+- **Suite:** `hub-web/e2e/journeys/rich-content.journey.ts`
+- **Gaps:** hub tickets and proxy responses are doubled; actual PNG, PDF, WebM and WAV bytes are decoded by the production browser build under a self-only media CSP. Ticket binding, revocation and proxy authorization are proven by the hub handler tests. Hosted Commander cross-origin media remains outside this hub-served proof.
+
+#### Steps
+
+1. Open plain text without loading rich renderers
+2. Read a diagram and inspect its source; bad input stays readable
+3. Expand a unified diff
+4. Decode an inline image without moving its file caption
+5. Read the real PDF first page inline
+6. Play video and audio on demand; unavailable files keep Open
+
+The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named journey against a registered local candidate at `HUB_RICH_HUB_URL` (its `/commander/` URL). It starts no server and keeps the same protocol double; the hub binary supplies the HTML, scripts, styles and lazy assets.
+
+#### Expected experience
+
+- Rich renderer bytes are requested only when the conversation contains the relevant content; Pele loads each diagram type on demand.
+- Diagrams follow the selected theme; Diagram source is keyboard reachable. Parse or chunk-load errors leave the original code visible.
+- Diffs retain literal code and line markers. More than 24 lines start collapsed and allocate line DOM only when opened.
+- Media reserve their viewport before tickets or bytes arrive. Video and audio have controls, never autoplay, and preload no media bytes. An expired video ticket is renewed once, preserving the requested playback and native Range seeking.
+- PDF previews render only the first page as pixels. The original file link remains beneath every preview, including unavailable ones.
+
+#### Edge paths
+
+- Invalid diagram syntax remains readable source.
+- Missing or local-only artifacts show Preview unavailable beside their original Open link.
+- A transient preview failure recovers after the session reconnects, without rebuilding the attachment or moving its caption.
+- SVG from the renderer is sanitized before DOM node insertion; the unit boundary regression supplies script, event-handler and foreignObject payloads.
+
+### HUB-J24 · Paste text, screenshots and files into a supervisor message
+
+- **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
+- **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with readable local paths.
+- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
+- **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.
+
+#### Steps
+
+1. Paste plain text inline
+2. Preview a long paste, screenshot and picked file together
+3. A connection loss keeps the files visibly, then reuses the upload identity
+
+#### Expected experience
+
+- Every attachment is named and removable before sending; long text has a bounded preview and screenshots have thumbnails.
+- Files remain through reconnect and shell replacement, with a visible reminder to send before closing the page.
+
+#### Edge paths
+
+- The hub refuses oversized or unsupported bytes, traversal names stay within host storage, and unsigned or unknown-session requests write nothing.
+- A slow 512 kbit/s phone upload budgets the base64 payload size (4 and 10 MiB regression rows); ordinary requests still time out promptly.
+- A refusal names the failed attachment, keeps all pending files, and gives no reconnect advice for an unsupported type. A missing session shows the hub's own explanation.
+- Phone HEIC, AVIF and MOV containers are identified from their brands and stored with their correct media types, regardless of filename.
+- Reusing an upload identity with different bytes is a conflict; replaying the same bytes returns the same artifact.
+
+### HUB-J25 · See the whole picture of the work
+
+- **Entry:** `/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a thread with work between two replies, and one worker on a task
+- **Goal:** see what the supervisor thought, ran and moved between its replies, collapsed until I open it, with each detail loaded only when I ask, and follow one worker's live timeline from Tasks & progress, without a terminal
+- **Touches:** `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`
+- **Suite:** `hub-web/e2e/journeys/whole-picture.journey.ts`
+- **Gaps:** the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe and the hub's follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests`)
+
+#### Steps
+
+1. Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is read
+2. Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and its rows not; a worker's own tool call stays in its timeline
+3. Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand and markup in it reads as text
+4. New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the earlier reply keeps its node
+5. Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies only
+6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
+7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
+8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+
+#### Expected experience
+
+- Work reads as quiet context between replies, never as a reply: one muted line, chips for task moves, rows a tap deeper.
+- The timeline replaces watching a worker's terminal: state, task and the last things it did, updating by itself.
+- Nothing heavy loads until asked: no work page while Show work is off, and no detail until a row opens.
+
+#### Edge paths
+
+- A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
+- A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
+- A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.

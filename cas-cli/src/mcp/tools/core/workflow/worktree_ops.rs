@@ -1031,7 +1031,7 @@ fn reject_closed_epic_merge_target(
         .filter(|task| {
             task.task_type == cas_types::TaskType::Epic
                 && task.is_terminal()
-                && task.branch.as_deref() == Some(target_branch)
+                && crate::mcp::tools::core::task::repo_context::effective_epic_branch(task) == Some(target_branch)
         })
         .map(|task| task.id)
         .collect::<Vec<_>>();
@@ -2340,11 +2340,8 @@ fn declared_system_b_merge_target(
     }
 
     let epic = epic?;
-    if let Some(branch) = epic
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
+    if let Some(branch) = crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic)
+        .filter(|_| epic.branch.as_deref().is_some_and(|branch| !branch.trim().is_empty()))
     {
         return Some(ResolvedSystemBMergeTarget {
             branch: branch.to_string(),
@@ -2406,18 +2403,7 @@ fn epic_lane_bypassed_by_trunk_target(
             return None;
         }
     }
-    let lane = epic
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|branch| !branch.is_empty())
-        .or_else(|| {
-            epic.deliverables
-                .work_target
-                .as_ref()
-                .map(|target| target.target_branch.trim())
-                .filter(|branch| !branch.is_empty())
-        })?;
+    let lane = crate::mcp::tools::core::task::repo_context::effective_epic_branch(epic)?;
     (lane != resolved_branch).then(|| lane.to_string())
 }
 
@@ -4275,6 +4261,12 @@ impl CasCore {
                     )
                 }
             };
+
+        // Stored worktree records can predate a lane rename too. Normalize
+        // only an alias whose task/repository identity still proves ownership.
+        worktree.parent_branch = crate::mcp::tools::core::task::repo_context::effective_epic_ref(
+            &self.cas_root, &worktree.parent_branch,
+        );
 
         // Bind this mutation to the task's declared work repository before
         // merge/reachability checks. A cleaned-up source is the sole

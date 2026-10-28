@@ -126,7 +126,9 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain("lastShellSignatureWithPaletteClosed = shellSignature({ ...signatureParts, commandPaletteOpen: false }) + signatureTail;");
     // Paired machines replaces the palette and clears the flag itself too.
     // cas-460a: it also remembers its opener so its close can hand focus back.
-    expect(source).toContain("const open = (opener: string) => { pairedMachinesOpener = opener; commandPaletteOpen = false; document.querySelector<HTMLDialogElement>('#command-palette')?.close(); dialog.showModal(); };");
+    // pin: Existing palette lifecycle audit requires flag clearing before native close; whitespace is immaterial.
+    const openRegister = source.slice(source.indexOf("const open = (opener: string) =>"), source.indexOf("for (const id of ['paired-machines-toggle'"));
+    expect(openRegister).toMatch(/pairedMachinesOpener = opener;\s*commandPaletteOpen = false;\s*document\.querySelector<HTMLDialogElement>\('#command-palette'\)\?\.close\(\);\s*dialog\.showModal\(\);/);
     // No other code closes the palette dialog behind the flag's back.
     const closes = source.match(/#command-palette['"]\)\?\.close\(\)/g) ?? [];
     expect(closes).toHaveLength(1);
@@ -212,6 +214,15 @@ describe("binding Cassy Cloud browser invariants", () => {
     expect(source).toContain('document.querySelector<HTMLButtonElement>("#message-send")!.onclick = () => { void submitSupervisorMessage(); };');
     expect(source).toContain("async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {");
     expect(source).toContain("const plan = planSupervisorSend(supervisorSendContext(text));");
+  });
+
+  // The built J24 journey exercises the retry; this pins its status reset to the real submit path.
+  it("clears an upload error after a successful retry", async () => {
+    const source = await readFile(new URL("main.ts", import.meta.url), "utf8");
+    // pin: scope this source check to the real send handler exercised by J24.
+    const submit = source.slice(source.indexOf("async function submitSupervisorMessage("), source.indexOf("function capturePairingDraft():"));
+    // pin: J24 proves the browser behavior; keep the submit path tied to its status reset.
+    expect(submit).toMatch(/if \(sent && uploads && hasAttachments\) \{\s*uploads\.clear\(\);\s*if \(messageStatus\?\.session === submissionKey && !messageStatus\?\.held\) clearComposerStatus\(\);/);
   });
 
   // Contract: a deferred structural change flushes after focus/gestures end.

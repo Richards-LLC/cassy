@@ -91,6 +91,28 @@ cas claude --bare <profile> --continue   # resume the last session in this folde
 The picker shows the same usage marks. Sessions resume across accounts
 because `projects/` lives in the base. `cas codex` works the same way.
 
+## Choose the Codex account for a factory worker
+
+Factory capability checks inspect registered Codex homes when `CODEX_HOME` is
+unset. An authenticated named account keeps Codex lanes available after the
+legacy `~/.codex` is retired. An explicit `CODEX_HOME` limits the check to that
+account.
+
+Pass the intended worker home as `config_dir`, or set worker `config_dir` in
+the project's `.cas/config.toml` (`[factory.defaults]` or
+`[[factory.workers]]`) for hub and Commander spawns. A requesting supervisor's
+`CODEX_HOME` is inherited when no eligible account recommendation overrides it.
+When no account is selected, the account policy may recommend an eligible
+registered account. Otherwise, an authenticated default `~/.codex` remains
+usable. If that default is absent or logged out, spawn refuses before creating
+a worktree or assigning a task and lists confirmed logged-in registered homes
+with the `config_dir` remedies.
+
+`cas integrate violet` updates every registered Codex account when `CODEX_HOME`
+is unset, preserving account links into the Codex base. An explicit
+`CODEX_HOME` limits registration to that home. With no registered account, it
+reports `codex: no account` and leaves the retired `~/.codex` absent.
+
 ## List subscriptions
 
 ```bash

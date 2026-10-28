@@ -18,6 +18,21 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
   base: "/commander/",
+  plugins: [{
+    name: "rich-content-licenses",
+    apply: "build",
+    renderChunk: {
+      order: "post",
+      handler(code, chunk) {
+        if (chunk.name !== "rich-diagram") return null;
+        // Append after minification, before hashing: legal text stays in this
+        // lazy chunk and adds no legal-comment bytes to first paint.
+        const notices = ["pele-MIT.txt", "DOMPurify-LICENSE.txt"].map((name) => readFileSync(join(root, "licenses", name), "utf8").trim()).join("\n\n");
+        const header = readFileSync(join(root, "node_modules/dompurify/dist/purify.es.mjs"), "utf8").split("\n")[0];
+        return { code: `${code}\n/*! Pele and DOMPurify notices\n${notices}\n*/\n${header}\n`, map: null };
+      },
+    },
+  }],
   // cas-9b7d: keep @hpke/common's Node-only `import("crypto")` fallback out
   // of the bundle; dist must hold exactly the files the hub embeds.
   resolve: { alias: { crypto: fileURLToPath(new URL("./src/shims/node-crypto-unavailable.ts", import.meta.url)) } },
@@ -30,12 +45,13 @@ export default defineConfig({
     rollupOptions: {
       output: {
         entryFileNames: "app.js",
-        // The hub serves only app.js for script (server.rs include_bytes):
-        // any dynamic import must stay inside it, never become a chunk.
-        inlineDynamicImports: true,
-        chunkFileNames: "chunk-[name].js",
+        // cas-397a embeds these lazy assets in the production hub too.
+        chunkFileNames: (chunk) => `chunk-${chunk.name.replace(/[^A-Za-z0-9_-]/g, "-")}-[hash:8].js`,
         assetFileNames(asset) {
           const name = asset.names[0] ?? "asset";
+          if (name === "pdf.worker.min.mjs") return "chunk-pdf-worker-[hash:8].js";
+          if (name === "rich-content.css") return "chunk-rich-content-[hash:8].css";
+          if (name === "composer-uploads.css") return "chunk-composer-uploads-[hash:8].css";
           if (name.endsWith(".css")) return "app.css";
           // cas-4427: Commander's bundled UI and mono faces (fonts.css).
           if (name.endsWith("Inter-latin-wght.woff2")) return "inter.woff2";

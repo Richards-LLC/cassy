@@ -9,7 +9,7 @@ metadata:
 
 ## Codex constraints
 
-- Codex runs Cassy's lifecycle hooks once they are installed and trusted: `cas update` writes user-level `SessionStart`, `Stop`, `PreToolUse` and `PostToolUse` handlers and their trust, and factory spawns refuse to launch if Cassy's own handlers or the directory are untrusted. A hook only orients and guards the session. Codex loads no `.md` agents, so still call the Cassy tools (`task`, `memory`, `rule`, `search`) explicitly with the Codex prefix, and follow `cas-supervisor` for everything below.
+- Codex runs Cassy's lifecycle hooks once they are installed and trusted: `cas update` writes user-level `SessionStart`, `Stop`, `PreToolUse` and `PostToolUse` handlers and their trust, and factory spawns refuse to launch if Cassy's own handlers or the directory are untrusted. A hook only orients and guards the session. Codex loads no `.md` agents, so still call the Cassy tools (`task`, `memory`, `rule`, `search`) explicitly with the Codex prefix. Triage from the supervisor core in your developer instructions; open a `cas-supervisor` reference only for epic planning, releases, worker recovery or an unfamiliar refusal.
 - Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
 - Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
 
@@ -19,7 +19,7 @@ metadata:
 
 0. **Preflight.** From a connected CAS MCP session, call `system action=preflight`; otherwise run `cas --json factory preflight`. Follow [preflight.md](../cas-supervisor/references/preflight.md), using `factory_blocked` and the finding codes rather than `binary.state` alone. A healthy MCP connection with `factory_blocked=false` and `binary.source_evidence_missing` can continue startup while gathering source comparison evidence; it does not require a rebuild or reconnect.
 
-   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control (or open a fresh supervisor session). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
+   If the findings establish a deployment mismatch, resolve the intended deployment before replacing it: **do not kill or restart `cas serve` from this active MCP session** — that stdio process is this session's Cassy-tool connection. If replacement is needed, ask the operator to install the intended clean build and use the harness's MCP reconnect/restart control, which keeps every worker running. A supervisor restart stops every worker in this factory; take that route only after [checkpointing them](../cas-supervisor/references/worker-recovery.md#supervisor-restart). Do not use `pkill` or any name-based process kill. After replacement, confirm the Cassy tool list is restored, then rerun this checklist from step 0.
 
 1. Identify yourself: `coordination action=whoami`
 2. Load EPIC/task context:

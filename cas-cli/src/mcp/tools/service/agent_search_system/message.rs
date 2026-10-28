@@ -2426,8 +2426,20 @@ impl CasService {
                                 &branch_tip,
                                 &message,
                             );
+                            let full = format!("{message}\n\n{review}");
+                            let relay = match crate::review_body::relay_evidence_manifest(
+                                &self.inner.cas_root, &task.id, &full,
+                            ) {
+                                Ok(reference) => format!("{message}\n\n{reference}\n\n**Risk:** {}\n**Door:** {}",
+                                    crate::review_body::task_risk(&task),
+                                    task.door.map(|door| door.to_string()).unwrap_or_else(|| "—".into())),
+                                Err(error) => {
+                                    tracing::warn!(task_id=%task.id, %error, "relay manifest unavailable; retaining full review");
+                                    full
+                                },
+                            };
                             message = attach_merge_request_envelope(
-                                &format!("{message}\n\n{review}"),
+                                &relay,
                                 &MergeRequestEnvelope {
                                     task_id: task.id,
                                     // Live tip; the anchor rides along only
@@ -5809,7 +5821,7 @@ mod cas_89e1_post_merge_message_type_tests {
         task_b.status = TaskStatus::AwaitingMerge;
         task_b.risk = vec![cas_types::TaskRisk::Concurrency];
         task_b.door = Some(cas_types::TaskDoor::TwoWay);
-        task_b.notes = "qa-bundle: /proof/task-b/qa/bundle.json".into();
+        task_b.notes = "qa-bundle: /proof/task-b/qa/bundle.json\n".repeat(100);
         task_b.deliverables.work_target = task.deliverables.work_target.clone();
         task_b.deliverables.parked_branch = Some("factory/worker-a".into());
         tasks.update(&task_b).expect("park B with metadata");
@@ -5830,10 +5842,28 @@ mod cas_89e1_post_merge_message_type_tests {
         assert!(row.prompt.contains("**Risk:** concurrency"));
         // pin: merge requests preserve the task lifecycle gate in their context.
         assert!(row.prompt.contains("**Door:** two-way"));
-        // pin: exact QA bundle paths remain attached to the merge request.
-        assert!(row.prompt.contains("/proof/task-b/qa/bundle.json"));
-        // pin: file names from the task diff remain byte-preserved in the request.
-        assert!(row.prompt.contains("A\ttask-b.txt"));
+        let review = crate::review_body::merge_request_review(repo, &task_b,
+            &envelope.target_branch_tip, &envelope.branch_tip,
+            "Fresh worker delivery; please merge the branch.");
+        eprintln!("MANIFEST_REPLAY review_bytes={} queued_bytes={}", review.len(), row.prompt.len());
+        // pin: bundle links move losslessly into the manifest instead of the relay.
+        assert!(!row.prompt.contains("/proof/task-b/qa/bundle.json"), "relay must use one manifest reference");
+        let artifacts = cas_store::SqliteArtifactStore::open(&cas_root).unwrap()
+            .list_for_task(&task_b.id).unwrap();
+        let manifest = artifacts.iter().find(|artifact| artifact.name.starts_with("relay-evidence-"))
+            .expect("full evidence must be published before reducing the relay");
+        assert!(row.prompt.contains(&manifest.id));
+        let config = crate::config::Config::load(&cas_root).unwrap_or_default();
+        let root = crate::config::resolved_factory_artifacts_root(config.factory().artifacts_root.as_deref());
+        let roots = crate::artifacts::paths::PublishRoots::new(&cas_root, &root, &task_b.id);
+        let full = std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap();
+        assert!(full.contains(&review), "manifest must preserve the complete review");
+        // pin: literal evidence paths and changed file names survive manifest expansion.
+        assert!(full.contains("/proof/task-b/qa/bundle.json"));
+        // pin: Git's changed-file entry is preserved byte-for-byte on expansion.
+        assert!(full.contains("A\ttask-b.txt"));
+        assert!(row.prompt.len() < review.len() / 2);
+
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6534,30 +6564,85 @@ mod cas_89e1_post_merge_message_type_tests {
     #[tokio::test(flavor = "current_thread")]
     async fn folded_worker_acknowledgements_remain_inbox_only_cas_6920() {
         let _env = TestEnvGuard::temp_home();
-        let root = tempfile::tempdir().unwrap();
-        let cas_root = root.path().join(".cas");
-        std::fs::create_dir_all(&cas_root).unwrap();
-        let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
-        let worker = register_gh_1171_fleet(&core, false);
-        let agents = core.open_agent_store().unwrap();
-        let mut supervisor = agents.get("supervisor-a-id").unwrap();
-        supervisor.factory_session = worker.factory_session.clone();
-        agents.update(&supervisor).unwrap();
-        core.set_agent_id_for_testing(worker.id.clone());
-        let service = gh_1171_service(&core);
-        for body in ["ok", "thanks"] {
-            let mut request = message_request_to("supervisor");
-            request.kind = Some("status".into());
-            request.message = Some(body.into());
-            service.message_send(request).await.unwrap();
+        let mut failures = Vec::new();
+        for (case, messages, quiet) in [
+            ("acknowledgements", [("ok", None), ("thanks", None)], true),
+            (
+                "quiet then action",
+                [("ok", None), ("Choose the release scope", None)],
+                false,
+            ),
+            (
+                "action then quiet",
+                [("Choose the release scope", None), ("thanks", None)],
+                false,
+            ),
+            (
+                "identical quiet resend",
+                [
+                    ("Choose the release scope", None),
+                    ("Choose the release scope", Some(false)),
+                ],
+                false,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let cas_root = root.path().join(".cas");
+            std::fs::create_dir_all(&cas_root).unwrap();
+            let core = crate::mcp::server::CasCore::with_daemon(cas_root.clone(), None, None);
+            let worker = register_gh_1171_fleet(&core, false);
+            let agents = core.open_agent_store().unwrap();
+            let mut supervisor = agents.get("supervisor-a-id").unwrap();
+            supervisor.factory_session = worker.factory_session.clone();
+            agents.update(&supervisor).unwrap();
+            core.set_agent_id_for_testing(worker.id.clone());
+            let service = gh_1171_service(&core);
+            for (body, wake) in messages {
+                let mut request = message_request_to("supervisor");
+                request.kind = Some("status".into());
+                request.message = Some(body.into());
+                request.wake = wake;
+                service.message_send(request).await.unwrap();
+            }
+            let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
+            let rows = queue.peek_all(10).unwrap();
+            let row = rows.last().expect("the latest message remains readable");
+            let transports = queue
+                .peek_for_targets(&[&supervisor.name], worker.factory_session.as_deref(), 10)
+                .unwrap();
+            let recipient_core = crate::mcp::server::CasCore::with_daemon(cas_root, None, None);
+            recipient_core.set_agent_id_for_testing(supervisor.id.clone());
+            let request = serde_json::from_value(serde_json::json!({
+                "action": "inbox_poll", "notification_id": row.id,
+            }))
+            .unwrap();
+            let full = response_text(
+                gh_1171_service(&recipient_core)
+                    .inbox_poll(request)
+                    .await
+                    .unwrap(),
+            );
+            if rows.len() != 1
+                || crate::supervisor_message_wakes::quiet(&row.prompt) != quiet
+                || transports.len() != usize::from(!quiet)
+                || messages
+                    .iter()
+                    .any(|(body, _)| !row.prompt.contains(body) || !full.contains(body))
+            {
+                failures.push(format!(
+                    "{case}: pending={}, transports={}, quiet={}, prompt={}, full={full}",
+                    rows.len(),
+                    transports.len(),
+                    crate::supervisor_message_wakes::quiet(&row.prompt),
+                    row.prompt
+                ));
+            }
         }
-        let queue = crate::store::open_prompt_queue_store(&cas_root).unwrap();
-        let rows = queue.peek_all(10).unwrap();
-        assert_eq!(rows.len(), 1, "acknowledgements still coalesce");
-        let prompt = &rows[0].prompt;
-        assert!(prompt.contains("ok") && prompt.contains("thanks"), "{prompt}");
-        assert!(crate::supervisor_message_wakes::quiet(prompt),
-            "folded acknowledgements must wait for the next turn: {prompt}");
+        assert!(
+            failures.is_empty(),
+            "folded message delivery lost bodies or wake intent:\n{}",
+            failures.join("\n")
+        );
     }
 
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve

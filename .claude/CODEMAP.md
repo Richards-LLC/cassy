@@ -51,7 +51,7 @@
 - `cas-cli/src/account_lifecycle.rs` - account remove, rename, disable/enable and staged new-login transactions, with in-use checks and symlink-alias handling.
 - `cas-cli/src/account_links.rs` - shared-link drift detection and repair behind `cas doctor --fix` and launch-time link restoration.
 - `cas-cli/src/cli/accounts.rs`, `cas-cli/src/accounts.rs` - subscription list/JSON, shared account configuration and link/drift operations.
-- `cas-cli/src/cli/limits.rs`, `cas-cli/src/cli/accounts.rs` - shared local reset-date/day-hour formatting, reset-only summaries, native Claude statusline/Codex rollout capacity snapshots, bounded human reports and unchanged RFC3339 JSON instants.
+- `cas-cli/src/cli/limits.rs`, `cas-cli/src/cli/accounts.rs` - shared local reset-date/day-hour formatting, reset-only summaries, native Claude statusline/Codex rollout capacity snapshots with observation times and reset-based retention, bounded human reports and unchanged RFC3339 JSON instants.
 - `cas-cli/src/cli/claude.rs`, `cas-cli/src/cli/codex.rs`, `cas-cli/src/cli/account_picker.rs` - registry-backed account names, legacy profile aliases, profile setup and login commands.
 - `cas-cli/src/cli/doctor.rs`, `cas-cli/src/cli/doctor/` - health producers, grouped rendering and communication checks.
 - `cas-cli/src/cli/update.rs`, `cas-cli/src/cli/update/` - update phases, binding checks, discovery and receipts.

@@ -630,8 +630,15 @@ pub(crate) fn configure_claude_hooks_with_home(
     // Resolve every config dir a session on this machine could launch under:
     // `<home>/.claude` plus the active $CLAUDE_CONFIG_DIR (cas-5b96).
     let home = home_dir.map(Path::to_path_buf).or_else(dirs::home_dir);
-    let env_config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
-    let config_dirs = known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref());
+    // An injected home is an isolated test seam, never a request to mutate
+    // an ambient profile from the caller's real home.
+    let env_config_dir = home_dir.is_none().then(|| std::env::var("CLAUDE_CONFIG_DIR").ok()).flatten();
+    let mut config_dirs = known_claude_config_dirs_from(home.as_deref(), env_config_dir.as_deref());
+    if let Some(home) = &home {
+        for account in crate::accounts::discover(crate::accounts::Provider::Claude, home)? {
+            if !config_dirs.contains(&account.path) { config_dirs.push(account.path); }
+        }
+    }
 
     configure_claude_hooks_with_config_dirs(project_root, force, &config_dirs)
 }
@@ -647,6 +654,7 @@ pub(crate) fn configure_claude_hooks_with_config_dirs(
     force: bool,
     config_dirs: &[std::path::PathBuf],
 ) -> anyhow::Result<bool> {
+    for dir in config_dirs { config_gen::migrate_claude_statusline(dir)?; }
     configure_claude_hooks_at(project_root, force, config_dirs, project_root)
 }
 

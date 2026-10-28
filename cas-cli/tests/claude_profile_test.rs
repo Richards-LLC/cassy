@@ -24,6 +24,7 @@ fn cas_cmd(home: &std::path::Path) -> Command {
         .env_remove("CAS_ROOT")
         .env_remove("CAS_CLONE_PATH")
         .env_remove("COLUMNS")
+        .env_remove("CLAUDE_CONFIG_DIR")
         .env("CAS_SKIP_FACTORY_TOOLING", "1");
     cmd
 }
@@ -95,7 +96,7 @@ fn generated_statusline_records_usage_even_for_a_factory_supervisor() {
             .assert().success();
         let snapshot: serde_json::Value = serde_json::from_slice(
             &std::fs::read(dir.join(".cas-claude-usage.json")).expect("generated command must record the native snapshot")).unwrap();
-        assert_eq!(snapshot["windows"][0]["used_percent"], 38);
+        assert_eq!(snapshot["windows"][0]["used_percent"].as_f64(), Some(38.0));
         // Idle profiles retain their observation until the window resets.
         let mut old = snapshot;
         old["observed_at"] = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339().into();
@@ -103,7 +104,8 @@ fn generated_statusline_records_usage_even_for_a_factory_supervisor() {
     }
     cas_cmd(home.path()).args(["claude", "--list-profiles"])
         .assert().success()
-        .stdout(predicate::str::contains("weekly 62% left as of ").count(2))
+        .stdout(predicate::str::contains("weekly 38%").count(2))
+        .stdout(predicate::str::contains("as of ").count(2))
         .stdout(predicate::str::contains(" ET"));
 }
 

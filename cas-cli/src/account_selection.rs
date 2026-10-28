@@ -223,6 +223,7 @@ pub(crate) mod tests {
             email: None,
             identity: None,
             plan: None,
+            usage_observed_at: None,
             login_state: LoginState::LoggedIn,
             flags: AccountFlags::default(),
             windows: vec![

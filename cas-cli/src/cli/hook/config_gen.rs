@@ -601,9 +601,29 @@ pub(crate) fn get_cas_hooks_config(config: &crate::config::HookConfig) -> serde_
         "hooks": hooks,
         "statusLine": {
             "type": "command",
-            "command": "cas statusline"
+            "command": "cas statusline --with-session"
         }
     })
+}
+
+/// Upgrade only Cassy's legacy bare command; user statuslines and all other
+/// settings retain their values. An already migrated file is never rewritten.
+pub(super) fn migrate_claude_statusline(config_dir: &Path) -> anyhow::Result<()> {
+    let path = config_dir.join("settings.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    let mut settings: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Invalid JSON in {}; left unchanged", path.display()))?;
+    let Some(command) = settings.pointer_mut("/statusLine/command") else { return Ok(()) };
+    if matches!(command.as_str().map(str::trim), Some("cas statusline" | "cas status-line")) {
+        *command = "cas statusline --with-session".into();
+        std::fs::write(&path, canonical_json_pretty(&settings)?)
+            .with_context(|| format!("Cannot update {}", path.display()))?;
+    }
+    Ok(())
 }
 
 /// Get suggested Bash permission patterns for Cassy commands

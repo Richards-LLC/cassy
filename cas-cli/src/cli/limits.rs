@@ -16,8 +16,8 @@ use walkdir::WalkDir;
 use crate::cli::Cli;
 use std::fmt;
 
-// Snapshots are observations, not a live account probe. Five minutes keeps
-// idle sessions from advertising old capacity to a new worker.
+// An observation without a known reset cannot establish capacity indefinitely.
+// Known future windows remain useful after an idle session, with their age shown.
 const CLAUDE_SNAPSHOT_MAX_AGE: i64 = 5 * 60;
 const CLAUDE_SNAPSHOT_FILE: &str = ".cas-claude-usage.json";
 
@@ -40,6 +40,8 @@ struct AccountLimit {
     plan: Option<String>,
     state: String,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    observed_at: Option<DateTime<Utc>>,
     windows: Vec<LimitWindow>,
     detail: Option<String>,
 }
@@ -153,18 +155,21 @@ fn collect_claude_snapshot(account: &str, config_dir: &Path) -> (AccountLimit, O
             "usage unknown; account changed since Claude Code statusline snapshot"), None);
     }
     let age = Utc::now().signed_duration_since(snapshot.observed_at).num_seconds();
-    if !(0..=CLAUDE_SNAPSHOT_MAX_AGE).contains(&age) || snapshot.windows.is_empty() {
+    if age < 0 || snapshot.windows.is_empty() {
         return (unavailable(account, "claude", "unavailable",
-            "usage unknown; Claude Code statusline snapshot absent or older than 5m"), Some(snapshot.observed_at));
+            "usage unknown; Claude Code statusline snapshot empty or from the future"), Some(snapshot.observed_at));
     }
     for window in &mut snapshot.windows {
-        if expired(window.reset_at.as_deref()) {
+        let reset = window.reset_at.as_deref()
+            .and_then(|at| DateTime::parse_from_rfc3339(at).ok());
+        if expired(window.reset_at.as_deref())
+            || (age > CLAUDE_SNAPSHOT_MAX_AGE && !reset.is_some_and(|at| at > Utc::now())) {
             window.used_percent = None;
         }
     }
     (AccountLimit {
         account: account.into(), provider: "claude".into(), plan: None,
-        state: "active".into(), source: "Claude Code statusline (last 5m)".into(),
+        state: "active".into(), source: "Claude Code statusline".into(), observed_at: Some(snapshot.observed_at),
         windows: snapshot.windows, detail: None,
     }, Some(snapshot.observed_at))
 }
@@ -192,6 +197,7 @@ fn collect_codex_snapshot(account: &str, root: &Path) -> (AccountLimit, Option<D
             plan,
             state: "active".to_string(),
             source: "live transcript".to_string(),
+            observed_at: Some(observed_at),
             windows,
             detail: None,
         },
@@ -258,7 +264,7 @@ pub(crate) fn cached_account_usage(provider: crate::accounts::Provider, dir: &Pa
 pub(crate) fn transcript_windows(record: &Value) -> Vec<crate::account_registry::UsageWindow> {
     find_rate_limits(record).map(|limits| report_windows(&AccountLimit {
         account: String::new(), provider: String::new(), plan: None,
-        state: String::new(), source: String::new(), windows: parse_codex_limits(limits), detail: None,
+        state: String::new(), source: String::new(), observed_at: None, windows: parse_codex_limits(limits), detail: None,
     })).unwrap_or_default()
 }
 
@@ -290,6 +296,21 @@ pub(crate) fn account_usage(provider: crate::accounts::Provider, dir: &Path) -> 
         cache.insert((provider.name(), dir.canonicalize().unwrap_or_else(|_| dir.to_owned())), usage.clone());
     }
     usage
+}
+
+/// Keep observation age next to capacity rather than implying a live probe.
+pub(crate) fn observation_label(observed_at: Option<DateTime<Utc>>) -> String {
+    observed_at.map(|at| format!(" as of {}", super::release_report::eastern_time(at)))
+        .unwrap_or_default()
+}
+
+pub(crate) fn summarize_account_at(account: &crate::account_registry::Account, now: DateTime<Utc>) -> Option<String> {
+    let observed = account.usage_observed_at.filter(|_| account.provider == crate::accounts::Provider::Claude);
+    summarize_windows_at(&account.windows, now)
+        .map(|summary| match observed {
+            Some(_) => format!("{summary};{}", observation_label(observed)),
+            None => summary,
+        })
 }
 
 /// Human reset text; the stored/JSON instant stays UTC RFC3339.
@@ -381,6 +402,7 @@ fn collect_exa() -> AccountLimit {
         plan: None,
         state: "unavailable".to_string(),
         source: "ESTIMATE ledger".to_string(),
+        observed_at: None,
         windows,
         detail: Some(
             "API key configured; no supported balance endpoint (cost is a local estimate)"
@@ -433,6 +455,7 @@ fn unavailable_with_plan(
         plan,
         state: state.to_string(),
         source: "none".to_string(),
+        observed_at: None,
         windows: Vec::new(),
         detail: Some(detail.to_string()),
     }
@@ -531,7 +554,8 @@ fn compact_line(report: &LimitsReport) -> String {
         let (text, reset) = if let Some(window) = constraining {
             let used = window.used_percent.map(|used| format!("{used:.0}%")).unwrap_or_else(|| "unknown".into());
             let reset = format_reset(window.resets_at, now);
-            (format!("{alias} {used} {}", reset.split(" (in ").next().unwrap_or(&reset)), window.resets_at)
+            let observation = observation_label(account.observed_at.filter(|_| account.provider == "claude"));
+            (format!("{alias} {used}{observation} {}", reset.split(" (in ").next().unwrap_or(&reset)), window.resets_at)
         } else if !windows.is_empty() { (format!("{alias} reset/unknown"), None) }
         else { (format!("{alias}:{}", account.state), None) };
         (reset, text)
@@ -569,7 +593,8 @@ fn render_human(report: &LimitsReport) -> String {
     for account in &report.accounts {
         out.push('\n');
         let header = format!("{}{} - {} [{}]", display_alias(&account.account, 48), account.plan.as_ref().map(|plan| format!(" ({plan})")).unwrap_or_default(), account.state, account.source);
-        out.push_str(&crate::cloud::presence::wrap_line(&header));
+        let observation = observation_label(account.observed_at.filter(|_| account.provider == "claude"));
+        out.push_str(&crate::cloud::presence::wrap_line(&format!("{header}{observation}")));
         for window in &account.windows {
             let typed = crate::account_registry::UsageWindow {
                 name: window.name.clone(), used_percent: window.used_percent,
@@ -701,12 +726,15 @@ mod tests {
         snapshot.observed_at = Utc::now() - chrono::Duration::hours(3);
         fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();
         let report = collect_claude("fixture", &dir);
-        assert_eq!(report.windows[1].used_percent, Some(34.0), "unreset weekly observation survives idle sessions");
+        assert_eq!(report.windows.get(1).and_then(|window| window.used_percent), Some(34.0), "unreset weekly observation survives idle sessions");
         assert_eq!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows[1].used_percent, Some(34.0));
         let picker = usage_summaries(crate::accounts::Provider::Claude,
             vec![("fixture".into(), dir.clone())], Duration::from_secs(1));
         assert!(picker["fixture"].contains("as of ") && picker["fixture"].contains(" ET"), "{}", picker["fixture"]);
-        let human = render_human(&LimitsReport { accounts: vec![report] });
+        let report = LimitsReport { accounts: vec![report] };
+        let compact = compact_line(&report);
+        assert!(compact.contains("34% as of ") && compact.contains(" ET"), "{compact}");
+        let human = render_human(&report);
         assert!(human.contains("34%") && human.contains("as of ") && human.contains(" ET"), "{human}");
         snapshot.observed_at = Utc::now();
         for window in &mut snapshot.windows {
@@ -732,6 +760,7 @@ mod tests {
             plan: None,
             state: "active".into(),
             source: "live".into(),
+            observed_at: None,
             windows,
             detail: None,
         };

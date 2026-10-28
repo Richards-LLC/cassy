@@ -9,7 +9,7 @@ metadata:
 
 ## Codex constraints
 
-- Codex runs Cassy's lifecycle hooks once they are installed and trusted: `cas update` writes user-level `SessionStart`, `Stop`, `PreToolUse` and `PostToolUse` handlers and their trust, and factory spawns refuse to launch if Cassy's own handlers or the directory are untrusted. A hook only orients and guards the session. Codex loads no `.md` agents, so still call the Cassy tools (`task`, `memory`, `rule`, `search`) explicitly with the Codex prefix, and follow `cas-supervisor` for everything below.
+- Codex runs Cassy's lifecycle hooks once they are installed and trusted: `cas update` writes user-level `SessionStart`, `Stop`, `PreToolUse` and `PostToolUse` handlers and their trust, and factory spawns refuse to launch if Cassy's own handlers or the directory are untrusted. A hook only orients and guards the session. Codex loads no `.md` agents, so still call the Cassy tools (`task`, `memory`, `rule`, `search`) explicitly with the Codex prefix. Triage from the supervisor core in your developer instructions; open a `cas-supervisor` reference only for epic planning, releases, worker recovery or an unfamiliar refusal.
 - Coordinate workers; never implement a worker's task yourself or close one outside the documented Cassy lifecycle.
 - Every spawn names `cli=`, `model=`, and `effort=`; copy a generated recipe from [workflow.md](../cas-supervisor/references/workflow.md).
 

@@ -7257,6 +7257,41 @@ mod tests {
             check.message
         );
 
+        struct DefaultUnavailable;
+        impl crate::issue_reconcile::IssueStates for DefaultUnavailable {
+            fn open_issues(&self, repo: &str) -> Result<std::collections::HashSet<u64>, String> {
+                if repo.eq_ignore_ascii_case("Richards-LLC/cassy") {
+                    Err("default repository unavailable".into())
+                } else {
+                    Ok(std::collections::HashSet::new())
+                }
+            }
+        }
+        let mut foreign = crate::types::Task::new(
+            "cas-foreign".into(),
+            "foreign/repo#42: fix".into(),
+        );
+        foreign.status = crate::types::TaskStatus::Closed;
+        foreign.deliverables.factory_branch_anchor = Some("bbb222".into());
+        let check = shipped_issues_check(&[tasks[0].clone(), foreign], repo, &DefaultUnavailable, &tags);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("no open issue in the checked repositories")
+                && check.message.contains("Richards-LLC/cassy#1158")
+                && check.message.contains("default repository unavailable"),
+            "{}",
+            check.message
+        );
+        assert!(
+            !check.message.contains("no open Richards-LLC/cassy issue"),
+            "{}",
+            check.message
+        );
+
         let mut mixed = tasks.clone();
         mixed.push(crate::types::Task::new(
             "cas-bad".into(),

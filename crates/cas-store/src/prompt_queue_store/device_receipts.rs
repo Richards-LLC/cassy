@@ -23,7 +23,7 @@ impl SqlitePromptQueueStore {
         factory_session: &str,
         device_id: &str,
         notice: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if device_id.is_empty() || device_id.len() > 128 || device_id == "*" {
             return Err(StoreError::Other(
                 "application receipt needs one authenticated device".into(),
@@ -53,7 +53,9 @@ impl SqlitePromptQueueStore {
             // Every authenticated viewer can store a reply. Only its addressee
             // (or one viewer of a legacy broadcast) closes the delivery lane.
             // Other devices replay durable history, with independent receipts.
-            if processed_at.is_none() && recipient.as_deref().is_none_or(|recipient| recipient == device_id) {
+            let closes = processed_at.is_none()
+                && recipient.as_deref().is_none_or(|recipient| recipient == device_id);
+            if closes {
                 Self::atomic_stage_stamp_in_tx(
                     &tx,
                     prompt_id,
@@ -69,7 +71,7 @@ impl SqlitePromptQueueStore {
                 )?;
             }
             tx.commit()?;
-            Ok(())
+            Ok(closes)
         })
     }
 }

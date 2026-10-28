@@ -7605,8 +7605,12 @@ impl FactoryDaemon {
         device_id: &str,
     ) -> anyhow::Result<()> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)?;
-        self.queue_jobs.operator_reply_retries.clear();
+        // cas-59da: only a receipt that closes the row proves its addressee
+        // is reachable. A non-addressee's stored receipt leaves the row
+        // pending; clearing the backoff then re-forwarded it every tick.
+        if queue.record_operator_reply_persisted(notification_id, &self.session_name, device_id)? {
+            self.queue_jobs.operator_reply_retries.clear();
+        }
         Ok(())
     }
 
@@ -7616,8 +7620,9 @@ impl FactoryDaemon {
         device_id: &str,
     ) -> anyhow::Result<()> {
         let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
-        queue.record_operator_notice_persisted(notification_id, &self.session_name, device_id)?;
-        self.queue_jobs.operator_reply_retries.clear();
+        if queue.record_operator_notice_persisted(notification_id, &self.session_name, device_id)? {
+            self.queue_jobs.operator_reply_retries.clear();
+        }
         Ok(())
     }
 
@@ -13233,6 +13238,50 @@ mod tests {
             log_count(),
             attempts,
             "invalid persistence receipt cannot reset retries"
+        );
+        // cas-59da: a row addressed to an away phone, viewed by this desktop.
+        // The desktop's stored receipts leave the row pending, so they must not
+        // clear its backoff (that re-forwarded it at the select-loop rate).
+        let mut phone_payload: serde_json::Value = serde_json::from_str(
+            &crate::supervisor_notices::operator_prompt("phone reply", "reply").unwrap(),
+        )
+        .unwrap();
+        phone_payload["device_id"] = "phone".into();
+        let addressed = queue
+            .enqueue_with_session("supervisor", "operator", &phone_payload.to_string(), "provision-test")
+            .unwrap();
+        queue.stamp_recipient_device(addressed, "phone").unwrap();
+        let cas_store::EnqueueIdempotentResult::Created(notice) = queue
+            .enqueue_idempotent(
+                "relay-watchdog", "operator", "notice", Some("provision-test"), None, None,
+                "notice", Some(&cas_store::QueueOrigin::Daemon),
+            )
+            .unwrap()
+        else {
+            panic!("expected a new notice");
+        };
+        queue.stamp_recipient_device(notice, "phone").unwrap();
+        let addressed_reply = super::read_operator_replies(
+            &root, queue.as_ref(), "provision-test", false, &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|row| row.queued.id == addressed)
+        .unwrap();
+        daemon.forward_operator_replies(vec![addressed_reply.clone()]);
+        attempts += 1;
+        daemon.persist_operator_reply_receipt(addressed, "paired-device").unwrap();
+        daemon.persist_operator_notice_receipt(notice, "paired-device").unwrap();
+        daemon.forward_operator_replies(vec![addressed_reply.clone()]);
+        assert_eq!(log_count(), attempts, "non-addressee receipts keep the backoff");
+        daemon.persist_operator_reply_receipt(addressed, "phone").unwrap();
+        assert!(queue.queued_prompt(addressed).unwrap().unwrap().processed_at.is_some());
+        assert!(
+            !super::read_operator_replies(&root, queue.as_ref(), "provision-test", false, &Default::default())
+                .unwrap()
+                .iter()
+                .any(|row| row.queued.id == addressed),
+            "the addressee's receipt closes the row: it is never forwarded again"
         );
         daemon
             .persist_operator_reply_receipt(other, "paired-device")

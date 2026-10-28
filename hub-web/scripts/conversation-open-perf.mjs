@@ -14,6 +14,7 @@ const { values } = parseArgs({ options: {
   flow: { type: "string", default: "backlog" },
   dist: { type: "string" }, "bundle-revision": { type: "string" },
   "require-all-acked": { type: "boolean", default: false },
+  "show-work": { type: "boolean", default: false },
 } });
 if (!values.output || (!values.capture && (!values.db || !values.session))) {
   throw Error("Usage: node scripts/conversation-open-perf.mjs --db /project/.cas/cas.db --session SESSION --output TASK_ARTIFACT_DIR [--repeats 3]\nOr --capture PRIVATE_CAPTURE_JSON to replay the identical input.");
@@ -37,12 +38,13 @@ run("npx", ["playwright", "test", "--config", "e2e/conversation-perf.config.ts",
   CONVERSATION_PERF_CAPTURE: capture, CONVERSATION_PERF_OUTPUT: output,
   CONVERSATION_PERF_FLOW: values.flow,
   CONVERSATION_PERF_REQUIRE_ALL_ACKED: values["require-all-acked"] ? "1" : "0",
+  CONVERSATION_PERF_SHOW_WORK: values["show-work"] ? "1" : "0",
   ...(values.dist ? { CONVERSATION_PERF_DIST: resolve(values.dist) } : {}),
   ...(values["bundle-revision"] ? { CONVERSATION_PERF_BUNDLE_REVISION: values["bundle-revision"] } : {}),
 });
 const receipts = readdirSync(output).filter((name) => /^(desktop|phone)-\d+$/.test(name)).map((name) => JSON.parse(readFileSync(resolve(output, name, "receipt.json"), "utf8")));
-const metrics = ["first_turn_painted_ms", "latest_turn_painted_ms", "first_input_acknowledged_ms", "first_input_ack_ms", "final_paint_opportunity_ms", "final_tail_gap_px", "interactive_upper_bound_ms", "input_ack_ms", "history_requests", "history_payload_bytes", "websocket_payload_bytes", "live_reply_frames", "last_live_reply_ms", "json_parse_ms", "script_ms", "layout_ms", "style_ms", "dom_elements", "dom_nodes", "rendered_turns", "heap_used_bytes", "long_task_total_ms", "long_task_max_ms"];
-const summary = { machine, label: receipts[0].label, source_head: receipts[0].source_head, bundle_revision: receipts[0].bundle_revision, source_session: receipts[0].source_session, raw_queue_rows: receipts[0].raw_queue_rows, commander_turns: receipts[0].commander_turns, runs: [] };
+const metrics = ["first_turn_painted_ms", "latest_turn_painted_ms", "first_input_acknowledged_ms", "first_input_ack_ms", "final_paint_opportunity_ms", "final_tail_gap_px", "interactive_upper_bound_ms", "input_ack_ms", "history_requests", "work_requests_total", "mounted_work_blocks", "history_payload_bytes", "websocket_payload_bytes", "live_reply_frames", "last_live_reply_ms", "json_parse_ms", "script_ms", "layout_ms", "style_ms", "dom_elements", "dom_nodes", "rendered_turns", "heap_used_bytes", "long_task_total_ms", "long_task_max_ms"];
+const summary = { machine, label: receipts[0].label, source_head: receipts[0].source_head, bundle_revision: receipts[0].bundle_revision, source_session: receipts[0].source_session, raw_queue_rows: receipts[0].raw_queue_rows, commander_turns: receipts[0].commander_turns, show_work: receipts[0].show_work, work_events: receipts[0].work_events, runs: [] };
 for (const profile of ["desktop", "phone"]) for (const phase of new Set(receipts.filter((receipt) => receipt.profile.name === profile).flatMap((receipt) => Object.keys(receipt.results)))) {
   const group = receipts.filter((receipt) => receipt.profile.name === profile).map((receipt) => receipt.results[phase]);
   summary.runs.push({ profile, phase, repetitions: group.length, metrics: Object.fromEntries(metrics.map((metric) => {

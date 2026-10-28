@@ -6,11 +6,13 @@ import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { resolve, extname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { decode } from "@jridgewell/sourcemap-codec";
-import { HubDouble, type HistoryPage } from "./hub-double";
+import { HubDouble, type HistoryPage, type WorkWorld } from "./hub-double";
 
-type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[] };
+type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[]; work?: WorkWorld };
 const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
 const capture: Capture = JSON.parse(await readFile(process.env.CONVERSATION_PERF_CAPTURE!, "utf8"));
+const showWork = process.env.CONVERSATION_PERF_SHOW_WORK === "1";
+if (showWork && !capture.work?.events.length) throw Error("Show work measurement requires captured work events from the same thread");
 const dist = resolve(process.env.CONVERSATION_PERF_DIST ?? "dist");
 let server: Server;
 let origin: string;
@@ -181,9 +183,11 @@ for (const profile of [
     time: { now: () => performance.timeOrigin + performance.now(), delay: (callback, ms) => { setTimeout(callback, ms); } },
     paired: ["baseline"], machines: [{ id: "baseline", label: "Soundwave baseline", sessions: [{ name: capture.session, supervisor: "supervisor", project_dir: "/projects/cas-src", workers: [], liveness: "live" }] }],
     history: { [capture.session]: capture.pages },
+    ...(capture.work ? { work: { [capture.session]: capture.work } } : {}),
   });
   await hub.install();
   await page.addInitScript(installProbe);
+  await page.addInitScript((on) => localStorage.setItem("commander.showWork", on ? "1" : "0"), showWork);
   const results: Record<string, any> = {};
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -248,6 +252,8 @@ for (const profile of [
       const ackedIds = new Set(hub.persistedReplies.filter((reply) => reply.session === capture.session).map((reply) => reply.notification_id));
       results[phase] = { ...probe, first_input_acknowledged_ms: firstInput.at - probe.tap_at, first_input_ack_ms: firstInput.input_ack_ms, interactive_upper_bound_ms: interactive.at - probe.tap_at, input_ack_ms: interactive.input_ack_ms,
         history_requests: hub.historyRequests.length - requestStart,
+        work_requests_total: hub.frames.filter(frame => frame.kind === "WorkEventsRequest").length,
+        mounted_work_blocks: await page.locator(".msgs .work-turn").count(),
         websocket_payload_bytes: probe.frames.reduce((sum: number, f: any) => sum + f.bytes, 0),
         history_payload_bytes: probe.frames.filter((f: any) => f.history).reduce((sum: number, f: any) => sum + f.bytes, 0),
         live_reply_frames: probe.frames.filter((f: any) => f.live_reply).length,
@@ -269,6 +275,7 @@ for (const profile of [
       await writeFile(join(directory, "receipt.json"), JSON.stringify({ status: "PASS", profile, browser: browser.version(), source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         bundle_revision: process.env.CONVERSATION_PERF_BUNDLE_REVISION ?? execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
         source_session: capture.session, raw_queue_rows: capture.raw_queue_rows, commander_turns: capture.commander_turns, query_ms: capture.query_ms, pending_replies: capture.pending_replies?.length,
+        show_work: showWork, work_events: capture.work?.events.length ?? 0,
         flow: process.env.CONVERSATION_PERF_FLOW ?? "history", replay_cadence: "history response plus batches of ten pending OperatorReply frames, paced by browser rAF; fastest-case replay, daemon scheduling/network excluded",
         label: "real-bundle, real-supervisor-data, protocol-replay; transport is a double, not real hub latency", results, page_errors: errors }, null, 2));
     };
@@ -280,6 +287,11 @@ for (const profile of [
       if (backlog) await drainPending();
     });
     expect(results.initial.history_requests).toBe(1);
+    if (showWork) {
+      await expect(page.locator("#conversation-show-work")).toHaveAttribute("aria-pressed", "true");
+      expect(results.initial.work_requests_total).toBeGreaterThan(0);
+      expect(results.initial.mounted_work_blocks, "captured work must actually enter the rendered window").toBeGreaterThan(0);
+    } else expect(results.initial.work_requests_total).toBe(0);
     if (!backlog) await measure("accumulated", async () => {
       for (let index = 1; index < capture.pages.length; index++) {
         const count = hub.historyRequests.length;

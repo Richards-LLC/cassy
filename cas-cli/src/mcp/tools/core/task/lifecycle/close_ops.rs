@@ -27905,6 +27905,18 @@ mod merge_state_gate_tests {
         git(wt.path(), &["push", "-q", "origin", "factory/worker"]);
         let second = dispatch(&b);
         supervisor.cas_verification_add(Parameters(verdict(second.id, "approved"))).await.unwrap();
+        // Exact-head containment remains mandatory even when a sibling owns
+        // the live source and tracking must leave the parked boundary alone.
+        let mut sibling = worker_task("worker");
+        sibling.id = "cas-sibling".into();
+        sibling.deliverables.factory_branch_anchor = Some(b.clone());
+        tasks.add(&sibling).unwrap();
+        let held = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        let held = format!("{held:?}");
+        assert!(held.contains("MERGE REQUIRED") && held.contains(&b), "{held}");
+        assert_eq!(tasks.get(&task.id).unwrap().deliverables.factory_branch_anchor.as_deref(), Some(a.as_str()));
+        sibling.status = TaskStatus::Closed;
+        tasks.update(&sibling).unwrap();
         let response = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
         let text = format!("{response:?}");
         let parked = tasks.get(&task.id).unwrap();

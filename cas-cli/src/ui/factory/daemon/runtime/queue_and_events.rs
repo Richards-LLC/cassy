@@ -13464,6 +13464,32 @@ mod tests {
     /// cas-e829: a relay-watchdog alert reaches Commander as a notice that
     /// names the relay it is about and whether that relay has since been
     /// seen; a supervisor turn carries no notice.
+    #[tokio::test]
+    async fn notice_receipt_frames_drain_only_the_attention_lane_after_reconnect() {
+        use cas_store::QueueOrigin;
+        let _env = crate::test_support::TestEnvGuard::temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let mut daemon = super::super::provisioning_tests::daemon(&root);
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let payload = crate::supervisor_notices::operator_prompt("notice", "notice").unwrap();
+        let notice = queue.enqueue_idempotent("relay-watchdog", "operator", &payload,
+            Some("provision-test"), None, None, "notice-receipt", Some(&QueueOrigin::Daemon)).unwrap().id();
+        let reply = queue.enqueue_with_session("supervisor", "operator", &payload, "provision-test").unwrap();
+        for id in [reply, notice, notice] {
+            let frame = serde_json::from_value(serde_json::json!({ "OperatorNoticePersisted": {
+                "notification_id": id, "device_id": "phone"
+            }})).unwrap();
+            daemon.handle_ws_message(0, frame).await;
+        }
+        let reconnected = crate::store::open_prompt_queue_store(&root).unwrap();
+        assert_eq!(reconnected.peek_operator_replies("provision-test", 10).unwrap()
+            .iter().map(|row| row.id).collect::<Vec<_>>(), vec![reply]);
+        let row = reconnected.queued_prompt(notice).unwrap().unwrap();
+        assert!(row.processed_at.is_some());
+        assert!(row.acked_at.is_none(), "persistence is not an operator read");
+    }
+
     #[test]
     fn operator_notices_mark_daemon_alerts_and_follow_their_relay() {
         let temp = tempfile::TempDir::new().unwrap();

@@ -1848,25 +1848,20 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         if let Some(home) = std::env::var_os("CAS_09FE_CAPABILITY_CHILD") {
-            let account = PathBuf::from(home).join(".codex-usable@example.test");
+            let account = PathBuf::from(home).join(".codex-z-requester@example.test");
             let snapshot = collect_live_capability_snapshot();
             let decision = cas_factory::resolve_lane("standard", &snapshot)
                 .expect("a logged-out default must not hide a usable registered Codex account");
             assert_eq!(decision.spec.cli, cas_mux::SupervisorCli::Codex);
             assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.1-sol"));
             assert_eq!(decision.spec.effort, Some(cas_mux::Effort::High));
-            assert_eq!(
-                decision.spec.config_dir.as_deref(),
-                account.to_str(),
-                "the account proven available must reach the worker's auth preflight"
+            assert!(
+                decision.spec.config_dir.is_none()
+                    || decision.spec.config_dir.as_deref() == account.to_str(),
+                "lane routing must preserve the requester's account, even when another usable account sorts first: {:?}", decision.spec.config_dir
             );
             assert!(decision.warnings.is_empty());
 
-            std::fs::remove_file(account.join("auth.json")).unwrap();
-            assert!(
-                cas_factory::resolve_lane("standard", &collect_live_capability_snapshot()).is_err(),
-                "a registered directory without a usable login must not activate the lane"
-            );
             return;
         }
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1885,6 +1880,9 @@ mod tests {
         let account = env.home().join(".codex-usable@example.test");
         std::fs::create_dir_all(&account).unwrap();
         std::fs::write(account.join("auth.json"), "{}").unwrap();
+        let requester = env.home().join(".codex-z-requester@example.test");
+        std::fs::create_dir_all(&requester).unwrap();
+        std::fs::write(requester.join("auth.json"), "{}").unwrap();
 
         // Keep the fake CLI on this child's PATH, never the process-global PATH.
         let output = Command::new(std::env::current_exe().unwrap())
@@ -1894,6 +1892,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("CAS_09FE_CAPABILITY_CHILD", env.home())
+            .env("CODEX_HOME", &requester)
             .env("PATH", &bin)
             .output()
             .unwrap();

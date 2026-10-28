@@ -485,7 +485,7 @@ async fn cas_7694_immediate_exit_reports_failure_and_log_tail() {
 /// Registered identity controls both factory and legacy coordination routes.
 #[tokio::test]
 async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
-    use cas::types::{Agent, AgentRole};
+    use cas::types::{Agent, AgentRole, Task, TaskStatus};
     let env = TestEnv::new();
     let mut alice = Agent::new_with_role("alice-id".into(), "alice".into(), AgentRole::Worker);
     alice.factory_session = Some("session-a".into());
@@ -552,4 +552,115 @@ async fn cas_9723_worker_stops_owned_server_but_not_another_workers() {
     )
     .await;
     assert!(stopped.contains("Stopped server"), "{stopped}");
+
+    // A context recycle preserves the name/session/task binding, releases
+    // the old process's lease, and task start claims it for the new UUID.
+    let agents = cas::store::open_agent_store(&env.cas_root).unwrap();
+    let tasks = cas::store::open_task_store(&env.cas_root).unwrap();
+    let mut task = Task::new("cas-recycle".into(), "Resume server work".into());
+    task.status = TaskStatus::InProgress;
+    task.assignee = Some(alice.name.clone());
+    tasks.add(&task).unwrap();
+    assert!(
+        agents
+            .try_claim(&task.id, &alice.id, 600, None)
+            .unwrap()
+            .is_success()
+    );
+    let started = call(
+        service(&alice),
+        serde_json::json!({
+            "action":"server_start", "id":"recycled", "command":"sleep 300",
+            "cwd":env.workdir, "task_id":task.id, "shared":true,
+        }),
+    )
+    .await;
+    let id = extract_id(&started);
+    agents.graceful_shutdown(&alice.id).unwrap();
+
+    let mut replacement = Agent::new_with_role(
+        "alice-recycled-id".into(),
+        alice.name.clone(),
+        AgentRole::Worker,
+    );
+    // Each identity gets the same live lease where indicated. Names alone,
+    // another factory session, or another task must not authorize a stop.
+    for (label, name, session, assigned, leased, allowed) in [
+        (
+            "different worker",
+            "bob",
+            Some("session-a"),
+            "bob",
+            true,
+            false,
+        ),
+        (
+            "different session",
+            "alice",
+            Some("session-b"),
+            "alice",
+            true,
+            false,
+        ),
+        ("missing session", "alice", None, "alice", true, false),
+        (
+            "different task binding",
+            "alice",
+            Some("session-a"),
+            "bob",
+            true,
+            false,
+        ),
+        (
+            "no resumed lease",
+            "alice",
+            Some("session-a"),
+            "alice",
+            false,
+            false,
+        ),
+        (
+            "resumed owner",
+            "alice",
+            Some("session-a"),
+            "alice",
+            true,
+            true,
+        ),
+    ] {
+        replacement.name = name.into();
+        replacement.factory_session = session.map(str::to_string);
+        let svc = service(&replacement);
+        task.assignee = Some(assigned.into());
+        tasks.update(&task).unwrap();
+        if leased {
+            assert!(
+                agents
+                    .try_claim(&task.id, &replacement.id, 600, None)
+                    .unwrap()
+                    .is_success()
+            );
+        }
+        let result = call(svc, serde_json::json!({"action":"server_stop", "id":id})).await;
+        if leased {
+            agents.release_lease(&task.id, &replacement.id).unwrap();
+        }
+        if allowed {
+            // Cleanup also proves the supervisor retains authority on the red run.
+            let cleanup = env
+                .call(serde_json::json!({"action":"server_stop", "id":id}))
+                .await;
+            assert!(!cleanup.contains("MCP_ERROR"), "{cleanup}");
+            assert!(result.contains("Stopped server"), "{label}: {result}");
+        } else {
+            assert!(
+                result.contains("workers may stop only servers they started"),
+                "{label}: {result}"
+            );
+            assert!(
+                pid_alive(extract_pid(&started)),
+                "{label} killed the server"
+            );
+        }
+    }
 }

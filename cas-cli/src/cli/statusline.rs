@@ -313,6 +313,7 @@ mod tests {
         let usage = super::super::limits::account_usage(crate::accounts::Provider::Claude, &dir);
         assert_eq!(usage.windows[0].used_percent, Some(23.0));
         assert!(!usage.authenticated);
+        // pin: raw native input fields must not leak into the usage-only snapshot.
         assert!(!std::fs::read_to_string(dir.join(".cas-claude-usage.json")).unwrap().contains("must-not-be-cached"));
     }
 }

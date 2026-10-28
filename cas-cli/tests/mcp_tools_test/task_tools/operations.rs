@@ -382,9 +382,13 @@ async fn task_read_default_start_preserves_complete_advisories() {
             parked.assignee = Some("test-agent".into());
             parked.deliverables.factory_branch_anchor = Some(tip.clone());
             store.add(&parked).unwrap();
-            std::fs::write(cas_dir.join("config.toml"), r#"[project]
+            std::fs::write(
+                cas_dir.join("config.toml"),
+                r#"[project]
 canonical_id = "start-read-fixture"
-"#).unwrap();
+"#,
+            )
+            .unwrap();
             task.deliverables.work_target = Some(cas::types::WorkTarget {
                 repo_selector: "project:start-read-fixture".into(),
                 target_branch: "main".into(),
@@ -406,8 +410,19 @@ canonical_id = "start-read-fixture"
         let started = extract_text(service.task(request("start", false)).await.unwrap());
         assert!(started.len() <= 2_000, "{case}: {} bytes", started.len());
         let recovered = extract_text(service.task(request("notes", true)).await.unwrap());
-        let cursor = started.lines().find(|line| line.starts_with("Start advisories:")).expect("start context cursor");
-        let start_offset: usize = cursor.split("offset=").nth(1).unwrap().split_whitespace().next().unwrap().parse().unwrap();
+        let cursor = started
+            .lines()
+            .find(|line| line.starts_with("Start advisories:"))
+            .expect("start context cursor");
+        let start_offset: usize = cursor
+            .split("offset=")
+            .nth(1)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         let mut offset = start_offset;
         let mut paged = String::new();
         loop {
@@ -418,13 +433,22 @@ canonical_id = "start-read-fixture"
             let (header, body) = page.split_once("\n\n").unwrap();
             paged.push_str(body);
             let next = header.split("next=").nth(1).unwrap();
-            if next == "end" { break; }
+            if next == "end" {
+                break;
+            }
             offset = next.parse().unwrap();
         }
-        assert_eq!(paged, &recovered[start_offset..], "{case}: start-context pages must be lossless");
+        assert_eq!(
+            paged,
+            &recovered[start_offset..],
+            "{case}: start-context pages must be lossless"
+        );
         if case == "qa-overflow" {
             assert!(started.contains("Start advisories exceed"), "{started}");
-            assert!(paged.contains("cas-long-blocker-119"), "last blocker must remain reachable");
+            assert!(
+                paged.contains("cas-long-blocker-119"),
+                "last blocker must remain reachable"
+            );
         }
         for instruction in required {
             assert!(

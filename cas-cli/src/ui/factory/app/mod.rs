@@ -4211,6 +4211,7 @@ mod tests {
             !prompt.contains("codex-supervisor-ambient") && !prompt.contains("No hooks"),
             "Native hook context must remain off the queued operator surface: {prompt}"
         );
+        // pin: startup names the context owner and the first identity call.
         for required in ["native SessionStart", "mcp__cs__coordination action=whoami"] {
             assert!(
                 prompt.contains(required),

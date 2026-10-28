@@ -40,3 +40,22 @@ Terminal receipts: `terminal-qa: PASS account-resets · 12 runs · 0 fail · 0 w
 ## Follow-up: extra usage and long waits (cas-dd77)
 
 Extra usage is spend data, not a reset window; summaries omit it and retain 5h, weekly and existing model-specific weekly windows. Under24h waits round hours up; at24h and later show complete days plus remaining whole hours (47h56m is1d23h). The status-only Codex fallback visits at most256 entries in reverse calendar order, considers newest8 files by mtime and reads256KiB tails; unavailable data remains unknown. Explicit account inventory is unchanged.
+
+## Native Claude capacity
+
+| Field | Contract |
+| --- | --- |
+| First two lines | `cas limits` keeps the existing account-first layout and marks capacity unavailable when Claude Code has not emitted a recent statusline snapshot. |
+| Scannable | 5h and weekly percentages/reset windows retain the shared formatter; source identifies a Claude Code statusline observation from the last 5m. |
+| Readable | Missing, stale, or account-changed snapshots explain why usage is unknown; an expired window never advertises its previous percentage. |
+| Machine output | Existing account/source/windows/detail fields remain; credential values never enter the snapshot or report, and plan is unknown until a supported source supplies it. |
+| Omitted | Cassy never calls the subscription usage endpoint or opens Claude credential contents; cached usage never asserts login acceptance. |
+
+The supported input is Claude Code's `rate_limits.five_hour` and `seven_day`
+statusline JSON, consumed by `cas status-line --with-session`, including factory
+sessions and the account-only statusline outside a project. Only percentages and
+Unix reset instants are selected; raw input is never persisted. A private atomic
+`.cas-claude-usage.json` snapshot belongs to the emitting `CLAUDE_CONFIG_DIR`
+(default `~/.claude`). It expires after 5 minutes and after an account identity
+change. Unconfigured statuslines and idle sessions therefore show unknown usage.
+This change does not initiate model requests or a separate provider login probe.

@@ -56,6 +56,7 @@ struct ClaudeCodeInput {
     workspace: Option<WorkspaceInfo>,
     cost: Option<CostInfo>,
     context_window: Option<ContextWindowInfo>,
+    rate_limits: Option<super::limits::ClaudeRateLimits>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,6 +255,7 @@ pub fn execute(args: &StatusLineArgs, cli: &Cli, cas_root: &Path) -> anyhow::Res
 
 /// The status line outside a Cassy project: just the account, when known.
 pub fn execute_account_only(args: &StatusLineArgs) -> anyhow::Result<()> {
+    if args.with_session { let _ = read_claude_code_input(); }
     if args.json {
         return Ok(());
     }
@@ -268,35 +270,52 @@ pub fn execute_account_only(args: &StatusLineArgs) -> anyhow::Result<()> {
 }
 
 fn read_claude_code_input() -> Option<SessionInfo> {
-    // Set stdin to non-blocking and try to read
     let mut input = String::new();
+    io::stdin().read_to_string(&mut input).ok()?;
+    parse_claude_code_input(&input)
+}
 
-    // Try to read with a short timeout
-    if io::stdin().read_to_string(&mut input).is_ok() && !input.is_empty() {
-        if let Ok(claude_input) = serde_json::from_str::<ClaudeCodeInput>(&input) {
-            let model = claude_input.model.and_then(|m| m.display_name);
-
-            let context_pct = claude_input.context_window.and_then(|cw| {
-                let size = cw.context_window_size?;
-                let used = cw.total_input_tokens.unwrap_or(0) + cw.total_output_tokens.unwrap_or(0);
-                if size > 0 {
-                    Some(((used * 100) / size) as u8)
-                } else {
-                    None
-                }
-            });
-
-            // Capture session_id for agent lookup
-            let session_id = claude_input.session_id;
-
-            return Some(SessionInfo {
-                model,
-                context_pct,
-                session_id,
-            });
+fn parse_claude_code_input(input: &str) -> Option<SessionInfo> {
+    let claude_input = serde_json::from_str::<ClaudeCodeInput>(input).ok()?;
+    if let Some(limits) = claude_input.rate_limits {
+        if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .filter(|dir| !dir.is_empty()).map(std::path::PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".claude"))) {
+            super::limits::record_claude_statusline(&dir, limits);
         }
     }
-    None
+    let model = claude_input.model.and_then(|m| m.display_name);
+    let context_pct = claude_input.context_window.and_then(|cw| {
+        let size = cw.context_window_size?;
+        let used = cw.total_input_tokens.unwrap_or(0) + cw.total_output_tokens.unwrap_or(0);
+        (size > 0).then(|| ((used * 100) / size) as u8)
+    });
+    Some(SessionInfo { model, context_pct, session_id: claude_input.session_id })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_statusline_caches_only_usage_for_the_emitting_profile() {
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let dir = env.home().join(".claude-fixture");
+        std::fs::create_dir(&dir).unwrap();
+        env.set("CLAUDE_CONFIG_DIR", dir.to_str().unwrap());
+        let session = parse_claude_code_input(r#"{
+            "session_id":"fixture-session", "model":{"display_name":"Opus"},
+            "rate_limits":{"five_hour":{"used_percentage":23}},
+            "secret_unrecognized_field":"must-not-be-cached"
+        }"#).unwrap();
+        // pin: native model.display_name still maps to the existing session output.
+        assert_eq!(session.model.as_deref(), Some("Opus"));
+        let usage = super::super::limits::account_usage(crate::accounts::Provider::Claude, &dir);
+        assert_eq!(usage.windows[0].used_percent, Some(23.0));
+        assert!(!usage.authenticated);
+        // pin: raw native input fields must not leak into the usage-only snapshot.
+        assert!(!std::fs::read_to_string(dir.join(".cas-claude-usage.json")).unwrap().contains("must-not-be-cached"));
+    }
 }
 
 mod data_and_format;

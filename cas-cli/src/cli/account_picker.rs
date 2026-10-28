@@ -626,6 +626,7 @@ fn queue_key(
         KeyCode::Char('c') if control => return std::ops::ControlFlow::Break(()),
         KeyCode::Char('d') if control => typed.push(TYPED_EOF),
         KeyCode::Enter => typed.push('\n'),
+        KeyCode::Char('j') if control => typed.push('\n'),
         KeyCode::Backspace if !typed.is_empty() && !typed.ends_with(['\n', TYPED_EOF]) => {
             typed.pop();
         }
@@ -731,7 +732,10 @@ fn edit_key(line: &mut String, key: crossterm_inquire::event::KeyEvent) -> LineE
         KeyCode::Char('c') if control => return LineEdit::Interrupt,
         KeyCode::Char('d') if control => return LineEdit::Done(String::new()),
         KeyCode::Char('u') if control => line.clear(),
+        // A newline already queued by the terminal (Enter typed during the
+        // login) is read as Ctrl-J once raw mode is on.
         KeyCode::Enter => return LineEdit::Done(format!("{line}\n")),
+        KeyCode::Char('j') if control => return LineEdit::Done(format!("{line}\n")),
         KeyCode::Backspace => {
             line.pop();
         }
@@ -1125,6 +1129,7 @@ mod tests {
         line.push('y');
         assert!(matches!(edit_key(&mut line, ctrl('d')), LineEdit::Done(eof) if eof.is_empty()));
         assert!(matches!(edit_key(&mut line, key(KeyCode::Enter)), LineEdit::Done(answer) if answer == "y\n"));
+        assert!(matches!(edit_key(&mut line, ctrl('j')), LineEdit::Done(answer) if answer == "y\n"));
         assert!(matches!(edit_key(&mut line, ctrl('c')), LineEdit::Interrupt));
     }
 

@@ -7653,6 +7653,7 @@ mod workspace_contract_tests {
             for sink in ["wl-copy", "pbcopy", "xclip -selection clipboard"] {
                 for copy in [
                     format!("printf '%s' '{mutation}' | {sink}"),
+                    format!("echo '{mutation}' | {sink}"),
                     format!("cat <<'COMMAND' | {sink}\n{mutation}\nCOMMAND"),
                 ] {
                     let (status, reason) = decision(&copy);
@@ -7669,6 +7670,11 @@ mod workspace_contract_tests {
                 format!("printf '%s' '{mutation}' | pbcopy; {mutation}"),
                 format!("printf '%s' '{mutation}' | env X=1 pbcopy"),
                 format!("printf '%s' '{mutation}' | /tmp/pbcopy"),
+                format!("printf '%s' '{mutation}' $(printf x) | wl-copy"),
+                format!("printf '%s' '{mutation}' \"$(printf x)\" | pbcopy"),
+                format!("printf '%s' \"$({mutation})\" | pbcopy"),
+                format!("printf '%s' '{mutation}' | pbcopy > command.txt"),
+                format!("printf '%s' '{mutation}' | wl-copy 2> errors.txt"),
             ] {
                 let (status, reason) = decision(&invocation);
                 assert_eq!(status, "deny", "execution stays closed: {invocation}: {reason}");

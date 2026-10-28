@@ -519,13 +519,19 @@ fn task_delivery_selection(
     let target = preferred_diff_target_ref(repo, parent);
     let tip = tip.unwrap_or("HEAD");
     let base = git_text(repo, &["merge-base", tip, &target])?;
-    let unmerged: std::collections::HashSet<String> = git_text(
-        repo,
-        &["rev-list", "--first-parent", &format!("{base}..{tip}")],
-    )?
-    .lines()
-    .map(str::to_owned)
-    .collect();
+    // GH #1382: an unmerged start base can carry the preceding task's UI.
+    // Only unowned commits after the validated start belong to this cycle;
+    // named/recorded earlier delivery commits keep their identity below.
+    let start_exclusion = window.identity.start_base.as_ref().map(|base| format!("^{base}"));
+    let unmerged_range = format!("{base}..{tip}");
+    let mut unmerged_args = vec!["rev-list", "--first-parent", &unmerged_range];
+    if let Some(exclusion) = start_exclusion.as_deref() {
+        unmerged_args.push(exclusion);
+    }
+    let unmerged: std::collections::HashSet<String> = git_text(repo, &unmerged_args)?
+        .lines()
+        .map(str::to_owned)
+        .collect();
     let mut history_args = vec![
         "log".to_string(),
         "--first-parent".into(),
@@ -792,7 +798,7 @@ fn paths_from_ranges(repo: &Path, ranges: Vec<DeliveryRange>) -> Option<Vec<Stri
 
 /// Reviewable paths from selected task ranges. An empty result is meaningful
 /// when the task only merged history or changed whitespace/deletions.
-pub(super) fn qa_paths(
+pub(crate) fn qa_paths(
     repo: &Path,
     target: &str,
     window: &TaskCommitReceiptWindow,

@@ -430,6 +430,29 @@ impl CasCore {
         Some(report)
     }
 
+    /// Use the same durable delivery ranges as the implementer's evidence
+    /// gate. A branch-wide diff can include UI inherited at task start.
+    fn attributed_qa_paths(
+        &self,
+        task: &Task,
+        repo: &Path,
+        target: &str,
+        head: &str,
+    ) -> Option<Vec<String>> {
+        let history = self.open_agent_store().ok()?
+            .get_lease_history(&task.id, None).ok()?;
+        if !super::close_ops::task_attribution::has_recorded_delivery_boundary(task, &history) {
+            return None;
+        }
+        let identity = super::close_ops::task_commit_identity_in_repo(
+            repo, task, Some(head.to_owned()),
+        ).ok()?;
+        let window = super::close_ops::resolve_task_commit_receipt_window(
+            task.created_at, &history, identity,
+        );
+        super::close_ops::task_attribution::qa_paths(repo, target, &window, Some(head))
+    }
+
     /// Open the independent QA round for a delivery that just parked (or
     /// re-parked) for merge. Returns the text to append to the MERGE
     /// REQUIRED refusal, or `None` when the delivery is not user-facing.
@@ -454,17 +477,18 @@ impl CasCore {
         if integrated_dispatch_boundary(task, repo, delivery_ref, &target).is_some() {
             return None;
         }
-        let changed = match changed_paths_for_delivery(
-            repo,
-            &target,
-            delivery_ref,
-        ) {
-            Ok(paths) => Some(paths),
-            Err(error) => {
-                tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
-                None
-            }
-        };
+        let changed = self.attributed_qa_paths(task, repo, parent_branch, delivery_ref)
+            .or_else(|| match changed_paths_for_delivery(
+                repo,
+                &target,
+                delivery_ref,
+            ) {
+                Ok(paths) => Some(paths),
+                Err(error) => {
+                    tracing::warn!(task_id = %task.id, error = %error, "cas-619f: delivery diff unavailable; eligibility uses the demo_statement only");
+                    None
+                }
+            });
         self.independent_qa_for_paths(
             task,
             repo,
@@ -1294,6 +1318,9 @@ impl CasCore {
         // docs/test/CI-only change closes freely even when it merged before
         // it ever parked through the gate.
         let changed = head.as_deref().and_then(|head| {
+            if let Some(paths) = self.attributed_qa_paths(task, repo, target_branch, head) {
+                return Some(paths);
+            }
             // Match the close's durable task boundary: once a multi-commit
             // FF/rebase reaches the target, merge-base collapses onto its last
             // commit. A task-creation timestamp alone is not a delivery base;

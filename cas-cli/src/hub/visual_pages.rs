@@ -81,10 +81,19 @@ pub(crate) struct PageTickets {
 
 impl PageTickets {
     /// Mint a ticket and return it with its expiry.
-    pub fn issue(&self, session: &str, page: &str, origin: &str, now: Instant) -> (String, Instant) {
+    pub fn issue(
+        &self,
+        session: &str,
+        page: &str,
+        origin: &str,
+        now: Instant,
+    ) -> (String, Instant) {
         let ticket = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 32]>());
         let expires = now + PAGE_TICKET_TTL;
-        let mut tickets = self.tickets.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut tickets = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         tickets.retain(|_, held| held.expires > now);
         tickets.insert(
             ticket.clone(),
@@ -100,7 +109,10 @@ impl PageTickets {
 
     /// The live ticket, or `None` when it is unknown or expired.
     pub fn resolve(&self, ticket: &str, now: Instant) -> Option<PageTicket> {
-        let mut tickets = self.tickets.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut tickets = self
+            .tickets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         tickets.retain(|_, held| held.expires > now);
         tickets.get(ticket).cloned()
     }
@@ -167,9 +179,13 @@ mod tests {
     fn a_ticket_opens_only_until_it_expires() {
         let tickets = PageTickets::default();
         let now = Instant::now();
-        let (ticket, expires) = tickets.issue("factory-a", "art-page", "https://controller.example", now);
+        let (ticket, expires) =
+            tickets.issue("factory-a", "art-page", "https://controller.example", now);
         assert_eq!(expires, now + PAGE_TICKET_TTL);
-        assert_eq!(tickets.resolve(&ticket, now).unwrap().origin, "https://controller.example");
+        assert_eq!(
+            tickets.resolve(&ticket, now).unwrap().origin,
+            "https://controller.example"
+        );
         assert_eq!(tickets.resolve(&ticket, expires), None);
         assert_eq!(tickets.resolve("not-a-ticket", now), None);
     }

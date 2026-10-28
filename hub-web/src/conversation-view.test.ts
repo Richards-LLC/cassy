@@ -269,11 +269,12 @@ describe("ConversationView (Pebble thread)", () => {
     // A stand-in layout: every element in the thread, in document order, is 50px tall, stacked from the thread's top edge and moved by scrollTop.
     const msgs = view.element.querySelector<HTMLElement>(".msgs")!;
     const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
+    let bannerOffset = 0;
     const original = Element.prototype.getBoundingClientRect;
     Element.prototype.getBoundingClientRect = function (this: Element) {
       if (this === view.element) return rect(0, 200);
       const index = [...msgs.querySelectorAll("*")].indexOf(this);
-      return index >= 0 ? rect(40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
+      return index >= 0 ? rect(bannerOffset + 40 + index * 50 - view.element.scrollTop, 50) : original.call(this);
     };
     const bubble = (key: string) => [...msgs.querySelectorAll<HTMLElement>("[data-key]")].find((node) => node.dataset.key === key);
     try {
@@ -285,6 +286,11 @@ describe("ConversationView (Pebble thread)", () => {
       history.reply(reply(11, "answer", "Three workers."), at(9, 1));
       view.update();
       expect(view.element.scrollTop).toBeGreaterThan(0);
+      expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
+      // An outage banner adds padding without changing scrollTop. The same
+      // recorded reading turn must stay put when the outside layout changes.
+      bannerOffset = 76;
+      view.update();
       expect(bubble(key)!.getBoundingClientRect().top).toBe(before);
     } finally {
       Element.prototype.getBoundingClientRect = original;

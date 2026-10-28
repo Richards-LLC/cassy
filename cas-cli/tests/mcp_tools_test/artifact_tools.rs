@@ -858,7 +858,10 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .await
         .unwrap_err();
     assert_eq!(
-        refused.data.as_ref().unwrap()["state"],
+        refused
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("{refused:?}"))["state"],
         "metadata_unavailable"
     );
     assert!(

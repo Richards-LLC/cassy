@@ -134,9 +134,9 @@ fn preflight_claude_config_dir(raw: &str) -> Result<(), String> {
 /// directory surviving onto a claude-rewritten spec, checked by
 /// [`preflight_claude_config_dir`] against files (`settings.json`,
 /// `.credentials.json`) a codex directory never has — wrong provider, wrong
-/// file, wrong cause. Call this BEFORE `apply_codex_fallback` so a bad
-/// explicit codex dir is rejected outright instead of ever reaching that
-/// rewrite.
+/// file, wrong cause. Once the CLI is confirmed installed, call this before
+/// account-dependent fallback so a bad explicit directory is rejected
+/// outright instead of ever reaching that rewrite.
 ///
 /// Only checks `auth.json` directly under the (tilde-expanded) directory —
 /// the `CODEX_HOME` layout `push_codex_home_env` (cas-pty) actually spawns
@@ -2912,7 +2912,6 @@ impl CasService {
                 .requester_from_env
                 .then(|| requester_secure_storage_dir(spec.cli))
                 .flatten();
-
         }
 
         let account_policy = crate::account_selection::load_policy(Some(&self.inner.cas_root));
@@ -2920,6 +2919,31 @@ impl CasService {
             let home = dirs::home_dir().ok_or_else(|| std::io::Error::other("home directory unavailable"))?;
             crate::account_registry::collect_for(provider, &home, false)
         });
+
+        // Preserve the existing install refusal when no Codex CLI is on PATH.
+        // The account preflight is meaningful only after a binary can probe it.
+        // A lane has already resolved candidates against capability evidence.
+        let strict_cli = true;
+        if req.lane.is_none()
+            && specs.iter().any(|spec| spec.cli == cas_mux::SupervisorCli::Codex)
+            && !cas_factory::probe::codex_binary_present()
+        {
+            cas_factory::apply_codex_fallback(
+                &mut specs,
+                strict_cli,
+                Some(default_worker_model_for_cli(cas_mux::SupervisorCli::Claude)),
+            )
+            .map_err(|e| Self::error(ErrorCode::INVALID_PARAMS, e.to_string()))?;
+        }
+
+        for spec in &specs {
+            if spec.cli == cas_mux::SupervisorCli::Codex
+                && let Some(config_dir) = spec.config_dir.as_deref()
+            {
+                preflight_codex_config_dir(config_dir)
+                    .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error))?;
+            }
+        }
 
         // Validate the resolved or recommended account before the legacy
         // strict fallback can hide an unusable Codex home behind a generic
@@ -2929,7 +2953,6 @@ impl CasService {
         // A caller who requested Codex must either receive Codex or an
         // actionable refusal. Rewriting the provider/tier to Claude here is
         // a cost and capability change the supervisor did not approve.
-        let strict_cli = true;
         let notices = if req.lane.is_some() {
             // Lane resolution owns capability-aware substitution and warning
             // semantics. The legacy fallback must not rewrite a selected lane

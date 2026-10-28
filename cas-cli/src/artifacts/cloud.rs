@@ -422,7 +422,11 @@ impl ArtifactUploadClient {
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
             .ok_or_else(|| "artifact metadata lookup deadline exceeded".to_string())?;
-        let response = ureq::get(url.as_str())
+        // Metadata reads carry the bearer. A redirect must never send it to
+        // a location supplied by a response, even when Cloud is misconfigured.
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let response = agent
+            .get(url.as_str())
             .set("Authorization", &format!("Bearer {}", self.token))
             .timeout(remaining.min(self.timeout))
             .call();

@@ -15205,10 +15205,21 @@ mod tests {
             claude_profile_keychain_service("/tmp/cafe\u{301}"),
             "Claude Code-credentials-0873cca0"
         );
-        for present in [true, false] {
+        for (keychain_present, file_state) in [
+            (true, "missing"),
+            (false, "readable"),
+            (false, "missing"),
+            (false, "directory"),
+        ] {
             let profile = tempfile::tempdir().unwrap();
             valid_claude_config(profile.path());
-            std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+            let credentials = profile.path().join(".credentials.json");
+            if file_state != "readable" {
+                std::fs::remove_file(&credentials).unwrap();
+                if file_state == "directory" {
+                    std::fs::create_dir(&credentials).unwrap();
+                }
+            }
             let probed = std::cell::Cell::new(false);
             let result = preflight_claude_config_dir_with(
                 profile.path().to_str().unwrap(),
@@ -15217,18 +15228,49 @@ mod tests {
                     assert!(service.starts_with("Claude Code-credentials-"), "{service}");
                     assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
                     probed.set(true);
-                    present
+                    keychain_present
                 },
             );
             assert_eq!(
                 result.is_ok(),
-                present,
-                "Keychain present={present}: {result:?}"
+                keychain_present || file_state == "readable",
+                "Keychain present={keychain_present}, file={file_state}: {result:?}"
             );
+            if let Err(error) = result {
+                // pin: preserve the actionable credential error for existing callers.
+                assert!(error.starts_with(
+                    "config_dir preflight failed: missing or unreadable Claude Keychain credentials (service "
+                ), "{error}");
+            }
             assert!(
                 probed.get(),
                 "darwin must probe the selected profile's Keychain item"
             );
+        }
+    }
+
+    #[test]
+    fn claude_config_dir_preflight_hashes_the_launched_selector() {
+        let profile = tempfile::tempdir().unwrap();
+        valid_claude_config(profile.path());
+        std::fs::remove_file(profile.path().join(".credentials.json")).unwrap();
+        for raw in [
+            profile.path().display().to_string(),
+            format!("  {}/  ", profile.path().display()),
+        ] {
+            let mut launch = cas_pty::PtyConfig::default();
+            launch.apply_claude_config_dir(Some(&raw), Some("explicit"));
+            let (_, launched_selector) = launch
+                .env
+                .iter()
+                .find(|(key, _)| key == "CLAUDE_CONFIG_DIR")
+                .unwrap();
+            let expected_service = claude_profile_keychain_service(launched_selector);
+            preflight_claude_config_dir_with(&raw, true, |service| {
+                assert_eq!(service, expected_service, "selector {raw:?}");
+                true
+            })
+            .unwrap();
         }
     }
 

@@ -143,6 +143,9 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
   });
   await journey.stage("Two failed heartbeats show the machine cause despite a live session", async () => {
     await hub.down("atlas");
+    const firstProbe = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
+    await clock.advance(5_000);
+    await firstProbe;
     for (let beat = 0; beat < 2; beat++) {
       const failed = page.waitForEvent("requestfailed", request => request.url() === "https://atlas.test/v1/sessions");
       await clock.advance(5_000);
@@ -152,7 +155,7 @@ test("HUB-J12 degraded live machine keeps its measured cause in the open Connect
     // The log's periodic projection is a one-second protocol timer, independent
     // of the five-second heartbeat. Let that tick observe the settled failure.
     await clock.advance(1_000);
-    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Network or browser policy blocked the request.");
+    await expect(page.locator(".connection-log-summary")).toContainText("Atlas · Linux: Request deadline exceeded.");
     await expect(page.locator(".connection-log-summary")).not.toContainText("nothing is failing now");
     // Unsteady: the log agrees with the rail's "checking…" (F08), never "No retry scheduled".
     await expect(page.locator(".connection-log-summary")).not.toContainText("No retry scheduled");

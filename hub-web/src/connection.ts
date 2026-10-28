@@ -485,11 +485,7 @@ export class HubConnectionSupervisor {
       }
       if (stage === "auth") {
         this.transition("auth", "auth");
-        await this.withStageTimeout("auth", async (signal) => {
-          // Independent signed reads share the stage budget without spending
-          // the catalog's deadline waiting for the capability probe first.
-          await Promise.all([this.refreshMachineInfo(signal), this.refreshSessions(signal)]);
-        });
+        await this.authenticate();
         stage = "attaching";
       }
       this.transition("attaching", "attaching");
@@ -582,6 +578,25 @@ export class HubConnectionSupervisor {
 
   private async withStageTimeout<T>(stage: Exclude<ConnectionStage, "idle" | "live">, task: (signal: AbortSignal) => Promise<T>): Promise<T> {
     return withRequestDeadline(task, undefined, STAGE_TIMEOUT_MS[stage]);
+  }
+
+  private async authenticate(): Promise<void> {
+    // Each independent read gets the full request deadline. One transient
+    // miss stays Connecting while a fresh bounded attempt checks it again;
+    // explicit pairing refusals still stop immediately.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.withStageTimeout("auth", signal => Promise.all([
+          this.refreshMachineInfo(signal), this.refreshSessions(signal),
+        ]));
+        return;
+      } catch (error) {
+        if (!this.desired || attempt > 0 || error instanceof AuthenticationError || error instanceof TransientAuthError
+          || (error instanceof HubRequestError && error.status < 500)) throw error;
+        // The aborted catalog flight must retire before the retry joins it.
+        await this.catalogRequest?.catch(() => {});
+      }
+    }
   }
 
   private failureCause(error: unknown): CauseEvidence {

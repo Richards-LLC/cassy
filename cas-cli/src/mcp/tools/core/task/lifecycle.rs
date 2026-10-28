@@ -3272,12 +3272,6 @@ impl CasCore {
                 }
             }
         }
-        let claim_info = if peer_notes.is_empty() {
-            claim_info
-        } else {
-            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
-        };
-
         // cas-062d / cas-17e4: durable outbox push after successful start.
         let actor = agent_store
             .get(&agent_id)
@@ -3385,22 +3379,15 @@ impl CasCore {
             // otherwise recover warnings computed only during this start.
             let advisory = format!(
                 "{}{}{}{}{}",
-                claim_info.unwrap_or_default(),
+                peer_notes,
                 blocker_warning,
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 unanchored_warning.unwrap_or_default(),
                 start_guidance(&task),
             );
-            let note = format!(
-                "[{}] START CONTEXT{}{}{}",
-                chrono::Utc::now().format("%Y-%m-%d %H:%M"),
-                advisory, related_context, cited_issues
-            );
-            task_store.append_note(&task.id, &note).map_err(|error| Self::error(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
-            ))?;
-            let saved = task_store.get(&task.id).map_err(|error| {
+            let context = format!("{advisory}{related_context}{cited_issues}");
+            let context = cas_store::task_note_markers::neutralize_new_markers(&context, None);
+            let read_saved = || task_store.get(&task.id).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!(
@@ -3408,12 +3395,43 @@ impl CasCore {
                         task.id
                     ),
                 )
-            })?;
-            let offset = format!("Notes for task {}\n{}\n\n", task.id, "=".repeat(task.id.len() + 15)).len()
-                + saved.notes.rfind(cas_store::task_note_markers::neutralize_new_markers(&note, None).as_ref()).ok_or_else(|| Self::error(
+            });
+            let mut saved = read_saved()?;
+            // Only compare the most recent context, ignoring its timestamp and
+            // any later progress notes. Lease display is intentionally transient.
+            let previous = std::iter::once(0)
+                .chain(saved.notes.match_indices("\n\n[").map(|(i, _)| i + 2))
+                .filter_map(|offset| {
+                    let entry = &saved.notes[offset..];
+                    chrono::NaiveDateTime::parse_from_str(
+                        entry.get(..18)?, "[%Y-%m-%d %H:%M]",
+                    ).ok()?;
+                    Some((offset, entry.get(18..)?.strip_prefix(" START CONTEXT")?))
+                })
+                .last();
+            let existing = previous.filter(|(_, body)| {
+                body.strip_prefix(context.as_ref())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("\n\n["))
+            }).map(|(offset, _)| offset);
+            let note_offset = if let Some(offset) = existing {
+                offset
+            } else {
+                let note = format!(
+                    "[{}] START CONTEXT{context}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+                );
+                task_store.append_note(&task.id, &note).map_err(|error| Self::error(
+                    ErrorCode::INTERNAL_ERROR,
+                    format!("Task {} started, but saving complete start instructions failed: {error}. Complete unsaved start advisories (read before acting):{advisory}", task.id),
+                ))?;
+                saved = read_saved()?;
+                saved.notes.rfind(&note).ok_or_else(|| Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     "Task started, but its saved start instructions are unavailable; read task notes full=true before acting",
-                ))?;
+                ))?
+            };
+            let offset = format!("Notes for task {}\n{}\n\n", task.id, "=".repeat(task.id.len() + 15)).len()
+                + note_offset;
             let navigation = format!(
                 "\nStart advisories: task notes id={} offset={offset} limit=1600 (follow next=)\nAll start advisories: task notes id={} full=true",
                 task.id, task.id
@@ -3433,10 +3451,11 @@ impl CasCore {
                 excerpt(&cited_pointer, 220),
             );
             let prefix = format!(
-                "Started task: {} - {}\nDelivery mode: {}",
+                "Started task: {} - {}\nDelivery mode: {}{}",
                 task.id,
                 excerpt(&task.title, 60),
-                task.delivery_mode
+                task.delivery_mode,
+                claim_info.unwrap_or_default(),
             );
             let hint = read_hint(&task.id, "show", true);
             let available = 2000usize.saturating_sub(prefix.len() + navigation.len() + hint.len());
@@ -3457,6 +3476,12 @@ impl CasCore {
                 excerpt(&optional, available)
             )));
         }
+
+        let claim_info = if peer_notes.is_empty() {
+            claim_info
+        } else {
+            Some(format!("{}{peer_notes}", claim_info.unwrap_or_default()))
+        };
 
         Ok(Self::success(format!(
             "Started task: {} - {}\nDelivery mode: {}{}{}{}{}{}{}{}{}{}{}{}{}",

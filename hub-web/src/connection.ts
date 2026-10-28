@@ -1004,8 +1004,15 @@ export class HubConnectionSupervisor {
     if (!this.desired || this.lifecycle.phase !== "live") return;
     this.ensureAttachesPending();
     const started = performance.now();
+    // Catalog reads can wait on project stores while the machine socket is
+    // healthy. Refresh the rows independently: their deadline says nothing
+    // about transport liveness. A refused pairing still ends the connection.
+    void this.refreshSessions(AbortSignal.timeout(3_000)).catch(error => {
+      if (error instanceof AuthenticationError && this.desired && this.lifecycle.phase === "live") {
+        this.blockAuthentication(error.kind, error.message);
+      }
+    });
     try {
-      await this.refreshSessions(AbortSignal.timeout(3_000));
       if (this.machineSocketReady && this.machineSocket?.readyState === WebSocket.OPEN) {
         if (this.healthPing) {
           this.missedHeartbeats += 1;
@@ -1018,6 +1025,9 @@ export class HubConnectionSupervisor {
             this.reattachDesired("Machine terminal transport stopped answering", true);
             return;
           }
+          // Keep the outstanding id through the grace period. Replacing it
+          // every tick discarded a delayed but valid pong under host load.
+          return;
         }
         const id = Date.now();
         this.healthPing = { id, startedAt: started };

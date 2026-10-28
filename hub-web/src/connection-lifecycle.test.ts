@@ -601,7 +601,9 @@ describe("Commander live connection lifecycle", () => {
     await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(2));
     expect(connection.snapshot().phase).toBe("live");
     expect(connection.snapshot().degraded).toBe(true);
-    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before);
+    // The scheduled heartbeat now probes the machine even when its catalog
+    // fails; the quality estimate must not add an opportunistic probe.
+    expect(hub.requests.filter(request => request.path === "/v1/machine")).toHaveLength(before + 1);
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
     await vi.waitFor(() => expect(connection.snapshot().missedHeartbeats).toBe(3));
     expect(connection.snapshot().phase).toBe("live");
@@ -1237,8 +1239,8 @@ describe("Commander live connection lifecycle", () => {
     expect(connection.snapshot().latencyMs).toBeUndefined();
     hub.elapse(24);
     socket.receive({ channel: "health", pong: ping });
-    // 17ms for the catalog refresh plus 24ms for the socket's answer.
-    expect(connection.snapshot().latencyMs).toBe(41);
+    // Socket latency excludes the independent 17ms catalog refresh.
+    expect(connection.snapshot().latencyMs).toBe(24);
   });
 });
 

@@ -3242,7 +3242,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .conversation-context .status-agent .status-timeline { margin-left: 0; }
 .conversation-reading, .conversation-context { scrollbar-width: thin; scrollbar-color: var(--ink-mid) var(--color-transparent); }
 .conversation-reading::-webkit-scrollbar, .conversation-context::-webkit-scrollbar { width: var(--space-2); height: var(--space-2); }
-.conversation-reading::-webkit-scrollbar-thumb, .conversation-context::-webkit-scrollbar-thumb { background: var(--ink-mid); border: 2px solid var(--look-glass-strong); border-radius: var(--radius-pill); }
+.conversation-reading::-webkit-scrollbar-thumb, .conversation-context::-webkit-scrollbar-thumb { background: var(--ink-mid); border: 2px solid var(--panel); border-radius: var(--radius-pill); }
 @media (forced-colors: active) {
   .conversation-reading, .conversation-context { scrollbar-color: auto; }
   .release-progress progress { forced-color-adjust: none; background: Canvas; color: Highlight; border: 1px solid CanvasText; }

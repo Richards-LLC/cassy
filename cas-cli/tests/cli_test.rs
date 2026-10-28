@@ -49,6 +49,89 @@ fn test_version() {
 }
 
 #[test]
+fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    for directory in [".claude", "docs/qa", "src"] {
+        std::fs::create_dir_all(root.join(directory)).unwrap();
+    }
+    std::fs::write(root.join(".claude/CODEMAP.md"), "- `src/` - Product flow\n").unwrap();
+    std::fs::write(
+        root.join("docs/qa/journeys.md"),
+        "### FLOW-J1 · Flow\n\n- **Touches:** `src/flow.ts`\n",
+    ).unwrap();
+    std::fs::write(root.join("src/flow.ts"), "export const flow = 0;\n").unwrap();
+    git(&["add", ".claude/CODEMAP.md", "docs/qa/journeys.md", "src/flow.ts"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-qb", "factory/fixture"]);
+    std::fs::write(root.join("src/flow.ts"), "export const flow = 1;\n").unwrap();
+    git(&["add", "src/flow.ts"]);
+    git(&["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "delivery"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    let cas_root = cas::store::init_cas_dir(root).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"legacy-impact-fixture\"\n").unwrap();
+    let target = cas::types::WorkTarget {
+        repo_selector: "project:legacy-impact-fixture".into(),
+        target_branch: "main".into(),
+    };
+    let mut task = cas::types::Task::new("cas-legacy-impact".into(), "Legacy impact".into());
+    task.origin_project = Some("legacy-impact-fixture".into());
+    task.assignee = Some("fixture".into());
+    task.status = cas::types::TaskStatus::InProgress;
+    task.deliverables.work_target = Some(target.clone());
+    task.deliverables.factory_branch_anchor = Some(head);
+    task.deliverables.factory_branch_start = Some(cas::types::FactoryBranchStart {
+        work_target: target,
+        assignee: "fixture".into(),
+        branch: "factory/fixture".into(),
+        base_sha: base,
+    });
+    cas::store::open_task_store_local(&cas_root).unwrap().add(&task).unwrap();
+
+    for selector in [vec!["--task", "cas-legacy-impact"], vec!["--files", "src/flow.ts"]] {
+        let output = cas_cmd(root)
+            .current_dir(root)
+            .args(["qa", "impact"])
+            .args(&selector)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{selector:?}: {}", String::from_utf8_lossy(&output.stderr));
+        let impact: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(impact["source"], "codemap_fallback", "{selector:?}: {impact}");
+        assert_eq!(impact["areas"][0]["prefix"], "src", "{selector:?}: {impact}");
+        assert_eq!(impact["areas"][0]["files"][0], "src/flow.ts", "{selector:?}: {impact}");
+        assert!(impact["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning.as_str().unwrap_or_default().contains("scripts/journeys-for-diff.py")
+        }), "{selector:?}: {impact}");
+    }
+
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("scripts/journeys-for-diff.py"), "raise SystemExit(2)\n").unwrap();
+    git(&["add", "scripts/journeys-for-diff.py"]);
+    let malformed = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "impact", "--files", "src/flow.ts", "--json"])
+        .output()
+        .unwrap();
+    assert!(!malformed.status.success(), "malformed selector must fail closed");
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("legacy journey selector failed"));
+    assert!(malformed.stdout.is_empty(), "failed selector must not print impact JSON");
+}
+
+#[test]
 fn qa_candidate_plan_and_receipt_use_project_artifacts_cas_31fab() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

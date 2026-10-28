@@ -103,11 +103,13 @@ impl CasCore {
             .work_target
             .as_ref()
             .ok_or_else(|| refused("the task has no declared work target"))?;
-        if previous.work_target != *target
+        // A supervisor may retarget this delivery to another lane in the
+        // same repository. Validate its new base below without changing owner.
+        if previous.work_target.repo_selector != target.repo_selector
             || expected.assignee.as_deref() != Some(previous.assignee.as_str())
         {
             return Err(refused(
-                "assignment or work target differs from the recorded start; resolve that recovery first",
+                "assignment or repository differs from the recorded start; resolve that recovery first",
             ));
         }
         let worker = resolve_agent_identity(agents.as_ref(), &previous.assignee)
@@ -240,7 +242,11 @@ impl CasCore {
                 .success(),
             None => true,
         };
-        if same_branch && previous.base_sha == base && anchor_still_reachable {
+        if same_branch
+            && previous.work_target == *target
+            && previous.base_sha == base
+            && anchor_still_reachable
+        {
             return Ok(Self::success(format!(
                 "Task {id} already records delivery branch {branch}; its base and audit are unchanged."
             )));

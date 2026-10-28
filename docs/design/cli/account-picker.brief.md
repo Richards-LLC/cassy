@@ -10,6 +10,10 @@
 
 Exact folder aliases win before unique display-email matches. Ambiguous and unknown names refuse before provider launch or worker spawn. Only an explicit login flow creates an account folder. `main` and the active folder are never hidden; an active duplicate moves the cursor to its canonical row.
 
+Duplicate-alias exception: only a folder with the same provider identity as a listed folder is hidden. One email that owns two subscriptions (different account or workspace IDs) is two rows, each naming its folder alias. A hidden duplicate keeps its alias as a launch key (`cas claude <alias>`).
+
+Type-ahead: an answer typed together with the new-login email reaches the duplicate-account question. inquire reads keys ahead through crossterm 0.25, so the chooser drains that queue after the email prompt and the question echoes the consumed line; without type-ahead the question reads stdin, and EOF and Ctrl-C cancel as before.
+
 Colour sits on the two one-cell marks only: `✓` green (40,145,75) and `⚠` amber (176,112,16). Selection is the `>` cursor plus bold in the default foreground, replacing inquire's cyan, which measured 3.37:1 on white and 2.48:1 on Solarized light. `NO_COLOR` or a pipe emits no SGR; a non-UTF-8 locale uses `[OK]` / `[WARN]` and no em dash. After Enter the answer line repeats only the account.
 
 Before (operator capture, 3.86): a `main` row duplicating daniel, a never-used `grok` row, 5-hour lines above weekly ones, and the recommendation as a third detail line below the fold of the row.

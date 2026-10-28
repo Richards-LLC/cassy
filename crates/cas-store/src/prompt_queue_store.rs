@@ -7431,6 +7431,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
             let tx = crate::shared_db::ImmediateTx::new(&conn)?;
+            // A transcript-backed body observation may finish an active
+            // transport claim. No other source gains that authority, and an
+            // intervening hook/poll receipt remains stronger and unchanged.
             let changed = tx.execute(
                 "INSERT INTO prompt_queue_recipient_seen
                      (prompt_id, recipient, seen_at, source)
@@ -7438,8 +7441,10 @@ impl PromptQueueStore for SqlitePromptQueueStore {
                  ON CONFLICT(prompt_id, recipient) DO UPDATE SET
                      seen_at = excluded.seen_at,
                      source = excluded.source
-                 WHERE prompt_queue_recipient_seen.source = 'transport_delivered'
-                   AND excluded.source <> 'transport_delivered'",
+                 WHERE (prompt_queue_recipient_seen.source = 'transport_delivered'
+                        AND excluded.source <> 'transport_delivered')
+                    OR (prompt_queue_recipient_seen.source = 'transport_claimed'
+                        AND excluded.source = 'observed_wake')",
                 params![
                     prompt_id,
                     recipient,

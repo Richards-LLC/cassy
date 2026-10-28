@@ -342,9 +342,15 @@ fn measure_real_transcript() {
     let started = std::time::Instant::now();
     let (newest, mut has_earlier, mut cursor) = page(&mut index, &scope, &stores, &path, None, 100);
     let first_page = started.elapsed();
+    let mut typed_tools = newest.iter().filter(|event| event.tool.is_some()).count();
+    let mut lifecycles = newest.iter().filter(|event| event.lifecycle.is_some()).count();
+    let mut sample = newest.iter().find(|event| event.tool.is_some() && event.lifecycle.is_some()).cloned();
     let (mut pages, mut events) = (1, newest.len());
     while has_earlier {
         let (older, more, next) = page(&mut index, &scope, &stores, &path, cursor.as_deref(), 100);
+        typed_tools += older.iter().filter(|event| event.tool.is_some()).count();
+        lifecycles += older.iter().filter(|event| event.lifecycle.is_some()).count();
+        if sample.is_none() { sample = older.iter().find(|event| event.tool.is_some() && event.lifecycle.is_some()).cloned(); }
         (pages, events, has_earlier, cursor) = (pages + 1, events + older.len(), more, next);
     }
     let all_pages = started.elapsed();
@@ -364,6 +370,8 @@ fn measure_real_transcript() {
         all_pages.as_millis(),
         details.as_millis()
     );
+    println!("schema_version={} typed_tools={typed_tools} lifecycles={lifecycles} sample={}", WORK_EVENT_SCHEMA_VERSION, serde_json::to_string(&sample).unwrap());
+    assert!(typed_tools > 0 && lifecycles > 0, "real transcript must exercise typed tools and lifecycle fields");
     assert_eq!(before, after);
 }
 

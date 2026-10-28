@@ -318,9 +318,10 @@ impl TranscriptIndex {
     }
 
     fn annotate_tool(&mut self, name: &str, input: &Value, call: Option<&str>) {
-        let parent = if name.rsplit('.').next() == Some("write_stdin") {
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let parent = if matches!(short, "write_stdin" | "TaskOutput") {
             input
-                .get("session_id")
+                .get(if short == "TaskOutput" { "task_id" } else { "session_id" })
                 .and_then(session_key)
                 .and_then(|id| self.command_sessions.get(&id).copied())
         } else {
@@ -781,12 +782,17 @@ fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
         });
         return (code, session);
     }
+    let value = value.get("task").unwrap_or(value);
     let code = value
         .get("exit_code")
         .or_else(|| value.get("exitCode"))
         .or_else(|| value.pointer("/metadata/exit_code"))
         .and_then(Value::as_i64);
-    let session = value.get("session_id").and_then(session_key);
+    let session = value.get("session_id").and_then(session_key)
+        .or_else(|| (value.get("isAsync").and_then(Value::as_bool) == Some(true))
+            .then(|| value.get("backgroundTaskId").and_then(session_key)).flatten())
+        .or_else(|| (value.get("status").and_then(Value::as_str) == Some("running"))
+            .then(|| value.get("task_id").and_then(session_key)).flatten());
     if code.is_some() || session.is_some() {
         return (code, session);
     }

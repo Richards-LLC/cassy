@@ -726,7 +726,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .and(query_param("project_id", "github.com/source/blue"))
         .and(header("Authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&bad_proof))
-        .with_priority(1)
+        .with_priority(2)
         .mount_as_scoped(&server)
         .await;
     let (bad_proof_root, bad_proof_service) = fresh_recipient(&mut env);
@@ -801,7 +801,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     Mock::given(method("GET"))
         .and(path("/download"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong bytes"))
-        .with_priority(0)
+        .with_priority(1)
         .mount(&server)
         .await;
     let error = owner_service
@@ -841,7 +841,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
                 {"team_id":"team-source","canonical_id":"github.com/source/blue","scope":"team"}
             ]})),
         )
-        .with_priority(0)
+        .with_priority(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -849,7 +849,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .and(query_param("project_id", "github.com/source/blue"))
         .and(header("Authorization", "Bearer fixture-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(&forged_owner))
-        .with_priority(0)
+        .with_priority(1)
         .mount(&server)
         .await;
     let (forged_root, forged_service) = fresh_recipient(&mut env);

@@ -1087,6 +1087,42 @@ mod large_artifact_staging_tests {
         }
     }
 
+    #[test]
+    fn session_start_resume_replays_only_changed_context_cas_ea0c() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = staging_env("worker");
+        env.set("CAS_AGENT_NAME", "resume-worker");
+        let mut input = session_input(tmp.path().to_str().unwrap());
+        input.source = Some("startup".into());
+        let first = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        input.source = Some("resume".into());
+        let resumed = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        eprintln!("SESSION_REPLAY first_bytes={} resume_bytes={}", first.len(), resumed.len());
+        assert!(resumed.len() < first.len() / 2, "unchanged resume repeats context: {resumed}");
+        assert!(!resumed.contains("# Factory Worker"));
+
+        // Dynamic safety context must be evaluated even when base guidance is cached.
+        env.set("CAS_CLONE_PATH", tmp.path().join("other-worktree").to_str().unwrap());
+        let warning = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(warning.contains("WORKTREE"), "resume lost current safety warning: {warning}");
+        env.remove("CAS_CLONE_PATH");
+
+        // Changed instructions invalidate the retained base, even in the same session.
+        std::fs::write(tmp.path().join("AGENTS.md"), "New project guidance").unwrap();
+        let changed = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+        assert!(changed.contains("# Factory Worker"));
+        for source in ["compact", "clear", "startup"] {
+            input.source = Some(source.into());
+            let reset = additional_context(handle_session_start(&input, Some(tmp.path())).unwrap());
+            assert!(reset.contains("# Factory Worker"), "{source} needs a full reload");
+        }
+        input.source = Some("resume".into());
+        input.session_id = "new-session".into();
+        assert!(additional_context(handle_session_start(&input, Some(tmp.path())).unwrap()).contains("# Factory Worker"));
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        assert!(!additional_context(handle_session_start(&input, Some(tmp.path())).unwrap()).contains("unchanged"));
+    }
+
     /// WP2 (audit cas-1660 M30): the assembled SessionStart payload must fit
     /// the 9,216 B budget — and so Claude Code's 10,000-character inline hook
     /// cap — for every role, on a store that carries the sections that used

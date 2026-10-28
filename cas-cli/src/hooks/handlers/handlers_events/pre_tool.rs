@@ -5209,7 +5209,8 @@ fn is_duration_word(word: &str) -> bool {
 fn operator_policy_command_textual(command: &str) -> bool {
     static SET_WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let set_word = SET_WORD.get_or_init(|| {
-        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)").expect("valid set pattern")
+        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)")
+            .expect("valid set pattern")
     });
     let names_policy = (command.contains("factory.write_roots") && set_word.is_match(command))
         || command.contains("grant-write")
@@ -5218,7 +5219,21 @@ fn operator_policy_command_textual(command: &str) -> bool {
         return false;
     }
     let statements = shell_statement_words(command);
-    statements.is_empty()
+    let clipboard = statements.iter().any(|words| {
+        matches!(
+            words.first().map(String::as_str),
+            Some("pbcopy" | "wl-copy" | "xclip")
+        )
+    });
+    // A literal clipboard sink handles data, but never sanctions surrounding
+    // output redirections, substitutions or shell groups. Inspect tokens with
+    // quoted text/heredoc bodies kept inert; do not exempt the whole pipeline.
+    let clipboard_effects = clipboard
+        && factory_shell_tokens(&shell_command_without_heredoc_bodies(command))
+            .iter()
+            .any(|token| matches!(token, ShellToken::Operator('>' | '(' | ')')));
+    clipboard_effects
+        || statements.is_empty()
         || !statements
             .iter()
             .all(|words| !runs_substitution(words) && read_only_statement(words))
@@ -5235,9 +5250,9 @@ fn runs_substitution(words: &[String]) -> bool {
         .any(|word| word.contains("$(") || word.contains('`') || word.contains("<(") || word.contains(">("))
 }
 
-/// A statement that only reads or prints: it cannot change the policy by
-/// itself (a printed command piped into a shell has the shell as another,
-/// non-read-only statement).
+/// A statement that only reads or prints (including literal clipboard data):
+/// it cannot change the policy by itself. A printed command piped into a
+/// shell has the shell as another, non-read-only statement.
 fn read_only_statement(words: &[String]) -> bool {
     let Some(index) = unwrapped_command_index(words) else {
         return words.is_empty();
@@ -5250,7 +5265,9 @@ fn read_only_statement(words: &[String]) -> bool {
     match words[index].as_str() {
         name @ ("grep" | "egrep" | "fgrep" | "rg" | "cat" | "head" | "tail" | "wc" | "sort"
         | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd" | "true" | "false"
-        | "test" | "[") => index == 0 && policy_reader_flags(name, args),
+        | "test" | "[" | "pbcopy" | "wl-copy" | "xclip") => {
+            index == 0 && policy_reader_flags(name, args)
+        }
         "set" => index == 0 && policy_set_flags(args),
         "git" => index == 0 && policy_git_flags(args),
         "cas" => {
@@ -5513,6 +5530,11 @@ fn policy_reader_flags(name: &str, args: &[String]) -> bool {
         ),
         "echo" => (&["-n", "-e", "-E"], &[], false),
         "printf" | "true" | "false" => (&[], &[], false),
+        // Bare output-only clipboard programs, with known data/format flags.
+        // Wrappers and executable paths remain outside this exception.
+        "pbcopy" => (&[], &["-pboard"], false),
+        "wl-copy" => (&["-n", "--trim-newline"], &["-t", "--type"], false),
+        "xclip" => (&["-i", "-in"], &["-selection"], false),
         "cd" | "pwd" => (&["-L", "-P"], &[], false),
         "test" | "[" => (
             &[
@@ -7618,8 +7640,14 @@ mod workspace_contract_tests {
             let out = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
             let value = serde_json::to_value(out).unwrap();
             (
-                value["hookSpecificOutput"]["permissionDecision"].as_str().unwrap_or("").to_string(),
-                value["hookSpecificOutput"]["permissionDecisionReason"].as_str().unwrap_or("").to_string(),
+                value["hookSpecificOutput"]["permissionDecision"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
             )
         };
         for command in [
@@ -7677,7 +7705,10 @@ mod workspace_contract_tests {
                 format!("printf '%s' '{mutation}' | wl-copy 2> errors.txt"),
             ] {
                 let (status, reason) = decision(&invocation);
-                assert_eq!(status, "deny", "execution stays closed: {invocation}: {reason}");
+                assert_eq!(
+                    status, "deny",
+                    "execution stays closed: {invocation}: {reason}"
+                );
                 assert!(reason.contains("OPERATOR-ONLY"), "{invocation}: {reason}");
             }
         }

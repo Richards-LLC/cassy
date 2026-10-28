@@ -8953,7 +8953,7 @@ impl CasCore {
                             task.deliverables.factory_branch_anchor.as_deref(),
                         )
                         && let Ok(receipt_sha) = resolve_task_commit_receipt_sha(&close_project_root, receipt)
-                        && receipt_sha != tip.as_str()
+                        && receipt_sha.as_str() != tip
                         && git_commit_is_ancestor(&close_project_root, &receipt_sha, tip)
                         && git_commit_is_ancestor(&close_project_root, recorded, tip)
                         && current_factory_branch_receipt_for_identity(&close_project_root, &task, tip).is_some()

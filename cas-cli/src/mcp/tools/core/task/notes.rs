@@ -16,7 +16,7 @@ pub(crate) fn note_notification_ids(text: &str) -> Vec<i64> {
 impl CasCore {
     pub async fn cas_task_notes_read(
         &self,
-        Parameters(req): Parameters<IdRequest>,
+        Parameters(req): Parameters<TaskNotesReadRequest>,
     ) -> Result<CallToolResult, McpError> {
         let task_store = self.open_task_store()?;
         let task = task_store.get(&req.id).map_err(|e| McpError {
@@ -25,19 +25,28 @@ impl CasCore {
             data: None,
         })?;
 
-        if task.notes.is_empty() {
-            return Ok(Self::success(format!(
-                "No notes recorded for task {}",
-                task.id
-            )));
-        }
-
-        Ok(Self::success(format!(
-            "Notes for task {}\n{}\n\n{}",
-            task.id,
-            "=".repeat(task.id.len() + 15),
-            task.notes
-        )))
+        let full = if task.notes.is_empty() {
+            format!("No notes recorded for task {}", task.id)
+        } else {
+            format!(
+                "Notes for task {}\n{}\n\n{}",
+                task.id,
+                "=".repeat(task.id.len() + 15),
+                task.notes
+            )
+        };
+        let summary = if task.notes.is_empty() {
+            full.clone()
+        } else {
+            format!(
+                "Notes for task {}\n{}",
+                task.id,
+                super::query::task_show_notes(&task.notes, &task.id)
+            )
+        };
+        Ok(Self::success(super::query::render_task_read(
+            &full, &summary, &task.id, "notes", &req.read,
+        )?))
     }
 
     pub async fn cas_task_notes(
@@ -132,17 +141,19 @@ impl CasCore {
 
         // prepare_note adds only committed ledger records after the caller's
         // raw note has passed the marker rejection above.
-        let append = if formatted_note.lines().any(cas_store::task_note_markers::is_reserved_line) {
+        let append = if formatted_note
+            .lines()
+            .any(cas_store::task_note_markers::is_reserved_line)
+        {
             task_store.append_trusted_note(&req.id, &formatted_note)
         } else {
             task_store.append_note(&req.id, &formatted_note)
         };
-        append
-            .map_err(|e| McpError {
-                code: ErrorCode::INTERNAL_ERROR,
-                message: Cow::from(format!("Failed to append task note: {e}")),
-                data: None,
-            })?;
+        append.map_err(|e| McpError {
+            code: ErrorCode::INTERNAL_ERROR,
+            message: Cow::from(format!("Failed to append task note: {e}")),
+            data: None,
+        })?;
 
         crate::mcp::tools::service::mutation_receipt::task_terminal_committed(&req.id);
         if let Err(e) = self.record_task_note_activity(

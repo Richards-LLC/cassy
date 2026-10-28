@@ -3212,6 +3212,21 @@ slots. Without enough identity to derive a slot, registration falls back to
 `CAS_FACTORY_ID`, then the agent's factory session. Local
 `metadata.factory_session` still names the actual launch for fleet routing.
 
+## Bounded MCP task reads
+
+`task show` (including `get`), `task notes` reads and `task start` default to
+responses of at most 2,000 UTF-8 bytes. Show/start include the current scope;
+large note histories keep the latest decision, proof and checkpoint with cursors.
+An ellipsis marks a clipped field: read its complete instructions before acting.
+
+For show/notes, `full=true` returns complete text. `offset=0 limit=1600`
+starts a byte page of that same text; follow its `next=` cursor until `end`.
+The page header is separate from the body, and concatenated bodies reproduce
+the full response. Limits clamp to 4–1,600 body bytes; cursors must be UTF-8
+boundaries. Note summary cursors address the full `task notes` response.
+For start, `brief=false` (or `full=true`) explicitly includes sibling and epic
+context. Start's default still performs the same claim and epic lifecycle work.
+
 ## Durable task artifacts
 
 `factory.artifacts_root` is the shared parent (default `~/.cas/artifacts`).

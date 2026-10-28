@@ -179,14 +179,26 @@ pub struct TaskRequest {
     #[serde(default)]
     pub id: Option<String>,
 
-    /// Context-affordable task-start response. When true for `action=start`,
-    /// return only bounded notes from the task itself and omit sibling/epic
-    /// context.
+    /// Brief start is the default; false explicitly includes sibling/epic context.
     #[schemars(
-        description = "For start: return a size-bounded response with own-task notes only, omitting sibling and epic context"
+        description = "For start: bounded own-task response by default; false includes sibling/epic context"
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub brief: Option<bool>,
+
+    /// Explicit complete read; start accepts this as brief=false.
+    #[schemars(
+        description = "For show/get/notes: return complete text. For start: include sibling/epic context. Defaults to bounded reads (2000 UTF-8 bytes)."
+    )]
+    #[serde(default, deserialize_with = "deser::option_bool")]
+    pub full: Option<bool>,
+
+    /// Byte cursor into the complete show/notes text.
+    #[schemars(
+        description = "For show/get/notes: UTF-8 byte offset into full text; follow next= from the previous page"
+    )]
+    #[serde(default, deserialize_with = "deser::option_usize")]
+    pub offset: Option<usize>,
 
     /// Title (for create)
     #[schemars(description = "Task title for create")]
@@ -296,10 +308,11 @@ pub struct TaskRequest {
     pub state_patch: Option<serde_json::Value>,
 
     /// For update: supervisor-only pinned batch receipt; empty clears staging.
-    #[schemars(description = "For update: registered-supervisor-only integration batch ref@SHA containing the parked delivery; empty clears staging. Ordinary close recognizes an exact batch squash on the target.")]
+    #[schemars(
+        description = "For update: registered-supervisor-only integration batch ref@SHA containing the parked delivery; empty clears staging. Ordinary close recognizes an exact batch squash on the target."
+    )]
     #[serde(default)]
     pub merged_into: Option<String>,
-
 
     /// Note type (for notes action): progress, blocker, decision, discovery, question
     #[schemars(
@@ -317,7 +330,9 @@ pub struct TaskRequest {
     pub reason: Option<String>,
 
     /// Explicit per-attempt declaration for a helper with no Git delivery.
-    #[schemars(description = "close: declare no delivery; needs a reason, a registered caller and proof of no delivery, task commits or unmerged lane work. Skips delivery gates only; verification still applies; excludes other close receipts.")]
+    #[schemars(
+        description = "close: declare no delivery; needs a reason, a registered caller and proof of no delivery, task commits or unmerged lane work. Skips delivery gates only; verification still applies; excludes other close receipts."
+    )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub no_delivery: Option<bool>,
 
@@ -368,10 +383,14 @@ pub struct TaskRequest {
     )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub evidence_only: Option<bool>,
-    #[schemars(description = "Existing durable evidence beneath configured [factory] artifacts_root/<project-key>/<task-id>/; required with evidence_only=true.")]
+    #[schemars(
+        description = "Existing durable evidence beneath configured [factory] artifacts_root/<project-key>/<task-id>/; required with evidence_only=true."
+    )]
     #[serde(default)]
     pub evidence_only_artifact_path: Option<String>,
-    #[schemars(description = "Portable PR URL or branch:factory/name audit reference for intentionally unmerged evidence; required with evidence_only=true.")]
+    #[schemars(
+        description = "Portable PR URL or branch:factory/name audit reference for intentionally unmerged evidence; required with evidence_only=true."
+    )]
     #[serde(default)]
     pub evidence_only_reference: Option<String>,
 
@@ -489,17 +508,23 @@ pub struct TaskRequest {
     pub to_agent: Option<String>,
 
     /// Copy inherited task work to the receiver's own per-task branch.
-    #[schemars(description = "transfer: fast-forward clean registered receiver to delivery tip on factory/<receiver>-<task>; rebind anchor. Refuses dirty/divergent/foreign repos; keeps original branch.")]
+    #[schemars(
+        description = "transfer: fast-forward clean registered receiver to delivery tip on factory/<receiver>-<task>; rebind anchor. Refuses dirty/divergent/foreign repos; keeps original branch."
+    )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub adopt_branch: Option<bool>,
 
     /// Existing replacement delivery branch approved by the task's supervisor.
-    #[schemars(description = "rebind_branch: assignee's checked-out branch. Live registered supervisor + non-empty reason required; audits old tip; no Git/assignment/target changes.")]
+    #[schemars(
+        description = "rebind_branch: assignee's checked-out branch. Live registered supervisor + non-empty reason required; audits old tip; no Git/assignment/target changes."
+    )]
     #[serde(default)]
     pub branch: Option<String>,
 
-    /// Limit for list operations
-    #[schemars(description = "Maximum items to return")]
+    /// Item limit for lists, byte budget for show/notes pages.
+    #[schemars(
+        description = "Maximum list items; for show/get/notes: page body bytes (4..1600, default 1600), response <=2000 bytes"
+    )]
     #[serde(default, deserialize_with = "deser::option_usize")]
     pub limit: Option<usize>,
 
@@ -623,7 +648,9 @@ pub struct TaskRequest {
     pub target_repo: Option<String>,
 
     /// Expected integration branch in the target repository.
-    #[schemars(description = "Expected integration branch (create/update). When target_repo is omitted, update preserves an existing repository binding or defaults a targetless task to the current project repository.")]
+    #[schemars(
+        description = "Expected integration branch (create/update). When target_repo is omitted, update preserves an existing repository binding or defaults a targetless task to the current project repository."
+    )]
     #[serde(default)]
     pub target_branch: Option<String>,
 
@@ -1044,7 +1071,9 @@ pub struct AgentRequest {
     pub blocker: Option<bool>,
 
     /// Suppress an idle supervisor wake while retaining ordinary inbox delivery.
-    #[schemars(description = "message: false keeps this directed message inbox-only; acknowledgements and broadcasts never wake")]
+    #[schemars(
+        description = "message: false keeps this directed message inbox-only; acknowledgements and broadcasts never wake"
+    )]
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub wake: Option<bool>,
 
@@ -1065,7 +1094,9 @@ pub struct AgentRequest {
     pub kind: Option<String>,
 
     /// Quick-reply choices for a Commander ask.
-    #[schemars(description = "message target=operator kind=ask: non-empty quick-reply labels; the selected label returns with in_reply_to")]
+    #[schemars(
+        description = "message target=operator kind=ask: non-empty quick-reply labels; the selected label returns with in_reply_to"
+    )]
     #[serde(default)]
     pub options: Option<Vec<String>>,
 
@@ -1338,16 +1369,22 @@ mod worker_delivery_request_tests {
         let request: TaskRequest = serde_json::from_value(serde_json::json!({
             "action": "close", "id": "cas-helper", "reason": "Simulator released",
             "no_delivery": "true",
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(request.no_delivery, Some(true));
         assert!(request.execution_note.is_none());
         assert!(request.external_ref.is_none());
         let schema = serde_json::to_value(schemars::schema_for!(TaskRequest)).unwrap();
-        let description = schema["properties"]["no_delivery"]["description"].as_str().unwrap();
+        let description = schema["properties"]["no_delivery"]["description"]
+            .as_str()
+            .unwrap();
         assert!(description.contains("verification still applies"));
-        assert!(serde_json::from_value::<TaskRequest>(serde_json::json!({
-            "action": "close", "no_delivery": {"reason": "untyped"},
-        })).is_err());
+        assert!(
+            serde_json::from_value::<TaskRequest>(serde_json::json!({
+                "action": "close", "no_delivery": {"reason": "untyped"},
+            }))
+            .is_err()
+        );
     }
 
     #[test]

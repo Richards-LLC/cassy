@@ -84,7 +84,11 @@ async fn test_task_create_and_start() {
         id: task_id.to_string(),
     };
     let start_result = service
-        .cas_task_start(Parameters(start_req))
+        .cas_task_start_with_options(Parameters(TaskStartRequest {
+            id: start_req.id,
+            brief: Some(false),
+            force: None,
+        }))
         .await
         .expect("task_start should succeed");
 
@@ -479,6 +483,10 @@ async fn test_task_create_with_light_depth_shows_light() {
     let show = extract_text(
         service
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id,
                 with_deps: false,
             }))
@@ -507,6 +515,10 @@ async fn test_task_create_without_depth_defaults_to_deep() {
     let show = extract_text(
         service
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id,
                 with_deps: false,
             }))
@@ -585,6 +597,10 @@ async fn test_task_update_depth_to_light() {
     let show = extract_text(
         service
             .cas_task_show(Parameters(TaskShowRequest {
+                read: cas::mcp::tools::TaskReadOptions {
+                    full: true,
+                    ..Default::default()
+                },
                 id,
                 with_deps: false,
             }))

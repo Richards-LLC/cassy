@@ -16,16 +16,18 @@ Before (operator capture, 3.86): a `main` row duplicating daniel, a never-used `
 
 ## Critique
 
-terminal-qa: PASS claude-list-profiles · 11 runs · 0 fail · 0 warn · 0 allowed · cas-1e30/terminal-qa/claude-list-profiles/report.json
+terminal-qa: PASS account-picker-claude · 11 runs · 0 fail · 0 warn · 0 allowed · cas-715d/terminal-qa/after-claude/report.json
 
-terminal-qa: PASS codex-list-profiles · 11 runs · 0 fail · 0 warn · 0 allowed · cas-1e30/terminal-qa/codex-list-profiles/report.json
+terminal-qa: PASS account-picker-codex · 11 runs · 0 fail · 0 warn · 0 allowed · cas-715d/terminal-qa/after-codex/report.json
+
+Before, the same fixture on installed 3.86: FAIL claude 33 and codex 41 findings (selection and prompt contrast, cancel mark, literal ellipsis).
 
 | Dimension | Score | Evidence |
 | --- | --- | --- |
-| Hierarchy | 4 | The launch syntax is first; displayed emails resolve to real accounts and the aliases are explicit. |
-| Fit | 4 | Same-email rows differ by alias; interactive choice text reserves alias/login space before capacity. |
-| Craft | 4 | Picker text is bounded to 76 cells on the fixture; full expiry details occupy their own bounded listing lines. |
-| Theme safety | 5 | Four palettes, NO_COLOR, pipe and C locale pass for both providers; 80-column captures were reviewed. |
-| Machine contract | 5 | Shared registry identity is typed; exact aliases precede unique email matches and ambiguous/unknown names refuse. |
+| Hierarchy | 5 | The cursor and `✓ recommended` land on the policy's row; each row's first detail is weekly `% left` and reset. |
+| Fit | 4 | Four two-line account rows replace six of up to four lines; every line is at most 76 cells, so the new-login row stays on screen. |
+| Craft | 4 | One identity per row; 5-hour data appears only as an excluding `⚠` tag; unknown capacity names its reason. |
+| Theme safety | 5 | Four palettes, NO_COLOR (no SGR), pipe (no prompt) and C locale (`[OK]`/`[WARN]`) pass for both providers with no allowances. |
+| Machine contract | 5 | Selection keys are unchanged: Enter launched the preselected folder and Down+Enter the next shown folder in real PTYs; pipes keep the ambient account. |
 
-Scored by jolly-cardinal-26 on 2026-10-27 at 5a50c3c79. Both real PTY pickers showed distinct aliases, and Down+Enter selected the alt folder. Full capacity copy is available with --list-profiles; an expired window never retains a percentage as current. The prior 93-column Codex listing now fits 80 columns. Exact delivery-tip captures are refreshed in task artifacts after this documentation commit.
+Scored on 2026-10-28 against candidate f708a9e (sha256 65f26f5c…) with a disposable-HOME fixture that reproduces the operator's screenshot: no credential files and no provider API calls. A pane that inherited `NO_COLOR=1 TERM=dumb` gets no SGR by design; `env -u NO_COLOR TERM=xterm-256color cas claude` restores colour for that one launch.

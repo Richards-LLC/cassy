@@ -181,6 +181,10 @@ pub(crate) fn file_pointer(work: &PointerWork) -> bool {
     if !same_message(&row, &work.row) || (row.target != "all_workers" && row.acked_at.is_some()) {
         return false;
     }
+    let Ok(Some(delivery)) = queue.recipient_delivery(row.id, &work.recipient) else {
+        return false;
+    };
+    let row = delivery.into_prompt();
     let pane = &work.inbox_target;
     let view = work.primary.view_for_config_dir(work.config_dir.as_deref());
     let view = view.filter(|view| {

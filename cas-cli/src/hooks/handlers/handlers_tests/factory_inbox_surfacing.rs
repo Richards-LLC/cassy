@@ -1773,7 +1773,7 @@ fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeate
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
     assert_eq!(
         store.recipient_receipt(kept_id, WORKER).unwrap(),
-        Some(cas_store::SurfacingSource::HookSurfaced)
+        Some(cas_store::SurfacingSource::InboxPoll)
     );
     assert_eq!(
         store.recipient_receipt(acked_id, WORKER).unwrap(),

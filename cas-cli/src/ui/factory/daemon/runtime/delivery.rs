@@ -1508,8 +1508,15 @@ impl FactoryDaemon {
                 }
                 // cas-1f0c: a queued row's body reaches a Claude Teams
                 // recipient through the CAS hook only; its inbox gets a pointer.
-                let inbox_text =
-                    queued.map(|(id, body)| claude_teams_inbox_text(text, body, source, id));
+                let inbox_text = if let Some((id, body)) = queued {
+                    let queue = crate::store::open_prompt_queue_store(self.app.cas_dir())?;
+                    let delivery = queue.recipient_delivery(id, target)?
+                        .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?;
+                    Some(match delivery {
+                        cas_store::RecipientDelivery::Full(_) => claude_teams_inbox_text(text, body, source, id),
+                        cas_store::RecipientDelivery::Reference(row) => row.prompt,
+                    })
+                } else { None };
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);
                 let write = if let Some(native) = completed_native {
                     native.result

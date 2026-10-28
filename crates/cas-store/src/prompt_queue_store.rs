@@ -13,6 +13,8 @@ use std::sync::{Arc, Mutex};
 use crate::recording_store::capture_message_event;
 use crate::shared_db::ImmediateTx;
 use crate::supervisor_queue_store::NotificationPriority;
+mod recipient_delivery;
+pub use recipient_delivery::RecipientDelivery;
 mod schema;
 pub use schema::{
     PROMPT_QUEUE_HEALTH_SCHEMA_DETECT, missing_prompt_queue_columns,
@@ -652,6 +654,16 @@ CREATE TABLE IF NOT EXISTS prompt_queue_recipient_seen (
     recipient TEXT NOT NULL,
     seen_at TEXT NOT NULL,
     source TEXT,
+    PRIMARY KEY (prompt_id, recipient)
+);
+
+-- Explicit recipient intent; never inferred from a receipt or later activity.
+CREATE TABLE IF NOT EXISTS prompt_queue_recipient_ack (
+    prompt_id INTEGER NOT NULL,
+    recipient TEXT NOT NULL,
+    settled_at TEXT NOT NULL,
+    disposition TEXT NOT NULL,
+    reply_prompt_id INTEGER,
     PRIMARY KEY (prompt_id, recipient)
 );
 
@@ -3173,6 +3185,14 @@ pub trait PromptQueueStore: Send + Sync {
 
     /// Acknowledge receipt of a prompt (target agent confirms delivery)
     fn ack(&self, prompt_id: i64) -> Result<()>;
+
+    /// Settle only the authenticated recipient's copies, including its aliases.
+    /// A reply must already exist durably; it is never inferred from activity.
+    fn acknowledge_for_recipients(&self, prompt_id: i64, recipients: &[String], reply_prompt_id: Option<i64>) -> Result<()>;
+
+    /// Read-only rendering policy for transports; provisional handoffs remain full.
+    fn recipient_delivery(&self, prompt_id: i64, recipient: &str) -> Result<Option<RecipientDelivery>>;
+
 
     /// cas-9c34: unacknowledged rows to any of `targets` in `factory_session`
     /// whose body contains `needle`, newest first. A caller that acted on
@@ -8064,6 +8084,17 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         Ok(rows)
     }
 
+    fn acknowledge_for_recipients(&self, prompt_id: i64, recipients: &[String], reply_prompt_id: Option<i64>) -> Result<()> {
+        self.settle_recipient_message(prompt_id, recipients, reply_prompt_id)
+    }
+
+    fn recipient_delivery(&self, prompt_id: i64, recipient: &str) -> Result<Option<RecipientDelivery>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        let Some(row) = Self::queued_prompt_on_conn(&conn, prompt_id)? else { return Ok(None); };
+        if row.target != recipient && row.target != "all_workers" { return Ok(None); }
+        Self::recipient_delivery_on_conn(&conn, row, recipient, false).map(Some)
+    }
+
     fn ack(&self, prompt_id: i64) -> Result<()> {
         crate::shared_db::with_write_retry(|| {
             let conn = crate::shared_db::lock_connection(&self.conn)?;
@@ -10025,7 +10056,11 @@ impl SqlitePromptQueueStore {
             } else {
                 (Utc::now() - chrono::Duration::seconds(PROMPT_QUEUE_STALE_TTL_SECS)).to_rfc3339()
             };
-            let explicit_ack_sql = if named_read { "" } else { UNSURFACED_UNLESS_EXPLICIT_ACK_SQL };
+            let explicit_ack_sql = if named_read { String::new() } else {
+                format!("{UNSURFACED_UNLESS_EXPLICIT_ACK_SQL} AND NOT EXISTS (
+                    SELECT 1 FROM prompt_queue_recipient_ack ack
+                    WHERE ack.prompt_id = q.id AND ack.recipient = {})", sql_literal(recipient))
+            };
             let terminal_stage_sql = if named_read {
                 // cas-66c9: the daemon's stale-TTL sweep retains the row but
                 // marks it abandoned with a cas-d047 detail. An explicit read
@@ -10257,6 +10292,15 @@ impl SqlitePromptQueueStore {
                     Self::hydrate_recovery_reference_in_tx(&tx, prompt)?;
                 }
             }
+            let mut reference_ids = std::collections::HashSet::new();
+            let prompts = prompts.into_iter().map(|prompt| {
+                let delivery = Self::recipient_delivery_on_conn(&tx, prompt, recipient, named_read)?;
+                if !delivery.is_full() { reference_ids.insert(match &delivery {
+                    RecipientDelivery::Reference(row) => row.id, _ => unreachable!(),
+                }); }
+                Ok(delivery.into_prompt())
+            }).collect::<Result<Vec<_>>>()?;
+
             // cas-1f0c: keep only what the caller can render whole; a row
             // that does not fit gets no receipt and stays unread.
             let mut over_budget: Vec<(i64, usize)> = Vec::new();
@@ -10307,6 +10351,7 @@ impl SqlitePromptQueueStore {
                 let resurfaces_poll =
                     matches!(transport, TransportEligibility::PolledBefore(_));
                 for prompt in &prompts {
+                    if reference_ids.contains(&prompt.id) { continue; }
                     stmt.execute(params![
                         prompt.id,
                         recipient,
@@ -10336,7 +10381,7 @@ impl SqlitePromptQueueStore {
                         // recipient's turn must not mark it confirmed for the
                         // peers that have not seen it (its read state lives in
                         // the per-recipient receipt table).
-                        if prompt.target == "all_workers" {
+                        if prompt.target == "all_workers" || reference_ids.contains(&prompt.id) {
                             continue;
                         }
                         ack_stmt.execute(params![seen_at, prompt.id])?;
@@ -10353,6 +10398,12 @@ impl SqlitePromptQueueStore {
                 // is per-recipient, so one drain must not consume the row for
                 // peers.
                 for prompt in &prompts {
+                    if reference_ids.contains(&prompt.id) {
+                        tx.execute("UPDATE prompt_queue_recipient_seen SET poll_settled = 'repeat reference rendered'
+                            WHERE prompt_id = ?1 AND recipient = ?2 AND source = 'inbox_poll'",
+                            params![prompt.id, recipient])?;
+                        continue;
+                    }
                     if prompt.target == "all_workers" {
                         continue;
                     }

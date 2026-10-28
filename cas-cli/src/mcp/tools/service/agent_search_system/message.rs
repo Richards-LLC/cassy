@@ -2989,7 +2989,10 @@ impl CasService {
                 })?;
         }
         if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_acks) {
-            queue.ack(notification_id).map_err(|error| {
+            let sender_name = agent_from_store.as_ref().map(|a| a.name.as_str())
+                .unwrap_or(display_name.as_str());
+            let sender_aliases = crate::harness_policy::inbox_aliases(sender_name, role == "supervisor");
+            queue.acknowledge_for_recipients(notification_id, &sender_aliases, Some(message_id)).map_err(|error| {
                 Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     format!(
@@ -3073,10 +3076,11 @@ impl CasService {
                 .claim_recipient_transport_token(message_id, &worker.name)
                 .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
             {
-                let body =
-                    crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
-                        &row,
-                    );
+                let delivery = queue.recipient_delivery(row.id, &worker.name)
+                    .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
+                    .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "recovery row unavailable"))?;
+                let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
+                    &delivery.into_prompt());
                 if let Err(error) = inbox.write_to_inbox(
                     &worker.name,
                     &row.source,
@@ -3956,7 +3960,13 @@ impl CasService {
             )));
         }
 
-        queue.ack(notification_id).map_err(|error| {
+        let agent_id = self.inner.get_agent_id().map_err(|_| Self::error(
+            ErrorCode::INVALID_REQUEST, "message_ack requires a registered agent identity"))?;
+        let agent = self.inner.open_agent_store().and_then(|store| store.get(&agent_id))
+            .map_err(|error| Self::error(ErrorCode::INVALID_REQUEST, error.to_string()))?;
+        let aliases = crate::harness_policy::inbox_aliases(&agent.name,
+            agent.role == cas_types::AgentRole::Supervisor);
+        queue.acknowledge_for_recipients(notification_id, &aliases, None).map_err(|error| {
             Self::error(
                 ErrorCode::INTERNAL_ERROR,
                 format!("Failed to acknowledge message: {error}"),

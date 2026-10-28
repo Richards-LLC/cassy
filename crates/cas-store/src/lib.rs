@@ -774,6 +774,7 @@ pub trait TaskStore: Send + Sync {
 
     /// Append marker-bearing text prepared by artifact publication or the
     /// server-attested proposal renderer. Never pass caller text here.
+    /// A timestamped artifact receipt replaces its exact raw copy atomically.
     fn append_trusted_note(&self, _task_id: &str, _formatted_note: &str) -> Result<DateTime<Utc>> {
         Err(StoreError::Other(
             "trusted task-note append is unsupported by this store".into(),

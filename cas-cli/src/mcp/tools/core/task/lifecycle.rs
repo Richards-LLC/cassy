@@ -3064,7 +3064,7 @@ impl CasCore {
                             }
 
                             // Look up the parent epic's worktree
-                            if !brief && let Some(ref worktree_id) = parent.worktree_id {
+                            if let Some(ref worktree_id) = parent.worktree_id {
                                 if let Ok(wt_store) = self.open_worktree_store() {
                                     if let Ok(worktree) = wt_store.get(worktree_id) {
                                         if worktree.path.exists() {
@@ -3379,11 +3379,12 @@ impl CasCore {
             // Save start-only instructions before budgeting; full show cannot
             // otherwise recover warnings computed only during this start.
             let advisory = format!(
-                "{}{}{}{}{}",
+                "{}{}{}{}{}{}",
                 peer_notes,
                 blocker_warning,
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 unanchored_warning.unwrap_or_default(),
+                wt_info,
                 start_guidance(&task),
             );
             let context = format!("{advisory}{related_context}{cited_issues}");
@@ -3405,15 +3406,19 @@ impl CasCore {
                 .filter_map(|offset| {
                     let entry = &saved.notes[offset..];
                     chrono::NaiveDateTime::parse_from_str(
-                        entry.get(..18)?, "[%Y-%m-%d %H:%M]",
-                    ).ok()?;
+                        entry.get(..18)?,
+                        "[%Y-%m-%d %H:%M]",
+                    )
+                    .ok()?;
                     Some((offset, entry.get(18..)?.strip_prefix(" START CONTEXT")?))
                 })
                 .last();
-            let existing = previous.filter(|(_, body)| {
-                body.strip_prefix(context.as_ref())
-                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("\n\n["))
-            }).map(|(offset, _)| offset);
+            let existing = previous
+                .filter(|(_, body)| {
+                    body.strip_prefix(context.as_ref())
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with("\n\n["))
+                })
+                .map(|(offset, _)| offset);
             let note_offset = if let Some(offset) = existing {
                 offset
             } else {

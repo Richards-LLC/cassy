@@ -293,7 +293,6 @@ async fn task_read_default_show_preserves_gate_inputs() {
 
     let mut short = Task::new("cas-literal-ellipsis".into(), "Wait… then proceed".into());
     short.assignee = Some("test-agent".into());
-    short.origin_project = Some("local-fixture".into());
     short.description = "Continue… carefully".into();
     short.notes = "Checkpoint… ready".into();
     store.add(&short).unwrap();
@@ -477,6 +476,8 @@ Keep reading.".into(),
             assert!(!recovered.lines().any(cas_store::task_note_markers::is_reserved_line));
         }
         if case == "restart" {
+            store.append_note(&task.id, "[2026-10-28 00:00] PROGRESS checkpoint").unwrap();
+            recovered = extract_text(service.task(request("notes", true)).await.unwrap());
             let restarted = extract_text(service.task(request("start", false)).await.unwrap());
             let after = extract_text(service.task(request("notes", true)).await.unwrap());
             assert_eq!(after, recovered, "unchanged restart must not grow stored context");

@@ -325,7 +325,7 @@ pub(super) fn ready_prompt(
         format!("Merge now: `{prefix}factory action=worktree_merge id={worker} task_id={}` into {target}.", ready.evidence.task_id)
     };
     Some(crate::ui::factory::director::Prompt {
-        merge_alert: Some(ready.evidence.clone()), target: supervisor.to_string(),
+        merge_ready: true, merge_alert: Some(ready.evidence.clone()), target: supervisor.to_string(),
         text: format!(
             "READY TO MERGE — pushed delivery {} has green lane CI.\nTask {} on {}.\nMerge target: {target}.\nLive evidence: {} unmerged commit(s) on {} vs {target} (checked {} at {}).\n{action}\nDo not wait for park or a merge request; the merge needs no worker action. Existing CI and QA merge gates still apply.",
             ready.tip, ready.evidence.task_id, ready.evidence.factory_branch,

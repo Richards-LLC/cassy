@@ -445,6 +445,7 @@ pub(crate) fn enqueue_merge_ready_prompt(
     factory_session: &str,
     prompt: &crate::ui::factory::director::Prompt,
 ) -> anyhow::Result<i64> {
+    anyhow::ensure!(prompt.is_merge_ready(), "readiness requires typed green intent");
     let evidence = prompt.merge_alert.as_ref().ok_or_else(|| anyhow::anyhow!("readiness needs delivery evidence"))?;
     let text = format!("{}\n\n<cas-director-ready>{}</cas-director-ready>",
         prompt.text, serde_json::to_string(evidence)?);
@@ -466,7 +467,7 @@ pub(crate) fn parse_merge_ready_prompt(
     let evidence: crate::ui::factory::director::MergeAlertEvidence =
         serde_json::from_str(json.strip_suffix("</cas-director-ready>")?).ok()?;
     Some(crate::ui::factory::director::Prompt {
-        retract_task: Some(evidence.task_id.clone()), merge_alert: Some(evidence),
+        retract_task: Some(evidence.task_id.clone()), merge_ready: true, merge_alert: Some(evidence),
         target: target.into(), text: body.into(), stall_nudge_task: None,
         retract_worker: None, retract_epic: None, drop_if_worker_assigned: None,
         durable_retry: true,

@@ -20631,12 +20631,15 @@ mod cas_bf890_notice_digest_tests {
             "daemon_wake_eligible_rows": daemon_wakes,
             "required_blocker_preserved": replay_rows.iter().any(|row| row.id == action),
         });
-        if let Ok(cwd) = std::env::current_dir()
-            && let Some(root) = cwd.ancestors().find(|path| path.join("cas-cli").is_dir() && path.join("crates").is_dir()) {
-            std::fs::create_dir_all(root.join("target")).unwrap();
-            std::fs::write(root.join("target/noise-replay.json"), serde_json::to_string_pretty(&replay).unwrap()).unwrap();
-        } else {
-            eprintln!("SKIP optional replay export: checkout root unavailable");
+        if let Some(path) = std::env::var_os("CAS_NOISE_REPLAY_EXPORT_PATH").filter(|path| !path.is_empty()) {
+            let path = std::path::PathBuf::from(path);
+            let export = || -> std::io::Result<()> {
+                if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, serde_json::to_vec_pretty(&replay)?)
+            };
+            if let Err(error) = export() { eprintln!("SKIP optional replay export: {error}"); }
         }
         assert_eq!(
             selected(&store),

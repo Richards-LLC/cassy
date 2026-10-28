@@ -1890,6 +1890,7 @@ impl FactoryApp {
                     }
                 }
                 if let Some(ready) = ready {
+                    prompt.merge_ready = ready.ci == "success";
                     prompt.merge_alert = Some(ready.evidence.clone());
                     if ready.ci == "success" && !merge_alert::admit_ready(&self.cas_dir, &ready) {
                         continue;

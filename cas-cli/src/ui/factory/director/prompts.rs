@@ -578,6 +578,8 @@ pub struct Prompt {
     /// Immutable delivery identity for CI-completed signals. Final release
     /// must not substitute a later tip from the reused worker lane.
     pub merge_alert: Option<MergeAlertEvidence>,
+    /// Green CI intent assigned by the readiness producer, independent of prose.
+    pub merge_ready: bool,
     /// Target agent name (worker name or "supervisor")
     pub target: String,
     /// Typed routing for a routine worker stall nudge; always uses the durable queue.
@@ -629,7 +631,7 @@ pub struct Prompt {
 
 impl Prompt {
     pub(crate) fn is_merge_ready(&self) -> bool {
-        self.merge_alert.is_some() && self.text.starts_with("READY TO MERGE")
+        self.merge_ready && self.merge_alert.is_some()
     }
 }
 
@@ -1664,7 +1666,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: worker.clone(),
                 text: with_response_instructions(&text, supervisor_name, worker_cli),
                 retract_worker: None,
@@ -1749,7 +1751,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1776,7 +1778,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: None,
@@ -1925,7 +1927,7 @@ pub fn generate_prompt_at(
                 };
 
                 return Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker,
@@ -1996,7 +1998,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, worker, supervisor_cli),
                 retract_worker: Some(worker.clone()),
@@ -2043,7 +2045,7 @@ pub fn generate_prompt_at(
                 );
 
                 return Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -2069,7 +2071,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: worker.clone(),
                     text: with_response_instructions(&text, supervisor_name, worker_cli),
                     retract_worker: None,
@@ -2116,7 +2118,7 @@ pub fn generate_prompt_at(
                 );
 
                 Some(Prompt {
-                    merge_alert: None,
+                    merge_ready: false, merge_alert: None,
                     target: supervisor_name.to_string(),
                     text: with_response_instructions(&text, worker, supervisor_cli),
                     retract_worker: None,
@@ -2185,7 +2187,7 @@ pub fn generate_prompt_at(
             };
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text: with_response_instructions(&text, agent_name, supervisor_cli),
                 retract_worker: Some(agent_name.clone()),
@@ -2324,7 +2326,7 @@ pub fn generate_prompt_at(
             );
 
             Some(Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: supervisor_name.to_string(),
                 text,
                 retract_worker: None,
@@ -7198,7 +7200,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7230,7 +7232,7 @@ mod tests {
             commit_file(repo.path(), "a.rs");
             let mut data = awaiting_merge_data("recipe-be");
             let prompt = Prompt {
-                merge_alert: None,
+                merge_ready: false, merge_alert: None,
                 target: "supervisor".to_string(),
                 text: "⚠️ MERGE REQUIRED".to_string(),
                 retract_worker: None,
@@ -7707,7 +7709,7 @@ mod tests {
 fn idle_relays_and_merge_relays_use_the_status_verdict() {
     use crate::mcp::tools::service::worker_liveness::{Liveness, Observation};
     let prompt = Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: "Worker wolf is idle while task t is awaiting_merge".into(),
         retract_worker: Some("wolf".into()),

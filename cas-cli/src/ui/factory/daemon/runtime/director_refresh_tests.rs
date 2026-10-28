@@ -825,7 +825,7 @@ async fn flv2_retraction_reads_fresh() {
     store.update(&task_b).unwrap();
 
     let idle_alert = |worker: &str| crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: format!("{worker} is idle"),
         stall_nudge_task: None,
@@ -938,7 +938,7 @@ async fn c2_shutdown_hands_back_pending_rechecks() {
     let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let alert = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
         stall_nudge_task: None,
@@ -1170,7 +1170,7 @@ async fn c2_expired_recheck_delivers_and_ignores_the_late_result() {
         .with_read_gate(Arc::clone(&gate))
         .with_timeout(Duration::ZERO);
     let alert = crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: "worker-a is idle".into(),
         stall_nudge_task: None,
@@ -1395,7 +1395,7 @@ async fn c3b16_later_prompt_batch_waits_behind_a_pending_recheck() {
     let gate = Arc::new(ReadGate::default());
     let mut refresh = DirectorRefresh::new().with_read_gate(Arc::clone(&gate));
     let prompt = |text: &str, drop_if_worker_assigned: Option<&str>| crate::ui::factory::director::Prompt {
-        merge_alert: None,
+        merge_ready: false, merge_alert: None,
         target: "supervisor".into(),
         text: text.into(),
         stall_nudge_task: None,

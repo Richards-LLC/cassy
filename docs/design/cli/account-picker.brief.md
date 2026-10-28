@@ -12,7 +12,7 @@ Exact folder aliases win before unique display-email matches. Ambiguous and unkn
 
 Duplicate-alias exception: only a folder with the same provider identity as a listed folder is hidden. One email that owns two subscriptions (different account or workspace IDs) is two rows, each naming its folder alias. A hidden duplicate keeps its alias as a launch key (`cas claude <alias>`).
 
-Type-ahead: the new-login email is read through the terminal's own line discipline, not inquire, whose reader keeps keys typed after Enter in a private queue. One canonical read is one line, so an answer typed together with the email stays queued, in order, for the duplicate-account question; echo, editing, Ctrl-C and Ctrl-D (EOF cancels, also after an unfinished line) are the terminal's. The email line has no inquire styling, Esc or arrow-key editing.
+Type-ahead: an answer typed together with the new-login email reaches the duplicate-account question. inquire reads keys ahead through crossterm 0.25, so the chooser drains that queue after the email prompt and the question echoes the consumed line; without type-ahead the question reads stdin, and EOF and Ctrl-C cancel as before.
 
 Colour sits on the two one-cell marks only: `✓` green (40,145,75) and `⚠` amber (176,112,16). Selection is the `>` cursor plus bold in the default foreground, replacing inquire's cyan, which measured 3.37:1 on white and 2.48:1 on Solarized light. `NO_COLOR` or a pipe emits no SGR; a non-UTF-8 locale uses `[OK]` / `[WARN]` and no em dash. After Enter the answer line repeats only the account.
 

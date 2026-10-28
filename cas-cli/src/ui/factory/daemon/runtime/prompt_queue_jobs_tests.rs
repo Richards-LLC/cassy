@@ -911,7 +911,7 @@ fn a_stale_mirror_result_is_ignored() {
     jobs.submit_mirror_scan(move |state| {
         let _ = current_held.lock().unwrap().recv();
         state.operator_messages.push(crate::ui::factory::ConversationHistoryMessage {
-            notification_id: 77, target: "terminal-history".into(), text: "Typed in the terminal".into(),
+            notification_id: 77, client_ref: None, target: "terminal-history".into(), text: "Typed in the terminal".into(),
             state: "delivered".into(), stamped: false, reply_to: None, device_id: "terminal".into(),
             operator_label: Some("Terminal".into()), session: "factory-1".into(), at: chrono::Utc::now().to_rfc3339(),
         });

@@ -576,9 +576,52 @@ pub(crate) fn prompt_for_selection(
                     })
                     .prompt()
                     .with_context(|| format!("new {provider_label} login cancelled"))?;
+            stash_typeahead();
             Ok(Selection::NewLogin(entered.trim().to_string()))
         }
     }
+}
+
+/// Keystrokes typed after the email prompt's Enter, for the login flow's
+/// later question (the duplicate-account confirmation).
+static TYPEAHEAD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// inquire reads through crossterm 0.25, which takes every byte available on
+/// the terminal at once and queues the events after Enter privately. A later
+/// `std::io::stdin()` read can never see them, so move them out here.
+fn stash_typeahead() {
+    use crossterm_inquire::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+        let Ok(event) = event::read() else { break };
+        let Event::Key(key) = event else { continue };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        match key.code {
+            KeyCode::Enter => typed.push('\n'),
+            KeyCode::Backspace if !typed.is_empty() && !typed.ends_with('\n') => {
+                typed.pop();
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                typed.push(c)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The next line typed ahead of the question that asks for it. A line without
+/// a trailing newline is partial: the caller reads the rest from stdin.
+pub(crate) fn take_typeahead_line() -> Option<String> {
+    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if typed.is_empty() {
+        return None;
+    }
+    let end = typed.find('\n').map_or(typed.len(), |newline| newline + 1);
+    Some(typed.drain(..end).collect())
 }
 
 /// What one seeding pass did, so the caller can report it honestly.

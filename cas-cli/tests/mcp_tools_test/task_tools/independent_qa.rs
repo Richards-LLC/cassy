@@ -1800,6 +1800,11 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
     let cas_dir = repo.join(".cas");
     let _keep = &temp;
     close_text(&core, &task_id).await;
+    let old_qa = qa_task_id(&cas_dir, &task_id);
+    let tasks = open_task_store(&cas_dir).unwrap();
+    let mut child = tasks.get(&old_qa).unwrap();
+    child.priority = cas::types::Priority(0);
+    tasks.update(&child).unwrap();
     let service = CasService::new(core.clone(), None);
 
     let role = SupervisorRole::enter(&mut test_env);
@@ -1822,6 +1827,12 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
     assert!(refused.message.contains("reason"), "{}", refused.message);
     let waived = extract_text(waived.expect("supervisor may waive with a reason"));
     assert!(waived.contains("waived"), "{waived}");
+    assert_eq!(tasks.get(&old_qa).unwrap().status, TaskStatus::Cancelled, "{waived}");
+    git(&repo, &["checkout", "-q", "main"]);
+    git(&repo, &["merge", "-q", "--ff-only", "factory/test-agent"]);
+    let closed = close_text(&core, &task_id).await;
+    assert_eq!(tasks.get(&task_id).unwrap().status, TaskStatus::Closed, "{closed}");
+    assert!(!tasks.list_ready().unwrap().iter().any(|task| task.id == old_qa));
 
     let task = open_task_store(&cas_dir).unwrap().get(&task_id).unwrap();
     assert!(
@@ -1850,6 +1861,73 @@ async fn supervisor_waiver_needs_a_reason_logs_a_decision_and_shows_in_epic_stat
         .await
         .expect_err("qa_waive is supervisor-only");
     assert!(worker_waive.message.contains("supervisor-only"), "{}", worker_waive.message);
+}
+
+/// Historical pass transitions may predate child retirement. Repair only this
+/// closed delivery's obsolete work, preserving a child reused by an active round.
+#[tokio::test]
+async fn reconcile_historical_qa_children_is_bounded_and_preserves_replacement_gh1380() {
+    let mut env = TestEnvGuard::temp_home();
+    let (_temp, core, repo, delivery) = fixture(&mut env);
+    let root = repo.join(".cas");
+    close_text(&core, &delivery).await;
+    let tasks = open_task_store(&root).unwrap();
+    let original = qa_task_id(&root, &delivery);
+    let now = chrono::Utc::now();
+    let branch = "factory/test-agent";
+    // Recreate old store-only transitions, bypassing current lifecycle cleanup.
+    cas_store::waive_qa_pass(&root, &delivery, "old-supervisor", "test-agent", branch,
+        &git(&repo, &["rev-parse", "HEAD"]), "existing historical waiver", now).unwrap();
+    for (index, id) in ["cas-old-waived", "cas-shared-review"].into_iter().enumerate() {
+        let mut child = tasks.get(&original).unwrap();
+        child.id = id.into();
+        child.priority = cas::types::Priority(0);
+        child.notes = "Retain the reviewer's partial findings".into();
+        tasks.add(&child).unwrap();
+        let head = commit_file(&repo, "web/composer.css", &format!(".composer{{gap:{}px}}", index + 10), "historical tip");
+        let cas_store::QaPassOpen::Dispatched(pass) = cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+            task_id: &delivery, implementer_agent_id: "test-agent", branch, bound_head: &head,
+            deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+        }, now).unwrap() else { panic!("new historical round") };
+        cas_store::set_qa_task(&root, &pass.id, id).unwrap();
+        if index == 0 {
+            let waived = cas_store::waive_qa_pass(&root, &delivery, "old-supervisor", "test-agent", branch,
+                &head, "existing historical waiver", now).unwrap();
+            cas_store::set_qa_task(&root, &waived.id, id).unwrap();
+        }
+    }
+    let head = commit_file(&repo, "web/composer.css", ".composer{gap:20px}", "replacement tip");
+    let cas_store::QaPassOpen::Dispatched(active) = cas_store::open_qa_pass(&root, &cas_store::NewQaPass {
+        task_id: &delivery, implementer_agent_id: "test-agent", branch, bound_head: &head,
+        deadline_at: now + chrono::Duration::minutes(30), max_rounds: 3,
+    }, now).unwrap() else { panic!("active replacement") };
+    cas_store::set_qa_task(&root, &active.id, "cas-shared-review").unwrap();
+    let mut parent = tasks.get(&delivery).unwrap();
+    parent.status = TaskStatus::Closed;
+    tasks.update(&parent).unwrap();
+    let before = cas_store::list_qa_passes(&root, &delivery).unwrap();
+    let request = serde_json::json!({"action":"qa_reconcile", "task_id":delivery, "limit":1});
+    let refused = CasService::new(core, None).verification(Parameters(verification(request.clone())))
+        .await.expect_err("repair requires a registered supervisor");
+    assert!(refused.message.contains("supervisor"), "{refused}");
+    let service = CasService::new(supervisor_core(&root), None);
+    let _role = SupervisorRole::enter(&mut env);
+    for remaining in [1, 0, 0] {
+        let receipt = service.verification(Parameters(verification(request.clone()))).await.unwrap();
+        let count = [original.as_str(), "cas-old-waived"].into_iter()
+            .filter(|id| !tasks.get(id).unwrap().is_terminal()).count();
+        assert_eq!(count, remaining, "{}", extract_text(receipt));
+        assert_eq!(tasks.get("cas-shared-review").unwrap().status, TaskStatus::Open);
+    }
+    for id in [original.as_str(), "cas-old-waived"] {
+        let child = tasks.get(id).unwrap();
+        assert_eq!(child.status, TaskStatus::Cancelled);
+        assert!(child.close_reason.as_deref().unwrap().contains(&delivery));
+        assert!(!tasks.list_ready().unwrap().iter().any(|task| task.id == id));
+    }
+    assert!(tasks.get("cas-old-waived").unwrap().notes.contains("partial findings"));
+    assert_eq!(cas_store::list_qa_passes(&root, &delivery).unwrap(), before,
+        "repair must not change pass identity, evidence, verdicts or waivers");
 }
 
 /// Reject round 1 of the fixture delivery (on `main`) and hand the task back

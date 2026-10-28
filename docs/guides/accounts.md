@@ -108,6 +108,11 @@ usable. If that default is absent or logged out, spawn refuses before creating
 a worktree or assigning a task and lists confirmed logged-in registered homes
 with the `config_dir` remedies.
 
+`cas integrate violet` updates every registered Codex account when `CODEX_HOME`
+is unset, preserving account links into the Codex base. An explicit
+`CODEX_HOME` limits registration to that home. With no registered account, it
+reports `codex: no account` and leaves the retired `~/.codex` absent.
+
 ## List subscriptions
 
 ```bash

@@ -1005,8 +1005,10 @@ pub struct MachinePaths {
     /// `$HOME/.claude*/.claude.json`), excluding `claude_json`. GH #1164: a
     /// profile this command never looked at kept a stale `violet` entry.
     pub claude_profiles: Vec<PathBuf>,
-    /// `<CODEX_HOME|$HOME/.codex>/config.toml`.
+    /// First selected/registered Codex config, or its known shared-base target.
     pub codex_config: Option<PathBuf>,
+    /// Remaining registered Codex configurations; empty with explicit CODEX_HOME.
+    pub codex_profiles: Vec<PathBuf>,
     /// The only file allowed to contain the two plaintext onboarding values.
     pub credentials_file: PathBuf,
     /// The login-shell profile that must source the credentials file.
@@ -1050,10 +1052,27 @@ impl MachinePaths {
             .get("CLAUDE_CONFIG_DIR")
             .map(PathBuf::from)
             .or_else(|| home.clone());
-        let codex_dir = env
-            .get("CODEX_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home.map(|h| h.join(".codex")));
+        let selected_codex = env.get("CODEX_HOME").map(PathBuf::from);
+        let shared_codex_config = crate::accounts::Provider::Codex
+            .base_dir(&home_for_credentials)
+            .join("config.toml");
+        let mut codex_configs =
+            crate::accounts::codex_homes(&home_for_credentials, selected_codex.as_deref())
+                .context("could not inspect registered Codex homes")?
+                .into_iter()
+                .map(|dir| {
+                    let config = dir.join("config.toml");
+                    // Only follow the exact config link installed by accounts link.
+                    // The regular-file guards still refuse a symlinked base file
+                    // or any other account-config symlink.
+                    if fs::read_link(&config).is_ok_and(|target| target == shared_codex_config) {
+                        shared_codex_config.clone()
+                    } else {
+                        config
+                    }
+                });
+        let codex_config = codex_configs.next();
+        let codex_profiles = codex_configs.collect();
         let credentials_file = env
             .get("CAS_CREDENTIALS_FILE")
             .map(|path| path.trim().to_string())
@@ -1085,7 +1104,8 @@ impl MachinePaths {
             user_proxy,
             claude_json,
             claude_profiles,
-            codex_config: codex_dir.map(|d| d.join("config.toml")),
+            codex_config,
+            codex_profiles,
             credentials_file,
             login_profile,
         })
@@ -2264,6 +2284,9 @@ fn run_with_credentials(
             &bypass_env,
             args.dry_run,
         ));
+        harnesses.extend(paths.codex_profiles.iter().map(|profile| register_codex(
+            Some(profile), &args.url, &token_env, &bypass_env, args.dry_run,
+        )));
         harnesses
     };
 
@@ -2709,7 +2732,7 @@ fn register_codex(
             harness: "codex".to_string(),
             path: None,
             state: WriteState::Skipped,
-            note: Some("neither CODEX_HOME nor HOME is set".to_string()),
+            note: Some("no account".to_string()),
         };
     };
     match apply_codex(path, url, token_env, bypass_env, dry_run) {
@@ -3047,9 +3070,7 @@ fn registered_machine_env_names(
             }
         }
     }
-    if let Some(path) = paths
-        .codex_config
-        .as_deref()
+    for path in paths.codex_config.iter().chain(&paths.codex_profiles)
         .filter(|path| ifs::is_regular_file(path))
     {
         let mut doc: toml_edit::DocumentMut = ifs::read_capped(path)?.parse()?;
@@ -3239,6 +3260,11 @@ pub fn execute(args: &VioletArgs, json: bool, full: bool) -> Result<IntegrationO
         ));
     }
     for harness in &report.harnesses {
+        if harness.harness == "codex" && harness.path.is_none()
+            && harness.note.as_deref() == Some("no account") {
+            outcome.summary.push("codex: no account".to_string());
+            continue;
+        }
         outcome.summary.push(format!(
             "{}: {}{}",
             harness.harness,
@@ -3882,6 +3908,7 @@ mod tests {
             claude_json: Some(dir.join("home").join(".claude.json")),
             claude_profiles: Vec::new(),
             codex_config: Some(dir.join("home").join(".codex").join("config.toml")),
+            codex_profiles: Vec::new(),
             credentials_file: dir
                 .join("home")
                 .join(".config")
@@ -4876,41 +4903,132 @@ auth = "env:{token}"
         assert!(!paths.codex_config.unwrap().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn codex_registration_preserves_unrelated_configuration() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = paths_in(dir.path());
-        let codex = paths.codex_config.clone().unwrap();
-        std::fs::create_dir_all(codex.parent().unwrap()).unwrap();
-        std::fs::write(
-            &codex,
-            "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n\
-             [mcp_servers.other]\ncommand = \"other-mcp\"\n",
-        )
-        .unwrap();
-
-        let args = VioletArgs {
-            bypass_env: VIOLET_DEFAULT_BYPASS_ENV.to_string(),
-            url: violet_hub_url().to_string(),
-            ..test_args()
-        };
-        run(&args, None, &paths, &ready_env(), &FakeProbe(live_tools())).unwrap();
-
-        let written = std::fs::read_to_string(&codex).unwrap();
-        assert!(
-            written.contains("# operator comment worth keeping"),
-            "{written}"
-        );
-        assert!(written.contains("[mcp_servers.other]"), "{written}");
-        assert!(
-            written.contains(&format!("bearer_token_env_var = \"{}\"", TEST_TOKEN_ENV)),
-            "{written}"
-        );
-        let parsed: toml::Value = toml::from_str(&written).unwrap();
-        assert_eq!(
-            parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER].as_str(),
-            Some(VIOLET_DEFAULT_BYPASS_ENV)
-        );
+        use crate::accounts::Provider;
+        use std::os::unix::fs::symlink;
+        let original = "# operator comment worth keeping\nmodel = \"gpt-5\"\n\n[mcp_servers.other]\ncommand = \"other-mcp\"\n";
+        let mut env = crate::test_support::TestEnvGuard::temp_home();
+        let fixture_root = env.home().to_path_buf();
+        for mode in ["foreign", "registered", "explicit", "none"] {
+            let home = fixture_root.join(mode);
+            fs::create_dir_all(&home).unwrap();
+            env.set("HOME", &home);
+            env.remove("CODEX_HOME");
+            env.set("XDG_CONFIG_HOME", home.join(".config"));
+            env.set("CAS_CREDENTIALS_FILE", home.join("credentials.env"));
+            env.set("SHELL", "/bin/bash");
+            env.set(TEST_TOKEN_ENV, FAKE_TOKEN);
+            env.set(VIOLET_DEFAULT_BYPASS_ENV, FAKE_BYPASS);
+            env.set_current_dir(&home);
+            let base = Provider::Codex.base_dir(&home).join("config.toml");
+            let mut expected = Vec::new();
+            if mode != "none" {
+                fs::create_dir_all(base.parent().unwrap()).unwrap();
+                fs::write(&base, original).unwrap();
+                for name in [".codex-a@example.com", ".codex-b@example.com"] {
+                    let account = home.join(name);
+                    fs::create_dir_all(&account).unwrap();
+                    fs::write(account.join("auth.json"), "{}").unwrap();
+                    symlink(&base, account.join("config.toml")).unwrap();
+                    expected.push(account.join("config.toml"));
+                }
+            }
+            if matches!(mode, "explicit" | "foreign") {
+                let selected = home.join("selected-codex");
+                fs::create_dir_all(&selected).unwrap();
+                if mode == "foreign" {
+                    let foreign = home.join("foreign.toml");
+                    fs::write(&foreign, original).unwrap();
+                    symlink(&foreign, selected.join("config.toml")).unwrap();
+                } else {
+                    fs::write(selected.join("config.toml"), original).unwrap();
+                }
+                env.set("CODEX_HOME", &selected);
+                expected = vec![selected.join("config.toml")];
+            }
+            let args = VioletArgs {
+                skip_verify: true,
+                token_env: Some(TEST_TOKEN_ENV.into()),
+                ..test_args()
+            };
+            let paths = MachinePaths::from_env(&ProcessEnv).unwrap();
+            let report = run(&args, None, &paths, &ProcessEnv, &FakeProbe(live_tools())).unwrap();
+            assert!(
+                !home.join(".codex").exists(),
+                "{mode}: recreated retired default home"
+            );
+            if mode == "foreign" {
+                let foreign_after = fs::read_to_string(home.join("foreign.toml")).unwrap();
+                assert_eq!(
+                    foreign_after, original,
+                    "arbitrary config symlink target was changed"
+                );
+                assert!(
+                    report.harnesses.iter().any(|entry| entry.harness == "codex"
+                        && entry.state == WriteState::Skipped
+                        && entry
+                            .note
+                            .as_deref()
+                            .unwrap_or_default()
+                            .contains("not a regular file")),
+                    "{:?}",
+                    report.harnesses
+                );
+                assert!(
+                    fs::symlink_metadata(home.join("selected-codex/config.toml"))
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+                continue;
+            }
+            if mode == "none" {
+                assert!(
+                    report.harnesses.iter().any(|entry| entry.harness == "codex"
+                        && entry.path.is_none()
+                        && entry.state == WriteState::Skipped
+                        && entry.note.as_deref() == Some("no account")),
+                    "{:?}",
+                    report.harnesses
+                );
+                continue;
+            }
+            for config in expected {
+                let written = fs::read_to_string(&config).unwrap();
+                assert!(
+                    written.contains("# operator comment worth keeping"),
+                    "{mode}: {written}"
+                );
+                assert!(written.contains("[mcp_servers.other]"), "{mode}: {written}");
+                let parsed: toml::Value = toml::from_str(&written).unwrap();
+                assert_eq!(
+                    parsed["mcp_servers"]["violet"]["bearer_token_env_var"].as_str(),
+                    Some(TEST_TOKEN_ENV),
+                    "{mode}: {written}"
+                );
+                assert_eq!(
+                    parsed["mcp_servers"]["violet"]["env_http_headers"][VIOLET_BYPASS_HEADER].as_str(),
+                    Some(VIOLET_DEFAULT_BYPASS_ENV)
+                );
+                assert!(!written.contains(FAKE_TOKEN));
+            }
+            assert!(
+                crate::accounts::drift(Provider::Codex, &home)
+                    .unwrap()
+                    .is_empty(),
+                "{mode}: integration broke linked account config"
+            );
+            if mode == "explicit" {
+                // pin: explicit CODEX_HOME must leave other account configurations byte-for-byte unchanged.
+                assert_eq!(
+                    fs::read_to_string(&base).unwrap(),
+                    original,
+                    "explicit selection changed other registered homes"
+                );
+            }
+        }
     }
 
     #[test]

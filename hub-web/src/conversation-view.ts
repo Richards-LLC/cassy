@@ -444,6 +444,7 @@ export class ConversationView {
   private readonly below: HTMLElement;
   private readonly loadLater: HTMLButtonElement;
   private windowFrame?: number;
+  private model?: readonly ThreadItem[];
   private earlierIntent = false;
   /** Coalesced status lines the operator opened with "Show full update"; survives repaints. */
   private expanded = new Set<string>();
@@ -510,11 +511,14 @@ export class ConversationView {
     this.element.tabIndex = 0;
     this.element.setAttribute("aria-label", `Conversation with ${supervisor}`);
     this.element.addEventListener("conversation-reveal-turn", event => {
-      const id = (event as CustomEvent<{ notificationId: number }>).detail?.notificationId;
-      if (!Number.isSafeInteger(id)) return;
+      const detail = (event as CustomEvent<{ history?: ConversationHistory; notificationId: number; turn?: HTMLElement }>).detail;
+      const id = detail?.notificationId;
+      if (detail?.history !== this.history || !Number.isSafeInteger(id)
+        || !this.history.events.some(event => event.kind === "reply" && event.value.notification_id === id)) return;
       this.following = false;
       this.window.show(`reply:${id}`);
       this.update();
+      detail.turn = this.msgs.querySelector<HTMLElement>(`[data-key="reply:${id}"]`) ?? undefined;
     });
     this.head = document.createElement("header"); this.head.className = "thead";
     const identity = document.createElement("div"); identity.className = "id";
@@ -680,8 +684,12 @@ export class ConversationView {
   }
 
   /** Re-derive the thread from the history; nodes are keyed so grouping survives. */
-  update(): void {
+  update(): void { this.render(false); }
+
+  /** Scroll-only window changes reuse the last data/state presentation. */
+  private render(reuseModel: boolean): void {
     if (this.disposed) return;
+    if (this.updateRequest) reuseModel = false;
     this.updateRequest = undefined;
     this.noticeReset();
     this.restorePlace();
@@ -697,17 +705,20 @@ export class ConversationView {
     const working = this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
-    const events = this.history.visibleEvents();
-    const modelOptions = { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) };
-    // A visual chunk boundary must not split a logical unconfirmed run.
-    this.unconfirmedByKey = new Map();
-    if (events.some(event => event.kind === "send" && event.value.state === "unconfirmed")) {
-      for (const item of threadModel(events, modelOptions)) {
-        if (item.type !== "group" || item.side !== "you") continue;
-        for (const [index, run] of this.deriveUnconfirmedRuns(item)) this.unconfirmedByKey.set(item.turns[index]!.key, run);
+    if (!reuseModel || !this.model) {
+      const events = this.history.visibleEvents();
+      const modelOptions = { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) };
+      // A visual chunk boundary must not split a logical unconfirmed run.
+      this.unconfirmedByKey = new Map();
+      if (events.some(event => event.kind === "send" && event.value.state === "unconfirmed")) {
+        for (const item of threadModel(events, modelOptions)) {
+          if (item.type !== "group" || item.side !== "you") continue;
+          for (const [index, run] of this.deriveUnconfirmedRuns(item)) this.unconfirmedByKey.set(item.turns[index]!.key, run);
+        }
       }
+      this.model = threadModel(events, { ...modelOptions, groupSize: 4 });
     }
-    const model = threadModel(events, { ...modelOptions, groupSize: 4 });
+    const model = this.model;
     const focused = documentActiveKey(this.msgs);
     const window = this.window.select(model, this.element.scrollTop, this.element.clientHeight, this.following, focused ?? anchor?.key);
     hasEarlier = this.options.hasEarlier?.() === true || this.window.hasEarlier;
@@ -781,7 +792,16 @@ export class ConversationView {
         && !this.window.hasEarlier && this.options.hasEarlier?.() && !this.options.loadingEarlier?.()) {
         this.earlierIntent = false;
         this.options.loadEarlier?.("scroll");
-      } else this.update();
+      } else {
+        // Only entering an unmounted range requires layout and reconciliation.
+        // Two edge reads replace measuring/rebuilding the whole thread per frame.
+        const rows = [...this.nodes.values()];
+        const first = rows[0]?.getBoundingClientRect();
+        const last = rows.at(-1)?.getBoundingClientRect();
+        const bounds = this.element.getBoundingClientRect();
+        if ((this.window.hasEarlier && first && first.top >= bounds.top)
+          || (this.window.hasLater && last && last.bottom <= bounds.bottom)) this.render(true);
+      }
     });
   }
 

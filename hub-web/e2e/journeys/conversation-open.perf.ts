@@ -11,6 +11,7 @@ import { HubDouble, type HistoryPage, type WorkWorld } from "./hub-double";
 type Capture = { session: string; raw_queue_rows: number; commander_turns: number; query_ms: number[]; pages: HistoryPage[]; pending_replies?: Record<string, unknown>[]; work?: WorkWorld };
 const output = resolve(process.env.CONVERSATION_PERF_OUTPUT!);
 const capture: Capture = JSON.parse(await readFile(process.env.CONVERSATION_PERF_CAPTURE!, "utf8"));
+const scrollFlow = process.env.CONVERSATION_PERF_FLOW === "scroll";
 const showWork = process.env.CONVERSATION_PERF_SHOW_WORK === "1";
 if (showWork && !capture.work?.events.length) throw Error("Show work measurement requires captured work events from the same thread");
 const dist = resolve(process.env.CONVERSATION_PERF_DIST ?? "dist");
@@ -183,13 +184,19 @@ async function attributeSamples(profile: any) {
   return { leaf_ms: sorted(leaf), inclusive_ms_do_not_sum: sorted(inclusive) };
 }
 
-for (const profile of [
-  { name: "desktop", viewport: { width: 1440, height: 900 }, cpu: 1 },
-  { name: "phone", viewport: { width: 390, height: 844 }, cpu: 4 },
-]) test(`conversation opening baseline ${profile.name}`, async ({ browser }, info) => {
-  const directory = join(output, `${profile.name}-${info.repeatEachIndex}`);
+const profiles = scrollFlow
+  ? ["light", "dark"].flatMap(colorScheme => [
+    { name: "desktop", viewport: { width: 1280, height: 844 }, cpu: 1, colorScheme: colorScheme as "light" | "dark" },
+    { name: "phone", viewport: { width: 390, height: 844 }, cpu: 1, colorScheme: colorScheme as "light" | "dark" },
+  ])
+  : [
+    { name: "desktop", viewport: { width: 1440, height: 900 }, cpu: 1, colorScheme: "light" as const },
+    { name: "phone", viewport: { width: 390, height: 844 }, cpu: 4, colorScheme: "light" as const },
+  ];
+for (const profile of profiles) test(`conversation ${scrollFlow ? "scroll paging" : "opening baseline"} ${profile.name}${scrollFlow ? ` ${profile.colorScheme}` : ""}`, async ({ browser }, info) => {
+  const directory = join(output, `${profile.name}${scrollFlow ? `-${profile.colorScheme}` : ""}-${info.repeatEachIndex}`);
   await mkdir(directory, { recursive: true });
-  const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone" });
+  const context = await browser.newContext({ viewport: profile.viewport, isMobile: profile.name === "phone", hasTouch: profile.name === "phone", colorScheme: profile.colorScheme });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   await cdp.send("Emulation.setCPUThrottlingRate", { rate: profile.cpu });
@@ -305,6 +312,45 @@ for (const profile of [
       if (backlog) await drainPending();
     });
     expect(results.initial.history_requests).toBe(1);
+    if (scrollFlow) {
+      // Frozen independent-QA probe: unthrottled, wheel(-400), 60ms cadence,
+      // 1280x844 / 390x844, three pages of forty exchanges supplied by capture.
+      const thread = page.locator(".conversation-reading.thread");
+      const box = (await thread.boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      const requests = hub.historyRequests.length;
+      const sampleStart = await page.evaluate(() => performance.now());
+      const wheelMs: number[] = [], stepMs: number[] = [];
+      await startProfile(cdp);
+      for (let step = 0; step < 80 && hub.historyRequests.length === requests; step++) {
+        const start = performance.now();
+        await page.mouse.wheel(0, -400);
+        wheelMs.push(performance.now() - start);
+        await page.waitForTimeout(60);
+        stepMs.push(performance.now() - start);
+      }
+      const requested = hub.historyRequests.length > requests;
+      await settle(page);
+      const paints = await page.evaluate(since => (window as any).perfProbe.historyPaints.filter((paint: any) => paint.older && paint.at >= since), sampleStart);
+      const costs = await endProfile(cdp, directory, "scroll");
+      const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
+      const receipt = { profile, source_head: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        bundle_revision: process.env.CONVERSATION_PERF_BUNDLE_REVISION, browser: browser.version(), requested_older: requested,
+        wheel_ms: wheelMs, step_ms: stepMs, wheel_median_ms: median(wheelMs), step_median_ms: median(stepMs), history_paints: paints,
+        cpu: costs.sourceSamples, page_errors: errors };
+      await writeFile(join(directory, "scroll.json"), JSON.stringify(receipt, null, 2));
+      await page.screenshot({ path: join(directory, "paged.png") });
+      // Baselines retain their failing paging/latency evidence for comparison.
+      if (process.env.CONVERSATION_PERF_BASELINE !== "1") {
+        expect(requested, "scroll reaches the next history page").toBe(true);
+        expect(paints.length, "measure the page's actual anchor").toBeGreaterThan(0);
+        for (const paint of paints) expect(Math.abs(paint.anchor_drift_px), "fractional reading anchor stays fixed").toBeLessThanOrEqual(0.5);
+        expect(median(wheelMs), "same independent-QA wheel probe, base 358ms").toBeLessThanOrEqual(358);
+      }
+      expect(errors).toEqual([]);
+      return;
+    }
+
     if (showWork) {
       await expect(page.locator("#conversation-show-work")).toHaveAttribute("aria-pressed", "true");
       expect(results.initial.work_requests_total).toBeGreaterThan(0);

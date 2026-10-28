@@ -13032,6 +13032,7 @@ mod spawn_lifecycle_tests {
         let mut unresolved = vec![spec.clone()];
         let selection_notice = recommend_spawn_accounts(
             &mut unresolved,
+            false, // The explicit cli=codex request below carries no lane.
             &Default::default(),
             chrono::Utc::now(),
             |provider| crate::account_registry::collect_for(provider, env.home(), false),

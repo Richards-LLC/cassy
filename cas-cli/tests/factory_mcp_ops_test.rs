@@ -535,6 +535,7 @@ fn factory_req(action: &str) -> FactoryRequest {
     FactoryRequest {
         json: None,
         full: None,
+        detail: None,
         action: action.to_string(),
         id: None,
         name: None,
@@ -2363,6 +2364,9 @@ async fn test_spawn_workers_logged_out_default_names_account_remedies_in_isolate
     let env = factory_env_in_isolated_codex_child(
         "test_spawn_workers_logged_out_default_names_account_remedies_in_isolated_child",
     );
+    // This scenario exercises the default home, not the common selected fixture.
+    let mut selector = TestEnvGuard::new();
+    selector.remove("CODEX_HOME");
     env.create_epic("Test Epic");
     let home = PathBuf::from(std::env::var_os("HOME").expect("controlled HOME"));
     cas::test_paths::warm_stub(

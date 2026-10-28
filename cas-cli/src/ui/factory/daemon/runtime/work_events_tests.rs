@@ -153,6 +153,7 @@ fn codex_rollout_reasoning_and_calls_become_events() {
     assert!(!has_earlier);
     let shapes: Vec<_> = events.iter().map(|event| (event.kind, event.label.as_str(), event.error)).collect();
     assert_eq!(shapes, vec![
+        (WorkEventKind::Notice, "setup", false),
         (WorkEventKind::Thinking, "Reading the queue", false),
         (WorkEventKind::Tool, "shell: git status", true),
         (WorkEventKind::Todo, "Todos 1/2 · Merge", false),
@@ -369,18 +370,25 @@ fn measure_real_transcript() {
 fn v2_tool_payloads_use_explicit_inputs_and_results() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("claude.jsonl");
-    write_lines(&path, &[
-        json!({"type":"assistant","timestamp":at(1),"message":{"content":[
-            {"type":"tool_use","id":"r","name":"Read","input":{"file_path":"src/lib.rs"}},
-            {"type":"tool_use","id":"s","name":"Grep","input":{"pattern":"needle","path":"src"}},
-            {"type":"tool_use","id":"c","name":"Bash","input":{"command":"git status","cwd":"/repo"}},
-            {"type":"tool_use","id":"u","name":"future_tool","input":{}}
-        ]}}),
-        json!({"type":"user","timestamp":at(2),"toolUseResult":{"exitCode":7},"message":{"content":[
-            {"type":"tool_result","tool_use_id":"c","is_error":true,"content":"failed"}
-        ]}}),
-    ]);
-    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
+    write_lines(
+        &path,
+        &[
+            json!({"type":"assistant","timestamp":at(1),"message":{"content":[
+                {"type":"tool_use","id":"r","name":"Read","input":{"file_path":"src/lib.rs"}},
+                {"type":"tool_use","id":"s","name":"Grep","input":{"pattern":"needle","path":"src"}},
+                {"type":"tool_use","id":"c","name":"Bash","input":{"command":"git status","cwd":"/repo"}},
+                {"type":"tool_use","id":"u","name":"future_tool","input":{}}
+            ]}}),
+            json!({"type":"user","timestamp":at(2),"toolUseResult":{"exitCode":7},"message":{"content":[
+                {"type":"tool_result","tool_use_id":"c","is_error":true,"content":"failed"}
+            ]}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Claude),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
     let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
     let wire = serde_json::to_value(events).unwrap();
     assert_eq!(wire[0]["tool"]["operation"], "read");
@@ -396,34 +404,87 @@ fn v2_tool_payloads_use_explicit_inputs_and_results() {
 fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("rollout.jsonl");
-    write_lines(&path, &[
-        json!({"timestamp":at(1),"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status\"}","call_id":"c"}}),
-    ]);
-    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Codex), WorkEventStores::default(), WorkEventIndex::default());
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(1),"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"git status\"}","call_id":"c"}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Codex),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
     let resolve = |_: &SupervisorSource| Some(path.clone());
     let (started, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
     let before = index.fingerprint(&scope, &stores, &resolve).unwrap();
-    assert_eq!(serde_json::to_value(&started[0]).unwrap()["lifecycle"]["stage"], "start");
-    write_lines(&path, &[json!({"timestamp":at(2),"type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"{\"exit_code\":0,\"output\":\"clean\"}"}})]);
+    assert_eq!(
+        serde_json::to_value(&started[0]).unwrap()["lifecycle"]["stage"],
+        "start"
+    );
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(2),"type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"{\"exit_code\":0,\"output\":\"clean\"}"}}),
+        ],
+    );
     let (ended, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
     assert_eq!(started[0].id, ended[0].id);
     let wire = serde_json::to_value(&ended[0]).unwrap();
     assert_eq!(wire["lifecycle"]["stage"], "end");
     assert_eq!(wire["lifecycle"]["outcome"], "success");
-    assert_ne!(index.fingerprint(&scope, &stores, &resolve).unwrap(), before, "settling the newest row must wake live clients");
+    assert_ne!(
+        index.fingerprint(&scope, &stores, &resolve).unwrap(),
+        before,
+        "settling the newest row must wake live clients"
+    );
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(3),"type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"long command\"}","call_id":"run"}}),
+            json!({"timestamp":at(4),"type":"response_item","payload":{"type":"function_call_output","call_id":"run","output":[{"type":"input_text","text":"{\"session_id\":42,\"output\":\"working\"}"}]}}),
+        ],
+    );
+    let (running, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    assert_eq!(
+        serde_json::to_value(&running[1]).unwrap()["lifecycle"]["phase"],
+        "running"
+    );
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(5),"type":"response_item","payload":{"type":"function_call","name":"write_stdin","arguments":"{\"session_id\":42,\"chars\":\"\"}","call_id":"poll"}}),
+            json!({"timestamp":at(6),"type":"response_item","payload":{"type":"function_call_output","call_id":"poll","output":"Chunk ID: test\nProcess exited with code 3\nFinal output:\nfailed"}}),
+        ],
+    );
+    let (ended, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
+    let wire = serde_json::to_value(&ended[1]).unwrap();
+    assert_eq!(wire["lifecycle"]["stage"], "end");
+    assert_eq!(wire["lifecycle"]["outcome"], "error");
+    assert_eq!(wire["tool"]["exit_code"], 3);
 }
 
 #[test]
 fn v2_reasoning_publishes_only_recorded_summary_and_detail() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("rollout.jsonl");
-    write_lines(&path, &[json!({"timestamp":at(1),"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Published heading\nPublished detail"}],"encrypted_content":"PRIVATE_SENTINEL","content":[{"text":"PRIVATE_SENTINEL"}]}})]);
-    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Codex), WorkEventStores::default(), WorkEventIndex::default());
+    write_lines(
+        &path,
+        &[
+            json!({"timestamp":at(1),"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"Published heading\nPublished detail"}],"encrypted_content":"PRIVATE_SENTINEL","content":[{"text":"PRIVATE_SENTINEL"}]}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Codex),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
     let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
     let wire = serde_json::to_value(&events[0]).unwrap();
     assert_eq!(wire["reasoning"]["summary"], "Published heading");
     assert_eq!(wire["reasoning"]["source"], "codex_summary");
-    let detail = serde_json::to_string(&detail(&mut index, &scope, &stores, &path, &events[0].id)).unwrap();
+    let detail =
+        serde_json::to_string(&detail(&mut index, &scope, &stores, &path, &events[0].id)).unwrap();
     assert!(detail.contains("Published detail"));
     assert!(!detail.contains("PRIVATE_SENTINEL"));
 }
@@ -432,22 +493,38 @@ fn v2_reasoning_publishes_only_recorded_summary_and_detail() {
 fn v2_changed_files_are_per_turn_successful_edit_provenance() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("claude.jsonl");
-    write_lines(&path, &[
-        json!({"type":"user","promptId":"p1","timestamp":at(1),"message":{"content":"edit"}}),
-        json!({"type":"assistant","timestamp":at(2),"message":{"content":[
-            {"type":"tool_use","id":"a","name":"Edit","input":{"file_path":"a.rs"}},
-            {"type":"tool_use","id":"b","name":"Write","input":{"file_path":"b.rs"}}
-        ]}}),
-        json!({"type":"user","timestamp":at(3),"message":{"content":[
-            {"type":"tool_result","tool_use_id":"a","content":"done"},
-            {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"refused"}
-        ]}}),
-    ]);
-    let (scope, stores, mut index) = (scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
+    write_lines(
+        &path,
+        &[
+            json!({"type":"user","promptId":"p1","timestamp":at(1),"message":{"content":"edit"}}),
+            json!({"type":"assistant","timestamp":at(2),"message":{"content":[
+                {"type":"tool_use","id":"a","name":"Edit","input":{"file_path":"a.rs"}},
+                {"type":"tool_use","id":"b","name":"Write","input":{"file_path":"b.rs"}}
+            ]}}),
+            json!({"type":"user","timestamp":at(3),"message":{"content":[
+                {"type":"tool_result","tool_use_id":"a","content":"done"},
+                {"type":"tool_result","tool_use_id":"b","is_error":true,"content":"refused"}
+            ]}}),
+        ],
+    );
+    let (scope, stores, mut index) = (
+        scope(cas_mux::SupervisorCli::Claude),
+        WorkEventStores::default(),
+        WorkEventIndex::default(),
+    );
     let (events, _, _) = page(&mut index, &scope, &stores, &path, None, 10);
     let wire = serde_json::to_value(&events).unwrap();
-    assert_eq!(wire[0]["changed_files"]["files"], json!([{"path":"a.rs","operation":"edit","source_event_id":events[0].id}]));
-    assert_eq!(wire[0]["changed_files"]["provenance"], "successful_tool_calls");
+    assert_eq!(
+        wire[0]["changed_files"]["files"],
+        json!([{"path":"a.rs","operation":"edit","source_event_id":events[0].id}])
+    );
+    assert_eq!(
+        wire[0]["changed_files"]["provenance"],
+        "successful_tool_calls"
+    );
     assert_eq!(wire[0]["changed_files"]["complete"], false);
-    assert!(wire[1].get("changed_files").is_none(), "failed edit is not a changed file");
+    assert!(
+        wire[1].get("changed_files").is_none(),
+        "failed edit is not a changed file"
+    );
 }

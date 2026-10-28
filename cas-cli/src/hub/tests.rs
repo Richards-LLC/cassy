@@ -2800,11 +2800,25 @@ fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() 
     let page = serde_json::to_vec(&DaemonMessage::WorkEvents {
         request_id: "events-1".into(),
         schema_version: crate::ui::factory::WORK_EVENT_SCHEMA_VERSION,
-        events: Vec::new(),
+        events: vec![serde_json::from_value(serde_json::json!({
+            "id":"v2-tool", "kind":"tool", "session":"factory-1",
+            "at":"2026-10-28T12:00:00Z", "label":"Read: lib.rs",
+            "tool":{"name":"Read","operation":"read","targets":["lib.rs"]},
+            "lifecycle":{"id":"call","stage":"end","outcome":"success"}
+        })).unwrap()],
         has_earlier: false,
         next_before: None,
     })
     .unwrap();
+    // The shared protocol accepts v1 and retains v2 while the hub relays original bytes.
+    let decoded: DaemonMessage = serde_json::from_slice(&page).unwrap();
+    let roundtrip = serde_json::to_value(decoded).unwrap();
+    assert_eq!(roundtrip["WorkEvents"]["events"][0]["tool"]["targets"], serde_json::json!(["lib.rs"]));
+    assert_eq!(roundtrip["WorkEvents"]["events"][0]["lifecycle"]["stage"], "end");
+    let legacy: crate::ui::factory::WorkEvent = serde_json::from_value(serde_json::json!({
+        "id":"v1", "kind":"tool", "session":"factory-1", "at":"2026-10-28T12:00:00Z", "label":"old"
+    })).unwrap();
+    assert!(legacy.tool.is_none() && legacy.lifecycle.is_none());
     let history = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-1".into(),
         messages: Vec::new(),

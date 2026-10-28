@@ -2779,6 +2779,9 @@ exit 0
     fn legacy_systemd_unit_upgrades_to_the_current_template() {
         let upgraded =
             upgrade_systemd_restart_policy(LEGACY_SYSTEMD_UNIT).expect("legacy unit needs upgrade");
+        let service = service_lines(&upgraded);
+        assert!(service.contains(&"CPUWeight=1000"), "{upgraded}");
+        assert!(service.contains(&"MemoryLow=1G"), "{upgraded}");
         assert_eq!(
             upgraded,
             systemd_unit(Path::new("/opt/cas/bin/cas"), true, 8443)
@@ -2795,6 +2798,12 @@ exit 0
         assert_eq!(
             upgrade_systemd_restart_policy(&pre_limit).as_deref(),
             Some(current.as_str())
+        );
+        let pre_isolation = current.replace("CPUWeight=1000\nMemoryLow=1G\n", "");
+        assert_eq!(
+            upgrade_systemd_restart_policy(&pre_isolation).as_deref(),
+            Some(current.as_str()),
+            "existing units also acquire the hub resource reservation"
         );
         assert_eq!(
             upgrade_systemd_restart_policy(&systemd_unit(

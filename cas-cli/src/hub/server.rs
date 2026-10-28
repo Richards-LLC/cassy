@@ -2341,6 +2341,8 @@ mod launch_tests {
         );
         let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
         assert!(args.contains(&"--unit=cas-factory-demo-1".to_string()));
+        assert!(args.contains(&"--slice=agent.slice".to_string()), "{args:?}");
+        assert!(args.contains(&"--property=Nice=5".to_string()), "{args:?}");
         assert!(args.contains(&"reap-daemon".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--property=KillMode=")));
         assert!(args.contains(&"--setenv=PATH".to_string()));

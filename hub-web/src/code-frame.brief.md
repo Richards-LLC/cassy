@@ -1,24 +1,31 @@
 # Brief: Code frames
 
 ## Single idea
+
 Every fenced source block is a small reading tool: its identity and Copy and Wrap controls remain visible on a phone.
 
 ## Hero form
+
 Annotated specimen: a mono filename leads a ruled header directly above its selectable source, with two named actions alongside it.
 
 ## Emotional register
+
 Calm, precise: opaque Glass reading tokens, quiet mono labels and stable text controls keep the code primary.
 
 ## Distinctive move
+
 The mono source label anchors a compact tool strip; the violet pressed Wrap state makes the reading mode visible without competing with the source.
 
 ## Deliberately omitted
+
 No Run action, hover-only controls, syntax palette or command inference: this frame owns reading and exact copying, while existing rich previews continue to own their content.
 
 ## Implementation boundary
+
 `createCodeFrame(document, { source, language, filename })` owns only local Copy state and Wrap state. It exposes its content container and pre node so rich renderers can replace content while the header and original copy source survive. No global storage or remote state. Tokens come from `hub-web/DESIGN.md`, `tokens.css` and `glass.css`.
 
 ## Critique
+
 Scored by the implementation worker on 2026-10-28 from strict four-view captures and the phone reduced-motion capture. Final receipts live under the task artifact directory.
 
 | Dimension | Score | Evidence |

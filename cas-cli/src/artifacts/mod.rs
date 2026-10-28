@@ -80,8 +80,9 @@ impl PublishDisposition {
             PublishDisposition::NotLoggedIn => {
                 "recorded locally; not logged in to Cassy Cloud".to_string()
             }
-            PublishDisposition::UploadFailed { .. } =>
-                "recorded locally; Cloud delivery failed".to_string(),
+            PublishDisposition::UploadFailed { .. } => {
+                "recorded locally; Cloud delivery failed".to_string()
+            }
         }
     }
 }
@@ -450,7 +451,8 @@ mod tests {
         let project_root = base.join("project");
         let cas_root = project_root.join(".cas");
         let artifacts_root = base.join("artifacts");
-        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root).join("cas-b72a");
+        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root)
+            .join("cas-b72a");
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&task_dir).unwrap();
         let store = SqliteArtifactStore::open(&cas_root).unwrap();
@@ -692,8 +694,14 @@ mod cloud_double_tests {
 
     fn release_completion_writer(_: i32) -> bool {
         COMPLETION_WRITER.with(|writer| {
-            writer.borrow_mut().take().unwrap().lock().unwrap()
-                .execute_batch("COMMIT").unwrap();
+            writer
+                .borrow_mut()
+                .take()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .execute_batch("COMMIT")
+                .unwrap();
         });
         // The first UPDATE really fails with SQLITE_BUSY; only a retry succeeds.
         false
@@ -711,11 +719,19 @@ mod cloud_double_tests {
         let base = dir.path().canonicalize().unwrap();
         let cas_root = base.join("project").join(".cas");
         let artifacts_root = base.join("artifacts");
-        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root).join("cas-29624");
+        let task_dir = crate::config::project_factory_artifacts_root(&cas_root, &artifacts_root)
+            .join("cas-29624");
         fs::create_dir_all(&cas_root).unwrap();
         fs::create_dir_all(&task_dir).unwrap();
         let file = task_dir.join("report.pdf");
         fs::write(&file, b"hello world").unwrap();
+        crate::store::open_task_store(&cas_root)
+            .unwrap()
+            .add(&crate::types::Task::new(
+                "cas-29624".into(),
+                "artifact".into(),
+            ))
+            .unwrap();
         Fixture {
             store: SqliteArtifactStore::open(&cas_root).unwrap(),
             roots: PublishRoots::new(&cas_root, &artifacts_root, "cas-29624"),
@@ -765,7 +781,11 @@ mod cloud_double_tests {
             .and(body_string_contains(HELLO_SHA256))
             .respond_with(move |_: &wiremock::Request| {
                 if let Some(writer) = &writer {
-                    writer.lock().unwrap().execute_batch("BEGIN IMMEDIATE").unwrap();
+                    writer
+                        .lock()
+                        .unwrap()
+                        .execute_batch("BEGIN IMMEDIATE")
+                        .unwrap();
                 }
                 response.clone()
             })
@@ -817,7 +837,11 @@ mod cloud_double_tests {
         let (outcome, view) = tokio::task::spawn_blocking(move || {
             let pooled = cas_store::shared_db::shared_connection(&database).unwrap();
             COMPLETION_WRITER.with(|slot| *slot.borrow_mut() = Some(writer));
-            pooled.lock().unwrap().busy_handler(Some(release_completion_writer)).unwrap();
+            pooled
+                .lock()
+                .unwrap()
+                .busy_handler(Some(release_completion_writer))
+                .unwrap();
             let context = PublishContext {
                 store: &f.store,
                 roots: f.roots.clone(),
@@ -827,11 +851,24 @@ mod cloud_double_tests {
             let outcome = publish(&context, &f.file).expect("publish");
             cas_store::shared_db::install_busy_handler(&pooled.lock().unwrap()).unwrap();
             assert!(outcome.disposition.is_committed(), "{outcome:?}");
+            let task = crate::store::open_task_store(&f.roots.project_root.join(".cas"))
+                .unwrap()
+                .get("cas-29624")
+                .unwrap();
+            assert!(
+                task.notes.contains(&outcome.artifact.id) && task.notes.contains("ARTIFACT_PROOF:"),
+                "plain publish must carry its committed metadata to peers: {}",
+                task.notes
+            );
             assert_eq!(f.store.list_for_task("cas-29624").unwrap().len(), 1);
             let (note, warnings) = proof::prepare_note(
-                &f.store, "cas-29624", &outcome.artifact.id,
-                &f.roots.task_artifacts_dir, false,
-            ).unwrap();
+                &f.store,
+                "cas-29624",
+                &outcome.artifact.id,
+                &f.roots.task_artifacts_dir,
+                false,
+            )
+            .unwrap();
             assert!(warnings.is_empty(), "{warnings:?}");
             assert_eq!(note.matches("ARTIFACT_PROOF:").count(), 1, "{note}");
             let view = signed_view(&f.store, Some(&client), &outcome.artifact.id);
@@ -861,27 +898,55 @@ mod cloud_double_tests {
         let f = fixture();
         let database = f.roots.project_root.join(".cas/cas.db");
         let writer = Arc::new(Mutex::new(rusqlite::Connection::open(&database).unwrap()));
-        let server = cloud_double_with_writer(200, serde_json::json!({"status": "committed"}), Some(writer.clone())).await;
+        let server = cloud_double_with_writer(
+            200,
+            serde_json::json!({"status": "committed"}),
+            Some(writer.clone()),
+        )
+        .await;
         let client = client(&server);
         tokio::task::spawn_blocking(move || {
             let pooled = cas_store::shared_db::shared_connection(&database).unwrap();
-            pooled.lock().unwrap().busy_timeout(std::time::Duration::ZERO).unwrap();
-            let outcome = publish(&PublishContext {
-                store: &f.store, roots: f.roots.clone(), task_id: "cas-29624".into(), cloud: Some(client),
-            }, &f.file).unwrap();
+            pooled
+                .lock()
+                .unwrap()
+                .busy_timeout(std::time::Duration::ZERO)
+                .unwrap();
+            let outcome = publish(
+                &PublishContext {
+                    store: &f.store,
+                    roots: f.roots.clone(),
+                    task_id: "cas-29624".into(),
+                    cloud: Some(client),
+                },
+                &f.file,
+            )
+            .unwrap();
             cas_store::shared_db::install_busy_handler(&pooled.lock().unwrap()).unwrap();
             writer.lock().unwrap().execute_batch("COMMIT").unwrap();
             assert_eq!(outcome.artifact.status, "uploaded");
             assert!(!outcome.disposition.is_committed());
-            let PublishDisposition::UploadFailed { reason } = &outcome.disposition else { panic!("{outcome:?}") };
-            assert!(reason.contains("uploaded, not committed locally"), "{reason}");
+            let PublishDisposition::UploadFailed { reason } = &outcome.disposition else {
+                panic!("{outcome:?}")
+            };
+            assert!(
+                reason.contains("uploaded, not committed locally"),
+                "{reason}"
+            );
             assert_eq!(f.store.list_for_task("cas-29624").unwrap().len(), 1);
             let (note, warnings) = proof::prepare_note(
-                &f.store, "cas-29624", &outcome.artifact.id, &f.roots.task_artifacts_dir, false,
-            ).unwrap();
+                &f.store,
+                "cas-29624",
+                &outcome.artifact.id,
+                &f.roots.task_artifacts_dir,
+                false,
+            )
+            .unwrap();
             assert!(!note.contains("ARTIFACT_PROOF:"), "{note}");
             assert_eq!(warnings.len(), 1);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

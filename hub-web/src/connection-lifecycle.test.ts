@@ -138,6 +138,55 @@ function networkHints(): EventTarget {
 }
 
 describe("Commander live connection lifecycle", () => {
+  it("starts the catalog and capability reads independently within the authentication deadline", async () => {
+    transport();
+    const fetchNow = globalThis.fetch;
+    const reads = new Map<string, () => void>();
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/v1/machine" || path === "/v1/sessions") {
+        await new Promise<void>(resolve => reads.set(path, resolve));
+      }
+      return fetchNow(input, init);
+    }));
+    const connection = supervisor(await storedMachine("independent-auth-reads"));
+    connection.start();
+    try {
+      await vi.waitFor(() => expect([...reads.keys()].sort()).toEqual(["/v1/machine", "/v1/sessions"]), { timeout: 250 });
+      reads.forEach(release => release());
+      await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    } finally {
+      connection.stop();
+      reads.forEach(release => release());
+    }
+  });
+
+  it("retains known hub capabilities when a reconnect's capability read is temporarily unavailable", async () => {
+    transport(true);
+    const fetchNow = globalThis.fetch;
+    let unavailable = false;
+    vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) =>
+      unavailable && new URL(String(input)).pathname === "/v1/machine"
+        ? Promise.resolve(Response.json({ error: "busy" }, { status: 503 })) : fetchNow(input, init)));
+    const onMachineInfo = vi.fn();
+    const connection = new HubConnectionSupervisor(await storedMachine("known-capabilities"), {
+      onState: () => {}, onSessions: () => {}, onMachineEvent: () => {}, onSessionState: () => {},
+      onOutput: () => {}, onSocketError: () => {}, onMachineInfo,
+    });
+    supervisors.push(connection);
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    const known = onMachineInfo.mock.calls.at(-1)?.[0];
+    expect(known.capabilities).toContain("machine_multiplex_v2");
+    connection.stop();
+    // Drain the stopped event stream before starting the same paired connection.
+    await new Promise<void>(resolve => setTimeout(resolve, 0));
+    unavailable = true;
+    connection.start();
+    await vi.waitFor(() => expect(connection.snapshot().phase).toBe("live"));
+    expect(onMachineInfo.mock.calls.at(-1)?.[0]).toEqual(known);
+  });
+
   it("settles a resend receipt when an overlapping legacy attach's ticket finishes later (cas-547a)", async () => {
     transport();
     TransportSocket.instances = [];

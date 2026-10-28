@@ -396,7 +396,7 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await filters.getByRole("button", { name: "All", exact: true }).click();
     await expect(list.locator(".conversation-row")).toHaveCount(3);
     // A kept catalog's positive online bit must yield to a lost connection.
-    await hub.down("atlas");
+    await hub.down("atlas", { sockets: "close" });
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, offline", exact: true })).toBeVisible();
     await hub.up("atlas");
     await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();

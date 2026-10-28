@@ -26430,7 +26430,11 @@ mod merge_state_gate_tests {
             p,
             &["remote", "add", "origin", bare.path().to_str().unwrap()],
         );
-        git(p, &["push", "-q", "origin", "main:epic/new-target"]);
+        git(p, &["branch", "epic/previous-cas-new-parent", "main"]);
+        git(
+            p,
+            &["push", "-q", "origin", "main:epic/current-cas-new-parent"],
+        );
         let branch = "factory/retarget-worker-cas-retarget";
         git(p, &["checkout", "-q", "-b", branch]);
         std::fs::write(p.join("delivery.rs"), "// cas-retarget delivery\n").unwrap();
@@ -26474,31 +26478,38 @@ mod merge_state_gate_tests {
         store.add(&task).unwrap();
         for (id, target) in [
             ("cas-old-parent", "main"),
-            ("cas-new-parent", "epic/new-target"),
+            ("cas-new-parent", "epic/current-cas-new-parent"),
         ] {
             let mut epic = Task::new(id.into(), "Parent epic".into());
             epic.task_type = TaskType::Epic;
+            if id == "cas-new-parent" {
+                epic.branch = Some("epic/previous-cas-new-parent".into());
+            }
             epic.deliverables.work_target = Some(WorkTarget {
                 repo_selector: "project:cas-retarget-fixture".into(),
                 target_branch: target.into(),
             });
             store.add(&epic).unwrap();
         }
-        let service = CasService::new(core, None);
+        let supervisor_service = CasService::new(core, None);
         for request in [
             serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
             serde_json::json!({"action":"dep_remove", "id":task.id, "to_id":"cas-old-parent", "dep_type":"parent"}),
             serde_json::json!({"action":"dep_add", "id":task.id, "to_id":"cas-new-parent", "dep_type":"parent"}),
-            serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/new-target"}),
+            serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/current-cas-new-parent"}),
         ] {
-            let response = service
+            let response = supervisor_service
                 .task(Parameters(serde_json::from_value(request).unwrap()))
                 .await
                 .unwrap();
             assert_ne!(response.is_error, Some(true), "{response:?}");
         }
-        assert!(!git_ref_exists(p, "epic/new-target"));
-        assert!(!git_commit_is_ancestor(p, &tip, "origin/epic/new-target"));
+        assert!(!git_ref_exists(p, "epic/current-cas-new-parent"));
+        assert!(!git_commit_is_ancestor(
+            p,
+            &tip,
+            "origin/epic/current-cas-new-parent"
+        ));
         agents
             .register(&Agent::new_with_role(
                 "retarget-worker-id".into(),
@@ -26507,10 +26518,18 @@ mod merge_state_gate_tests {
             ))
             .unwrap();
         env.set("CAS_AGENT_ROLE", "worker");
-        let worker = CasCore::with_daemon(root, None, None);
+        let worker = CasCore::with_daemon(root.clone(), None, None);
         worker.set_agent_id_for_testing("retarget-worker-id".into());
         let service = CasService::new(worker, None);
-        let response = service.task(Parameters(serde_json::from_value(serde_json::json!({"action":"close", "id":task.id, "reason":"ready for review"})).unwrap())).await.unwrap();
+        let response = service
+            .task(Parameters(
+                serde_json::from_value(
+                    serde_json::json!({"action":"close", "id":task.id, "reason":"ready for review"}),
+                )
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
         assert_eq!(
             store.get(&task.id).unwrap().status,
             TaskStatus::AwaitingMerge,
@@ -26518,6 +26537,92 @@ mod merge_state_gate_tests {
         );
         assert_eq!(response.is_error, Some(true));
         assert!(response.content.iter().any(|content| matches!(&content.raw, rmcp::model::RawContent::Text(text) if text.text.contains("MERGE REQUIRED"))));
+        let message = format!("{response:?}");
+        assert!(
+            message.contains("epic/current-cas-new-parent")
+                && !message.contains("epic/previous-cas-new-parent"),
+            "close must name the same effective target as show: {message}"
+        );
+
+        // A previously inherited child target also follows the renamed lane.
+        let mut parked = store.get(&task.id).unwrap();
+        parked
+            .deliverables
+            .work_target
+            .as_mut()
+            .unwrap()
+            .target_branch = "epic/previous-cas-new-parent".into();
+        store.update(&parked).unwrap();
+        let shown = service
+            .task(Parameters(
+                serde_json::from_value(
+                    serde_json::json!({"action":"show", "id":task.id, "brief":true}),
+                )
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        let shown = format!("{shown:?}");
+        assert!(
+            shown.contains("Target: project:cas-retarget-fixture @ epic/current-cas-new-parent"),
+            "{shown}"
+        );
+        let epic = store.get("cas-new-parent").unwrap();
+        let target = effective_close_work_target(&parked, Some(&epic)).unwrap();
+        assert_eq!(target.target_branch, "epic/current-cas-new-parent");
+        git(
+            p,
+            &[
+                "push",
+                "-q",
+                "origin",
+                &format!("{tip}:refs/heads/epic/current-cas-new-parent"),
+            ],
+        );
+        let outcome =
+            run_factory_branch_merge_gate(&parked, &base_req(&task.id), &target.target_branch, p);
+        assert!(
+            matches!(
+                outcome,
+                MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)
+            ),
+            "merged delivery must pass the renamed target's ancestry gate: {outcome:?}"
+        );
+
+        // A frozen delivery target is repaired explicitly by its supervisor.
+        let update = serde_json::json!({"action":"update", "id":task.id, "target_branch":"epic/current-cas-new-parent"});
+        let refused = service
+            .task(Parameters(serde_json::from_value(update.clone()).unwrap()))
+            .await
+            .unwrap_err();
+        assert!(refused.message.contains("proof_scope_fix"), "{refused:?}");
+        let mut repair = update;
+        repair["proof_scope_fix"] = serde_json::json!(true);
+        repair["reason"] = serde_json::json!("repair inherited target after epic rename");
+        let refused = service
+            .task(Parameters(serde_json::from_value(repair.clone()).unwrap()))
+            .await
+            .unwrap_err();
+        assert!(
+            refused.message.contains("live registered supervisor"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            store.get(&task.id).unwrap().deliverables.work_target,
+            parked.deliverables.work_target
+        );
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let repaired = supervisor_service
+            .task(Parameters(serde_json::from_value(repair).unwrap()))
+            .await
+            .unwrap();
+        assert_ne!(repaired.is_error, Some(true), "{repaired:?}");
+        let repaired = store.get(&task.id).unwrap();
+        assert_eq!(repaired.status, TaskStatus::Open);
+        assert_eq!(
+            repaired.deliverables.work_target.unwrap().target_branch,
+            "epic/current-cas-new-parent"
+        );
     }
 
     /// cas-44e93: a per-task factory branch pushed once (`pushed`), with a

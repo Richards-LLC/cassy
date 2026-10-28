@@ -206,6 +206,10 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J17-STATUS-TRUTH:
+    statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
+    check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
+    bug: {task: cas-0a75}
   HUB-J17-FLEET-INVALIDATION:
     statement: A fleet change overlapping an older heartbeat obtains a fresh catalog, so a stopped worker disappears
       without waiting for the next heartbeat.
@@ -277,6 +281,11 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  stale-worker-and-delivery-projection:
+    title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
+    tasks: [cas-0a75]
+    invariants: [HUB-J17-STATUS-TRUTH]
+    journeys: [HUB-J17]
   prose-table-column-collapse:
     title: A prose column must never consume its siblings' word widths or render inline markdown literally
     tasks: [cas-8bb3]
@@ -1686,6 +1695,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-STATUS-TRUTH
   - HUB-J17-FLEET-INVALIDATION
   - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
   traffic:

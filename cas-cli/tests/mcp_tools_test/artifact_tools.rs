@@ -209,11 +209,36 @@ async fn an_unknown_action_lists_the_valid_ones() {
 #[tokio::test]
 async fn showing_an_unknown_artifact_names_the_id() {
     let mut test_env = TestEnvGuard::temp_home();
-    let (_temp, service) = setup_cas_service(&mut test_env);
-    let mut show = req("show");
-    show.id = Some("art-nope".to_string());
-    let error = service.artifact(Parameters(show)).await.unwrap_err();
-    assert!(error.message.contains("art-nope"), "{}", error.message);
+    let (temp, service) = setup_cas_service(&mut test_env);
+    cas::store::open_task_store(&temp.path().join(".cas"))
+        .unwrap()
+        .add(&cas::types::Task::new(
+            "cas-proof".into(),
+            "artifact".into(),
+        ))
+        .unwrap();
+    for action in ["show", "fetch"] {
+        let mut request = req(action);
+        request.id = Some("art-nope".to_string());
+        request.task_id = Some("cas-proof".to_string());
+        let error = service.artifact(Parameters(request)).await.unwrap_err();
+        assert!(error.message.contains("art-nope"), "{}", error.message);
+        assert_eq!(
+            error.data.as_ref().unwrap()["state"],
+            "metadata_unavailable"
+        );
+        assert_eq!(error.data.as_ref().unwrap()["artifact_id"], "art-nope");
+        let mut command = std::process::Command::new(cas::test_paths::cas_binary());
+        command.current_dir(temp.path()).args(["--json", "artifact", action]);
+        if action == "fetch" {
+            command.args(["--task", "cas-proof"]);
+        }
+        let output = command.arg("art-nope").output().unwrap();
+        assert!(!output.status.success());
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["state"], "metadata_unavailable");
+        assert_eq!(report["artifact_id"], "art-nope");
+    }
 }
 
 #[tokio::test]
@@ -481,6 +506,10 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     let owner_tasks = open_task_store(&owner.path().join(".cas")).unwrap();
     owner_tasks.add(&synced).unwrap();
     owner_tasks.append_trusted_note(&task.id, &published_proof).unwrap();
+    // These are two machines in one project, not two unrelated fixture projects.
+    let mut owner_config = cas::config::Config::load(&owner.path().join(".cas")).unwrap();
+    owner_config.project.get_or_insert_default().canonical_id = synced.origin_project.clone();
+    owner_config.save(&owner.path().join(".cas")).unwrap();
     std::fs::write(owner.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
     assert!(
         cas_store::SqliteArtifactStore::open(&owner.path().join(".cas"))
@@ -491,6 +520,27 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     );
     // Delete the source: resolving must use Cloud, not a shared-host shortcut.
     std::fs::remove_file(source).unwrap();
+    let mut show = req("show");
+    show.id = Some(id.into());
+    let shown = extract_text(owner_service.artifact(Parameters(show)).await.unwrap());
+    assert!(
+        shown.contains(sha) && shown.contains("cloud-proof"),
+        "{shown}"
+    );
+    let cli_show = std::process::Command::new(cas::test_paths::cas_binary())
+        .current_dir(owner.path())
+        .args(["--json", "artifact", "show", id])
+        .output()
+        .unwrap();
+    assert!(
+        cli_show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cli_show.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&cli_show.stdout).unwrap()["sha256"],
+        sha
+    );
     let fetch = serde_json::json!({"action": "fetch", "task_id": task.id, "id": id});
     let fetched = extract_text(
         owner_service

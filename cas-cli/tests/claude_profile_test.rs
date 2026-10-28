@@ -563,8 +563,8 @@ fn login_subcommand_keeps_main_on_legacy_default_credential_store() {
 
 /// Picker new-login on a real terminal: keys typed together with the email
 /// are read by inquire's reader at the email prompt. A finished `y` line still
-/// answers the duplicate question, an unfinished one stays editable there, and
-/// a typed-ahead Ctrl-C still cancels.
+/// answers the duplicate question and a typed-ahead Ctrl-C still cancels;
+/// everything else is the terminal's own native input handling.
 #[cfg(unix)]
 #[tokio::test]
 async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_providers() {
@@ -579,6 +579,7 @@ async fn picker_email_type_ahead_answers_the_duplicate_question_for_both_provide
             r#"#!/bin/sh
 if [ "$1" = auth ] && [ "$2" = status ]; then echo '{"loggedIn":true}'; exit 0; fi
 if [ "$1" = login ] && [ "$2" = status ]; then echo 'Logged in using ChatGPT'; exit 0; fi
+if [ "$1" = auth ] || [ "$1" = login ]; then echo LOGIN_STARTED; [ -f "$HOME/pause-login" ] && sleep 1; fi
 if [ "$1" = auth ] && [ -n "$CLAUDE_CONFIG_DIR" ]; then
   printf '{"oauthAccount":{"emailAddress":"real@example.com","accountUuid":"one"}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
 fi
@@ -599,17 +600,25 @@ exit 0
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))
         .unwrap();
-        // (keys written with the email, keys written at the question, succeeds)
-        let cases: [(&[u8], &[u8], bool); 5] = [
-            (b"typed@example.com\ry\r", b"", true),
-            // An unfinished type-ahead stays editable and can be completed.
-            (b"typed@example.com\rn", b"\x7fy\r", true),
-            (b"typed@example.com\ry", b"\r", true),
-            // Enter typed during the login reaches the editor as a newline.
-            (b"typed@example.com\ry", b"\n", true),
-            (b"typed@example.com\r\x03", b"", false),
+        // (keys written with the email, output that triggers the next write,
+        // keys written then, succeeds). After the email prompt the terminal
+        // owns input natively; only finished type-ahead lines carry over.
+        let cases: [(&[u8], &str, &[u8], bool); 5] = [
+            (b"typed@example.com\ry\r", "", b"", true),
+            // The undisplayed fragment is dropped; the terminal edits natively.
+            (b"typed@example.com\rn", "[y/N] ", b"\x7fy\r", true),
+            // Ctrl-D typed while the login runs is EOF at the question.
+            (b"typed@example.com\ry", "LOGIN_STARTED", b"\x04", false),
+            (b"typed@example.com\ry", "[y/N] ", b"\r", false),
+            (b"typed@example.com\r\x03", "", b"", false),
         ];
-        for (with_email, at_question, succeeds) in cases {
+        for (with_email, trigger, then, succeeds) in cases {
+            let pause = home.path().join("pause-login");
+            if trigger == "LOGIN_STARTED" {
+                std::fs::write(&pause, "").unwrap();
+            } else {
+                let _ = std::fs::remove_file(&pause);
+            }
             let mut pty = Pty::spawn(
                 "picker-type-ahead",
                 PtyConfig {
@@ -647,8 +656,8 @@ exit 0
                             } else if step == 1 && text.contains("Email for the new") {
                                 pty.write(with_email).await.unwrap();
                                 step = 2;
-                            } else if step == 2 && text.contains("[y/N] ") && !at_question.is_empty() {
-                                pty.write(at_question).await.unwrap();
+                            } else if step == 2 && !trigger.is_empty() && text.contains(trigger) {
+                                pty.write(then).await.unwrap();
                                 step = 3;
                             }
                         }
@@ -668,7 +677,6 @@ exit 0
                 assert!(output.contains("Keep the existing account? [y/N] "), "{provider} {case:?}: {output}");
             } else {
                 assert_ne!(code, Some(0), "{provider} {case:?}: {output}");
-                assert!(!output.contains("Keep the existing account?"), "{provider} {case:?}: {output}");
             }
             let left: Vec<_> = std::fs::read_dir(home.path())
                 .unwrap()

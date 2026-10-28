@@ -894,6 +894,16 @@ export class ConversationView {
   private noticeReset(): void {
     if (!this.element.isConnected || this.element.clientHeight === 0) return;
     if (Math.abs(this.element.scrollTop - this.scrolledTo) > 1) this.placePending = true;
+    // An outage banner can add padding above the turns without changing
+    // scrollTop. The remembered turn, rather than the offset alone, reveals
+    // that layout drift before this update captures a new reading anchor.
+    if (!this.following && this.place) {
+      const node = [...this.msgs.querySelectorAll<HTMLElement>("[data-key]")].find(item => item.dataset.key === this.place!.key);
+      if (node) {
+        const offset = node.getBoundingClientRect().top - this.element.getBoundingClientRect().top;
+        if (Math.abs(offset - this.place.offset) > 1) this.placePending = true;
+      }
+    }
   }
 
   private restorePlace(): void {

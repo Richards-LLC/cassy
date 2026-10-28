@@ -1,5 +1,6 @@
 //! Session-scoped media tickets and bounded, credential-free blob streaming.
 use super::*;
+pub(crate) use crate::hub::auth::MediaTicket;
 use cas_store::PublishedArtifact;
 use cas_types::ARTIFACT_MAX_BYTES;
 use std::io::{self, Read};
@@ -20,6 +21,10 @@ fn media_mime(mime: &str) -> Option<&str> {
     (valid_token(subtype)
         && (matches!(family, "image" | "video" | "audio") || mime == "application/pdf"))
         .then_some(mime)
+}
+
+fn accepts_media(mime: &str) -> bool {
+    media_mime(mime).is_some()
 }
 
 /// Fetch no URL until both the session and the thread's published ref match.
@@ -50,7 +55,6 @@ async fn scoped<R: SessionReadModel>(
                 .is_none_or(str::is_empty)
             || record.size_bytes == 0
             || record.size_bytes > ARTIFACT_MAX_BYTES
-            || media_mime(&record.mime).is_none()
         {
             return None;
         }
@@ -82,6 +86,46 @@ fn refusal(error: &anyhow::Error) -> Response {
     }
 }
 
+/// Issue a reusable ticket only for a live SessionRead context and a committed
+/// ref in that session's thread. `accepts` is a server-owned MIME allowlist,
+/// never request input; page routes can admit HTML without relaxing media routes.
+pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
+    state: &HubState<R>,
+    context: &AuthContext,
+    session: &str,
+    artifact: &str,
+    accepts: fn(&str) -> bool,
+) -> Result<MediaTicket, Response> {
+    let auth = state.auth.as_ref().ok_or_else(unauthorized)?;
+    if !context.has(Scope::SessionRead) {
+        return Err(refusal(&ScopeDenied.into()));
+    }
+    auth.ensure_active_context(context, chrono::Utc::now())
+        .map_err(|error| refusal(&error))?;
+    let (_, record) = scoped(state, session, artifact).await?;
+    if !accepts(&record.mime) {
+        return Err(generic_not_found());
+    }
+    auth.issue_media_ticket(context, session, artifact, chrono::Utc::now())
+        .map_err(|error| refusal(&error))
+}
+
+/// The opaque URL itself supplies the bound session after HMAC, expiry and
+/// pairing-generation checks. Call fetch_session_artifact next to recheck the
+/// thread ref, live permission and the route's own MIME allowlist.
+pub(crate) fn authenticate_session_artifact_ticket<R: SessionReadModel>(
+    state: &HubState<R>,
+    ticket: &str,
+    artifact: &str,
+) -> Result<(String, AuthContext), Response> {
+    state
+        .auth
+        .as_ref()
+        .ok_or_else(unauthorized)?
+        .authenticate_artifact_ticket(ticket, artifact, chrono::Utc::now())
+        .map_err(|error| refusal(&error))
+}
+
 pub(super) async fn ticket<R: SessionReadModel>(
     State(state): State<HubState<R>>,
     Path((session, artifact)): Path<(String, String)>,
@@ -100,17 +144,10 @@ pub(super) async fn ticket<R: SessionReadModel>(
         Ok(None) => return private(unauthorized(), &headers),
         Err(error) => return private(refusal(&error), &headers),
     };
-    if let Err(response) = scoped(&state, &session, &artifact).await {
-        return private(response, &headers);
-    }
-    match state
-        .auth
-        .as_ref()
-        .expect("authenticated store")
-        .issue_media_ticket(&context, &session, &artifact, chrono::Utc::now())
+    match issue_session_artifact_ticket(&state, &context, &session, &artifact, accepts_media).await
     {
         Ok(ticket) => private(Json(ticket).into_response(), &headers),
-        Err(error) => private(refusal(&error), &headers),
+        Err(response) => private(response, &headers),
     }
 }
 
@@ -177,9 +214,9 @@ pub(super) async fn content<R: SessionReadModel>(
     Query(query): Query<MediaQuery>,
     headers: HeaderMap,
 ) -> Response {
-    let Some(auth) = state.auth.clone() else {
+    if state.auth.is_none() {
         return private(unauthorized(), &headers);
-    };
+    }
     let uri = format!("/v1/sessions/{session}/artifacts/{artifact}/content");
     let context = if headers.contains_key("authorization") {
         match authorize(
@@ -198,23 +235,63 @@ pub(super) async fn content<R: SessionReadModel>(
         let Some(ticket) = query.t.as_deref() else {
             return private(unauthorized(), &headers);
         };
-        match auth.authenticate_media_ticket(ticket, &session, &artifact, chrono::Utc::now()) {
-            Ok(context)
-                if origin(&headers).is_none_or(|origin| origin == context.controller_origin) =>
+        match authenticate_session_artifact_ticket(&state, ticket, &artifact) {
+            Ok((bound_session, context))
+                if bound_session == session
+                    && origin(&headers)
+                        .is_none_or(|origin| origin == context.controller_origin) =>
             {
                 context
             }
             Ok(_) => return private(unauthorized(), &headers),
-            Err(error) => return private(refusal(&error), &headers),
+            Err(response) => return private(response, &headers),
         }
     };
-    let (root, record) = match scoped(&state, &session, &artifact).await {
-        Ok(found) => found,
-        Err(response) => return private(response, &headers),
+    fetch_session_artifact(
+        &state,
+        context,
+        &session,
+        &artifact,
+        &headers,
+        accepts_media,
+    )
+    .await
+}
+
+/// Fetch only a server-resolved, session-referenced artifact. All consumers
+/// retain the 25 MiB ceiling, reusable Range handling, cancellation/backpressure,
+/// no-store caching and no upstream bearer forwarding. A caller admitting HTML
+/// must apply its own sandbox/CSP response policy before returning it.
+pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
+    state: &HubState<R>,
+    context: AuthContext,
+    session: &str,
+    artifact: &str,
+    headers: &HeaderMap,
+    accepts: fn(&str) -> bool,
+) -> Response {
+    let Some(auth) = state.auth.clone() else {
+        return private(unauthorized(), headers);
     };
-    let requested = match range(&headers, record.size_bytes) {
+    if !context.has(Scope::SessionRead) {
+        return private(refusal(&ScopeDenied.into()), headers);
+    }
+    if origin(headers).is_some_and(|origin| origin != context.controller_origin) {
+        return private(unauthorized(), headers);
+    }
+    if let Err(error) = auth.ensure_active_context(&context, chrono::Utc::now()) {
+        return private(refusal(&error), headers);
+    }
+    let (root, record) = match scoped(state, session, artifact).await {
+        Ok(found) => found,
+        Err(response) => return private(response, headers),
+    };
+    if !accepts(&record.mime) || HeaderValue::from_str(&record.mime).is_err() {
+        return private(generic_not_found(), headers);
+    }
+    let requested = match range(headers, record.size_bytes) {
         Ok(range) => range,
-        Err(()) => return private(unsatisfied(record.size_bytes), &headers),
+        Err(()) => return private(unsatisfied(record.size_bytes), headers),
     };
     let (start, end) = requested.unwrap_or((0, record.size_bytes - 1));
     let size = record.size_bytes;
@@ -332,7 +409,7 @@ pub(super) async fn content<R: SessionReadModel>(
         }
     });
     if head_rx.await != Ok(true) {
-        return private(StatusCode::BAD_GATEWAY.into_response(), &headers);
+        return private(StatusCode::BAD_GATEWAY.into_response(), headers);
     }
     let stream = stream::unfold(body_rx, |mut receiver| async move {
         receiver.recv().await.map(|chunk| (chunk, receiver))
@@ -363,5 +440,5 @@ pub(super) async fn content<R: SessionReadModel>(
             HeaderValue::from_str(&format!("bytes {start}-{end}/{size}")).unwrap(),
         );
     }
-    private(response, &headers)
+    private(response, headers)
 }

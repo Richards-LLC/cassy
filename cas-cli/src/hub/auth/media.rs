@@ -65,13 +65,12 @@ impl AuthStore {
         })
     }
 
-    pub(crate) fn authenticate_media_ticket(
+    pub(crate) fn authenticate_artifact_ticket(
         &self,
         ticket: &str,
-        session: &str,
         artifact: &str,
         now: DateTime<Utc>,
-    ) -> Result<AuthContext> {
+    ) -> Result<(String, AuthContext)> {
         // Bound all work before decoding attacker-controlled data. Never include
         // a token, its payload or its signature in an error or Debug output.
         anyhow::ensure!(ticket.len() <= 4096, "media ticket refused");
@@ -95,8 +94,7 @@ impl AuthStore {
         )
         .context("media ticket refused")?;
         anyhow::ensure!(
-            claims.session == session
-                && claims.artifact == artifact
+            claims.artifact == artifact
                 && claims.issued <= now.timestamp()
                 && claims.expires > now.timestamp()
                 && claims.expires > claims.issued
@@ -124,6 +122,6 @@ impl AuthStore {
         };
         Self::ensure_active_context_in_state(&state, &context, now)?;
         anyhow::ensure!(context.has(Scope::SessionRead), "media ticket refused");
-        Ok(context)
+        Ok((claims.session, context))
     }
 }

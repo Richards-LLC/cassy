@@ -5,6 +5,7 @@
 mod account;
 mod installation;
 mod media;
+pub(crate) use media::MediaTicket;
 pub use account::{CHALLENGE_TTL_SECONDS, EnrollmentAssertion, EnrollmentRefusal};
 pub use installation::{AccountEnrollment, InstallationAction, InstallationProof};
 
@@ -1757,7 +1758,7 @@ impl AuthStore {
     }
 
     pub fn ensure_active_context(&self, context: &AuthContext, now: DateTime<Utc>) -> Result<()> {
-        let state = self.lock()?;
+        let state = self.lock().map_err(store_failure)?;
         Self::ensure_active_context_in_state(&state, context, now)
     }
 

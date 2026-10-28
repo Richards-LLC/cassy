@@ -5263,7 +5263,7 @@ async fn projects_list_live_session_folders_only_to_pairings_that_read_sessions_
 /// pairing credential in a URL (cas-1b35). One table drives the public router.
 #[tokio::test]
 async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
-    use cas_store::{NewArtifact, PromptQueueStore, SqliteArtifactStore};
+    use cas_store::{NewArtifact, SqliteArtifactStore};
     let mut f = ops_fixture([Scope::SessionRead].into_iter().collect());
     let upstream = wiremock::MockServer::start().await;
     let artifacts = SqliteArtifactStore::open(&f.cas_dir).unwrap();

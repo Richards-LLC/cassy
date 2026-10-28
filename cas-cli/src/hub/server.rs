@@ -26,7 +26,7 @@ use super::{
 use crate::ui::factory::{ClientMessage, DaemonMessage, MessageAttribution, valid_session_name};
 
 #[path = "artifact_proxy.rs"]
-mod artifact_proxy;
+pub(crate) mod artifact_proxy;
 
 const MACHINE_PROTOCOL_VERSION: u32 = 2;
 const MACHINE_PROTOCOL_MAGIC: &[u8; 4] = b"CAS2";
@@ -218,11 +218,11 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         )
         .route(
             "/v1/sessions/{session}/artifacts/{artifact}/ticket",
-            post(artifact_proxy::ticket::<R>).options(preflight::<R>),
+            post(crate::hub::artifact_proxy::ticket::<R>).options(preflight::<R>),
         )
         .route(
             "/v1/sessions/{session}/artifacts/{artifact}/content",
-            get(artifact_proxy::content::<R>).options(artifact_proxy::preflight::<R>),
+            get(crate::hub::artifact_proxy::content::<R>).options(crate::hub::artifact_proxy::preflight::<R>),
         )
         .route("/{*path}", options(preflight::<R>))
         .with_state(state)

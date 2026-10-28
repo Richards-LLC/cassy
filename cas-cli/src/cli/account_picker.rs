@@ -54,8 +54,13 @@ pub(crate) struct Profile {
     pub(crate) login_state: LoginState,
     pub(crate) active: bool,
     pub(crate) disabled: bool,
-    /// Live usage for the picker, e.g. `5h limit hit, resets 15:00` (cas-e1f4).
+    /// Live usage for `--list-profiles`, e.g. `5h limit hit, resets 15:00` (cas-e1f4).
     pub(crate) usage: Option<String>,
+    /// The chooser's one capacity line, e.g. `weekly 64% left, resets …`.
+    /// `None` means no weekly data was reported; the chooser says why.
+    pub(crate) weekly: Option<String>,
+    /// Canonical folder of the same provider identity; the chooser hides it.
+    pub(crate) duplicate_of: Option<PathBuf>,
     pub(crate) recommendation: Option<String>,
     pub(crate) exclusion: Option<String>,
 }
@@ -145,6 +150,8 @@ pub(crate) fn scan_profiles_with(
             directory: account.folder,
             login_state: account.login_state,
             usage: None,
+            weekly: None,
+            duplicate_of: account.flags.duplicate_of,
             recommendation: None,
             exclusion: None,
         })
@@ -167,6 +174,8 @@ fn apply_recommendation(profiles: &mut [Profile], accounts: &[crate::account_reg
         if let Some(account) = accounts.iter().find(|a| a.folder == profile.directory) {
             profile.login_state = account.login_state;
             profile.usage = crate::cli::limits::summarize_windows_at(&account.windows, now);
+            profile.weekly = weekly_line(&account.windows, now);
+            profile.duplicate_of = account.flags.duplicate_of.clone();
         }
         profile.recommendation = selection.recommended.as_ref()
             .filter(|r| r.account.folder == profile.directory).map(|r| r.reason.clone());
@@ -194,7 +203,8 @@ pub(crate) fn should_prompt_for_profile(
 /// One selectable row in the account picker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ProfileChoice {
-    Existing { name: String, label: String },
+    /// `title` is what the answer line repeats once the operator presses Enter.
+    Existing { name: String, title: String, label: String },
     NewLogin,
 }
 
@@ -202,7 +212,8 @@ impl std::fmt::Display for ProfileChoice {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProfileChoice::Existing { label, .. } => formatter.write_str(label),
-            ProfileChoice::NewLogin => formatter.write_str("+ Log in a new account…"),
+            // An action, not truncated content: no ellipsis, ASCII in any locale.
+            ProfileChoice::NewLogin => formatter.write_str("+ Log in a new account"),
         }
     }
 }
@@ -217,59 +228,209 @@ pub(crate) fn login_state_label(state: LoginState) -> &'static str {
     }
 }
 
-/// Build the picker rows: every detected profile, then the new-login entry.
-///
-/// Nothing is filtered out here. A logged-out or unknown account stays
-/// selectable and is labelled as such, so the operator sees the real state of
-/// the box instead of a silently shortened list.
-pub(crate) fn profile_choices(profiles: &[Profile]) -> Vec<ProfileChoice> {
-    let mut choices: Vec<ProfileChoice> = profiles
+/// Widest chooser line before inquire's two-cell cursor prefix.
+const ROW_WIDTH: usize = 76;
+/// One-cell marks measured at >= 3:1 on the dark, light and both Solarized
+/// palettes of the terminal-qa gate. Words beside them stay default foreground.
+const RECOMMENDED_MARK: (u8, u8, u8) = (40, 145, 75);
+const LIMIT_MARK: (u8, u8, u8) = (176, 112, 16);
+
+#[derive(Clone, Copy)]
+enum Mark {
+    Recommended,
+    Limit,
+}
+
+/// How the chooser may decorate itself on this terminal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PickerStyle {
+    /// UTF-8 glyphs; otherwise the ASCII `[OK]` / `[WARN]` words.
+    pub(crate) glyphs: bool,
+    /// Any SGR at all: bold selection and coloured marks. Off for NO_COLOR or a pipe.
+    pub(crate) styled: bool,
+}
+
+impl PickerStyle {
+    pub(crate) fn detect() -> Self {
+        use std::io::IsTerminal;
+        Self {
+            glyphs: crate::ui::components::formatter::locale_is_utf8(),
+            styled: std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
+        }
+    }
+
+    fn mark(self, mark: Mark) -> String {
+        let (glyph, ascii, (r, g, b)) = match mark {
+            Mark::Recommended => ("\u{2713}", "[OK]", RECOMMENDED_MARK),
+            Mark::Limit => ("\u{26a0}", "[WARN]", LIMIT_MARK),
+        };
+        match (self.glyphs, self.styled) {
+            (true, true) => format!("\x1b[38;2;{r};{g};{b}m{glyph}\x1b[39m"),
+            (true, false) => glyph.to_string(),
+            // ASCII words stay uncoloured, as the shared Formatter does.
+            (false, _) => ascii.to_string(),
+        }
+    }
+}
+
+/// inquire's colours (cyan selection, green/red marks) fail contrast on light
+/// and Solarized themes. Selection is the `>` cursor plus bold in the default
+/// foreground; with SGR disabled nothing is styled at all.
+fn render_config(style: PickerStyle) -> inquire::ui::RenderConfig<'static> {
+    use inquire::ui::{Attributes, RenderConfig, StyleSheet, Styled};
+    let mut config = RenderConfig::empty();
+    config.answered_prompt_prefix = Styled::new(">");
+    if style.styled {
+        let bold = StyleSheet::new().with_attr(Attributes::BOLD);
+        config.prompt_prefix = Styled::new("?").with_attr(Attributes::BOLD);
+        config.answered_prompt_prefix = Styled::new(">").with_attr(Attributes::BOLD);
+        config.highlighted_option_prefix = Styled::new(">").with_attr(Attributes::BOLD);
+        config.prompt = bold;
+        config.selected_option = Some(bold);
+    }
+    config
+}
+
+/// The folders the chooser offers. A duplicate of a listed account and a
+/// never-used folder (no credential, email or identity, and a logged-out
+/// probe) are hidden. `main` and the active folder always stay; every hidden
+/// folder remains launchable by name and listed by `--list-profiles`.
+pub(crate) fn chooser_profiles(profiles: &[Profile]) -> Vec<&Profile> {
+    profiles
         .iter()
-        .map(|profile| {
-            let state = format!(" — {}{}{}", login_state_label(profile.login_state),
-                if profile.active { ", active" } else { "" }, if profile.disabled { ", disabled" } else { "" });
-            let alias = if profile.display_name == profile.name { String::new() }
-                else { format!(" ({})", shorten_picker_text(&profile.name, 72usize.saturating_sub(text_width(&state)))) };
-            let display = shorten_picker_text(&profile.display_name, 76usize.saturating_sub(text_width(&alias) + text_width(&state)));
-            let mut label = format!("{display}{alias}{state}");
-            if let Some(reason) = &profile.recommendation {
-                append_picker_detail(&mut label, &format!("recommended: {reason}"));
-            } else if let Some(reason) = profile.exclusion.as_deref().filter(|reason| !profile.disabled && *reason != crate::account_selection::LOGIN_UNAVAILABLE_REASON) {
-                append_picker_detail(&mut label, reason);
-            }
-            if let Some(usage) = &profile.usage {
-                for window in usage.split("; ") { append_picker_detail(&mut label, window); }
-            }
-            ProfileChoice::Existing {
-                name: profile.name.clone(),
-                label: disabled_label(profile.disabled, label),
-            }
+        .filter(|profile| {
+            let duplicate = profile.duplicate_of.as_ref().is_some_and(|canonical| {
+                profiles.iter().any(|other| &other.directory == canonical)
+            });
+            let unused = profile.login_state == LoginState::NeverLoggedIn
+                && profile.name != "main"
+                && !profile.active;
+            !duplicate && !unused
+        })
+        .collect()
+}
+
+/// An exclusion that limits this account and is not already said elsewhere:
+/// login and disabled state have their own tags, unknown usage is on the
+/// weekly line, and comparisons with the recommended row are implied by it.
+fn limit_tag(profile: &Profile) -> Option<&str> {
+    if profile.recommendation.is_some() {
+        return None;
+    }
+    let reason = profile.exclusion.as_deref()?;
+    let reason = reason.split(';').next().unwrap_or(reason).trim();
+    let said_elsewhere = reason == crate::account_selection::LOGIN_UNAVAILABLE_REASON
+        || matches!(reason, "disabled" | "stale login" | "usage unknown" | "weekly reset unknown")
+        || reason.starts_with("duplicate of ")
+        || reason.starts_with("resets later than ");
+    (!said_elsewhere).then_some(reason)
+}
+
+/// The weekly capacity line, from structured windows. `None` when nothing was
+/// reported, so the chooser can say why instead of implying spare capacity.
+fn weekly_line(
+    windows: &[crate::account_registry::UsageWindow],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<String> {
+    if windows.is_empty() {
+        return None;
+    }
+    let Some(weekly) = windows.iter().find(|window| window.name == "weekly") else {
+        return Some("weekly usage unknown (not reported)".to_string());
+    };
+    let reset = crate::cli::limits::format_reset(weekly.resets_at, now);
+    if weekly.resets_at.is_some_and(|at| at <= now) {
+        return Some(format!("weekly {reset}"));
+    }
+    Some(match weekly.used_percent {
+        Some(used) if used.is_finite() && used >= 100.0 => format!("weekly limit hit, {reset}"),
+        Some(used) if used.is_finite() && used >= 0.0 => {
+            format!("weekly {:.0}% left, {reset}", 100.0 - used)
+        }
+        None if weekly.resets_at.is_none() => "weekly not opened yet".to_string(),
+        _ => format!("weekly usage unknown, {reset}"),
+    })
+}
+
+fn weekly_detail(profile: &Profile) -> String {
+    profile.weekly.clone().unwrap_or_else(|| {
+        match profile.login_state {
+            LoginState::LoggedIn => "weekly usage unknown (no recent report)",
+            LoginState::Unknown => "weekly usage unknown (login unknown)",
+            _ => "weekly usage unknown until login",
+        }
+        .to_string()
+    })
+}
+
+fn choice_label(profile: &Profile, style: PickerStyle) -> String {
+    let mut tags = Vec::new();
+    if profile.recommendation.is_some() {
+        tags.push(format!("{} recommended", style.mark(Mark::Recommended)));
+    }
+    if let Some(reason) = limit_tag(profile) {
+        tags.push(format!("{} {reason}", style.mark(Mark::Limit)));
+    }
+    match profile.login_state {
+        LoginState::LoggedIn => {}
+        LoginState::Unknown => tags.push("login unknown".to_string()),
+        _ => tags.push(format!("{} not logged in", style.mark(Mark::Limit))),
+    }
+    if profile.active {
+        tags.push("active".to_string());
+    }
+    if profile.disabled {
+        tags.push("disabled".to_string());
+    }
+    let tags: String = tags.iter().map(|tag| format!("  {tag}")).collect();
+    let alias = if profile.display_name == profile.name {
+        String::new()
+    } else {
+        format!(" ({})", shorten_picker_text(&profile.name, 24))
+    };
+    let display = shorten_picker_text(
+        &profile.display_name,
+        ROW_WIDTH.saturating_sub(text_width(&alias) + text_width(&strip_sgr(&tags))),
+    );
+    format!(
+        "{display}{alias}{tags}\n    {}",
+        shorten_picker_text(&weekly_detail(profile), ROW_WIDTH - 4)
+    )
+}
+
+/// Build the chooser rows: each offered account, then the new-login entry.
+///
+/// Every row names one account and its state, then one weekly line. 5-hour
+/// windows appear only as the limit that excluded an account; full detail is
+/// `--list-profiles`.
+pub(crate) fn profile_choices(profiles: &[Profile], style: PickerStyle) -> Vec<ProfileChoice> {
+    let mut choices: Vec<ProfileChoice> = chooser_profiles(profiles)
+        .into_iter()
+        .map(|profile| ProfileChoice::Existing {
+            name: profile.name.clone(),
+            title: profile.display_name.clone(),
+            label: choice_label(profile, style),
         })
         .collect();
     choices.push(ProfileChoice::NewLogin);
     choices
 }
 
-fn append_picker_detail(label: &mut String, detail: &str) {
-    let mut line = String::new();
-    for word in detail.split_whitespace() {
-        let word = shorten_picker_text(word, 72);
-        if !line.is_empty() && text_width(&line) + 1 + text_width(&word) > 72 {
-            label.push_str("\n    "); label.push_str(&line); line.clear();
+fn strip_sgr(value: &str) -> String {
+    let mut plain = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() {
+                if c.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(c);
         }
-        if !line.is_empty() { line.push(' '); }
-        line.push_str(&word);
     }
-    if !line.is_empty() { label.push_str("\n    "); label.push_str(&line); }
-}
-
-fn disabled_label(disabled: bool, label: String) -> String {
-    use std::io::IsTerminal;
-    if disabled && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
-        format!("\x1b[2m{label}\x1b[0m")
-    } else {
-        label
-    }
+    plain
 }
 
 fn text_width(value: &str) -> usize {
@@ -294,12 +455,19 @@ fn shorten_picker_text(value: &str, width: usize) -> String {
     result
 }
 
-/// Index of the account the environment currently points at, for cursor start.
+/// Chooser index for the starting cursor: the recommended account, else the
+/// active one (or the account it duplicates), else the first row.
 pub(crate) fn active_choice_index(profiles: &[Profile]) -> usize {
-    profiles
+    let shown = chooser_profiles(profiles);
+    let active = profiles.iter().find(|profile| profile.active);
+    shown
         .iter()
         .position(|profile| profile.recommendation.is_some())
-        .or_else(|| profiles.iter().position(|profile| profile.active))
+        .or_else(|| {
+            let active = active?;
+            let canonical = active.duplicate_of.as_ref().unwrap_or(&active.directory);
+            shown.iter().position(|profile| &profile.directory == canonical)
+        })
         .unwrap_or(0)
 }
 
@@ -362,17 +530,25 @@ pub(crate) fn prompt_for_selection(
     layout: ProfileLayout,
     profiles: &[Profile],
 ) -> Result<Selection> {
-    let choices = profile_choices(profiles);
+    let style = PickerStyle::detect();
+    let render = render_config(style);
+    let choices = profile_choices(profiles, style);
     let starting_cursor = active_choice_index(profiles);
     let option_lines = choices.iter().map(|choice| choice.to_string().lines().count()).max().unwrap_or(1);
     let terminal_rows = crossterm::terminal::size().map(|(_, rows)| usize::from(rows)).unwrap_or(24);
     let page_size = picker_page_size(choices.len(), option_lines, terminal_rows);
 
     let selection = inquire::Select::new(&format!("Choose {provider_label} account"), choices)
+        .with_render_config(render)
         .with_starting_cursor(starting_cursor)
         .with_page_size(page_size)
+        // Repeat the account, not its whole two-line row, after Enter.
+        .with_formatter(&|option| match option.value {
+            ProfileChoice::Existing { title, .. } => title.clone(),
+            ProfileChoice::NewLogin => "new account".to_string(),
+        })
         .with_help_message(&format!(
-            "Session only. End: new login. Full details: cas {} --list-profiles",
+            "Enter: this session only. Esc: cancel. Details: cas {} --list-profiles",
             provider_label.to_ascii_lowercase()
         ))
         .prompt()
@@ -384,6 +560,7 @@ pub(crate) fn prompt_for_selection(
             let main_name = layout.main_name.to_string();
             let entered =
                 inquire::Text::new(&format!("Email for the new {provider_label} account"))
+                    .with_render_config(render)
                     .with_help_message(&format!(
                         "creates ~/{}<email> and runs the {provider_label} login flow",
                         layout.named_prefix
@@ -587,36 +764,37 @@ mod tests {
         .unwrap();
         std::fs::create_dir(home.path().join(".codex-operator@example.com")).unwrap();
         std::fs::copy(alt.join("auth.json"), home.path().join(".codex-operator@example.com/auth.json")).unwrap();
-        let mut profiles =
-            scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
-                if name == "alt" {
-                    LoginState::LoggedIn
-                } else {
-                    LoginState::Unknown
-                }
-            })
-            .unwrap();
+        // A never-used folder (no credential, email or identity; logged out).
+        std::fs::create_dir(home.path().join(".codex-grok")).unwrap();
+        let profiles = scan_profiles_with(CODEX, home.path(), Some(alt.as_path()), |name, _| {
+            match name {
+                "alt" => LoginState::LoggedIn,
+                "grok" => LoginState::LoggedOut,
+                _ => LoginState::Unknown,
+            }
+        })
+        .unwrap();
 
         let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, vec!["main", "operator@example.com", "alt", "work"]);
-        assert!(profiles[2].active);
+        assert_eq!(names, vec!["main", "grok", "operator@example.com", "alt", "work"]);
+        assert!(profiles[3].active);
         assert!(!profiles[0].active);
-        profiles[3].usage = Some("weekly 99%, 5h reset, usage unknown until next session".into());
-        let rows = profile_choices(&profiles);
-        assert!(
-            rows[2]
-                .to_string()
-                .starts_with("operator@example.com (alt) — logged in")
+        // The chooser offers each identity once and hides the never-used
+        // folder; the active duplicate's cursor moves to its canonical row.
+        let rows: Vec<String> =
+            profile_choices(&profiles, PickerStyle { glyphs: false, styled: false })
+                .iter()
+                .map(ToString::to_string)
+                .collect();
+        assert_eq!(
+            rows,
+            [
+                "main  login unknown\n    weekly usage unknown (login unknown)",
+                "operator@example.com  login unknown\n    weekly usage unknown (login unknown)",
+                "+ Log in a new account",
+            ]
         );
-        assert!(matches!(&rows[2], ProfileChoice::Existing { name, .. } if name == "alt"));
-        assert!(
-            rows[3]
-                .to_string()
-                .starts_with("operator@example.com (work) —")
-        );
-        assert_ne!(rows[2].to_string(), rows[3].to_string());
-        assert!(rows[3].to_string().contains("reset, usage unknown until next session"));
-        assert!(rows.iter().all(|row| row.to_string().lines().all(|line| text_width(line) <= 76)));
+        assert_eq!(active_choice_index(&profiles), 1);
     }
 
     #[test]
@@ -630,8 +808,10 @@ mod tests {
                 active: true,
                 disabled: false,
                 usage: None,
-            recommendation: None,
-            exclusion: None,
+                weekly: None,
+                duplicate_of: None,
+                recommendation: None,
+                exclusion: None,
             },
             Profile {
                 name: "alt".to_string(),
@@ -641,8 +821,10 @@ mod tests {
                 active: false,
                 disabled: false,
                 usage: None,
-            recommendation: None,
-            exclusion: None,
+                weekly: None,
+                duplicate_of: None,
+                recommendation: None,
+                exclusion: None,
             },
         ];
 
@@ -671,8 +853,10 @@ mod tests {
                 active: true,
                 disabled: false,
                 usage: None,
-            recommendation: None,
-            exclusion: Some("not logged in or login unknown".into()),
+                weekly: None,
+                duplicate_of: None,
+                recommendation: None,
+                exclusion: Some("not logged in or login unknown".into()),
             },
             Profile {
                 name: "alt".to_string(),
@@ -682,67 +866,65 @@ mod tests {
                 active: false,
                 disabled: true,
                 usage: None,
-            recommendation: None,
-            exclusion: None,
+                weekly: None,
+                duplicate_of: None,
+                recommendation: None,
+                exclusion: None,
             },
         ];
 
-        let choices = profile_choices(&profiles);
-        assert_eq!(choices.len(), 3);
-        assert_eq!(choices[0].to_string(), "main — not logged in, active");
+        const PLAIN: PickerStyle = PickerStyle { glyphs: false, styled: false };
+        let text = |profiles: &[Profile], style| -> Vec<String> {
+            profile_choices(profiles, style).iter().map(ToString::to_string).collect()
+        };
+        // Unknown capacity says why; it is never shown as spare capacity.
         assert_eq!(
-            choices[1].to_string(),
-            "alt — login state unknown, disabled"
+            text(&profiles, PLAIN),
+            [
+                "main  [WARN] not logged in  active\n    weekly usage unknown until login",
+                "alt  login unknown  disabled\n    weekly usage unknown (login unknown)",
+                "+ Log in a new account",
+            ]
         );
-        assert_eq!(choices[2], ProfileChoice::NewLogin);
         assert_eq!(active_choice_index(&profiles), 0);
+        let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+        let reset = |hours| crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(hours)), now);
         for provider in crate::accounts::Provider::ALL {
             let mut accounts = vec![
                 crate::account_selection::tests::row(provider, "main", 48, 0.0, 0.0),
                 crate::account_selection::tests::row(provider, "alt", 6, 59.0, 20.0),
             ];
-            if provider == crate::accounts::Provider::Claude {
-                for account in &mut accounts { account.windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None }); }
+            for account in &mut accounts {
+                account.windows.push(crate::account_registry::UsageWindow { name: "extra usage".into(), used_percent: None, resets_at: None });
             }
             let mut profiles = profiles.clone();
             for (profile, account) in profiles.iter_mut().zip(&accounts) { profile.directory = account.folder.clone(); }
-            apply_recommendation(&mut profiles, &accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
-            let choices = profile_choices(&profiles);
+            apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
+            // Weekly capacity is the first detail; the policy's choice is the
+            // marked, preselected row. Only the glyph carries colour.
+            let rows = text(&profiles, PickerStyle { glyphs: true, styled: true });
+            assert_eq!(
+                rows[..2],
+                [
+                    format!("main  active\n    weekly 100% left, {}", reset(48)),
+                    format!("alt  \x1b[38;2;40;145;75m\u{2713}\x1b[39m recommended  disabled\n    weekly 41% left, {}", reset(6)),
+                ]
+            );
             assert_eq!(active_choice_index(&profiles), 1);
-            assert!(choices.iter().all(|row| !row.to_string().contains("extra usage")));
-            let now = "2026-10-27T12:00:00Z".parse::<chrono::DateTime<chrono::Utc>>().unwrap();
-            let reset = crate::cli::limits::format_reset(Some(now + chrono::Duration::hours(6)), now);
-            assert!(choices[1].to_string().contains(&format!("recommended: {reset}, 41% left")), "{}", choices[1]);
-            for name in ["5h", "weekly"] {
-                assert!(choices[1].to_string().lines().any(|line| line.contains(name) && line.contains("resets ")), "{}", choices[1]);
-            }
-            assert!(choices.iter().all(|choice| choice.to_string().lines().all(|line| text_width(line) <= 76)));
-            assert!(choices[0].to_string().contains("resets later than alt"));
-            let mut idle_accounts = accounts.clone();
-            idle_accounts[1].windows.remove(0);
-            idle_accounts[1].windows[0].used_percent = Some(10.0);
-            idle_accounts[0].flags.duplicate_of = Some(idle_accounts[1].folder.clone());
-            apply_recommendation(&mut profiles, &idle_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
-            let idle_choices = profile_choices(&profiles);
-            assert_eq!(active_choice_index(&profiles), 1);
-            assert!(idle_choices[1].to_string().contains(&format!("recommended: {reset}, 90% left")));
-            assert!(idle_choices[0].to_string().contains("duplicate of alt"));
-            // This block exercises usable rows; the outer fixture also
-            // checks disabled rendering before selection is applied.
-            for profile in &mut profiles { profile.disabled = false; }
-            let mut unknown_reset_accounts = accounts.clone();
-            unknown_reset_accounts[1].windows[1].resets_at = None;
-            apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
-            assert!(profile_choices(&profiles)[1].to_string().contains("weekly reset unknown; known resets first"));
-            unknown_reset_accounts[0].flags.disabled = true;
-            apply_recommendation(&mut profiles, &unknown_reset_accounts, provider, "2026-10-27T12:00:00Z".parse().unwrap(), &Default::default());
-            assert!(profile_choices(&profiles)[1].to_string().contains("weekly reset unknown, 41% left"));
-
-            assert!(matches!(&choices[0], ProfileChoice::Existing { name, .. } if name == "main"));
-            assert!(matches!(&choices[1], ProfileChoice::Existing { name, .. } if name == "alt"));
-            assert_eq!(choices[2], ProfileChoice::NewLogin);
+            assert!(rows.iter().all(|row| !row.contains("5h") && !row.contains("extra usage")));
+            assert!(rows.iter().all(|row| row.lines().all(|line| text_width(&strip_sgr(line)) <= ROW_WIDTH)));
+            // A 5-hour window appears only as the limit that excluded a row.
+            accounts[1].windows[0].used_percent = Some(95.0);
+            accounts[0].windows.clear();
+            apply_recommendation(&mut profiles, &accounts, provider, now, &Default::default());
+            assert_eq!(
+                text(&profiles, PLAIN)[..2],
+                [
+                    "main  active\n    weekly usage unknown (no recent report)".to_string(),
+                    format!("alt  [WARN] 5h at 95% (threshold 90%)  disabled\n    weekly 41% left, {}", reset(6)),
+                ]
+            );
         }
-
     }
 
     #[test]

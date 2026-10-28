@@ -71,7 +71,8 @@ async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_
         agent.factory_session = Some(name.to_string());
         crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
         if *name == "legacy" {
-            agent.metadata.remove("supervisor_account_dir");
+            // Old registrations have a selector but no proven provider binding.
+            agent.metadata.remove("supervisor_account_harness");
         } else {
             assert_eq!(agent.metadata.get("supervisor_account_dir").map(std::path::PathBuf::from), *selector, "{name}: registration records only this harness's selector");
         }

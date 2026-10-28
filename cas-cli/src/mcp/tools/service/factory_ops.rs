@@ -1714,6 +1714,39 @@ const SPAWN_UNCONFIRMED_SECS: i64 = 90;
 /// Window of spawn history worth showing. Older terminal rows are noise.
 const SPAWN_HISTORY_WINDOW_SECS: i64 = 1800;
 
+/// cas-7fc3 (GH #1381): describe the live verification dispatch a parked
+/// task is waiting on, so `worker_status` names the verifier as the next
+/// action owner instead of the worker. A Blocked task counts only when the
+/// documented verification wait is its sole hold.
+fn pending_verification_summary(cas_root: &std::path::Path, task: &cas_types::Task) -> Option<String> {
+    use cas_types::VerificationDispatchState;
+    let dispatch = cas_store::get_latest_verification_dispatch(cas_root, &task.id).ok()??;
+    if !matches!(
+        dispatch.state,
+        VerificationDispatchState::Pending | VerificationDispatchState::Claimed
+    ) || dispatch.deadline_at <= chrono::Utc::now()
+    {
+        return None;
+    }
+    if task.status == cas_types::TaskStatus::Blocked
+        && !crate::mcp::tools::core::task::block_hold::blocked_only_by_verification_wait(
+            cas_root, &task.id, &dispatch.id,
+        )
+    {
+        return None;
+    }
+    let owner = crate::store::open_agent_store(cas_root)
+        .ok()
+        .and_then(|agents| agents.get(&dispatch.owner_agent_id).ok())
+        .map(|agent| agent.name)
+        .unwrap_or_else(|| dispatch.owner_agent_id.clone());
+    Some(format!(
+        "dispatch {} owned by {owner}, deadline {}",
+        dispatch.id,
+        dispatch.deadline_at.format("%Y-%m-%d %H:%M UTC")
+    ))
+}
+
 /// Render the task a worker is holding, for `worker_status` (GH #67).
 ///
 /// The roster already knew the assignment; it just never said so, and the
@@ -1728,6 +1761,7 @@ fn format_assigned_task_info(
     assigned_open: Option<(&str, &str, bool)>,
     parked: Option<(&str, &str, cas_types::TaskStatus)>,
     parked_merge_already_integrated: bool,
+    pending_verification: Option<&str>,
 ) -> String {
     const TITLE_CAP: usize = 60;
     let truncate = |title: &str| -> String {
@@ -1761,6 +1795,21 @@ fn format_assigned_task_info(
         // do — so the one state that genuinely needs supervisor action looked
         // like the one that needs none. It is also why the stall flag "missed
         // the real anomaly": there was nothing in the row to miss.
+        // cas-7fc3 (GH #1381): a merged delivery, or a worker in the
+        // documented verification wait, is waiting on its verifier. Cassy
+        // closes it on a PASS, so the worker is not the next action owner.
+        (None, None, Some((id, title, status)))
+            if pending_verification.is_some()
+                && ((status == cas_types::TaskStatus::AwaitingMerge
+                    && parked_merge_already_integrated)
+                    || status == cas_types::TaskStatus::Blocked) =>
+        {
+            format!(
+                "\n    task: {id} (awaiting verification) — {} → WAITING ON VERIFIER: {}; a PASS closes it and a FAIL returns it to the worker. Do not message the worker to close.",
+                truncate(title),
+                pending_verification.unwrap_or_default()
+            )
+        }
         (None, None, Some((id, title, status))) => {
             // Matched exhaustively on purpose: a catch-all would silently
             // relabel any status added to the parked set later.
@@ -5532,6 +5581,9 @@ impl CasService {
                             clone_path.as_deref(),
                         )
                     }),
+                    parked_task
+                        .and_then(|task| pending_verification_summary(&self.inner.cas_root, task))
+                        .as_deref(),
                 );
                 let execution = liveness_rows
                     .iter()
@@ -13196,6 +13248,7 @@ mod spawn_lifecycle_tests {
             None,
             None,
             false,
+            None,
         );
         assert!(out.contains("cas-8b84"), "{out}");
         assert!(out.contains("in progress"), "{out}");
@@ -13212,6 +13265,7 @@ mod spawn_lifecycle_tests {
             Some(("cas-4242", "Fix the thing", false)),
             None,
             false,
+            None,
         );
         assert!(out.contains("cas-4242"), "{out}");
         assert!(out.contains("assigned, not started"), "{out}");
@@ -13221,7 +13275,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn rejected_review_reopen_is_waiting_on_supervisor() {
         let out =
-            format_assigned_task_info(None, Some(("cas-56f8", "Needs rework", true)), None, false);
+            format_assigned_task_info(None, Some(("cas-56f8", "Needs rework", true)), None, false, None);
         assert!(out.contains("WAITING ON YOU"), "{out}");
         assert!(
             out.contains("resume the existing worker or replace it"),
@@ -13238,6 +13292,7 @@ mod spawn_lifecycle_tests {
             Some(("cas-2222", "Also assigned", false)),
             None,
             false,
+            None,
         );
         assert!(out.contains("cas-1111"), "{out}");
         assert!(!out.contains("cas-2222"), "{out}");
@@ -13247,7 +13302,7 @@ mod spawn_lifecycle_tests {
     /// as missing data; "none assigned" is an answer.
     #[test]
     fn unassigned_worker_says_none_assigned() {
-        let out = format_assigned_task_info(None, None, None, false);
+        let out = format_assigned_task_info(None, None, None, false, None);
         assert!(out.contains("none assigned"), "{out}");
     }
 
@@ -13255,7 +13310,7 @@ mod spawn_lifecycle_tests {
     #[test]
     fn long_titles_are_truncated() {
         let long = "x".repeat(200);
-        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None, false);
+        let out = format_assigned_task_info(Some(("cas-9999", &long)), None, None, false, None);
         assert!(out.contains('…'), "{out}");
         assert!(
             out.len() < 140,
@@ -17011,11 +17066,47 @@ effort = "high"
             None,
             Some(("cas-block", "Stuck work", cas_types::TaskStatus::Blocked)),
             false,
+            None,
         );
         assert!(out.contains("cas-block"), "{out}");
         assert!(out.contains("blocked"), "{out}");
         assert!(out.contains("clear the blocker"), "{out}");
         assert!(!out.contains("none assigned"), "{out}");
+    }
+
+    /// cas-7fc3 (GH #1381): a merged delivery whose verification dispatch is
+    /// still pending, or a worker in the documented verification wait, is
+    /// waiting on its verifier. Cassy closes it on a PASS, so the row must
+    /// name the dispatch and never tell the supervisor to wake the worker.
+    #[test]
+    fn merged_delivery_with_pending_verification_waits_on_verifier_cas_7fc3() {
+        let dispatch = "dispatch vdispatch-38f0 owned by bright-otter-99, deadline 2026-10-27 15:10 UTC";
+        for (status, merged) in [
+            (cas_types::TaskStatus::AwaitingMerge, true),
+            (cas_types::TaskStatus::Blocked, false),
+        ] {
+            let out = format_assigned_task_info(
+                None,
+                None,
+                Some(("cas-68a9", "Docs-only delivery", status)),
+                merged,
+                Some(dispatch),
+            );
+            assert!(out.contains("awaiting verification"), "{out}");
+            assert!(out.contains("WAITING ON VERIFIER"), "{out}");
+            assert!(out.contains(dispatch), "{out}");
+            assert!(!out.contains("WAITING ON WORKER"), "{out}");
+            assert!(!out.contains("re-close"), "{out}");
+        }
+        // Without a live dispatch the merged delivery keeps its re-close row.
+        let legacy = format_assigned_task_info(
+            None,
+            None,
+            Some(("cas-68a9", "Docs-only delivery", cas_types::TaskStatus::AwaitingMerge)),
+            true,
+            None,
+        );
+        assert!(legacy.contains("awaiting worker re-close"), "{legacy}");
     }
 
     /// The actionable half: quiet WITH undelivered mail means the worker was
@@ -17409,6 +17500,7 @@ effort = "high"
                 cas_types::TaskStatus::AwaitingMerge,
             )),
             false,
+            None,
         );
         assert!(merge.contains("cas-1234"), "{merge}");
         assert!(merge.contains("awaiting merge"), "{merge}");
@@ -17429,6 +17521,7 @@ effort = "high"
                 cas_types::TaskStatus::AwaitingMerge,
             )),
             false,
+            None,
         );
         assert!(out.contains("cas-live"), "{out}");
         assert!(!out.contains("cas-parked"), "{out}");

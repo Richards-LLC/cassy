@@ -1270,6 +1270,27 @@ mod tests {
     }
 
     #[test]
+    fn terminal_operator_prompt_is_captured_before_the_supervisor_finishes() {
+        let now = Utc::now();
+        let question = "Please check the terminal conversation capture";
+        // A real Codex terminal turn has no UserPromptSubmit hook and may run
+        // for minutes before a final answer. Its input must already be visible.
+        let (temp, root, queue) = terminal_session(vec![
+            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"terminal-pending"}}),
+            serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":question}]}}),
+        ]);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        mirror_supervisor_replies(&root, temp.path(), "factory-1", &queue);
+        for device in ["phone", "desktop"] {
+            let rows = queue.conversation_history("factory-1", device, None, 50).unwrap();
+            assert_eq!(rows.len(), 1, "terminal input is owed before any assistant answer");
+            assert_eq!(rows[0].source, "terminal");
+            assert_eq!(rows[0].prompt, question);
+            assert!(rows[0].processed_at.is_some(), "history must never re-inject the prompt");
+        }
+    }
+
+    #[test]
     fn ct2_p3_operator_mirror_without_prior_send() {
         let (temp, root, queue) = terminal_session(codex_turn_at(
             "unsolicited-status",

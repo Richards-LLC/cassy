@@ -54,11 +54,16 @@ pub(super) fn discover(
     path: &Path,
     deadline: Option<Instant>,
 ) -> Vec<ScannedCache> {
-    let Some(tree) = worktree(cas_root, path) else {
+    let (tree, ownership) = if let Some(tree) = unknown::worktree(cas_root, path) {
+        (tree, CacheOwnership::Unknown)
+    } else if let Some(tree) = worktree(cas_root, path) {
+        (tree, CacheOwnership::Durable)
+    } else {
         return Vec::new();
     };
-    let scan = scan_cache_until(&tree, path, false, deadline)
+    let mut scan = scan_cache_until(&tree, path, false, deadline)
         .unwrap_or_else(|error| scan_error_record(tree, path.to_path_buf(), false, error));
+    scan.ownership = ownership;
     vec![scan]
 }
 
@@ -557,9 +562,17 @@ mod tests {
             "gitdir: /nonexistent-eaf7/git-admin\n",
         )
         .unwrap();
+        let worker_checkout = cas.join("worktrees/missing-gitdir");
+        fs::create_dir_all(&worker_checkout).unwrap();
+        fs::write(
+            worker_checkout.join(".git"),
+            "gitdir: /nonexistent-eaf7/worker-admin\n",
+        )
+        .unwrap();
         let targets = [
             checkout.join("target"),
             cas.join("merge-sweeps/assembly-target"),
+            worker_checkout.join("target"),
         ];
         let old =
             filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(7200));
@@ -579,6 +592,9 @@ mod tests {
         fs::create_dir_all(proof.parent().unwrap()).unwrap();
         fs::write(&proof, b"durable proof").unwrap();
         for target in &targets {
+            let named = inspect_named(&cas, _policy, target, &[], true).unwrap();
+            assert_eq!(named.caches.len(), 1);
+            assert_eq!(named.caches[0].ownership, CacheOwnership::Unknown);
             let preview = legacy_mcp_request(&service, target, true).await;
             assert_eq!(
                 preview["caches"].as_array().unwrap().len(),

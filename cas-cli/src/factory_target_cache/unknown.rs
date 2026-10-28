@@ -1,6 +1,27 @@
 //! Explicit consent is authority to reclaim one cache, never proof of ownership.
 use super::*;
 
+/// Exact legacy layouts only. Missing Git metadata remains unknown ownership.
+pub(super) fn worktree(cas_root: &Path, target: &Path) -> Option<PathBuf> {
+    if !target.is_absolute()
+        || target.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return None;
+    }
+    if target == cas_root.join("merge-sweeps/assembly-target") {
+        return Some(cas_root.join("merge-sweeps"));
+    }
+    let checkout = target.parent()?;
+    (target.file_name().is_some_and(|name| name == "target")
+        && missing_gitdir_checkout(cas_root, checkout).is_some())
+    .then(|| checkout.to_path_buf())
+}
+
 pub(super) fn validate(
     cas_root: &Path,
     record: &TargetCacheRecord,
@@ -32,16 +53,21 @@ pub(super) fn validate(
             ));
         }
     }
-    let retired = cas_root.join("merge-sweeps/assembly-target");
-    let missing_gitdir_target = record.path == record.worktree.join("target")
-        && missing_gitdir_checkouts(cas_root)
-            .iter()
-            .any(|(checkout, _)| checkout == &record.worktree);
-    if !(missing_gitdir_target
-        || record.path == retired && record.worktree == cas_root.join("merge-sweeps"))
-    {
+    if worktree(cas_root, &record.path).as_ref() != Some(&record.worktree) {
         return Err(refuse(
             "unknown-cache inventory changed; only missing-gitdir targets or the retired assembly target are reclaimable",
+        ));
+    }
+    if matches!(
+        record.disposition,
+        CacheDisposition::Indeterminate
+            | CacheDisposition::UnsafePath
+            | CacheDisposition::LiveProcess
+            | CacheDisposition::RecentWrite
+    ) {
+        return Err((
+            record.disposition,
+            format!("unknown-cache evidence is not eligible: {}", record.reason),
         ));
     }
     validate_evidence(cas_root, &record.path)?;
@@ -73,8 +99,10 @@ pub(super) fn validate(
     Ok(())
 }
 
-pub(super) fn validate_evidence(cas_root: &Path, target: &Path)
-    -> Result<(), (CacheDisposition, String)> {
+pub(super) fn validate_evidence(
+    cas_root: &Path,
+    target: &Path,
+) -> Result<(), (CacheDisposition, String)> {
     let refuse = |reason: &str| (CacheDisposition::UnsafePath, reason.to_string());
     // Evidence paths are independent of source/cache ownership, including a
     // custom artifacts root placed inside an otherwise regenerable target.

@@ -65,8 +65,12 @@ reclaim. Omitting either destructive flag previews and prints the refusal reason
 
 The same exact-path option also accepts a known retired worker target, including
 its configured scratch target. Its historical `reclaim_unknown_target` name is
-retained for compatibility. A known target receives its own eight-second scan
-budget; unrelated caches, previews and pending review output are not inventoried.
+retained for compatibility. Every supported exact target receives its own
+eight-second scan budget; unrelated caches, previews and pending review output
+are not inventoried. Legacy assembly and missing-gitdir targets are derived and
+validated directly, including missing-gitdir targets under the worker directory;
+their ownership remains unknown. Unsupported paths have no inventory and never
+fall back to a global scan.
 An incomplete global report therefore cannot prevent inspecting that one path.
 Explicit consent may release its warm-cache reservation only with positive
 terminal-task and dead-owner evidence, a durable generation marker, a fresh

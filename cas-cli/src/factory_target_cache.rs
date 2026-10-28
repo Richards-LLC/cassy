@@ -249,12 +249,7 @@ pub(crate) fn inspect_named(
     live: &[PathBuf],
     dry_run: bool,
 ) -> io::Result<TargetCacheReport> {
-    if named::worktree(cas_root, path).is_some() {
-        named::inspect(cas_root, policy, path, live, dry_run)
-    } else {
-        // Preserve the separately guarded legacy unknown-owner protocol.
-        inspect(cas_root, policy, &[], live, dry_run)
-    }
+    named::inspect(cas_root, policy, path, live, dry_run)
 }
 
 /// Admission reclaims verified relocated worker and resolved review targets. Keep full factory
@@ -1124,27 +1119,31 @@ pub(crate) fn missing_gitdir_checkouts(
                 continue;
             }
             let checkout = entry.path();
-            let marker = checkout.join(".git");
-            if !std::fs::symlink_metadata(&marker).is_ok_and(|md| md.is_file()) {
-                continue;
-            }
-            let Ok(contents) = std::fs::read_to_string(marker) else {
-                continue;
-            };
-            let Some(target) = contents.trim().strip_prefix("gitdir: ") else {
-                continue;
-            };
-            if target.is_empty() {
-                continue;
-            }
-            let target = checkout.join(target);
-            if matches!(target.try_exists(), Ok(false)) {
+            if let Some(target) = missing_gitdir_checkout(cas_root, &checkout) {
                 found.push((checkout, target));
             }
         }
     }
     found.sort();
     found
+}
+
+/// Validate one supported checkout's missing Git metadata without enumerating siblings.
+fn missing_gitdir_checkout(cas_root: &Path, checkout: &Path) -> Option<PathBuf> {
+    if checkout.parent() != Some(cas_root)
+        && checkout.parent() != Some(cas_root.join("worktrees").as_path()) {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(checkout).ok()?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() { return None; }
+    let marker = checkout.join(".git");
+    let metadata = fs::symlink_metadata(&marker).ok()?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() { return None; }
+    let contents = fs::read_to_string(marker).ok()?;
+    let target = contents.trim().strip_prefix("gitdir: ")?;
+    if target.is_empty() { return None; }
+    let target = checkout.join(target);
+    matches!(target.try_exists(), Ok(false)).then_some(target)
 }
 
 fn git_common_dir(repo_root: &Path) -> Option<PathBuf> {

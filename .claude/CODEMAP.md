@@ -127,11 +127,13 @@
 - `crates/cas-core/src/hooks/`, `crates/cas-core/src/memory/`, `crates/cas-core/src/search/temporal/` - hook schemas (captured harness payloads in `hooks/fixtures/`), memory maintenance and temporal retrieval.
 - `cas-cli/src/hybrid_search/`, `cas-cli/src/history/` - composed retrieval and Git-history search.
 - `hub-web/src/main.ts`, `hub-web/src/conversation-store.ts`, `hub-web/src/inbox/` - Commander startup, conversation state and reply grants.
+- `hub-web/src/project-navigation.ts`, `hub-web/src/conversation-list.ts` - project cards across machines, decision shortcuts, filters, device collapse and keyed supervisor rows.
 - `hub-web/src/connection.ts`, `hub-web/src/connection-lifecycle.ts` - machine streams, recovery and session subscriptions.
 - `hub-web/src/conversation-history.ts`, `hub-web/src/early-thread.ts`, `hub-web/src/thread-window.ts` - paged history, receipt progress, unopened conversation previews and windowed thread rendering.
 - `hub-web/src/rich-code.ts`, `hub-web/src/rich-diagram.ts`, `hub-web/src/rich-diff.ts` - lazy safe Markdown diagrams and unified diffs.
 - `hub-web/src/code-frame.ts`, `hub-web/src/code-frame.css` - reusable fenced-source header with literal-source Copy feedback and per-block Wrap, retained around rich previews.
 - `hub-web/src/rich-attachment.ts`, `hub-web/src/rich-media.ts`, `hub-web/src/rich-pdf.ts` - reserved inline media, lifecycle and PDF first-page pixels.
+- `hub-web/src/progress-model.ts`, `hub-web/src/progress-view.ts`, `hub-web/src/context-resize.ts` - scoped release/task ledger, server merge metrics and accessible device-local context width.
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.

@@ -1,3 +1,4 @@
+import { syncContextResize } from "./context-resize";
 import { plainTextMarkdown } from "./markdown-renderer";
 import { artifactHref, attachmentSize, attachmentTypeMark } from "./attachment-sheet";
 import type { ConversationHistory } from "./conversation-history";
@@ -195,6 +196,8 @@ export function syncContextRail(root: ParentNode, input: ContextRailInput): bool
   rail.dataset.open = String(open);
   // A folded rail is an empty 48px track: nothing for assistive tech to land on.
   if (open) rail.removeAttribute("aria-hidden"); else rail.setAttribute("aria-hidden", "true");
-  rail.closest(".conversation-shell")?.classList.toggle("context-open", open);
+  const shell = rail.closest<HTMLElement>(".conversation-shell");
+  shell?.classList.toggle("context-open", open);
+  if (shell) syncContextResize(shell);
   return open;
 }

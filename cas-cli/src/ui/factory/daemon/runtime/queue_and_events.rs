@@ -697,6 +697,11 @@ fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
 /// it (provenance line, reply hint, body), so the teammate turn that renders it
 /// carries the `[cas #N …]` envelope and body the turn recorder matches.
 pub(crate) fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> String {
+    // A reference is not a first body delivery. Keep body provenance and
+    // reply framing out of the wire consumed by transcript correlation.
+    if queued.reference_only {
+        return queued.prompt.clone();
+    }
     use crate::mcp::tools::service::agent_search_system::message::{
         commander_reply_command, first_message_provenance,
     };

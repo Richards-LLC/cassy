@@ -199,6 +199,9 @@ pub(crate) struct TaskSummaryJson {
     pub(crate) status: String,
     pub(crate) priority: i32,
     pub(crate) assignee: Option<String>,
+    /// Epic review ownership, alongside status and assignee for session scoping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) epic_verification_owner: Option<String>,
     pub(crate) task_type: String,
     pub(crate) epic: Option<String>,
     pub(crate) epic_id: Option<String>,

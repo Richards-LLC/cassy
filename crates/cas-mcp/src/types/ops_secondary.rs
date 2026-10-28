@@ -378,7 +378,7 @@ pub struct VerificationRequest {
     /// Action to perform
     #[schemars(
         schema_with = "crate::actions::verification_action_schema",
-        description = "Operation. batch_receipt records one immutable published staging ledger for PASS task_ids in qa.mode=batch (registered supervisor, no self-review). qa_record records an independent QA reviewer's verdict, never the implementer's; qa_waive is a logged supervisor waiver; qa_request opens an explicit independent round; qa_status includes batch receipts; qa_reconcile cancels obsolete QA children of one closed task (registered supervisor, limit 1..100, default 25), retaining current rounds and evidence; external_verify is registered-supervisor-only receipted external verification."
+        description = "Operation. batch_receipt: immutable PASS ledger in qa.mode=batch (registered supervisor, no self-review). qa_record: independent reviewer's verdict. qa_waive: logged supervisor waiver; qa_request: open review; qa_status: rounds and batch receipts. qa_reconcile: retire obsolete QA children of one closed task (registered supervisor), preserving current rounds/evidence. external_verify: receipted supervisor-only external checks."
     )]
     pub action: String,
 

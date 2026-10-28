@@ -34,7 +34,9 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
       });
       const contentRoute = "https://*.test/v1/sessions/*/artifacts/*/content?*";
       const imageBytes = readFileSync(new URL("../media/evidence.png", import.meta.url));
-      await page.context().route(contentRoute, route => route.fulfill({ contentType: "image/png", body: imageBytes }));
+      const serveImage = (route: import("@playwright/test").Route) => route.fulfill({ contentType: "image/png", body: imageBytes });
+      await page.route(contentRoute, serveImage);
+      await page.context().route(contentRoute, serveImage);
       let sentText = "";
       let queued = 0;
       const field = page.getByRole("textbox", { name: "Your message" });

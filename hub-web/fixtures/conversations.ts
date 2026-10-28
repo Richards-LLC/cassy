@@ -15,6 +15,7 @@ import { installAttentionObjects, renderAskObject, renderBlockerObject } from '.
 import { installAttachmentSheet } from '../src/attachment-sheet';
 import type { ArtifactRef } from '../src/types';
 import { inlineAttachment } from '../src/rich-attachment';
+import { sentAttachmentReference } from '../src/sent-attachments';
 import evidenceImage from '../e2e/media/evidence.png?url';
 import { WorkEventStream, workEventsPage } from '../src/work-events';
 import type { WorkRowsContext } from '../src/work-rows-view';
@@ -301,6 +302,23 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       return root;
     });
     reply(91, null, '# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```diff\n--- a/launch.ts\n+++ b/launch.ts\n@@ -1,25 +1,25 @@\n-launch()\n+launchWithEvidence()\n' + Array.from({ length: 24 }, (_, index) => ` context ${index}`).join('\n') + '\n```', 'answer', at(9, 44), [{ artifact_id: 'rich-visual-image', name: 'Evidence screenshot.png', mime: 'image/png', size_bytes: 1024, sha256: '9f'.repeat(32) }]);
+  } else if (state === 'conversation-sent-attachment') {
+    // Polish fixture; upload, ticket, reload and second-device behavior is HUB-J24.
+    installAttachmentSheet((sheet, file) => {
+      const root = inlineAttachment(sheet, file, () => new Promise(() => {}), { openPreview: true });
+      const viewport = root.querySelector<HTMLElement>('.rich-media');
+      if (viewport) {
+        const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;
+        viewport.replaceChildren(image); viewport.dataset.previewState = 'ready';
+      }
+      return root;
+    });
+    const text = ['Please review this screenshot.',
+      sentAttachmentReference({ path: '/host/commander/art-screenshot/screenshot.png', mime: 'image/png', size: 2048 }),
+      sentAttachmentReference({ path: '/host/commander/art-notes/notes.txt', mime: 'text/plain', size: 1024 }),
+    ].join('\n\n');
+    history.submit('upload', supervisor, text, at(9, 40));
+    history.acknowledge({ client_ref: 'upload', notification_id: 70, target: supervisor, stamped: true });
   } else if (state === 'conversation-attachment') {
     // The report-card case: a receipt with prose, then its two artifacts laid on the thread as sheets.
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));

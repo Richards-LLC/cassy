@@ -7703,6 +7703,7 @@ mod workspace_contract_tests {
                 format!("printf '%s' \"$({mutation})\" | pbcopy"),
                 format!("printf '%s' '{mutation}' | pbcopy > command.txt"),
                 format!("printf '%s' '{mutation}' | wl-copy 2> errors.txt"),
+                format!("cat <<COMMAND | pbcopy\n$({mutation})\nCOMMAND"),
             ] {
                 let (status, reason) = decision(&invocation);
                 assert_eq!(

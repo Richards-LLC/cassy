@@ -9,6 +9,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
+from http.client import HTTPException
 import io
 import json
 import os
@@ -20,7 +21,6 @@ import tarfile
 import tempfile
 import sys
 import time
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -61,7 +61,7 @@ def fetch(url, token=None, timeout=60):
             if response.status != 200:
                 raise RuntimeError(f"expected anonymous HTTP 200: {url}")
             return response.read()
-    except (HTTPError, URLError, TimeoutError) as error:
+    except (HTTPException, OSError) as error:
         raise RuntimeError(f"HTTP verification failed: {url} ({getattr(error, 'code', 'network error')})") from None
 
 

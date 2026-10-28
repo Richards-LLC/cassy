@@ -2,6 +2,7 @@
 """Exercise the release deployer with real git/tag bytes and fake service edges."""
 import contextlib
 import hashlib
+from http.client import IncompleteRead
 import importlib.util
 import io
 import json
@@ -25,6 +26,15 @@ REAL_RUN = subprocess.run
 
 class Response(io.BytesIO):
     status = 200
+
+    def __init__(self, data, read_error=None):
+        super().__init__(data)
+        self.read_error = read_error
+
+    def read(self, *args):
+        if self.read_error:
+            raise self.read_error
+        return super().read(*args)
 
 
 class DeployTests(unittest.TestCase):
@@ -162,6 +172,10 @@ class DeployTests(unittest.TestCase):
                 url.hostname == "hub.petrastella.io" and path == "/"):
             self.fail_at = None
             return Response(self.old["index.html"] + b"stale alias")
+        if (isinstance(self.fail_at, Exception) and variant == "candidate" and
+                url.hostname == "hub.petrastella.io" and path == "/"):
+            error, self.fail_at = self.fail_at, None
+            return Response(b"", read_error=error)
         if self.fail_at == "immutable" and url.hostname == "candidate.vercel.app":
             raise HTTPError(request.full_url, 302, "SSO redirect", {}, None)
         return Response(files[name])
@@ -233,6 +247,21 @@ class DeployTests(unittest.TestCase):
         self.assertEqual([c[2] for c in self.calls if c[:2] == ["vercel", "promote"]], ["dpl_candidate"])
         self.assertEqual(len(self.sleeps), 1)
         self.assertGreater(self.sleeps[0], 0)
+
+    def test_dropped_live_response_body_retries_without_rolling_back(self):
+        for error in (IncompleteRead(b"partial", 10), ConnectionResetError("fixture connection reset")):
+            with self.subTest(error=type(error).__name__):
+                self.calls.clear()
+                self.sleeps.clear()
+                self.aliased = "previous"
+                self.fail_at = error
+                result = self.deploy("v9.99.2")
+                self.assertEqual(result, 0, self.assets[-1])
+                self.assertEqual(self.assets[-1]["status"], "deployed")
+                self.assertEqual(self.aliased, "candidate")
+                self.assertEqual([c[2] for c in self.calls if c[:2] == ["vercel", "promote"]],
+                                 ["dpl_candidate"])
+                self.assertEqual(len(self.sleeps), 1)
 
 
 if __name__ == "__main__":

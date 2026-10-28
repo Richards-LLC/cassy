@@ -10,6 +10,8 @@ import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRIN
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
 import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
+import type { WorkEvent } from "./work-events";
+import { renderWork, workSignature, type WorkRowsContext } from "./work-rows-view";
 import {
   cellTone,
   coalesceText,
@@ -190,6 +192,14 @@ export interface ConversationViewOptions {
    * keeps the dismissed questions across a reload.
    */
   dismissalsChanged?: () => void;
+  /**
+   * Show work (cas-ff22): the session's work events, oldest first, or
+   * undefined while Show work is off. Off, the thread is the conversation's
+   * alone.
+   */
+  work?: () => readonly WorkEvent[] | undefined;
+  /** Detail and disclosure state for work rows; required with `work`. */
+  workRows?: WorkRowsContext;
 }
 
 const TICK = '<svg class="tick" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.6 8.6l3.3 3.3L13.4 4.4"/></svg>';
@@ -630,7 +640,8 @@ export class ConversationView {
     this.renderLoadEarlier(loadingEarlier);
     const working = this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
-    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession });
+    const work = this.options.work?.();
+    const model = threadModel(this.history.visibleEvents(), { working, historyEnd: this.options.historyEnd?.() === true, session: this.history.currentSession, ...(work ? { work } : {}) });
     const document = this.element.ownerDocument;
     const next = new Map<string, HTMLElement>();
     const children: HTMLElement[] = [];
@@ -1119,7 +1130,8 @@ export class ConversationView {
   }
 
   private renderItem(node: HTMLElement, item: ThreadItem): void {
-    const signature = signatureOf(item, (turn) => this.turnSignature(turn));
+    const rows = this.options.workRows;
+    const signature = item.type === "work" ? (rows ? workSignature(item, rows) : "work") : signatureOf(item, (turn) => this.turnSignature(turn));
     if (node.dataset.signature === signature) return;
     node.dataset.signature = signature;
     switch (item.type) {
@@ -1129,7 +1141,24 @@ export class ConversationView {
       case "working": this.renderWorking(node); return;
       case "coalesce": this.renderCoalesce(node, item); return;
       case "group": this.renderGroup(node, item); return;
+      case "work": if (rows) renderWork(node, item, rows, this.speakerOf(this.history.currentSession), (before) => this.holdWorkBlock(node, before)); return;
     }
+  }
+
+  /**
+   * A work disclosure the reader opened or closed changed its own node's
+   * height (cas-ff22): its control stays where the reader tapped it, and a
+   * thread that was following its tail stops following until they return,
+   * so the rows they opened are not pinned away under them.
+   */
+  private holdWorkBlock(node: HTMLElement, before: number): void {
+    const drift = node.getBoundingClientRect().top - before;
+    if (Math.abs(drift) >= 1) this.element.scrollTop += drift;
+    this.scrolledTo = this.element.scrollTop;
+    this.lastContentHeight = this.element.scrollHeight;
+    this.following = shouldFollowTail(this.element);
+    this.jump.hidden = this.following;
+    this.notePlace();
   }
 
   private renderWorking(node: HTMLElement): void {
@@ -1598,6 +1627,7 @@ function signatureOf(item: ThreadItem, turnSignature: (turn: ThreadTurn) => stri
     case "history-end": return "history-end";
     case "working": return "working";
     case "coalesce": return JSON.stringify([item.count, item.latest, item.time, item.clockAhead === true, item.replies.map((reply) => reply.notification_id)]);
+    case "work": return `work:${item.events.length}`;
     case "group": return JSON.stringify([item.side, item.time, item.clockAhead === true, item.turns.map((turn) => [turn.key, turn.first, turn.last, turnSignature(turn)])]);
   }
 }

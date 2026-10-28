@@ -109,6 +109,7 @@ pub fn router<R: SessionReadModel>(state: HubState<R>) -> Router {
         .route("/commander/app.css", get(commander_stylesheet))
         .route("/commander/favicon.svg", get(commander_favicon))
         .merge(commander_brand_routes())
+        .route("/commander/{*asset}", get(commander_chunk).options(preflight::<R>))
         .route("/v1/health", get(health::<R>).options(preflight::<R>))
         .route("/v1/auth/pairing/protocol", post(installation_protocol::<R>).options(preflight::<R>))
         .route(
@@ -253,6 +254,29 @@ fn commander_asset(bytes: &'static [u8], content_type: &'static str) -> Response
     response.headers_mut().insert(
         "cache-control",
         HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+    );
+    response
+}
+
+const COMMANDER_CHUNKS: &[(&str, &[u8])] =
+    include!(concat!(env!("OUT_DIR"), "/commander_chunks.rs"));
+
+async fn commander_chunk(OriginalUri(uri): OriginalUri) -> Response {
+    // Use the original, encoded path: Path<String> would decode forbidden `%`
+    // sequences before validation. Never consult the filesystem at runtime.
+    let Some(name) = uri.path().strip_prefix("/commander/") else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(mime) = super::chunk_assets::content_type(name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some((_, bytes)) = COMMANDER_CHUNKS.iter().find(|(asset, _)| *asset == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut response = commander_asset(bytes, mime);
+    response.headers_mut().insert(
+        "cache-control",
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
     );
     response
 }
@@ -3398,7 +3422,15 @@ fn client_history_request_ref(bytes: &[u8]) -> Option<String> {
 pub(crate) enum PendingRefKind {
     Send,
     History,
+    /// Not a pending answer: this socket has read a work-events page, so the
+    /// daemon's `WorkEventsAppended` notices reach it (cas-ff22). Keyed by
+    /// [`WORK_EVENTS_FOLLOWER`] and never consumed.
+    WorkEventsFollower,
 }
+
+/// The `PendingRefs` key that marks a socket following a session's work
+/// events. A NUL never appears in a browser-supplied request id.
+const WORK_EVENTS_FOLLOWER: &str = "\u{0}work-events";
 
 /// One authenticated socket's outstanding references, keyed by session and
 /// client reference.
@@ -3547,7 +3579,7 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
                 Correlation::Consumed(answer.map(|result| SendAnswer { client_ref, result }))
             }
             Some(PendingRefKind::History) => Correlation::Consumed(None),
-            None => Correlation::Refused,
+            Some(PendingRefKind::WorkEventsFollower) | None => Correlation::Refused,
         }
     };
     match serde_json::from_slice::<DaemonMessage>(bytes) {
@@ -3563,8 +3595,25 @@ fn correlate_daemon_frame(pending: &mut PendingRefs, session: &str, bytes: &[u8]
             client_ref: Some(client_ref),
             message,
         }) => consume(client_ref, Some(Err(message))),
+        Ok(DaemonMessage::WorkEvents { request_id, .. }) => {
+            let answered = consume(request_id, None);
+            if matches!(answered, Correlation::Consumed(_)) {
+                pending.insert(
+                    (session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned()),
+                    PendingRefKind::WorkEventsFollower,
+                );
+            }
+            answered
+        }
+        // Only a socket that reads work events hears that more arrived.
+        Ok(DaemonMessage::WorkEventsAppended { .. }) => {
+            if pending.contains_key(&(session.to_owned(), WORK_EVENTS_FOLLOWER.to_owned())) {
+                Correlation::Uncorrelated
+            } else {
+                Correlation::Refused
+            }
+        }
         Ok(DaemonMessage::ConversationHistory { request_id, .. })
-        | Ok(DaemonMessage::WorkEvents { request_id, .. })
         | Ok(DaemonMessage::WorkEventDetail { request_id, .. }) => consume(request_id, None),
         _ => Correlation::Uncorrelated,
     }

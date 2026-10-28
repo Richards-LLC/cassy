@@ -435,7 +435,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - **Goal:** I start a supervisor on a project from my phone, without SSH, and land in its conversation
 - **Touches:** `hub-web/src/launch-session.ts`, `hub-web/src/pairing-scopes.ts`, `hub-web/src/connection.ts`, `hub-web/src/conversation-shell.ts`, `cas-cli/src/hub/launch_env.rs`, `cas-cli/src/hub/server.rs`, `cas-cli/src/account_selection.rs`, `hub-web/e2e/journeys/real-hub-server.mjs`
 - **Suite:** `hub-web/e2e/journeys/launch-session.journey.ts`
-- **Gaps:** the catalog suite doubles the hub protocol. The separate HUB-J13 part in `real-hub.journey.ts` crosses the real project browse, session start, reaper, daemon, PTY startup, first message and operator reply with a foreign hub CAS_ROOT. Provider and service placement alone are inert; official-login model action and surviving a hub restart remain real-machine assembly checks.
+- **Gaps:** the catalog suite doubles the hub protocol. The separate HUB-J13 part in `real-hub.journey.ts` crosses the real project browse, session start, reaper, daemon, PTY startup, first message and operator reply with the production-shaped absence of CAS_ROOT. Provider and service placement alone are inert. The Rust startup regression separately proves that a Teams write before pane readiness retries into the PTY once ready, without a provider generating replies. Official-login model action and surviving a hub restart remain real-machine assembly checks.
 
 #### Steps
 
@@ -463,7 +463,8 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - Keyboard focus moves from Allow to Confirm to the project search after grant, and a very long machine label stays readable on a phone.
 - The session does not come up within 90 s: the sheet says it was started and may still be starting.
 - A machine without launch folders hides Browse.
-- A hub carrying another project's CAS_ROOT still starts the chosen project's supervisor, observes its first message and answers one reply (the separate real-hub part).
+- A machine hub starts the chosen project's supervisor, observes its first message and answers one reply (the separate real-hub part). Foreign CAS_ROOT isolation has its own Rust hardening regression.
+- A named-profile startup brief written to Teams before pane readiness retries its wake once ready, submits once and leaves one Teams body (the real queue/PTY regression for cas-dd2e).
 - The machine can't list a CLI's accounts: the step says so with Try again, and the launch uses the machine's default account.
 - The chosen account was removed or logged out before Start (400 invalid_profile / 422 not_logged_in): plain advice, and the list refreshes.
 
@@ -699,3 +700,34 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 #### Edge paths
 
 - With no cloud origin configured, Explorer is a disabled item that says so.
+
+### HUB-J25 · See the whole picture of the work
+
+- **Entry:** `/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a thread with work between two replies, and one worker on a task
+- **Goal:** see what the supervisor thought, ran and moved between its replies, collapsed until I open it, with each detail loaded only when I ask, and follow one worker's live timeline from Tasks & progress, without a terminal
+- **Touches:** `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts`, `hub-web/src/thread-model.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/connection.ts`, `hub-web/src/main.ts`, `hub-web/src/styles.css`
+- **Suite:** `hub-web/e2e/journeys/whole-picture.journey.ts`
+- **Gaps:** the work-event stream is a protocol double; the daemon's transcript indexing, redaction, change probe and the hub's follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests`)
+
+#### Steps
+
+1. Show work is off and the thread is replies only — the switch reads off, no work row shows and no work page is read
+2. Turn Show work on — the work between the two replies is one collapsed block in order, its task chip showing and its rows not; a worker's own tool call stays in its timeline
+3. Open the work and one tool call's detail — by keyboard, focus stays on each control, the detail loads on demand and markup in it reads as text
+4. New work arrives live without redrawing the thread — the daemon's change notice brings the new row and the earlier reply keeps its node
+5. Show work stays as set on this device — a reload keeps it on, and turning it off returns the thread to replies only
+6. Open a worker's timeline from Tasks & progress — a right drawer on desktop, a bottom sheet on a phone, with the worker's state, task and its own newest rows first
+7. The timeline follows the worker live — the daemon's change notice brings the worker's new row to the top
+8. Close the timeline back to its worker row — Escape closes it and focus returns to the row's Timeline control
+
+#### Expected experience
+
+- Work reads as quiet context between replies, never as a reply: one muted line, chips for task moves, rows a tap deeper.
+- The timeline replaces watching a worker's terminal: state, task and the last things it did, updating by itself.
+- Nothing heavy loads until asked: no work page while Show work is off, and no detail until a row opens.
+
+#### Edge paths
+
+- A machine whose Cassy does not serve work events marks Show work unavailable with the reason, instead of hiding it.
+- A machine whose Cassy predates worker timelines says so in the sheet and points to the supervisor's raw output.
+- A failed tool call shows a critical dot and the word "failed"; a detail that is gone from the machine says so.

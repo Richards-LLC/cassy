@@ -102,9 +102,10 @@ answers the actual injected startup prompt through `cas factory message`, then
 answers one Commander instruction through the same durable queue. No reply is
 seeded by the browser or fixture control endpoint.
 
-The hub deliberately inherits another disposable project's `CAS_ROOT`. This
-regresses a machine hub carrying the store from its original launch directory
-into a different project's daemon. Run this part with the registered fixture:
+The hub runs without `CAS_ROOT`, matching the production user service. The
+separate Rust launch-environment test covers foreign-store hardening; that
+condition was absent from the operator's blank launch. Run this part with the
+registered fixture:
 
 ```bash
 npm run journeys:real-hub -- real-hub.journey.ts --grep 'HUB-J13 real hub'
@@ -117,3 +118,12 @@ manager. Its recorded process group and start fingerprint bound cleanup to the
 owned launch. This does not prove host systemd/cgroup placement or model action.
 The installed official provider and login remain a separate bounded live check;
 never use an existing hub or read/copy credentials into this fixture.
+
+The deferred startup regression is
+`supervisor_single_turn_tests::claude_startup_retries_the_deferred_wake_when_the_pane_becomes_ready`.
+It queues the real named-profile startup with project context, observes the
+Teams write while the PTY is unready, then makes the pane ready and requires
+one submitted wake naming that message, with no second Teams body. Its PTY
+only captures input and never generates replies. This proves the daemon's
+retry after a declined wake, independently of the inert provider's answer;
+neither proof claims an official model took a turn.

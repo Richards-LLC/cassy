@@ -172,6 +172,9 @@ fn create_fixture() -> (TempDir, PathBuf, PathBuf) {
         "resolve production build script from runtime current_dir(): {}",
         production_build_script.display()
     );
+    fs::create_dir_all(source.join("hub")).expect("fixture hub module");
+    fs::copy(production_build_script.parent().unwrap().join("src/hub/chunk_assets.rs"), source.join("hub/chunk_assets.rs"))
+        .expect("copy shared Commander filename validator");
     fs::copy(production_build_script, package.join("build.rs"))
         .expect("copy production build script");
     fs::write(
@@ -193,6 +196,10 @@ dotenvy = "0.15"
         r#"fn main() {
     println!("{}", option_env!("CAS_GIT_HASH").unwrap_or("unknown"));
     println!("{}", option_env!("CAS_POSTHOG_API_KEY").unwrap_or("missing"));
+    const CHUNKS: &[(&str, &[u8])] = include!(concat!(env!("OUT_DIR"), "/commander_chunks.rs"));
+    for (name, bytes) in CHUNKS {
+        println!("chunk={name}:{}", String::from_utf8_lossy(bytes));
+    }
 }
 "#,
     )
@@ -282,6 +289,23 @@ fn cargo_build_script_stays_fresh_and_tracks_worktree_transitions() {
             .any(|line| line == "package-initial"),
         "the initial package-local .env was not embedded:\n{initial_env_output}"
     );
+
+    // Newly emitted dist-root chunks must enter the compiled manifest without
+    // touching app.js; rejected extensions never enter the binary.
+    let dist = normal_package.parent().unwrap().join("hub-web/dist");
+    for (name, contents) in [("chunk-fixture-Ab12_cd3.js", "script"), ("chunk-fixture-Ab1-_cd3.css", "style"), ("chunk-rejected-Ab12_cd3.html", "unsafe"), ("chunk-fixture..-Ab12_cd3.js", "unsafe")] {
+        fs::write(dist.join(name), contents).unwrap();
+    }
+    let added = cargo_run_hash(&normal_package, &normal_target);
+    assert!(added.contains("chunk=chunk-fixture-Ab12_cd3.js:script"), "{added}");
+    assert!(added.contains("chunk=chunk-fixture-Ab1-_cd3.css:style"), "{added}");
+    assert!(!added.contains("unsafe"), "{added}");
+    fs::write(dist.join("chunk-fixture-Ab12_cd3.js"), "edited script").unwrap();
+    let edited = cargo_run_hash(&normal_package, &normal_target);
+    assert!(edited.contains("chunk=chunk-fixture-Ab12_cd3.js:edited script"), "{edited}");
+    fs::remove_file(dist.join("chunk-fixture-Ab12_cd3.js")).unwrap();
+    let removed = cargo_run_hash(&normal_package, &normal_target);
+    assert!(!removed.contains("chunk=chunk-fixture-Ab12_cd3.js:"), "{removed}");
 
     run_git(
         repo.path(),

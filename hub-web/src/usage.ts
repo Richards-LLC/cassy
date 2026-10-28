@@ -33,6 +33,8 @@ export const USAGE_ACTIONS = {
   "inbox.open": "HUB-J19",
   "write-grant": "HUB-J20",
   "app-switch.explorer": "HUB-J21",
+  "show-work.toggle": "HUB-J25",
+  "worker.timeline": "HUB-J25",
 } as const;
 
 export type UsageAction = keyof typeof USAGE_ACTIONS;

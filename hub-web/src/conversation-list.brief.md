@@ -42,7 +42,7 @@ No invented account, harness, status or performance figures. Missing optional id
 
 Use `hub-web/DESIGN.md@ce0d8adc9`, existing Glass `--bg-raised`, `--ink`, `--ink-mid`, `--color-action`, state colors, 4px spacing and pane radii. Project boundaries use `--ink-mid` for at least 3:1 against their surface. Inter and mono identifiers inherit the existing stacks and brand mark. Native buttons expose pressed/expanded state; machine state also has text, every row remains keyboard reachable when expanded, and toggles retain focus. Phone heading spacing is compact enough to leave the project register useful. Forced colors use system colors; reduced motion adds no animation.
 
-No images or dependencies are added. The same gzip command on merged epic `2b491102e` and the combined delivered bundles measures app.js at 189,316 → 192,027 bytes (+2,711) and app.css at 35,472 → 36,205 bytes (+733). JavaScript stays below 200 KB; CSS intentionally retains the pre-existing whole-app budget exception. No new blur, polling, images or dependencies. Field p75 LCP/INP are not established by this local synthetic walk; production telemetry owns those measurements. The expanded spec makes singleton projects cards too, superseding the original plain-singleton requirement.
+No images or dependencies are added. The same gzip command on merged epic `2b491102e` and the combined delivered bundles measures app.js at 189,316 → 192,009 bytes (+2,693) and app.css at 35,472 → 36,205 bytes (+733). JavaScript stays below 200 KB; CSS intentionally retains the pre-existing whole-app budget exception. No new blur, polling, images or dependencies. Field p75 LCP/INP are not established by this local synthetic walk; production telemetry owns those measurements. The expanded spec makes singleton projects cards too, superseding the original plain-singleton requirement.
 
 ## Critique
 
@@ -58,7 +58,7 @@ Scored by solid-leopard-96 on 2026-10-28. The public-surface floors hold; the fr
 
 ## Critique response and handoff
 
-- Fixed real defects revealed by the expanded walk: six-session phone density, fractional End-confirmation clipping in a nested scroll container, a collapsed body whose flex display overrode the hidden attribute, and filter padding that ignored a landscape phone notch.
+- Fixed real defects revealed by the expanded walk: six-session phone density, fractional End-confirmation clipping in a nested scroll container, a collapsed body whose flex display overrode the hidden attribute, and filter padding that ignored a landscape phone notch, and renderer recreation during search that doubled page-lifetime gesture listeners.
 - Account and harness are only supplied catalog data. Older hubs retain a generic avatar and no blank account line. Real hub metadata production/auth remains the companion task's ownership; these browser receipts use a protocol double.
 - The production HUB-J14 navigation part covers cross-machine grouping, optional identity, a decision shortcut, filter/search empty recovery, keyboard collapse across reload and footer filtering. HUB-J16 covers adjacent End-session confirmation/failure/focus and density. All selected affected journeys must pass before parking.
 - Original narrower before/after pairs remain the consistent same-data comparison for the project-boundary defect. Additional full-navigation production captures show the expanded design at both widths and all three color modes; the ledger labels renderer-fixture mechanical checks separately.

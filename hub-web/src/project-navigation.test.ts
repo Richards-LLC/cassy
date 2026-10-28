@@ -26,7 +26,7 @@ describe("project-first navigation", () => {
     expect(cards[1]!.textContent).not.toMatch(/undefined|Unknown harness/);
   });
 
-  it("keeps a collapsed project on this device and retains the toggle through a catalog tick", () => {
+  it("keeps a collapsed project on this device and retains its keyed toggle through a catalog tick and search", () => {
     const nav = setup(); const list = new ProjectNavigation(); const rows = [row("one")];
     list.render(nav, rows, vi.fn());
     const toggle = nav.querySelector<HTMLButtonElement>(".project-card-toggle")!;
@@ -35,6 +35,9 @@ describe("project-first navigation", () => {
     expect(nav.querySelector<HTMLElement>(".project-card-rows")!.hidden).toBe(true);
     list.render(nav, rows, vi.fn());
     expect(document.activeElement).toBe(toggle);
+    list.render(nav, [], vi.fn(), undefined, { searchActive: true });
+    list.render(nav, rows, vi.fn());
+    expect(nav.querySelector(".project-card-toggle")).toBe(toggle);
     new ProjectNavigation().render(nav, rows, vi.fn());
     expect(nav.querySelector(".project-card-toggle")?.getAttribute("aria-expanded")).toBe("false");
   });

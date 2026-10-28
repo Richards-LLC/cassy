@@ -12,7 +12,7 @@ const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: 
 test("HUB-J4 prose tables keep words readable and render inline markdown", journeyPart, async ({ page, journey }) => {
   const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(page.locator("#conversation-connection")).toContainText("Live");
   hub.supervisorSays(PELICAN, [
     "| Tab | State |", "| --- | --- |",

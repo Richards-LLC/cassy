@@ -15,6 +15,8 @@ const projectKey = (row: ConversationRow) => row.project?.trim() || projectTitle
 /** The project register composes the existing keyed row renderer, so pointer
  * intent, confirmation and focus behavior have one implementation. */
 export class ProjectNavigation {
+  // Row renderers own page-lifetime gesture listeners. Reuse each project's
+  // renderer when a filter detaches and later restores its card.
   private cards = new Map<string, Card>();
   private shortcuts = new Map<string, HTMLButtonElement>();
   private pinned?: HTMLElement;
@@ -149,7 +151,6 @@ export class ProjectNavigation {
       card.rows.render(card.body, nested, open, end);
       ordered.push(card.node);
     }
-    for (const [key, card] of this.cards) if (!groups.has(key)) { card.node.remove(); this.cards.delete(key); }
     if (!ordered.length && rows.length) {
       const empty = this.empty ??= document.createElement("p"); empty.className = "project-nav-empty"; empty.textContent = "No conversations match this filter. Choose All to see your projects."; ordered.push(empty);
     }

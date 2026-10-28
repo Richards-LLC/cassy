@@ -88,16 +88,16 @@ impl CasCore {
             data: None,
         })?;
 
-    let parent_epic = task_store
-        .get_parent_epic(&task.id)
-        .map_err(|error| McpError {
-            code: ErrorCode::INTERNAL_ERROR,
-            message: Cow::from(format!("Failed to resolve effective task target: {error}")),
-            data: None,
-        })?;
-    let target = super::repo_context::effective_task_work_target(&task, parent_epic.as_ref())
-        .map(|target| format!("{} @ {}", target.repo_selector, target.target_branch))
-        .unwrap_or_else(|| "(none — trunk fallback)".to_string());
+        let parent_epic = task_store
+            .get_parent_epic(&task.id)
+            .map_err(|error| McpError {
+                code: ErrorCode::INTERNAL_ERROR,
+                message: Cow::from(format!("Failed to resolve effective task target: {error}")),
+                data: None,
+            })?;
+        let target = super::repo_context::effective_task_work_target(&task, parent_epic.as_ref())
+            .map(|target| format!("{} @ {}", target.repo_selector, target.target_branch))
+            .unwrap_or_else(|| "(none — trunk fallback)".to_string());
         let project_id = super::current_project_id(&self.cas_root);
         let origin = task
             .origin_project

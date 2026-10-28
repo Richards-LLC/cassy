@@ -27249,6 +27249,25 @@ mod merge_state_gate_tests {
             original_epic_tip,
             resolve_branch_sha(p, "epic/clean").unwrap()
         );
+
+        git(p, &["push", "-q", "origin", "--delete", "epic/clean"]);
+        git(p, &["fetch", "-q", "--prune", "origin"]);
+        let retained_tip = resolve_branch_sha(p, "epic/clean");
+        commit_file_at(p, "later.rs", "// later\n", "2026-08-15T02:01:00Z");
+        let note = advance_recorded_epic(p, "cas-epic", "epic/clean", "main").unwrap();
+        assert!(note.contains("REFUSED"), "{note}");
+        assert_eq!(resolve_branch_sha(p, "epic/clean"), retained_tip);
+        let observed = git_command(
+            p,
+            &["ls-remote", "--heads", "origin", "refs/heads/epic/clean"],
+        )
+        .output()
+        .unwrap();
+        assert!(observed.status.success());
+        assert!(
+            observed.stdout.is_empty(),
+            "close must never resurrect a deleted lane"
+        );
     }
 
     #[test]

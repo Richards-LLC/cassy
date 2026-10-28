@@ -547,25 +547,7 @@ fn names_epic_lane(epic: &cas_types::Task, branch: &str) -> bool {
 /// Resolve legacy rows whose recorded lane predates a rename of that epic's
 /// own target. A different epic or an integration base is never a rename.
 pub(crate) fn effective_epic_branch(epic: &cas_types::Task) -> Option<&str> {
-    let branch = epic
-        .branch
-        .as_deref()
-        .map(str::trim)
-        .filter(|b| !b.is_empty());
-    let target = epic
-        .deliverables
-        .work_target
-        .as_ref()
-        .map(|target| target.target_branch.trim())
-        .filter(|b| !b.is_empty());
-    match (branch, target) {
-        (Some(branch), Some(target))
-            if names_epic_lane(epic, branch) && names_epic_lane(epic, target) =>
-        {
-            Some(target)
-        }
-        _ => branch.or(target.filter(|target| target.starts_with("epic/"))),
-    }
+    epic.effective_epic_branch()
 }
 
 /// Normalize a persisted factory lane even for consumers that have only its
@@ -576,6 +558,9 @@ fn current_epic_work_target(cas_root: &Path, target: &WorkTarget) -> WorkTarget 
         return target.clone();
     };
     if !target.target_branch.starts_with("epic/") || suffix.is_empty() {
+        return target.clone();
+    }
+    if !cas_root.join("cas.db").is_file() {
         return target.clone();
     }
     let id = format!("cas-{suffix}");
@@ -1183,6 +1168,9 @@ pub(crate) fn resolve_repo_context_bounded(
     target: &WorkTarget,
     probe: &BoundedRepoProbe,
 ) -> Result<RepoContext, BoundedRepoError> {
+    if probe.deadline.remaining().is_zero() {
+        return Err(BoundedRepoError::TimedOut);
+    }
     let current_target = current_epic_work_target(cas_root, target);
     let target = &current_target;
     if let Some(binding) = bounded_host_binding(&target.repo_selector)? {

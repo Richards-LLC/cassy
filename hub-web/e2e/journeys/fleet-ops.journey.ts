@@ -372,21 +372,12 @@ test("HUB-J17 a merge request stays on its machine and permissions explain refus
     // Pause needs factory:operate, which this control pairing may allow itself.
     await expect(row("swift-lark-3").getByRole("menuitem", { name: "Pause" })).toHaveAttribute("aria-disabled", "true");
     await expect(row("swift-lark-3").locator(".fleet-ops-reason").first()).toContainText("Allow managing workers in Paired machines.");
-    // cas-ba64: one lead, a short permission line per group, and one remedy
-    // sentence that names the grant and re-pair actions in Paired machines.
     const header = page.locator("#status-view .fleet-ops-header");
-    await expect(header.locator(":scope > .fleet-ops-reason")).toHaveText([
-      "Not allowed on this pairing.",
-      "Add worker, Focus epic: needs Manage workers and tasks.",
-      "Write access: needs Stop and restart workers and sessions.",
-    ]);
-    await expect(header.locator(":scope > .fleet-ops-instruction")).toHaveText("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
-    for (const name of ["Add worker…", "Focus epic…", "Write access…"]) {
-      const control = header.getByRole("button", { name });
-      const descriptions = (await control.getAttribute("aria-describedby"))?.split(" ") ?? [];
-      expect(descriptions).toHaveLength(3);
-      for (const id of descriptions) await expect(header.locator(`#${id}`), name).toBeVisible();
-    }
+    await expect(header.getByRole("button")).toHaveCount(0);
+    const permissions = header.locator("details");
+    await expect(permissions.locator("summary")).toHaveText("View only · Permissions");
+    await permissions.locator("summary").click();
+    await expect(permissions).toContainText("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
     const before = hub.operations.length;
     await stop.click({ force: true });
     expect(hub.operations.length, "a disabled item sends nothing").toBe(before);

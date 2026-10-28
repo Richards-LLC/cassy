@@ -3,7 +3,8 @@ import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
-import { statusClass, statusLabel, workerProgress } from "./progress-model";
+import { statusClass, statusLabel, workerProgress, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
+import { releaseHeader } from "./progress-view";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
@@ -265,6 +266,7 @@ function scheduleReplyPresentation(): void {
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
 let contextProgress = false;
+const allProgressTasks = new Set<string>();
 let contextAttention = 0;
 function syncConversationContext(): void {
   // With no thread open there is nothing for the rail to hold: the last
@@ -5075,7 +5077,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -5156,7 +5158,10 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.append(row);
   }
   const agents = ((status.agents as FleetAgent[]) ?? []);
-  const tasks = [...((status.tasks_in_progress as FleetTask[]) ?? []), ...((status.tasks_ready as FleetTask[]) ?? [])];
+  const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
+  const epics = ((status.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
+  const release = releaseProgress(epics, typeof status.focused_epic === "string" ? status.focused_epic : null, tasks);
+  container.prepend(releaseHeader(document, release));
   const workers = workerProgress(session?.workers, agents, tasks, session?.supervisor);
   const identifier = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
@@ -5201,7 +5206,8 @@ function renderStatus(status?: Record<string, unknown>): void {
   for (const worker of workers) {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(worker.name), chip(worker.agent?.status));
+    const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
+    line.append(identifier(worker.name), chip(metadata?.liveness ?? worker.agent?.status));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
@@ -5210,29 +5216,47 @@ function renderStatus(status?: Record<string, unknown>): void {
       open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
       open.setAttribute("aria-haspopup", "dialog");
       open.setAttribute("aria-label", `${worker.name} timeline`);
-      open.textContent = "Timeline";
+      open.textContent = "Activity";
       open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
       line.append(open);
     }
     const work = document.createElement("p"); work.className = "status-activity";
     if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
     work.append(document.createTextNode(worker.work)); row.append(work);
+    const activity = document.createElement("small"); activity.className = "status-last-activity";
+    const at = metadata?.latest_activity?.created_at_rfc3339 ? Date.parse(metadata.latest_activity.created_at_rfc3339) : NaN;
+    activity.textContent = Number.isFinite(at) ? `Last activity ${new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "Last activity not reported";
+    row.append(activity);
     container.append(row);
   }
-  if (tasks.length > 0) container.append(sectionLabel("Tasks", tasks.length));
-  for (const task of tasks) {
-    const row = document.createElement("article"); row.className = "status-row status-task";
-    const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(task.id), chip(task.status));
-    const title = document.createElement("p");
-    title.className = "status-task-title";
-    title.textContent = String(task.title ?? "");
-    row.append(line, title);
-    const controls = ops ? taskControls(document, ops, task as FleetTask) : undefined;
-    if (controls) row.append(controls);
-    container.append(row);
+  const scopeKey = `${selectedMachineId}:${selectedSession}`;
+  const showAll = allProgressTasks.has(scopeKey);
+  const filter = document.createElement("button"); filter.type = "button"; filter.className = "progress-filter";
+  filter.textContent = showAll ? "Supervisor tasks" : "All tasks";
+  filter.setAttribute("aria-pressed", String(showAll)); filter.dataset.fleetFocus = "tasks:filter";
+  filter.onclick = () => { if (showAll) allProgressTasks.delete(scopeKey); else allProgressTasks.add(scopeKey); renderStatus(status); };
+  container.append(filter);
+  const groups = taskGroups(tasks, epics, workers.map(worker => worker.name), showAll);
+  for (const group of groups) {
+    if (!group.tasks.length) continue;
+    container.append(sectionLabel(group.label, group.tasks.length));
+    for (const task of group.tasks) {
+      const row = document.createElement("article"); row.className = "status-row status-task";
+      const line = document.createElement("div"); line.className = "status-line";
+      line.append(identifier(task.id), chip(task.delivery_state === "merged" ? "Merged, closing" : task.status));
+      const title = document.createElement("p"); title.className = "status-task-title"; title.textContent = String(task.title ?? "");
+      row.append(line, title);
+      const controls = task.delivery_state === "merged" ? undefined : ops ? taskControls(document, ops, task) : undefined;
+      if (controls) row.append(controls);
+      container.append(row);
+    }
   }
-  contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
+  if (!groups.some(group => group.tasks.length)) {
+    const empty = document.createElement("p"); empty.className = "status-empty";
+    empty.textContent = showAll ? "No tasks reported." : "No active tasks for this supervisor. All tasks opens the board.";
+    container.append(empty);
+  }
+  contextProgress = Boolean(release) || Boolean(summary) || workers.length > 0 || tasks.length > 0;
   scheduleConversationLayout();
   if (!contextProgress) {
     const empty = document.createElement("p");

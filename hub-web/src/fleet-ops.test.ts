@@ -228,60 +228,24 @@ describe("the rail's controls draw that state (cas-a474)", () => {
     const header = headerControls(document, context([...CONTROL, "factory-operate"]), "focus");
     expect([...header.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent)).toEqual(["Focus cas-f29b"]);
     const readOnly = headerControls(document, context(["machine-read", "session-read", "pane-read"]), undefined);
-    expect(readOnly.querySelector(".fleet-ops-add")?.getAttribute("aria-disabled")).toBe("true");
-    // cas-97d58 F06: by what it allows, never the scope id.
-    // pin: permission names are the required user-facing rail copy.
-    expect(readOnly.querySelectorAll(".fleet-ops-reason")[1]?.textContent).toBe("Add worker, Focus epic: needs Manage workers and tasks.");
-    expect(readOnly.querySelectorAll(".fleet-ops-reason")[1]?.textContent).not.toMatch(/factory:/);
+    expect(readOnly.querySelector(".fleet-ops-add")).toBeNull();
+    expect(readOnly.querySelector("summary")?.textContent).toBe("View only · Permissions");
   });
 
-  // cas-ba64: one shared lead, one short permission line per control group,
-  // and one Paired machines instruction that names actions the panel offers.
-  it("summarizes missing header permissions once and points to the available Paired machines actions", () => {
+  it("collapses permissions to one line, hides unavailable controls and links the pairing remedy", () => {
     const writeAccess: WriteAccessContext = { state: new WriteGrantState(), tasks: [], on: { changed: vi.fn(), review: vi.fn(), revoke: vi.fn(), confirm: vi.fn(), cancel: vi.fn() } };
-    const described = (header: HTMLElement, selector: string) => {
-      const ids = header.querySelector(selector)?.getAttribute("aria-describedby")?.split(" ") ?? [];
-      return ids.map((id) => header.querySelector(`#${id}`)?.textContent);
-    };
-    const plain = headerControls(document, { ...context(CONTROL), writeAccess }, undefined);
-    expect([...plain.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
-      "Not allowed on this pairing.",
-      "Add worker, Focus epic: needs Manage workers and tasks.",
-      "Write access: needs Stop and restart workers and sessions.",
-    ]);
-    // pin: the instruction matches Paired machines' grant and re-pair actions.
-    expect(plain.querySelector(".fleet-ops-instruction")?.textContent).toBe("In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.");
-    expect(described(plain, ".fleet-ops-add")).toEqual([
-      "Not allowed on this pairing.", "Add worker, Focus epic: needs Manage workers and tasks.", "In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.",
-    ]);
-    expect(described(plain, ".fleet-ops-focus")).toEqual(described(plain, ".fleet-ops-add"));
-    expect(described(plain, ".fleet-ops-grant")).toEqual([
-      "Not allowed on this pairing.", "Write access: needs Stop and restart workers and sessions.", "In Paired machines, allow managing workers, then pair again to add the Stop and restart workers and sessions permission.",
-    ]);
-    const operate = headerControls(document, { ...context([...CONTROL, "factory-operate"]), writeAccess }, undefined);
-    expect([...operate.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
-      "Not allowed on this pairing.",
-      "Write access: needs Stop and restart workers and sessions.",
-    ]);
-    expect(operate.querySelector(".fleet-ops-add")?.hasAttribute("aria-describedby")).toBe(false);
-    // pin: the missing-scope remedy names Paired machines' actual re-pair action.
-    expect(operate.querySelector(".fleet-ops-instruction")?.textContent).toBe("Pair again from Paired machines to add the Stop and restart workers and sessions permission.");
-    expect(described(operate, ".fleet-ops-grant")).toEqual([
-      "Not allowed on this pairing.", "Write access: needs Stop and restart workers and sessions.", "Pair again from Paired machines to add the Stop and restart workers and sessions permission.",
-    ]);
+    const header = headerControls(document, { ...context(CONTROL), writeAccess }, undefined);
+    expect(header.querySelectorAll("button")).toHaveLength(0);
+    expect(header.querySelector("details")?.open).toBe(false);
+    expect(header.querySelector("summary")?.textContent).toBe("View only · Permissions");
+    expect(header.querySelector("details")?.textContent).toContain("pair again");
+    expect(header.querySelector("a")?.getAttribute("href")).toBe("#paired-machines");
     const manage = headerControls(document, { ...context([...CONTROL, "factory-manage"]), writeAccess }, undefined);
-    expect([...manage.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
-      "Not allowed on this pairing.",
-      "Add worker, Focus epic: needs Manage workers and tasks.",
-    ]);
-    expect(manage.querySelector(".fleet-ops-instruction")?.textContent).toBe("Allow managing workers in Paired machines.");
-    expect(manage.querySelector(".fleet-ops-grant")?.hasAttribute("aria-disabled")).toBe(false);
-    // Without Write access in the rail, a single line still names its controls.
-    const noGrant = headerControls(document, context(CONTROL), undefined);
-    expect([...noGrant.querySelectorAll(".fleet-ops-reason")].map((line) => line.textContent)).toEqual([
-      "Not allowed on this pairing.", "Add worker, Focus epic: needs Manage workers and tasks.",
-    ]);
-    expect(noGrant.querySelector(".fleet-ops-instruction")?.textContent).toBe("Allow managing workers in Paired machines.");
+    expect(manage.querySelector(".fleet-ops-grant")).not.toBeNull();
+    expect(manage.querySelector(".fleet-ops-add")).toBeNull();
+    const all = headerControls(document, { ...context([...CONTROL, "factory-manage", "factory-operate"]), writeAccess }, undefined);
+    expect(all.querySelector("details")).toBeNull();
+    expect(all.querySelectorAll("button")).toHaveLength(3);
   });
 
   it("draws the Undo offer while it lasts", () => {

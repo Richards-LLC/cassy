@@ -638,9 +638,36 @@ mod focused_epic_tests {
             socket_exists: false,
         };
 
+        // The status catalog contains all project epics, including foreign and
+        // terminal ones. Preserve ownership so Commander can scope honestly.
+        let store = crate::store::open_task_store(&cas_root).unwrap();
+        for (id, state, owner, verifier) in [
+            ("cas-owned", cas_types::TaskStatus::InProgress, Some("supervisor"), None),
+            ("cas-foreign", cas_types::TaskStatus::Open, Some("other"), None),
+            ("cas-closed", cas_types::TaskStatus::Closed, None, Some("supervisor")),
+        ] {
+            let mut epic = cas_types::Task::new(id.into(), id.into());
+            epic.task_type = cas_types::TaskType::Epic;
+            epic.status = state;
+            epic.assignee = owner.map(str::to_string);
+            epic.epic_verification_owner = verifier.map(str::to_string);
+            store.add(&epic).unwrap();
+        }
         let status_json =
             || serde_json::to_value(build_status_json(&session, &cas_root, 20).unwrap()).unwrap();
         let status = status_json();
+        let epics = status["epics"].as_array().unwrap();
+        assert_eq!(epics.len(), 3);
+        for (id, state, owner, verifier) in [
+            ("cas-owned", "inprogress", Some("supervisor"), None),
+            ("cas-foreign", "open", Some("other"), None),
+            ("cas-closed", "closed", None, Some("supervisor")),
+        ] {
+            let epic = epics.iter().find(|epic| epic["id"] == id).unwrap();
+            assert_eq!(epic["status"], state);
+            assert_eq!(epic["assignee"].as_str(), owner);
+            assert_eq!(epic["epic_verification_owner"].as_str(), verifier);
+        }
         assert!(
             status
                 .get("focused_epic")

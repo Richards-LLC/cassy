@@ -288,7 +288,7 @@ pub use surfaced_artifact_store::{
 // Prompt queue store for supervisor → worker communication
 // (includes enqueue outcomes for message dedup and cas-ecff lifecycle outbox)
 pub use prompt_queue_store::{
-    AdmissionOutcome, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryStage,
+    AdmissionOutcome, BudgetedSurface, ClaimToken, ConfirmationSource, DeliveryRetryState, DeliveryStage,
     EnqueueIdempotentResult, EnqueueOutcome, HOOK_SURFACE_BUDGET_CHARS,
     HOOK_SURFACE_ROW_OVERHEAD_CHARS, HookDrain, InboxHandoffState, MessageDeliveryReport,
     MessageStatus, NOTICE_DIGEST_KIND, OPERATOR_CLOUD_SCHEMA_STATEMENTS,

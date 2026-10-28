@@ -1987,6 +1987,60 @@ impl std::fmt::Display for ConfirmationSource {
     }
 }
 
+/// Durable retry evidence, without an inferred cadence or extra wake attempt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeliveryRetryState {
+    /// Failed handoffs recorded by the bounded delivery retry policy.
+    pub delivery_attempts: u32,
+    /// Persisted retry/readiness deadline, absent after transport completes.
+    pub next_attempt_at: Option<DateTime<Utc>>,
+}
+
+impl DeliveryRetryState {
+    /// Shared by message status and the watchdog's sender notice.
+    pub fn narrative(&self) -> String {
+        let next = self.next_attempt_at.map(|at| at.to_rfc3339())
+            .unwrap_or_else(|| "none recorded".into());
+        format!("delivery_attempts: {}; next_attempt_at: {next}", self.delivery_attempts)
+    }
+}
+
+fn delivery_retry_on_conn(conn: &Connection, prompt_id: i64) -> Result<DeliveryRetryState> {
+    let (attempts, next): (u32, Option<String>) = conn.query_row(
+        "SELECT delivery_attempts, CASE WHEN processed_at IS NULL
+             AND transport_delivered_at IS NULL AND acked_at IS NULL
+             AND COALESCE(highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
+             THEN next_attempt_at END
+         FROM prompt_queue WHERE id = ?",
+        params![prompt_id], |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(DeliveryRetryState {
+        delivery_attempts: attempts,
+        next_attempt_at: SqlitePromptQueueStore::optional_datetime(next.as_deref(), "next_attempt_at", prompt_id)?,
+    })
+}
+
+/// The same channel episode key is used by the watchdog writer and status reader.
+fn delivery_stalled_episode_key(conn: &Connection, session: Option<&str>, recipient: &str) -> Result<String> {
+    let last_read: Option<String> = conn.query_row(
+        "SELECT MAX(at) FROM (
+            SELECT seen.seen_at AS at FROM prompt_queue_recipient_seen seen
+            JOIN prompt_queue q ON q.id = seen.prompt_id
+            WHERE q.factory_session = ?1 AND q.target = ?2 AND seen.recipient = ?2
+              AND COALESCE(seen.source, 'inbox_poll') NOT IN ('transport_delivered', 'transport_claimed')
+            UNION ALL
+            SELECT acked_at AS at FROM prompt_queue
+            WHERE factory_session = ?1 AND target = ?2 AND acked_at IS NOT NULL
+              AND COALESCE(acked_via, 'explicit_ack') <> 'inferred_from_reply'
+         )",
+        params![session, recipient], |row| row.get(0),
+    )?;
+    let episode = serde_json::to_string(&(session, recipient, last_read))
+        .map_err(|error| StoreError::Parse(error.to_string()))?;
+    Ok(format!("{DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX}recipient:{episode}"))
+}
+
 /// Stage-based delivery report for one prompt_queue message (cas-2c5f).
 ///
 /// Additive to legacy [`MessageStatus`]. The store returns wake/reaction as
@@ -2012,6 +2066,13 @@ pub struct MessageDeliveryReport {
     pub factory_session: Option<String>,
     pub priority: u8,
     pub urgent: bool,
+    #[serde(flatten)]
+    pub retry: DeliveryRetryState,
+    /// When this row actually triggered the delivery watchdog, never inferred from age.
+    pub delivery_stalled_notified_at: Option<DateTime<Utc>>,
+    /// Persisted notice for the current channel episode. While present, further
+    /// sender notices are deduplicated until the recipient reads or acknowledges.
+    pub channel_stalled_notice_id: Option<i64>,
     pub enqueued_at: DateTime<Utc>,
     pub selected_at: Option<DateTime<Utc>>,
     /// Full transport handoff time only (not legacy processed_at / partial).
@@ -6461,32 +6522,19 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             // A durable channel episode ends only when the recipient actually
             // reads/acks, not when the sender reads this watchdog alert. A PTY
             // handoff or an in-flight transport claim is not a recipient read.
-            let last_read: Option<String> = tx.query_row(
-                "SELECT MAX(at) FROM (
-                    SELECT seen.seen_at AS at FROM prompt_queue_recipient_seen seen
-                    JOIN prompt_queue q ON q.id = seen.prompt_id
-                    WHERE q.factory_session = ?1 AND q.target = ?2 AND seen.recipient = ?2
-                      AND COALESCE(seen.source, 'inbox_poll') NOT IN ('transport_delivered', 'transport_claimed')
-                    UNION ALL
-                    SELECT acked_at AS at FROM prompt_queue
-                    WHERE factory_session = ?1 AND target = ?2 AND acked_at IS NOT NULL
-                      AND COALESCE(acked_via, 'explicit_ack') <> 'inferred_from_reply'
-                 )",
-                params![factory_session, recipient], |row| row.get(0),
-            )?;
-            let episode = serde_json::to_string(&(&factory_session, &recipient, &last_read))
-                .map_err(|error| StoreError::Parse(error.to_string()))?;
-            let dedupe_key = format!("{DELIVERY_STALLED_BOUNCE_DEDUPE_PREFIX}recipient:{episode}");
+            let dedupe_key = delivery_stalled_episode_key(&tx, factory_session.as_deref(), &recipient)?;
             let (unread, since): (i64, Option<String>) = tx.query_row(
                 "SELECT COUNT(*), MIN(created_at) FROM prompt_queue q
                  WHERE factory_session = ?1 AND target = ?2 AND acked_at IS NULL
                    AND COALESCE(highest_stage, 'enqueued') NOT IN ('confirmed', 'dropped', 'suppressed', 'abandoned')
                    AND COALESCE(dedupe_key, '') NOT LIKE 'delivery-stalled:%'
                    AND NOT EXISTS (SELECT 1 FROM prompt_queue_recipient_seen seen
-                       WHERE seen.prompt_id = q.id AND seen.recipient = q.target)",
+                       WHERE seen.prompt_id = q.id AND seen.recipient = q.target
+                         AND seen.source NOT IN ('transport_delivered', 'transport_claimed'))",
                 params![factory_session, recipient], |row| Ok((row.get(0)?, row.get(1)?)),
             )?;
-            let notice = format!("{notice}\nChannel degraded at first detection: {unread} unread message(s) for {recipient} since {}. Further delivery-stalled notices are paused until the recipient reads or acknowledges a message.", since.as_deref().unwrap_or("unknown"));
+            let retry = delivery_retry_on_conn(&tx, prompt_id)?.narrative();
+            let notice = format!("{notice}\nDelivery retry state: {retry}.\nChannel degraded at first detection: {unread} unconfirmed message(s) for {recipient} since {}. Further delivery-stalled notices are paused until the recipient reads or acknowledges a message.", since.as_deref().unwrap_or("unknown"));
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO prompt_queue
                     (source, target, prompt, created_at, factory_session, summary, priority, urgent, dedupe_key)
@@ -8128,6 +8176,17 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             stage = DeliveryStage::Confirmed;
         }
 
+        let retry = delivery_retry_on_conn(&conn, id)?;
+        let notified: Option<String> = conn.query_row(
+            "SELECT delivery_stalled_notified_at FROM prompt_queue WHERE id = ?",
+            params![id], |row| row.get(0),
+        )?;
+        let channel_stalled_notice_id = if factory_session.is_some() {
+            let key = delivery_stalled_episode_key(&conn, factory_session.as_deref(), &target)?;
+            conn.query_row("SELECT id FROM prompt_queue WHERE dedupe_key = ?", params![key], |row| row.get(0)).optional()?
+        } else {
+            None
+        };
         Ok(Some(MessageDeliveryReport {
             id,
             prompt,
@@ -8138,6 +8197,9 @@ impl PromptQueueStore for SqlitePromptQueueStore {
             factory_session,
             priority,
             urgent,
+            retry,
+            delivery_stalled_notified_at: Self::optional_datetime(notified.as_deref(), "delivery_stalled_notified_at", id)?,
+            channel_stalled_notice_id,
             enqueued_at,
             selected_at,
             delivered_at,
@@ -16405,6 +16467,7 @@ mod tests {
             candidates.iter().map(|row| row.id).collect::<Vec<_>>(),
             vec![urgent]
         );
+        store.record_recipient_surfaced(urgent, "claude-worker", SurfacingSource::TransportClaimed).unwrap();
         let bounce = store
             .enqueue_delivery_stalled_bounce(
                 urgent,
@@ -16429,6 +16492,12 @@ mod tests {
         );
         let bounced = store.message_delivery_report(bounce).unwrap().unwrap();
         assert_eq!(bounced.target, "supervisor");
+        let original_report = store.message_delivery_report(urgent).unwrap().unwrap();
+        assert!(bounced.prompt.contains(&original_report.retry.narrative()));
+        // pin: a claimed transport is still unconfirmed, so it must count in the degraded-channel notice.
+        assert!(bounced.prompt.contains("2 unconfirmed message(s)"), "{}", bounced.prompt);
+        let reported = serde_json::to_value(store.message_delivery_report(urgent).unwrap().unwrap()).unwrap();
+        assert_eq!(reported["channel_stalled_notice_id"], bounce);
 
         let very_old = (Utc::now() - chrono::Duration::seconds(31 * 60)).to_rfc3339();
         store
@@ -16450,6 +16519,8 @@ mod tests {
         store
             .poll_unseen_for_recipient("claude-worker", Some("session"), 10)
             .unwrap();
+        let reported = serde_json::to_value(store.message_delivery_report(normal).unwrap().unwrap()).unwrap();
+        assert!(reported["channel_stalled_notice_id"].is_null(), "reading resumes the channel");
         assert!(
             store
                 .delivery_stalled_candidates("session", 10 * 60, 30 * 60, 10)

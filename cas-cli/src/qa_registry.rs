@@ -1264,6 +1264,18 @@ journeys:
             registry.journeys[0].owners.globs(),
             ["server/auth/**", "pages/[id].vue"]
         );
+        let families = dir.path().join("docs/qa/bug-families");
+        std::fs::create_dir(&families).unwrap();
+        let file = families.join("extra.yml");
+        std::fs::write(&file, "title: Extra\ninvariants: [missing]\njourneys: [missing]\n").unwrap();
+        let report = check(dir.path(), Path::new(custom_path)).unwrap();
+        assert!(report.problems.iter().any(|p| p.code == "unknown_invariant"));
+        assert!(report.problems.iter().any(|p| p.code == "unknown_journey"));
+        std::fs::write(&file, "invalid: [").unwrap();
+        assert!(format!("{:#}", load(&dir.path().join(custom_path)).unwrap_err()).contains("extra.yml"));
+        std::fs::remove_file(file).unwrap();
+        std::fs::write(families.join("claim.yaml"), "title: Duplicate\n").unwrap();
+        assert!(format!("{:#}", load(&dir.path().join(custom_path)).unwrap_err()).contains("duplicate bug family"));
     }
 
     #[test]

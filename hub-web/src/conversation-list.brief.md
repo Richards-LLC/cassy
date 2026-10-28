@@ -42,8 +42,23 @@ No invented account, harness, status or performance figures. Missing optional id
 
 Use `hub-web/DESIGN.md@ce0d8adc9`, existing Glass `--bg-raised`, `--ink`, `--ink-mid`, `--color-action`, state colors, 4px spacing and pane radii. Project boundaries use `--ink-mid` for at least 3:1 against their surface. Inter and mono identifiers inherit the existing stacks and brand mark. Native buttons expose pressed/expanded state; machine state also has text, every row remains keyboard reachable when expanded, and toggles retain focus. Phone heading spacing is compact enough to leave the project register useful. Forced colors use system colors; reduced motion adds no animation.
 
-No images or dependencies are added. Baseline app.js is 189.18 KB gzip and app.css 35.75 KB gzip; the CSS baseline already exceeds the generic 30 KB target. Measure final delta and avoid adding new blur or polling. The expanded spec makes singleton projects cards too, superseding the original plain-singleton requirement.
+No images or dependencies are added. The same gzip command on the target and delivered bundles measures app.js at 188,415 → 191,114 bytes (+2,699) and app.css at 35,396 → 36,115 bytes (+719). JavaScript stays below 200 KB; CSS intentionally retains the pre-existing whole-app budget exception. No new blur, polling, images or dependencies. Field p75 LCP/INP are not established by this local synthetic walk; production telemetry owns those measurements. The expanded spec makes singleton projects cards too, superseding the original plain-singleton requirement.
 
 ## Critique
 
-Pending the expanded implementation and fresh renders. Original narrower group-boundary evidence is retained as a baseline and does not claim completion of this redesign.
+| Dimension | Score | Evidence |
+| --- | --- | --- |
+| Distinctiveness | 4 | Glass carries one outlined register per project across machines, with compact harness marks and an amber decision section. |
+| Fit to argument | 5 | Atlas and Borealis share one studio surface; pulse-card begins in its own bounded surface. |
+| Hierarchy | 4 | Needs you leads the project register; project names outrank supervisor codenames and optional account lines. |
+| Craft | 4 | Reviewed production light/dark phone and desktop renders keep project edges, rows and metadata aligned. Phone spacing was reduced after HUB-J16 measured five visible sessions; it now proves six with unchanged touch targets. Fresh strict visual QA is required before delivery. |
+| Accessibility | 4 | Named machine chips speak online state; native filters and collapse expose pressed/expanded state. The production walk proves keyboard focus, persisted hidden rows, forced colors, no horizontal overflow and missing-field fallback. |
+
+Scored by solid-leopard-96 on 2026-10-28. The public-surface floors hold; the fresh strict mechanical receipt remains a delivery gate. The app declares its JavaScript requirement and retains its existing noscript fallback. No new animation was added; reduced motion preserves state changes.
+
+## Critique response and handoff
+
+- Fixed real defects revealed by the expanded walk: six-session phone density, fractional End-confirmation clipping in a nested scroll container, and a collapsed body whose flex display overrode the hidden attribute.
+- Account and harness are only supplied catalog data. Older hubs retain a generic avatar and no blank account line. Real hub metadata production/auth remains the companion task's ownership; these browser receipts use a protocol double.
+- The production HUB-J14 navigation part covers cross-machine grouping, optional identity, a decision shortcut, filter/search empty recovery, keyboard collapse across reload and footer filtering. HUB-J16 covers adjacent End-session confirmation/failure/focus and density. All selected affected journeys must pass before parking.
+- Original narrower before/after pairs remain the consistent same-data comparison for the project-boundary defect. Additional full-navigation production captures show the expanded design at both widths and all three color modes; the ledger labels renderer-fixture mechanical checks separately.

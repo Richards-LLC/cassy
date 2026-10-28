@@ -39,7 +39,7 @@ test("HUB-J12 switch networks without losing the conversation", async ({ page, j
 });
 
 async function chooseConversation(page: Page): Promise<void> {
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
 }
 async function sendNow(page: Page, text: string): Promise<void> {
   await page.getByRole("textbox", { name: "Your message" }).fill(text);
@@ -110,7 +110,7 @@ test("HUB-J12 network switch: delayed legacy refusal holds both sends in order",
 test("HUB-J12 network switch: half-open machine waits for four failed heartbeats then flushes once", journeyPart, async ({ page, journey }) => {
   await journey.stage("Tailscale goes off, then on again", async () => {
     const { hub, clock, header, held } = await connected(page);
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).locator(".conversation-preview");
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).locator(".conversation-preview");
     const footer = page.locator("#hub-footer-badges .machine-badge-state");
     const panel = page.locator(".status-stale").filter({ visible: true });
     await hub.down("atlas");
@@ -651,7 +651,7 @@ test("HUB-J12 network switch: a revoked pairing leaves no stored draft behind (c
     // past the catalog's freshness, the open conversation's row is still
     // listed, open and marked Needs pairing; the list never empties beside it.
     const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-    const row = list.getByRole("button", { name: /cas-src/ });
+    const row = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
     await expect(row).toBeVisible();
     await expect(row).toHaveAttribute("aria-current", "true");
     await expect(row).toContainText("Needs pairing");
@@ -740,7 +740,7 @@ test("HUB-J12 network switch: a reload while the machine is unreachable reopens 
     await page.reload();
     // Within a second, before the machine answers: the conversation it last
     // knew, open, with its held message; never "0 conversations".
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toBeVisible({ timeout: 1_000 });
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toBeVisible({ timeout: 1_000 });
     await expect.poll(async () => {
       await clock.advance(32);
       return bubble("Keep this through the reload").isVisible();
@@ -778,8 +778,8 @@ test("HUB-J12 network switch: an outage past the catalog's freshness keeps the l
   const studio = { ...STUDIO, sessions: STUDIO.sessions.map(session => ({ ...session })) };
   const { hub, clock, header } = await connected(page, true, [atlas, studio]);
   const list = page.getByRole("navigation", { name: "Choose a supervisor" });
-  const row = list.getByRole("button", { name: /cas-src/ });
-  const studioRow = list.getByRole("button", { name: /gabber-studio/ });
+  const row = list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row"));
+  const studioRow = list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row"));
   const footer = page.locator(".hub-footer-meta");
   const empty = page.getByText(/No live supervisors listed/);
   const outages = [
@@ -928,7 +928,7 @@ test("HUB-J12 network switch: re-pairing by code says plainly that starting sess
     // cas-b452 (journey F39): Re-pair was started from the cas-src
     // conversation, so it lands back in it, live, with no click to find it again.
     await expect(header).toHaveText(" · Live", { timeout: 30_000 });
-    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ })).toHaveAttribute("aria-current", "true");
+    await expect(page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"))).toHaveAttribute("aria-current", "true");
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
@@ -968,7 +968,7 @@ test("HUB-J12 network switch: three unconfirmed messages read as one notice (cas
   await journey.stage("Three unconfirmed messages read as one notice", async () => {
     const { hub, clock } = await connected(page);
     const log = page.getByRole("log");
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
     const when = row.locator(".conversation-when");
     const whenBefore = (await when.count()) ? await when.textContent() : null;
     for (const text of ["Is the gate green?", "Did the Mac tests start?", "Ship it if both are green"]) {

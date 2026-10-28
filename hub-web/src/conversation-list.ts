@@ -267,7 +267,8 @@ export function conversationRowMarkup(row: ConversationRow): string {
  */
 function revealWhole(control: HTMLElement): void {
   const parent = control.parentElement;
-  const list = parent?.classList.contains("conversation-group") ? parent.parentElement : parent;
+  const list = control.closest<HTMLElement>("nav, #conversation-list")
+    ?? (parent?.classList.contains("conversation-group") ? parent.parentElement : parent);
   if (!list) return;
   const edge = list.getBoundingClientRect().bottom;
   const lowest = Math.max(...[...control.querySelectorAll("button")].map((button) => button.getBoundingClientRect().bottom));

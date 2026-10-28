@@ -18,6 +18,7 @@ describe("project-first navigation", () => {
     expect(cards).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".conversation-row")).toHaveLength(2);
     expect(cards[0]!.querySelectorAll(".project-machine-chip")).toHaveLength(2);
+    expect(cards[0]!.querySelectorAll(".project-machine-chip")[1]!.getAttribute("aria-label")).toBe("Filter conversations on prowl, offline");
     expect(cards[0]!.textContent).toContain("2 live workers");
     expect(cards[0]!.querySelector('[data-harness="codex"]')?.textContent).toBe(">_");
     expect(cards[0]!.querySelector(".conversation-account")?.textContent).toBe("operator@example.test");

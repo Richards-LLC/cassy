@@ -100,7 +100,7 @@ test("HUB-J2 pair a machine from a cas hub pair link", async ({ page, journey })
   });
 
   await journey.stage("Reach the supervisor", async () => {
-    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ });
+    const row = page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row"));
     await expect(row).toBeVisible({ timeout: 15_000 });
     await row.click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();

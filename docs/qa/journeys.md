@@ -501,7 +501,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 
 - **Entry:** `/commander/` on a desktop paired with `factory:manage`, one machine running three live sessions of one project
 - **Goal:** each session opens onto its own conversation, or an honest empty state with its live activity, never another session's old thread; I can retire a stale one
-- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/connection.ts`
+- **Touches:** `hub-web/src/conversation-history.ts`, `hub-web/src/conversation-view.ts`, `hub-web/src/conversation-list.ts`, `hub-web/src/project-navigation.ts`, `hub-web/src/connection.ts`
 - **Suite:** `hub-web/e2e/journeys/session-identity.journey.ts`
 - **Gaps:** the daemon's session-bound history page, the catalog's last activity and the hub's End session are doubled; that ending a session stops its daemon is proven on a real machine at epic assembly
 
@@ -528,7 +528,9 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
 - Under Needs pairing, Reconnecting or Unreachable the empty thread says why new messages cannot arrive; before its first page has loaded it claims no messages at all (cas-010f).
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
-- Group membership has a shared outlined surface around the project/machine heading, all session rows and End controls; the next single-conversation project stays outside. Verify at 1280 and 390 pixels in light, dark and forced colors (cas-6024).
+- Every canonical project has one closed outlined card across machines, including singletons. Machine chips expose online state and filter; rows expose supplied harness/email or gracefully omit them. Verify boundaries at 1280 and 390 pixels in light, dark and forced colors (cas-6024).
+- Needs you pins operator decisions above the cards; unread alone never pins. All/Needs you/machine filters intersect search with an explicit no-results recovery. A shortcut opens its own session without sending an answer.
+- Collapse by keyboard retains focus and survives reload on this device; search temporarily reveals matches. The paired-machine footer applies the same machine filter and keeps machine-management access.
 
 ### HUB-J15 · See a delivery problem as attention, not conversation
 

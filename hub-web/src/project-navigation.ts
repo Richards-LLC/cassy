@@ -131,7 +131,7 @@ export class ProjectNavigation {
         current.toggle.setAttribute("aria-expanded", String(!current.body.hidden));
         this.save();
       };
-      const chipMarkup = hosts.map((row) => `<button type="button" class="project-machine-chip" data-project-machine="${escapeHtml(row.machineId)}" aria-label="Filter conversations on ${escapeHtml(machineName(row.host))}"><span class="machine-online-dot${row.machine_online === true ? " online" : row.machine_online === false ? " offline" : ""}" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}<span class="sr-only">${row.machine_online === undefined ? "" : row.machine_online ? ", online" : ", offline"}</span></button>`).join("");
+      const chipMarkup = hosts.map((row) => `<button type="button" class="project-machine-chip" data-project-machine="${escapeHtml(row.machineId)}" aria-label="Filter conversations on ${escapeHtml(machineName(row.host))}${row.machine_online === undefined ? "" : row.machine_online ? ", online" : ", offline"}"><span class="machine-online-dot${row.machine_online === true ? " online" : row.machine_online === false ? " offline" : ""}" aria-hidden="true"></span>${escapeHtml(machineName(row.host))}<span class="sr-only">${row.machine_online === undefined ? "" : row.machine_online ? ", online" : ", offline"}</span></button>`).join("");
       if (card.chips.innerHTML !== chipMarkup) card.chips.innerHTML = chipMarkup;
       for (const chip of card.chips.querySelectorAll<HTMLButtonElement>("button")) chip.onclick = () => this.setFilter(`machine:${chip.dataset.projectMachine!}`);
       const live = members.filter((row) => row.machine_online === true && row.workerCount !== undefined);

@@ -3188,6 +3188,7 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .machine-online-dot.offline { background: var(--color-transparent); border-color: var(--ink-mid); }
 .project-card-summary { margin: 0; padding: 0 var(--space-3) var(--space-1); color: var(--ink-mid); font: var(--weight-regular) var(--fs-xs)/var(--line-ui) var(--font-ui); }
 .project-card-rows { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.project-card-rows[hidden] { display: none; }
 .project-card .conversation-row.grouped { padding-inline-start: var(--space-3); }
 .project-card .conversation-who { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
 .project-card .conversation-supervisor { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1); min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
@@ -3219,6 +3220,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
   .conversation-filters { padding-inline: var(--space-3); }
   .conversation-filter { min-height: var(--rail-item-min); }
   .project-machine-chip { min-height: var(--rail-item-min); }
+  /* Keep six sessions visible below the project header and filter bar.
+     The 42px avatar and separate 44px End target keep their full size. */
+  .project-card .conversation-row { padding-block: var(--space-1); }
+  .project-card .conversation-end[data-state="idle"] .conversation-end-ask { bottom: var(--space-1); }
 }
 @media (forced-colors: active) {
   .project-card, .needs-you-section, .project-machine-chip, .conversation-filter { border-color: CanvasText; background: Canvas; color: CanvasText; }

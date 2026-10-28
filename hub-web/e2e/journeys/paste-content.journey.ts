@@ -43,7 +43,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
       const send = page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true });
       await journey.stage("Paste plain text inline", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await field.focus();
         await page.evaluate(() => navigator.clipboard.writeText("A pasted message\nwith a second line"));
         await field.press("ControlOrMeta+V");
@@ -121,7 +121,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
             await remote.install();
             await peer.route(contentRoute, route => route.fulfill({ contentType: "image/png", body: imageBytes }));
             await peer.goto(baseURL!); await remote.seedPaired(); await peer.reload();
-            await peer.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+            await peer.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(peer.locator(".conversation-row")).click();
             await assertFiles(peer);
             await peer.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-second-phone.png` });
           } finally { await phone.close(); }

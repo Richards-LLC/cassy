@@ -30,7 +30,7 @@ test("HUB-J4 read the conversation history", async ({ page, journey }) => {
 
   await journey.stage("Open the conversation and see the recent turns", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(log.getByText("Yes. The gate is green on the release branch.")).toBeVisible();
     await expect(log.getByText("Is the release ready to cut?")).toBeVisible();
     // cas-acb4b: the latest exchange is on screen at once, without Jump to latest.
@@ -120,7 +120,7 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
   const hub = await journey.hub(historyWorld());
   const log = page.getByRole("log");
   await journey.open();
-  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
   await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
   // Reach the real history boundary before reconnecting. The reattach's newest
   // page still advertises older turns; it must not reset the reader's boundary.
@@ -309,7 +309,7 @@ test("HUB-J4 a machine reconnect while reading mid-history keeps keyboard focus 
 
   await journey.stage("Read mid-history, then move on to the composer", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(log.getByText("Closing it after the notes go out.")).toBeVisible();
     await loadEarlier.scrollIntoViewIfNeeded();
     await loadEarlier.click();
@@ -387,7 +387,7 @@ for (const [name, viewport, rest] of [
 
     await journey.stage(`Read an earlier page mid-history, then move on to the composer (${name})`, async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
       await expect(log.getByText("Recent turn 11:")).toBeVisible();
       await loadEarlier.scrollIntoViewIfNeeded();
       await loadEarlier.click();
@@ -479,7 +479,7 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
     await tab.route("https://foreign.example/**", (route) => route.fulfill({ contentType: "text/html", body: `<iframe title="reframed" src="${new URL(route.request().url()).searchParams.get("src")}"></iframe>` }));
     await tab.addInitScript(() => { (window as unknown as { heard: unknown[] }).heard = []; addEventListener("message", (event) => (window as unknown as { heard: unknown[] }).heard.push(event.data)); });
     await journey.open();
-    await tab.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await tab.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(tab.locator(".conversation-row")).click();
     const log = tab.getByRole("log");
     await expect(log.getByText("Here it is, and the page the scanner flagged.")).toBeVisible();
     const storage = () => tab.evaluate(async () => ({ local: Object.keys(localStorage).sort(), databases: (await indexedDB.databases()).map((db) => db.name).sort() }));

@@ -319,3 +319,86 @@ test("HUB-J14 a project group ends before the next project's conversation (cas-6
     await expect(page.locator('.conversation-row[aria-current="true"]')).toHaveCount(1);
   });
 });
+
+test("HUB-J14 project navigation spans machines, decisions and device collapse (cas-6024)", journeyPart, async ({ page, journey }) => {
+  const machine = atlas();
+  machine.sessions = [{ ...machine.sessions[1]!, project: "studio", harness: "codex", account_email: "operator@example.test", machine_online: true, workers: ["worker-one"], last_activity: "supervisor → Commander", last_activity_at: journeyStamp(-30_000) }, {
+    name: "pulse-card-solo", supervisor: "solo-otter-12", project_dir: "/projects/pulse-card", workers: [], liveness: "live",
+  }];
+  const other: Machine = { id: "borealis", label: "Borealis · macOS", sessions: [{ ...session(SHARK, "wild-shark-68", journeyStamp(-60_000), "supervisor → Commander"), project_dir: "/other/studio", project: "studio", harness: "claude", machine_online: true }] };
+  const hub = await journey.hub({ machines: [machine, other], paired: ["atlas", "borealis"], history: {
+    [PUMA]: [{ has_earlier: false, messages: [], replies: [sup(701, "Which mix should I export?", PUMA, journeyStamp(-30_000), "ask")] }],
+  } });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  const filters = page.locator("#conversation-filters");
+  const studio = () => list.getByRole("group", { name: /^studio ·/ });
+  const back = async () => { if (await page.locator("#conversation-back").isVisible()) await page.locator("#conversation-back").click(); };
+
+  await journey.stage("A project contains supervisors on both machines and pins its decision", async () => {
+    await journey.open();
+    await expect(studio().locator(".conversation-row")).toHaveCount(2);
+    await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();
+    await expect(studio().getByRole("button", { name: "Filter conversations on Borealis, online", exact: true })).toBeVisible();
+    await expect(studio().locator(".conversation-account")).toHaveText("operator@example.test");
+    await expect(studio().locator('[data-harness="codex"]')).toHaveText(">_");
+    await expect(studio().locator('[data-harness="claude"]')).toHaveText("✳");
+    await expect(studio().locator(".project-card-summary")).toHaveText("1 live worker");
+    const old = list.getByRole("group", { name: /^pulse-card ·/ });
+    await expect(old.locator(".conversation-account")).toHaveCount(0);
+    await expect(old.locator("[data-harness]")).toHaveCount(0);
+    await expect(list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toContainText("calm-puma-34");
+    for (const width of [1280, 390]) for (const scheme of ["light", "dark", "forced-colors"] as const) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none", reducedMotion: "reduce" });
+      await expect(studio().locator(".project-card-toggle")).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      if (process.env.FULL_NAV_CAPTURE_DIR) await page.screenshot({ path: `${process.env.FULL_NAV_CAPTURE_DIR}/${width}-${scheme}.png` });
+    }
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.emulateMedia({ colorScheme: "light", forcedColors: "none" });
+  });
+
+  await journey.stage("Filters intersect search, and a decision opens its own session", async () => {
+    await filters.getByRole("button", { name: "Needs you", exact: true }).click();
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await filters.getByRole("button", { name: "Borealis", exact: true }).click();
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
+    await page.getByRole("searchbox", { name: "Search conversations" }).fill("calm-puma");
+    await expect(list.locator(".conversation-row")).toHaveCount(0);
+    await expect(list.getByText("No conversations match this filter. Choose All to see your projects.")).toBeVisible();
+    await filters.getByRole("button", { name: "All", exact: true }).click();
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button").click();
+    await expect(page.getByRole("log")).toContainText("Which mix should I export?");
+    await back();
+    expect(hub.sends).toHaveLength(0);
+  });
+
+  await journey.stage("Keyboard collapse survives reload and footer filters the same register", async () => {
+    const toggle = studio().locator(".project-card-toggle");
+    await toggle.focus();
+    await page.keyboard.press("Enter");
+    await expect(toggle).toBeFocused();
+    await expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await page.reload();
+    await expect(studio().locator(".project-card-toggle")).toHaveAttribute("aria-expanded", "false");
+    await expect(studio().locator(".conversation-row").first()).toBeHidden();
+    await studio().locator(".project-card-toggle").click();
+    await page.locator("#paired-machines-toggle").click();
+    const dialog = page.locator("#paired-machines-dialog");
+    await dialog.getByRole("group", { name: "Filter conversations" }).getByRole("button", { name: "Borealis", exact: true }).click();
+    await expect(dialog).toBeHidden();
+    await expect(filters.getByRole("button", { name: "Borealis", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await expect(list.locator(".conversation-row")).toHaveCount(1);
+    await expect(list.locator(".conversation-row")).toContainText("wild-shark-68");
+    await expect(list.getByRole("region", { name: "Needs you", exact: true })).toHaveCount(0);
+    await filters.getByRole("button", { name: "All", exact: true }).click();
+    await expect(list.locator(".conversation-row")).toHaveCount(3);
+    // A kept catalog's positive online bit must yield to a lost connection.
+    await hub.down("atlas");
+    await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, offline", exact: true })).toBeVisible();
+    await hub.up("atlas");
+    await expect(studio().getByRole("button", { name: "Filter conversations on Atlas, online", exact: true })).toBeVisible();
+  });
+});

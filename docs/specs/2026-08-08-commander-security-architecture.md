@@ -148,6 +148,7 @@ style-src 'self';
 img-src 'self' data:;
 font-src 'self';
 connect-src 'self' https: wss: http://127.0.0.1:* ws://127.0.0.1:*;
+frame-src 'self' https: http://127.0.0.1:*;
 object-src 'none';
 base-uri 'none';
 frame-ancestors 'none';
@@ -156,7 +157,7 @@ worker-src 'none';
 manifest-src 'self'
 ```
 
-The broad secure-scheme allowance in `connect-src` is not an authorization grant: the browser client may initiate connections only to catalog entries, and every target hub independently enforces exact Origin, DPoP, and scope. Plaintext IPv6 loopback may be added only with an equivalently literal loopback source expression verified by browser tests; plaintext hostnames, LAN addresses, and wildcard subdomains are not allowed. Responses also send `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and `Strict-Transport-Security: max-age=31536000` on TLS origins. `includeSubDomains` is omitted because a hub must not assert policy for DNS names it does not control. Framing is forbidden by both CSP and any legacy frame header retained for compatibility.
+The broad secure-scheme allowance in `connect-src` is not an authorization grant: the browser client may initiate connections only to catalog entries, and every target hub independently enforces exact Origin, DPoP, and scope. Plaintext IPv6 loopback may be added only with an equivalently literal loopback source expression verified by browser tests; plaintext hostnames, LAN addresses, and wildcard subdomains are not allowed. Responses also send `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, and `Strict-Transport-Security: max-age=31536000` on TLS origins. `includeSubDomains` is omitted because a hub must not assert policy for DNS names it does not control. Framing is forbidden by both CSP and any legacy frame header retained for compatibility. Commander may itself frame one thing (cas-3aff): a paired machine's visual reply page at `/v1/pages/{ticket}/{artifact}`, which that machine serves under a CSP `sandbox` policy (no script, opaque origin, no popups or top navigation, no network beyond its own assets) with `frame-ancestors` naming only the minting Commander origin. The `frame-src` scheme allowance follows `connect-src`: frame URLs are built only from a paired machine's base URL and a ticket that machine issued. Threat model: [visual replies](../design/hub-web/visual-replies-threat-model.md).
 
 The cloud operator inbox (cas-9b7d, 2026-10-05) is the second reviewed external origin, beside the pairing relay. Commander reads retained supervisor messages and queues offline replies through the cloud's `/api/operator/*` wire v1, so the embedded page names it in a `cas-operator-inbox-origin` meta element, and the hub-served CSP lists exactly `https://petra-stella-cloud.vercel.app/api/operator/` in `connect-src`. No wildcard host and no non-production origin are allowed. The `https:` scheme source above still admits it, because paired machines live on arbitrary hosts. The explicit entry is therefore a reviewed, test-pinned declaration (`h4_csp_03`): the relay and the operator API are the only external origins the page may name. It is not a narrowing. What the browser sends there is bounded by the account's operator enrollment (PSC-PoP device keys, issuer-signed assertions), never by catalog credentials.
 

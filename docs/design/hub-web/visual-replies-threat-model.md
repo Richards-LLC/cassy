@@ -62,7 +62,7 @@ The machine's general `X-Frame-Options: DENY` is left off these responses only. 
 
 *Proof.* The journey's hostile page names `https://evil.example` in an image, a stylesheet, a meta refresh, a form, a font and a video. The test records every request the browser makes and asserts that none of them targets `evil.example`.
 
-*Residual.* A user who clicks a plain link inside the frame navigates that frame, and only that frame, to the link's target. The navigation is a deliberate operator action, it is not automatic, and the target still can't reach Commander. Commander doesn't intercept the click.
+*Residual.* A user who clicks a plain link inside the frame navigates that frame, and only that frame, to the link's target. In a page opened in its own tab, the same click navigates that tab. The navigation is a deliberate operator action, it is not automatic, and the target still can't reach Commander. Commander doesn't intercept the click.
 
 ### T3: clickjacking and top-window takeover
 

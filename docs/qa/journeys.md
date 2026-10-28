@@ -528,6 +528,7 @@ conversation shows the terminal canvas or sits on a bare panel for more than
 - A device without `factory:manage` sees no End session; the hub refuses the call with 403 `scope_denied`.
 - Under Needs pairing, Reconnecting or Unreachable the empty thread says why new messages cannot arrive; before its first page has loaded it claims no messages at all (cas-010f).
 - Ending a session whose daemon PID now belongs to another process only cleans up its metadata.
+- Group membership has a shared outlined surface around the project/machine heading, all session rows and End controls; the next single-conversation project stays outside. Verify at 1280 and 390 pixels in light, dark and forced colors (cas-6024).
 
 ### HUB-J15 · See a delivery problem as attention, not conversation
 

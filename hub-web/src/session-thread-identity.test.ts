@@ -227,12 +227,20 @@ describe("grouped project sessions (cas-55a4)", () => {
   it("asks before ending a session, and only the confirmation ends it", async () => {
     const container = document.createElement("nav"); document.body.replaceChildren(container);
     const list = new ConversationList();
-    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true })]);
+    const rows = groupConversationRows([row("calm-puma-34", 300, { canEnd: true }), row("noble-cheetah-84", 100, { canEnd: true }), row("solo", 50, { projectDir: "/projects/cas-src" })]);
     let resolve!: () => void;
     const end = vi.fn((_row: ConversationRow) => new Promise<void>((ok) => { resolve = ok; }));
     list.render(container, rows, vi.fn(), end);
     expect(container.querySelector(".conversation-group-head")?.textContent).toBe("gabber-studio · 2 conversations on Atlas");
-    expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
+    const group = container.querySelector('[role="group"]')!;
+    expect(group?.getAttribute("aria-label")).toBe("gabber-studio · 2 conversations on Atlas");
+    expect([...group.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-row", "conversation-end"]);
+    expect(container.children).toHaveLength(2);
+    expect(container.lastElementChild?.textContent).toContain("solo");
+    const focused = group.querySelector<HTMLButtonElement>(".conversation-row")!;
+    focused.focus();
+    list.render(container, rows, vi.fn(), end);
+    expect(document.activeElement).toBe(focused);
     const control = container.querySelectorAll<HTMLElement>(".conversation-end")[1]!;
     const ask = control.querySelector<HTMLButtonElement>(".conversation-end-ask")!;
     expect(ask.getAttribute("aria-label")).toBe("End session noble-cheetah-84 on Atlas");
@@ -264,7 +272,7 @@ describe("grouped project sessions (cas-55a4)", () => {
     control.querySelector<HTMLButtonElement>(".conversation-end-ask")!.click();
     expect(live.querySelectorAll(".conversation-row")).toHaveLength(2);
     expect(before.children).toHaveLength(0);
-    expect(control.parentElement).toBe(live);
+    expect(control.closest("nav")).toBe(live);
     expect(control.dataset.state).toBe("confirm");
     expect(control.querySelector(".conversation-end-question")?.textContent).toBe("End noble-cheetah-84 on Atlas? Its supervisor and workers stop.");
     expect(document.activeElement).toBe(control.querySelector(".conversation-end-cancel"));
@@ -439,7 +447,7 @@ describe("grouped project sessions (cas-55a4)", () => {
       control.querySelector<HTMLButtonElement>(".conversation-end-confirm")!.click();
       await vi.advanceTimersByTimeAsync(0);
       expect(status.textContent).toBe("wild-shark-68 on Atlas ended.");
-      expect([...container.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-ended", "conversation-row", "conversation-end"]);
+      expect([...container.querySelector(".conversation-group")!.children].map((node) => node.className.split(" ")[0])).toEqual(["conversation-group-head", "conversation-row", "conversation-end", "conversation-ended", "conversation-row", "conversation-end"]);
       expect(container.querySelector(".conversation-ended")?.textContent).toBe("wild-shark-68 on Atlas ended.");
       // A catalog poll keeps it in place.
       list.render(container, groupConversationRows(live), open, end);

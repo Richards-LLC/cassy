@@ -249,7 +249,8 @@ export function conversationRowMarkup(row: ConversationRow): string {
  * Scroll the list by the whole remainder.
  */
 function revealWhole(control: HTMLElement): void {
-  const list = control.parentElement;
+  const parent = control.parentElement;
+  const list = parent?.classList.contains("conversation-group") ? parent.parentElement : parent;
   if (!list) return;
   const edge = list.getBoundingClientRect().bottom;
   const lowest = Math.max(...[...control.querySelectorAll("button")].map((button) => button.getBoundingClientRect().bottom));
@@ -318,10 +319,11 @@ export class ConversationList {
     const ordered: HTMLElement[] = [];
     const current = new Set(rows.map((row) => row.key));
     for (const [key, node] of this.nodes) {
-      if (!current.has(key) || node.parentElement !== container) { node.remove(); this.nodes.delete(key); }
+      if (!current.has(key) || !container.contains(node)) { node.remove(); this.nodes.delete(key); }
     }
     for (const key of this.ending.keys()) if (!current.has(key)) this.ending.delete(key);
     const extrasKept = new Set<string>();
+    const groups = new Map<HTMLElement, HTMLElement>();
     const extra = (key: string, make: () => HTMLElement): HTMLElement => {
       let node = this.extras.get(key);
       if (!node) { node = make(); this.extras.set(key, node); }
@@ -332,6 +334,14 @@ export class ConversationList {
       if (row.group?.first) {
         const head = extra(`group:${row.group.key}`, () => { const node = document.createElement("p"); node.className = "conversation-group-head"; return node; });
         if (head.textContent !== row.group.label) head.textContent = row.group.label;
+        const group = extra(`container:${row.group.key}`, () => {
+          const node = document.createElement("div");
+          node.className = "conversation-group";
+          node.setAttribute("role", "group");
+          return node;
+        });
+        group.setAttribute("aria-label", row.group.label);
+        groups.set(head, group);
         ordered.push(head);
       }
       let node = this.nodes.get(row.key);
@@ -376,9 +386,28 @@ export class ConversationList {
       announcer.setAttribute("role", "status");
       if (container.nextElementSibling !== announcer && container.parentElement) container.after(announcer);
     }
-    ordered.forEach((node, index) => {
-      if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);
+    // Keep the flat row/control order (including ended notices), but give each
+    // project a real boundary. Reuse both containers and buttons so catalog
+    // heartbeats leave keyboard focus and open End confirmations in place.
+    const top: HTMLElement[] = [];
+    const children = new Map<HTMLElement, HTMLElement[]>();
+    let group: HTMLElement | undefined;
+    for (const node of ordered) {
+      if (groups.has(node)) {
+        group = groups.get(node)!;
+        top.push(group);
+        children.set(group, []);
+      } else if (node.classList.contains("conversation-row") && !node.classList.contains("grouped")) {
+        group = undefined;
+      }
+      if (group) children.get(group)!.push(node);
+      else top.push(node);
+    }
+    const place = (parent: HTMLElement, nodes: readonly HTMLElement[]) => nodes.forEach((node, index) => {
+      if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] ?? null);
     });
+    for (const [parent, nodes] of children) place(parent, nodes);
+    place(container, top);
   }
 
   /**

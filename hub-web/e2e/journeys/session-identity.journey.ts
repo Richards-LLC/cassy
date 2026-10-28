@@ -59,6 +59,7 @@ test("HUB-J14 tell a project's live sessions apart", async ({ page, journey }) =
   await journey.stage("See a project's live sessions together", async () => {
     await journey.open();
     await expect(list.locator(".conversation-group-head")).toHaveText("gabber-studio · 3 conversations on Atlas");
+    await expect(list.getByRole("group", { name: "gabber-studio · 3 conversations on Atlas", exact: true }).locator(".conversation-row")).toHaveCount(3);
     const rows = list.locator(".conversation-row");
     await expect(rows.locator(".conversation-supervisor")).toHaveText(["calm-puma-34Most recent", "wild-shark-68", "noble-cheetah-84"]);
     await expect(row("calm-puma-34")).toHaveAttribute("data-most-recent", "true");
@@ -280,5 +281,37 @@ test.describe("on a phone", () => {
       await expect(row("noble-cheetah-84")).toBeInViewport({ ratio: 1 });
       expect(await scroller.evaluate((node) => node.scrollTop), "the list did not jump back to its top").toBeGreaterThan(0);
     });
+  });
+});
+
+test("HUB-J14 a project group ends before the next project's conversation (cas-6024)", journeyPart, async ({ page, journey }) => {
+  const machine = atlas();
+  machine.sessions = [...machine.sessions!.slice(0, 2), {
+    name: "pulse-card-solo", supervisor: "solo-otter-12", project_dir: "/projects/pulse-card",
+    workers: [], liveness: "live", last_activity_at: journeyStamp(-60_000), last_activity: "supervisor → Commander",
+  }];
+  await journey.hub({ machines: [machine], paired: ["atlas"] });
+  const list = page.getByRole("navigation", { name: "Choose a supervisor" });
+  await journey.stage("A bounded project sits above an independent project on desktop and phone", async () => {
+    await journey.open();
+    for (const width of [1280, 390]) for (const scheme of ["light", "dark", "forced-colors"] as const) {
+      await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+      await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none" });
+      await expect(list.locator(".conversation-group-head")).toBeVisible();
+      await expect(list.locator(".conversation-row")).toHaveCount(3);
+      if (process.env.GROUP_BOUNDARY_CAPTURE_DIR) await page.screenshot({ path: `${process.env.GROUP_BOUNDARY_CAPTURE_DIR}/${width}-${scheme}.png` });
+    }
+    const group = list.getByRole("group", { name: "gabber-studio · 2 conversations on Atlas", exact: true });
+    await expect(group.locator(".conversation-row")).toHaveCount(2);
+    await expect(list.locator(":scope > .conversation-row")).toContainText("pulse-card");
+    await expect(group.locator(".conversation-session-mark")).toHaveText("Most recent");
+    await group.locator(".conversation-row").first().focus();
+    await page.keyboard.press("Tab");
+    await expect(group.locator(".conversation-row").last()).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(list.locator(":scope > .conversation-row")).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.getByRole("button", { name: "Send to the pulse-card supervisor", exact: true })).toBeVisible();
+    await expect(page.locator('.conversation-row[aria-current="true"]')).toHaveCount(1);
   });
 });

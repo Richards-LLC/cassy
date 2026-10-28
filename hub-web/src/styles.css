@@ -2821,10 +2821,11 @@ button.chip:disabled { cursor: default; }
 /* cas-5d2c: the heading names the project and machine once, at the weight of
    a row's title, so the rows under it lead with what tells them apart: the
    codename, then what the session last did. */
-.conversation-group-head { margin: var(--space-2) 14px 0; color: var(--ink); font: var(--weight-semibold) var(--fs-meta)/1.35 var(--font-ui); }
+.conversation-group { flex: none; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); margin-block: var(--space-1) var(--space-2); padding: var(--space-1); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pane); background: var(--bg-raised); color: var(--ink); }
+.conversation-group-head { margin: var(--space-2) var(--space-3) var(--space-1); overflow-wrap: anywhere; color: var(--ink); font: var(--weight-semibold) var(--fs-meta)/1.35 var(--font-ui); }
 .conversation-row.grouped .conversation-title:has(+ .conversation-supervisor) { display: none; }
 .conversation-row.grouped .conversation-supervisor { font-size: var(--fs-meta); color: var(--ink); }
-.conversation-row.grouped { padding-left: 22px; }
+.conversation-row.grouped { padding-left: var(--space-3); }
 .conversation-row[aria-current="true"] .conversation-session-mark { background: var(--bg-panel); }
 .conversation-session-mark { margin-left: 8px; padding: 1px 7px; border-radius: var(--radius-pill); background: var(--accent-soft); color: var(--ink); font: var(--weight-medium) 10px/1.4 var(--font-ui); white-space: nowrap; }
 .conversation-end { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); margin: -6px 14px var(--space-1) 73px; font-size: var(--fs-xs); color: var(--ink-mid); }
@@ -2857,6 +2858,7 @@ button.chip:disabled { cursor: default; }
   .conversation-end .conversation-end-confirm, .conversation-end .conversation-end-cancel { min-height: 36px; padding-inline: 14px; }
 }
 @media (forced-colors: active) {
+  .conversation-group { border-color: CanvasText; background: Canvas; color: CanvasText; }
   /* The mark keeps its text on any system palette: an outline, no fill. */
   .conversation-session-mark, .conversation-row[aria-current="true"] .conversation-session-mark { background: transparent; border: 1px solid currentColor; }
 }

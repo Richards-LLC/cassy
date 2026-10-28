@@ -27801,23 +27801,33 @@ mod merge_state_gate_tests {
         git(p, &["add", ".gitignore", "cas-cli", "delivery.rs"]);
         git(p, &["commit", "-q", "-m", "test(cas-4386): delivery with scoped proof obligation"]);
         let delivery = head_sha(p);
-        let tree = rev_parse_local(p, "HEAD^{tree}");
+        let mut tree = rev_parse_local(p, "HEAD^{tree}");
         // A queue's synthetic commit and the landed commit may differ while
         // carrying the same tree. Keep that real Git boundary in the fixture.
         git(p, &["checkout", "-q", "-b", "queue"]);
         git(p, &["commit", "-q", "--allow-empty", "-m", "synthetic queue head"]);
-        let queue = head_sha(p);
+        let mut queue = head_sha(p);
         git(p, &["checkout", "-q", "main"]);
-        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "land delivery"]);
+        git(p, &["merge", "-q", "--no-ff", "--no-commit", "factory/worker"]);
+        if case == "dropped" {
+            // A merge resolution discards the delivery. A deliberate later
+            // edit would instead be legitimate supersession under the
+            // existing content policy, and must remain accepted.
+            git(p, &["rm", "delivery.rs"]);
+        }
+        git(p, &["commit", "-q", "-m", "land delivery"]);
+        if case == "dropped" {
+            tree = rev_parse_local(p, "HEAD^{tree}");
+            git(p, &["checkout", "-q", "-b", "queue-dropped"]);
+            git(p, &["commit", "-q", "--allow-empty", "-m", "queue proof of dropping merge"]);
+            queue = head_sha(p);
+            git(p, &["checkout", "-q", "main"]);
+        }
         assert_ne!(head_sha(p), queue);
         let before_delivery = rev_parse_local(p, "main~1");
         let before_tree = rev_parse_local(p, "main~1^{tree}");
-        if case == "dropped" {
-            git(p, &["rm", "delivery.rs"]);
-        } else {
-            std::fs::write(p.join("later.txt"), "unrelated later main change\n").unwrap();
-            git(p, &["add", "later.txt"]);
-        }
+        std::fs::write(p.join("later.txt"), "unrelated later main change\n").unwrap();
+        git(p, &["add", "later.txt"]);
         git(p, &["commit", "-q", "-m", "advance main after the queue landing"]);
         git(p, &["push", "-q", "origin", "main"]);
         let tree = if case == "wrong-tree" { "a".repeat(40) } else { tree };

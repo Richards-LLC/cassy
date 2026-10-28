@@ -33494,6 +33494,63 @@ esac
         );
     }
 
+    /// GH #1404: the worker renames its migration while merging the target,
+    /// so the rename belongs to the delivery anchor itself.
+    #[test]
+    fn migration_renamed_inside_own_anchor_merge_is_delivered_gh1404() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let old = "migrations/20261027200000_watched_creators.sql";
+        let new = "migrations/20261027210000_watched_creators.sql";
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
+        std::fs::write(p.join(old), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: add watched creators migration"]);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("sibling.sql"), "CREATE TABLE sibling (id INT);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-beef: sibling migration"]);
+        git(p, &["checkout", "factory/worker"]);
+        git(p, &["merge", "--no-ff", "--no-commit", "main"]);
+        git(p, &["mv", old, new]);
+        git(p, &["commit", "-qm", "cas-test1: sync target and rename migration"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "factory/worker", "-m", "integrate delivery"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let req = base_req(&task.id);
+        let mut window = window_at(0, "anchor rename");
+        window.identity.task_id = Some(task.id.clone());
+        let outcome = || run_factory_branch_merge_gate_with_attribution(
+            &task, &req, "main", p,
+            TaskCommitAttribution { receipt: None, window: Some(&window) },
+        );
+        let delivered = outcome();
+        assert!(
+            matches!(delivered, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
+            "the identical migration renamed inside its own anchor must be delivered: {delivered:?}"
+        );
+
+        // Reachability and the old path's absence cannot excuse losing the
+        // renamed file after integration.
+        git(p, &["rm", new]);
+        git(p, &["commit", "-qm", "drop renamed migration"]);
+        let dropped = outcome();
+        assert!(matches!(&dropped, MergeStateGateOutcome::Reject(reason)
+            if reason.contains("DELIVERY CONTENT DROPPED")), "{dropped:?}");
+        // Matching bytes after lost ownership are still not delivery.
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
+        std::fs::write(p.join(new), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        git(p, &["add", new]);
+        git(p, &["commit", "-qm", "unrelated recreation of migration"]);
+        let recreated = outcome();
+        assert!(matches!(&recreated, MergeStateGateOutcome::Reject(reason)
+            if reason.contains("DELIVERY CONTENT DROPPED")), "{recreated:?}");
+    }
+
     /// GH #1160: the final sync anchor comes after two migration renames and
     /// an intentional revert. The old paths are absent at that anchor, but
     /// attribution still measures their earlier task commits as dropped.

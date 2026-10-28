@@ -269,55 +269,33 @@ test("HUB-J3 find the conversation that needs me", async ({ page, journey }) => 
     await expect(list.locator(".conversation-row")).toHaveCount(3);
   });
 
-  await journey.stage("A 40-character machine name ellipsises in its row and never runs under the time stamp, on desktop and at 390px", async () => {
-    const row = list.getByRole("button", { name: /lighthouse/ }).and(list.locator(".conversation-row"));
-    const clearOfTime = () => row.evaluate((node) => {
-      const name = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
-      const time = node.querySelector(".conversation-when")?.getBoundingClientRect();
-      const label = node.querySelector<HTMLElement>(".conversation-machine-name")!;
-      return { ellipsised: label.scrollWidth > label.clientWidth, clear: !time || name.right <= time.left + 0.5 };
+  await journey.stage("A 40-character machine name wraps in its project header and stays separate from session times", async () => {
+    const project = list.getByRole("group", { name: /^lighthouse ·/ });
+    const chip = project.getByRole("button", { name: "Filter conversations on Forge build box with an unusual hostname, online", exact: true });
+    // Project cards move the machine identity out of the row's timestamp
+    // column. Its complete name wraps in the chip at both viewport widths.
+    const clearOfRows = () => project.evaluate((node) => {
+      const chip = node.querySelector<HTMLElement>(".project-machine-chip")!;
+      const name = chip.getBoundingClientRect();
+      const card = node.getBoundingClientRect();
+      const row = node.querySelector(".conversation-row")!.getBoundingClientRect();
+      return { whole: chip.scrollWidth <= chip.clientWidth + 1, contained: name.left >= card.left && name.right <= card.right, separate: name.bottom <= row.top };
     });
-    // A machine that wraps to its own line never starts it with the separator
-    // dot: the dot sits past the title's left edge, clipped (cas-1ca1 F02).
-    const noLeadingDot = () => list.locator(".conversation-row").evaluateAll((rows) => rows.every((node) => {
-      const title = node.querySelector(".conversation-title")!.getBoundingClientRect();
-      const project = node.querySelector(".conversation-project")!.getBoundingClientRect();
-      const machine = node.querySelector(".conversation-machine-name")!.getBoundingClientRect();
-      const dot = node.querySelector(".conversation-sep")!.getBoundingClientRect();
-      const wrapped = machine.top > project.top + 4;
-      return wrapped ? dot.right <= title.left + 0.5 : dot.left >= project.right;
-    }));
-    expect(await noLeadingDot()).toBe(true);
-    // Desktop: the 40-character name ellipsises before the time stamp.
-    await expect(row.locator(".conversation-when")).toBeVisible();
-    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
-    await expect(row.locator(".conversation-machine")).toHaveAttribute("title", "Forge build box with an unusual hostname");
-    // cas-7374: the ellipsis is for the resting row only. Reached from the
-    // keyboard, the row shows the whole machine name, wrapped in its title
-    // column, still clear of the time stamp and with no leading dot.
-    await row.focus();
+    await expect(chip).toContainText("Forge build box with an unusual hostname");
+    expect(await clearOfRows()).toEqual({ whole: true, contained: true, separate: true });
+    await chip.focus();
     await page.keyboard.press("Shift+Tab");
     await page.keyboard.press("Tab");
-    await expect(row).toBeFocused();
-    expect(await row.evaluate((node) => node.matches(":focus-visible"))).toBe(true);
-    expect(await clearOfTime()).toEqual({ ellipsised: false, clear: true });
-    expect(await noLeadingDot()).toBe(true);
+    await expect(chip).toBeFocused();
+    await expect(chip).toHaveCSS("outline-style", "solid");
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-focused.png") });
-    await row.evaluate((node) => (node as HTMLElement).blur());
-    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
-    // Phone width: the same, with the list as the whole page.
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
-    await expect(row).toBeVisible();
+    await expect(chip).toBeVisible();
     await expectOneRowHeading();
-    expect(await clearOfTime()).toEqual({ ellipsised: true, clear: true });
-    expect(await noLeadingDot()).toBe(true);
-    // Receipt beside the stage screenshots: the 390 px list with the long name.
+    expect(await clearOfRows()).toEqual({ whole: true, contained: true, separate: true });
     await page.screenshot({ path: join(RECEIPTS, journey.id, "long-machine-phone.png") });
     await page.setViewportSize({ width: 1280, height: 720 });
-    // Back at desktop width with nothing open, after a thread had filled the
-    // context rail: the canvas is the first load's, not an empty 240px column
-    // beside a shifted welcome (journey F15).
     await expect(page.locator(".conversation-welcome")).toBeVisible();
     expect(await welcomeLayout()).toEqual(firstWelcome);
   });

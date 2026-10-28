@@ -40,6 +40,14 @@ describe("a refused hub request says what the hub said (cas-d382, fleet-operatio
     expect(plain.detail).toBeUndefined();
   });
 
+  it("preserves a missing session's refusal instead of treating it as a broken pairing", async () => {
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ error: "session_denied", detail: "This session is not available on this machine." }), { status: 403 }));
+    const connection = new HubConnectionSupervisor(await machine(["message-send"]), {} as HubCallbacks);
+    const refused = await connection.request("POST", "/v1/sessions/gone/uploads/id", { name: "photo.png", data: "AAAA" }).catch((error: unknown) => error);
+    expect(refused).toBeInstanceOf(HubRequestError);
+    expect(refused).toMatchObject({ code: "session_denied", detail: "This session is not available on this machine." });
+  });
+
   it("allows managing workers once, as session launch is allowed, and keeps the new scopes", async () => {
     const control = await machine(["machine-read", "session-read", "pane-read", "pane-input", "message-send", "pane-interrupt"]);
     const sent: unknown[] = [];

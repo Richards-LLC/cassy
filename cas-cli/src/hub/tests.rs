@@ -5361,6 +5361,23 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let image: serde_json::Value = serde_json::from_slice(&to_bytes(image.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(image["mime"], "image/png");
     assert_eq!(std::fs::read(image["path"].as_str().unwrap()).unwrap(), png);
+    // ISO-BMFF major and compatible brands, not the filename, identify phone media.
+    for (brands, mime) in [
+        (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),
+        (&b"mif1\0\0\0\0heic"[..], "image/heic"),
+        (&b"avif\0\0\0\0mif1"[..], "image/avif"),
+        (&b"qt  \0\0\0\0"[..], "video/quicktime"),
+        (&b"isom\0\0\0\0mp42"[..], "video/mp4"),
+    ] {
+        let mut bytes = ((8 + brands.len()) as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(brands);
+        let response = app.clone().oneshot(send("factory-a", uuid::Uuid::new_v4(), "misleading.txt", &bytes, 1)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        assert_eq!(body["mime"], mime);
+        assert_eq!(cas_store::SqliteArtifactStore::open(&root).unwrap().get(body["artifact_id"].as_str().unwrap()).unwrap().unwrap().mime, mime);
+    }
     let artifact = first.unwrap();
     let store = cas_store::SqliteArtifactStore::open(&root).unwrap();
     assert_eq!(store.get(artifact["artifact_id"].as_str().unwrap()).unwrap().unwrap().mime, "text/plain");

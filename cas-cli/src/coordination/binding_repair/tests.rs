@@ -479,10 +479,10 @@ fn cas_9021_old_or_unknown_actual_runtime_preflight_sends_zero_post() {
     );
 }
 
-/// A transport-uncertain attempt pauses legacy claims; no eligible readers
-/// retains pending work until a later definite refusal permits legacy intake.
+/// A transport-uncertain attempt pauses legacy claims; a reader refusal
+/// retains pending work through a failed retry.
 #[test]
-fn cas_9021_uncertain_attempt_is_settled_by_a_later_definite_refusal() {
+fn cas_7088_reader_refusal_retains_pending_pause_after_uncertainty() {
     let env = crate::test_support::TestEnvGuard::temp_home();
     let scope = scope();
     let root = env.home().join("project/.cas");

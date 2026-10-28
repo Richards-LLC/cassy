@@ -38,6 +38,85 @@ use cloud::{
 };
 use paths::{PublishRoots, resolve_publishable_path};
 
+/// A missing local pointer says nothing about whether Cloud has the bytes.
+#[derive(Debug, thiserror::Error)]
+#[error("artifact_metadata_unavailable: {artifact_id}\nThis machine lacks synced metadata; Cloud bytes have not been checked.\nRun `cas cloud sync`, then retry.")]
+pub struct MetadataUnavailable {
+    pub artifact_id: String,
+    pub task_id: Option<String>,
+}
+
+/// Share every successful publication through the existing trusted task-note
+/// transport, including publications that did not request a prose proof note.
+pub(crate) fn record_published(cas_root: &Path, artifact: &PublishedArtifact) -> anyhow::Result<()> {
+    proof::validate(artifact, &artifact.task_id)?;
+    let tasks = crate::store::open_task_store(cas_root)?;
+    let note = format!(
+        "[{}] Published artifact {}\nARTIFACT_PROOF: {}",
+        chrono::Utc::now().format("%Y-%m-%d %H:%M"),
+        artifact.id,
+        serde_json::to_string(artifact)?
+    );
+    tasks.append_trusted_note(&artifact.task_id, &note)?;
+    Ok(())
+}
+
+/// Resolve metadata before attempting any byte transfer. Show and fetch share
+/// this reader so a synced reference is inspectable before its first download.
+pub fn lookup_metadata(
+    cas_root: &Path,
+    task_id: Option<&str>,
+    id: &str,
+) -> anyhow::Result<PublishedArtifact> {
+    let store = SqliteArtifactStore::open(cas_root)?;
+    let local = store.get(id)?;
+    if task_id.is_none() {
+        if let Some(artifact) = local {
+            return Ok(artifact);
+        }
+    }
+    let tasks = crate::store::open_task_store_local(cas_root)?;
+    let mut found = None;
+    if let Some(task_id) = task_id {
+        let task = tasks.get(task_id)?;
+        found = proof::from_notes(&task.notes, id, task_id)?;
+        if let (Some(reference), Some(local)) = (&found, &local) {
+            anyhow::ensure!(
+                proof::same_artifact(reference, local),
+                "artifact ledger conflicts with proof reference"
+            );
+        }
+        found = found.or(local);
+        if let Some(artifact) = &found {
+            anyhow::ensure!(
+                artifact.task_id == task_id,
+                "artifact belongs to another task"
+            );
+        }
+    } else {
+        // Match task-reader visibility, including accepted project proposals.
+        let scope = crate::mcp::tools::core::task::ProjectScope::current(cas_root);
+        for task in tasks.list(None)?.into_iter().filter(|task| scope.shows(task)) {
+            if let Some(reference) = proof::from_notes(&task.notes, id, &task.id)? {
+                if let Some(previous) = &found {
+                    anyhow::ensure!(
+                        proof::same_artifact(previous, &reference),
+                        "conflicting proof artifact references for {id}"
+                    );
+                }
+                found = Some(reference);
+            }
+        }
+    }
+    found.ok_or_else(|| {
+        MetadataUnavailable {
+            artifact_id: id.to_string(),
+            task_id: task_id.map(str::to_string),
+        }
+        .into()
+    })
+}
+
 /// 64 KiB: large enough that hashing a 25 MiB file is a handful of syscalls,
 /// small enough not to matter on a constrained host.
 const HASH_CHUNK: usize = 64 * 1024;
@@ -61,7 +140,11 @@ pub enum PublishDisposition {
 impl PublishDisposition {
     /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
-        matches!(self, PublishDisposition::Committed { .. } | PublishDisposition::CommittedMetadataUnavailable { .. })
+        matches!(
+            self,
+            PublishDisposition::Committed { .. }
+                | PublishDisposition::CommittedMetadataUnavailable { .. }
+        )
     }
 
     pub fn metadata_state(&self) -> &'static str {
@@ -374,7 +457,7 @@ pub fn publish(
         .unwrap_or(artifact);
 
     if disposition.is_committed() {
-        if let Err(error) = proof::record_published(&context.roots.project_root.join(".cas"), &artifact) {
+        if let Err(error) = record_published(&context.roots.project_root.join(".cas"), &artifact) {
             disposition = PublishDisposition::CommittedMetadataUnavailable { reason: error.to_string() };
         }
     }

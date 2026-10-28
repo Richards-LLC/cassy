@@ -222,7 +222,7 @@ fn print_publish(outcome: &PublishOutcome) {
 }
 
 fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {
-    let artifact = metadata_result(crate::artifacts::proof::lookup(cas_root, None, &args.id), json)?;
+    let artifact = metadata_result(crate::artifacts::lookup_metadata(cas_root, None, &args.id), json)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&artifact)?);
@@ -254,7 +254,7 @@ fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<
 fn metadata_result<T>(result: anyhow::Result<T>, json: bool) -> anyhow::Result<T> {
     result.map_err(|error| {
         if json {
-            if let Some(missing) = error.downcast_ref::<crate::artifacts::proof::MetadataUnavailable>() {
+            if let Some(missing) = error.downcast_ref::<crate::artifacts::MetadataUnavailable>() {
                 println!("{}", serde_json::json!({
                     "status": "error", "state": "metadata_unavailable",
                     "artifact_id": missing.artifact_id, "task_id": missing.task_id,

@@ -133,7 +133,7 @@ impl CasCore {
         Parameters(req): Parameters<ArtifactRequest>,
     ) -> Result<CallToolResult, McpError> {
         let id = required(&req.id, "artifact show requires 'id'")?;
-        let artifact = crate::artifacts::proof::lookup(&self.cas_root, None, &id)
+        let artifact = crate::artifacts::lookup_metadata(&self.cas_root, None, &id)
             .map_err(metadata_error)?;
         Ok(Self::success(render_detail(&artifact)))
     }
@@ -173,7 +173,7 @@ fn internal(error: impl std::fmt::Display) -> McpError {
 }
 
 fn metadata_error(error: anyhow::Error) -> McpError {
-    if let Some(missing) = error.downcast_ref::<crate::artifacts::proof::MetadataUnavailable>() {
+    if let Some(missing) = error.downcast_ref::<crate::artifacts::MetadataUnavailable>() {
         return McpError {
             code: ErrorCode::INTERNAL_ERROR,
             message: Cow::from(error.to_string()),

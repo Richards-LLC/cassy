@@ -385,7 +385,14 @@ async fn recovery_close_parks_final_receipt_and_dispatches_that_tip_cas_c6e1() {
 #[tokio::test]
 async fn first_close_explicit_final_receipt_binds_qa_and_merge_request_gh1389() {
     let mut env = TestEnvGuard::temp_home();
-    let f = fixture(&mut env);
+    let mut f = fixture(&mut env);
+    // The final target-sync merge also carries the worker's last source
+    // correction. Prior-head QA is therefore stale, not source-equivalent.
+    std::fs::write(f.worker_path.join("footer.css"), ".footer { gap: 12px; }\n").unwrap();
+    git(&f.worker_path, &["add", "footer.css"]);
+    git(&f.worker_path, &["commit", "--amend", "-q", "--no-edit"]);
+    f.final_tip = git(&f.worker_path, &["rev-parse", "HEAD"]);
+    git(f.dir.path(), &["update-ref", &format!("refs/remotes/origin/{BRANCH}"), &f.final_tip]);
     let cas_dir = f.dir.path().join(".cas");
     let tasks = open_task_store(&cas_dir).unwrap();
     let mut task = tasks.get(TASK).unwrap();

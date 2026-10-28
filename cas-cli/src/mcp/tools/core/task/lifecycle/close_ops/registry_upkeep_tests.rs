@@ -322,6 +322,7 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
     let mut f = Fixture::new(YAML);
     f.task.task_type = TaskType::Bug;
     f.task.updated_at = f.store.update(&f.task).unwrap();
+    let mut deliveries = Vec::new();
     for (branch, task) in [("alpha", "cas-1234"), ("beta", "cas-5678")] {
         git(f.repo.path(), &["checkout", "-qb", branch, &f.base]);
         write(
@@ -329,9 +330,13 @@ fn registry_upkeep_parallel_bug_families_merge_and_satisfy_case_gate() {
             &format!("docs/qa/bug-families/{branch}.yaml"),
             &format!("title: {branch}\ntasks: [{task}]\ninvariants: [INV]\njourneys: [signup]\n"),
         );
-        commit(f.repo.path());
+        deliveries.push(commit(f.repo.path()));
     }
     git(f.repo.path(), &["merge", "--no-edit", "alpha"]);
+    for delivery in deliveries {
+        let presence = delivery_content_presence_on_target(f.repo.path(), &delivery, "HEAD");
+        assert!(matches!(presence, DeliveryContentPresence::Present { .. }), "{presence:?}");
+    }
     let registry = crate::qa_registry::load(
         &f.repo.path().join(crate::qa_registry::DEFAULT_PATH),
     ).unwrap();

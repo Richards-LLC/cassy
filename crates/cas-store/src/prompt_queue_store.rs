@@ -8392,7 +8392,15 @@ impl PromptQueueStore for SqlitePromptQueueStore {
         let sql = conversation_open_attention_sql();
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map([factory_session], |row| {
-            Ok((Self::prompt_from_row(row)?, row.get::<_, Option<String>>("open_attention_kind")?))
+            let queued = Self::prompt_from_row(row)?;
+            // A send is arbitrary operator text, including JSON with a
+            // non-string kind. Only operator-lane decisions have this kind.
+            let kind = if queued.target.eq_ignore_ascii_case("operator") {
+                row.get::<_, Option<String>>("open_attention_kind")?
+            } else {
+                None
+            };
+            Ok((queued, kind))
         })?;
         let mut later_operator = false;
         let mut acknowledged = std::collections::HashSet::new();

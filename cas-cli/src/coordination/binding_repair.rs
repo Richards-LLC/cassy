@@ -113,14 +113,14 @@ impl OrdinaryBindingClient {
         }
         let journal = IntakeJournal::new(cas_dir);
         let state = journal.read()?;
-        // A previous legacy_intake_active response is still waiting for the
-        // host to go quiet. Failure to submit this retry cannot settle it.
+        // A previous refusal still holds pending work. A failed retry cannot
+        // release that pause before Cloud has a definite answer.
         let preserve_pause = state.policies.iter().any(|policy| {
             &policy.scope == scope
                 && matches!(
                     policy.disposition,
                     ChannelDisposition::Paused {
-                        origin: Some(PauseOrigin::LegacyIntakeActive),
+                        origin: Some(PauseOrigin::LegacyIntakeActive | PauseOrigin::NoEligibleReaders),
                     }
                 )
         });

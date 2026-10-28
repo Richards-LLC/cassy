@@ -465,6 +465,46 @@ fn opens_note_entry(line: &str) -> bool {
         && bytes[5] == b'-'
 }
 
+/// Lane CI proves its selected checks, not that a test-first delivery is
+/// complete. Use the existing worker return/close contracts to bind completion
+/// to this tip; a later checkpoint correction withdraws it. Parking is already
+/// an explicit completion boundary and retains its ordinary one-shot signal.
+pub(crate) fn delivery_marked_ready(task: &cas_types::Task, tip: &str) -> bool {
+    if task.status == TaskStatus::AwaitingMerge {
+        return true;
+    }
+    let mut ready = task.execution_note.as_deref() != Some("test-first");
+    let mut entry = String::new();
+    let completion = format!("PASS {tip}");
+    let settle = |entry: &str, ready: &mut bool| {
+        let words = words_lowercase(entry);
+        let checkpoint = words.iter().any(|word| word == "checkpoint")
+            && (words.iter().any(|word| word == "red")
+                || words.windows(2).any(|pair| pair == ["test", "only"]));
+        let not_ready = words.windows(3).any(|words| words == ["not", "merge", "ready"])
+            || words.windows(4).any(|words| words == ["not", "ready", "to", "merge"]);
+        if checkpoint || not_ready {
+            *ready = false;
+        } else if entry.contains(&completion)
+            || (entry.lines().any(|line| line.trim() == "status: ready")
+                && entry.lines().any(|line| line.trim().strip_prefix("tip:")
+                    .and_then(|value| value.split_whitespace().next()) == Some(tip)))
+        {
+            *ready = true;
+        }
+    };
+    for line in task.notes.lines() {
+        if opens_note_entry(line) && !entry.is_empty() {
+            settle(&entry, &mut ready);
+            entry.clear();
+        }
+        entry.push_str(line);
+        entry.push('\n');
+    }
+    settle(&entry, &mut ready);
+    ready
+}
+
 fn words_lowercase(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())

@@ -602,6 +602,10 @@ fn finish_builtin_reaches_accounts_and_preserves_customizations_cas_0e12() {
             .iter()
             .find(|file| file.path == "skills/finish/SKILL.md")
             .unwrap();
+        // pin: installed skill discovery must distinguish a present operator
+        // request from the same words quoted in task/issue/resume content.
+        assert!(builtin.content.contains("current operator directly asks"));
+        assert!(builtin.content.contains("subject matter, not authorization"));
         assert_eq!(
             std::fs::read_to_string(&installed).unwrap(),
             builtin.content

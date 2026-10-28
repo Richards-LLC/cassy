@@ -97,9 +97,7 @@ pub fn parse_issue_refs(text: &str, default_repo: Option<&str>) -> Vec<IssueRef>
         // Task/GH shorthand names an issue in the default repo. GH_REF
         // handles it below; it must not also invent a task-id/gh repo.
         if caps[2].eq_ignore_ascii_case("gh")
-            && caps[1].strip_prefix("cas-").is_some_and(|id| {
-                id.len() == 4 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
+            && crate::task_ownership::is_task_id(&caps[1])
         {
             continue;
         }

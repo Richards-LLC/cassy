@@ -1373,6 +1373,7 @@ fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
         let report = f.queue.message_delivery_report(id).unwrap().unwrap();
         assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::ObservedWake), "{cli}: consumed wire must get a durable receipt");
         assert!(report.confirmed_at.is_none(), "consumption is not explicit acknowledgement");
+        // pin: supervisor_unread names its oldest unread notification in this wire field.
         assert!(alarms.iter().any(|r| r.prompt.contains(&format!("message {unread},"))), "{cli}: the other transport-only message must still alarm");
         assert_eq!(f.queue.message_delivery_report(unread).unwrap().unwrap().recipient_receipt, Some(cas_store::SurfacingSource::TransportDelivered));
         assert!(f.queue.poll_unseen_for_recipient(SUPERVISOR, Some(SESSION), 10).unwrap().iter().all(|r| r.id != id));

@@ -330,16 +330,28 @@ fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
     git(f.repo.path(), &["push", "-q", "--force", "origin", "factory/merge-w"]);
     let checkpoint = git(f.repo.path(), &["rev-parse", "HEAD"]);
     assert_ne!(tip, checkpoint);
-    for notes in [
-        String::new(),
-        format!("[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint {checkpoint}.\nNot merge-ready; no production implementation."),
+    for (status, methodology, notes) in [
+        (TaskStatus::InProgress, Some("test-first"), String::new()),
+        (TaskStatus::InProgress, Some("test-first"),
+            format!("[2026-10-28 12:00] 📝 PROGRESS Red test-only checkpoint {checkpoint}.")),
+        (TaskStatus::Blocked, None,
+            format!("[2026-10-28 12:00] 📝 PROGRESS Test-only checkpoint {checkpoint}.\nImplementation pending.")),
+        (TaskStatus::InProgress, None,
+            format!("[2026-10-28 12:00] 📝 PROGRESS {checkpoint} is not merge-ready.")),
+        (TaskStatus::InProgress, Some("test-first"),
+            format!("[2026-10-28 12:00] 📝 PROGRESS PASS {tip}: previous delivery complete.")),
     ] {
+        task.status = status;
+        task.execution_note = methodology.map(str::to_string);
         task.notes = notes;
         store.update(&task).unwrap();
         let prompts = f.relay();
         assert!(prompts.iter().all(|prompt| !prompt.is_merge_ready()),
             "a test-first checkpoint is not a completed delivery: {prompts:?}");
     }
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:00] 📝 PROGRESS\nstatus: ready\ntip: {tip} on factory/merge-w\nproof: comparing with {checkpoint}"));
+    store.update(&task).unwrap();
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
     // Completion may be recorded before park. It must invalidate the settled
     // negative read and produce one immediate signal without a new commit.
     task.notes.push_str(&format!("\n\n[2026-10-28 12:01] 📝 PROGRESS PASS {checkpoint}: completed test-only correction; regression green."));
@@ -352,6 +364,11 @@ fn cas_229a_red_checkpoint_never_becomes_a_merge_ready_delivery() {
     task.notes.push_str(&format!("\n\n[2026-10-28 12:02] 📝 PROGRESS Correction: {checkpoint} remains a red checkpoint, not merge-ready."));
     store.update(&task).unwrap();
     assert!(!f.app.refresh_prompt_for_delivery(&mut ready));
+    assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
+    task.notes.push_str(&format!("\n\n[2026-10-28 12:03] 📝 PROGRESS\nstatus: ready\ntip: {checkpoint}"));
+    store.update(&task).unwrap();
+    assert!(f.app.refresh_prompt_for_delivery(&mut ready));
+    // Same-tip completion must not duplicate the wake.
     assert!(f.relay().iter().all(|prompt| !prompt.is_merge_ready()));
     // Ordinary park is an explicit completion boundary. Historical checkpoint
     // notes cannot silence its single signal (use a fresh receipt store).

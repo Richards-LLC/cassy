@@ -1,4 +1,5 @@
 import { cloudBrand, escapeHtml } from './cloud-brand';
+import { machineVersionMarkup } from './machine-version';
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNREACHABLE, UNSTEADY, machineConnectionLabel, type MachineConnectionLabelState } from './connection-state';
 import type { FleetControlGate } from './fleet-permissions';
 import { commandTokensMarkup } from './launch-session';
@@ -22,6 +23,7 @@ export interface PairedMachineRow {
   connectionState?: MachineConnectionLabelState;
   lastSeen: string;
   runtime?: string;
+  latestRelease?: string;
   /**
    * Fleet permissions on this pairing (cas-d382): managing workers and tasks
    * (factory:operate) and stopping and restarting them (factory:manage).
@@ -105,7 +107,7 @@ export function machineFooterMarkup(rows: readonly PairedMachineRow[], sessions:
   // The dot shows the worst machine: green only when every machine is
   // connected, the warning tone when some are down (cas-b789) or unsteady.
   const dot = connected && connected === rows.length ? ' connected' : connected || state === UNSTEADY ? ' partial' : '';
-  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Hub build">Hub ${escapeHtml(build)}</span></div>`;
+  return `<button id="paired-machines-toggle" type="button" aria-haspopup="dialog"><span class="pairing-dot${dot}" aria-hidden="true"></span><span title="${escapeHtml(machine)}">${escapeHtml(machine)}</span><span class="machine-badge-state${/\s/.test(state.trim()) ? '' : ' whole'}" title="${escapeHtml(state)}">${escapeHtml(state)}</span></button><div class="hub-footer-meta"><span>${sessions === undefined ? 'Conversations not loaded yet' : `${sessions} ${sessions === 1 ? 'conversation' : 'conversations'}${lastKnownSuffix(sessions, lastKnown)}`}</span><span title="Web client release and build">Web ${escapeHtml(build)}</span></div>`;
 }
 
 function lastKnownSuffix(sessions: number, lastKnown: boolean | number): string {
@@ -164,8 +166,11 @@ export function renderPairedMachines(container: HTMLElement, rows: readonly Pair
       button.onblur = () => { delete button.dataset.confirm; button.textContent = 'Remove from this browser'; };
       container.append(node);
     }
-    const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.cause ?? row.connection, '.paired-machine-seen': row.lastSeen, '.paired-machine-runtime': row.runtime ? `Cassy ${row.runtime}` : 'Version unknown until it connects' };
+    const texts = { h3: row.label, '.paired-machine-address': row.address, '.paired-machine-state': row.cause ?? row.connection, '.paired-machine-seen': row.lastSeen };
     for (const [selector, text] of Object.entries(texts)) { const target = node.querySelector(selector)!; if (target.textContent !== text) target.textContent = text; }
+    const runtime = node.querySelector('.paired-machine-runtime')!;
+    const versionMarkup = machineVersionMarkup(row.runtime, row.latestRelease);
+    if (runtime.innerHTML !== versionMarkup) runtime.innerHTML = versionMarkup;
     renderFleetPermissions(node, row, options);
     if (options.installations) {
       let inventory = node.querySelector<HTMLButtonElement>('.paired-machine-installations');

@@ -40,6 +40,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 
 ## Primary Journeys
 
+Commander labels each machine's reported Cassy version in its project chip and paired-machine card. A newer published stable release adds a quiet update note; an hourly cached lookup retains its last known release while offline. The Web footer separately identifies the client release and build.
+
 The operator can paste text, screenshots or files into Commander: long text becomes a previewed text attachment, and Send stores files on the session's machine and gives the supervisor readable local paths through the existing durable message lane. Pending files remain through reconnect, with a reminder to send before closing the page. The operator's own sent files appear in their bubble as image previews and named file chips after reload and on other paired devices, without displaying host paths.
 
 1. The operator launches `cas`, reviews the active epic and staffs workers for its ready tasks.

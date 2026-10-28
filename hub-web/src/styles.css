@@ -2448,7 +2448,7 @@ button.chip:disabled { cursor: default; }
      and its state. The conversation count and hub build stay on desktop (the
      list is the count here). The toggle's hit area still reaches 40px. */
   .conversation-shell .conversation-sidebar > footer { padding-top: var(--space-1); padding-bottom: max(var(--space-1), env(safe-area-inset-bottom)); }
-  .conversation-sidebar .hub-footer-badges { display: flex; flex-wrap: nowrap; align-items: center; gap: var(--space-3); min-height: 32px; margin: 0; }
+  .conversation-sidebar .hub-footer-badges { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-height: 32px; margin: 0; }
   .conversation-sidebar #paired-machines-toggle { display: flex; align-items: center; position: relative; flex-wrap: nowrap; min-width: 0; min-height: 32px; padding: 0 var(--space-2); background: var(--color-transparent); }
   .conversation-sidebar #paired-machines-toggle:hover:not(:disabled) { background: var(--bg-hover); }
   .conversation-sidebar #paired-machines-toggle::before { content: ""; position: absolute; inset: -4px 0; }
@@ -2470,7 +2470,8 @@ button.chip:disabled { cursor: default; }
      that names the machine keeps the rule above. */
   .conversation-sidebar #paired-machines-toggle .machine-badge-state.whole { flex: none; min-width: auto; }
   .conversation-sidebar .hub-footer-badges > #paired-machines-toggle { flex: 1 1 auto; }
-  .conversation-sidebar .hub-footer-meta { display: none; }
+  .conversation-sidebar .hub-footer-meta { display: flex; flex-basis: 100%; justify-content: flex-end; }
+  .conversation-sidebar .hub-footer-meta > span:first-child { display: none; }
   .conversation-shell:not(.thread-open) .compose-fab { display: flex; }
   /* The compose bar already takes the free space above the footer. */
   .conversation-shell:not(.thread-open) .compose-fab + footer { margin-top: 0; }
@@ -3270,6 +3271,10 @@ dialog .operator-inbox-bubble, dialog .operator-inbox-bubble p { color: inherit;
 .project-machine-chips { display: flex; flex-wrap: wrap; gap: var(--space-1); padding: 0 var(--space-3); }
 .project-machine-chip { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; min-height: 28px; padding: var(--space-1) var(--space-2); border: var(--line-width) solid var(--line-strong); border-radius: var(--radius-pill); background: var(--bg-panel); color: var(--ink-mid); font: var(--weight-medium) var(--fs-xs)/var(--line-ui) var(--font-ui); overflow-wrap: anywhere; }
 .project-machine-chip:hover { background: var(--bg-hover); color: var(--ink); }
+.project-machine-chip { flex-wrap: wrap; border-radius: var(--radius-card); }
+.machine-version { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); min-width: 0; max-width: 100%; color: var(--ink-mid); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+.machine-version-installed { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.machine-version-update { color: var(--state-warn); }
 .machine-online-dot { width: var(--space-2); height: var(--space-2); border: var(--line-width) solid currentColor; border-radius: var(--radius-pill); flex: none; }
 .machine-online-dot.online { background: var(--state-ok); border-color: var(--state-ok); }
 .machine-online-dot.offline { background: var(--color-transparent); border-color: var(--ink-mid); }

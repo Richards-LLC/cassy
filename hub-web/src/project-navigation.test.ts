@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ProjectNavigation } from "./project-navigation";
+import { isNewerRelease } from "./machine-version";
 import type { ConversationRow } from "./conversation-list";
 
 const row = (key: string, extra: Partial<ConversationRow> = {}): ConversationRow => ({ key, session: key, machineId: "soundwave", host: "soundwave · Linux", projectDir: "/projects/cassy", supervisor: key, connection: "Live", freshness: "", attention: 0, selected: false, ...extra });
@@ -11,6 +12,16 @@ function setup() {
 beforeEach(() => localStorage.clear());
 
 describe("project-first navigation", () => {
+  it("compares published versions numerically without inventing updates for unknown runtimes", () => {
+    for (const [current, latest, newer] of [
+      ["3.9.0", "v3.10.0", true], ["3.87.0", "3.87.1", true],
+      ["3.87.0", "4.0.0", true], ["3.88.0", "3.88.0", false],
+      ["3.89.0", "3.88.0", false], ["3.88.0-rc.1", "3.88.0", true],
+      ["3.88.0+debug", "3.88.0", false], ["unknown", "3.88.0", false],
+      [undefined, "3.88.0", false], ["3.87.0", undefined, false],
+      ["3.87.0", "invalid", false], ["3.87.0", "3.88.0-rc.1", false],
+    ] as const) expect(isNewerRelease(current, latest), `${current} → ${latest}`).toBe(newer);
+  });
   it("contains supervisors across machines in one project and renders only supplied identity", () => {
     const nav = setup();
     new ProjectNavigation().render(nav, [row("nimble-fox-66", { project: "cassy", harness: "codex", account_email: "operator@example.test", machine_online: true, workerCount: 2, activityAt: 2 }), row("mighty-eagle-86", { machineId: "prowl", host: "prowl · macOS", projectDir: "/other/cassy", machine_online: false, activityAt: 1 }), row("solo", { projectDir: "/projects/pulse-card" })], vi.fn());

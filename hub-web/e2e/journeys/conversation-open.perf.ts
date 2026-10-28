@@ -290,7 +290,16 @@ for (const profile of [
     if (showWork) {
       await expect(page.locator("#conversation-show-work")).toHaveAttribute("aria-pressed", "true");
       expect(results.initial.work_requests_total).toBeGreaterThan(0);
-      expect(results.initial.mounted_work_blocks, "captured work must actually enter the rendered window").toBeGreaterThan(0);
+      // Real work may precede the latest exchange. Exercise its reading window
+      // without moving captured timestamps or inserting synthetic tail events.
+      await measure("work_window", async () => {
+        for (let step = 0; step < 12 && await page.locator(".msgs .work-turn").count() === 0; step++) {
+          await page.getByRole("button", { name: "Load earlier", exact: true }).click();
+          await settle(page);
+        }
+      });
+      expect(results.work_window.mounted_work_blocks, "captured work must actually enter a reading window").toBeGreaterThan(0);
+      await page.getByRole("button", { name: "Jump to latest" }).click();
     } else expect(results.initial.work_requests_total).toBe(0);
     if (!backlog) await measure("accumulated", async () => {
       for (let index = 1; index < capture.pages.length; index++) {

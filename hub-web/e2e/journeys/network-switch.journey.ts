@@ -1148,9 +1148,9 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     const atlas = { ...ATLAS, sessions: [...ATLAS.sessions, { ...ATLAS.sessions[0]!, name: peer, supervisor: peer, project_dir: "/projects/peer" }] };
     const { hub, clock, header } = await connected(page, false, [atlas, STUDIO]);
     const nav = page.getByRole("navigation", { name: "Choose a supervisor" });
-    await nav.getByRole("button", { name: /peer/ }).click();
+    await nav.getByRole("button", { name: /peer/ }).and(nav.locator(".conversation-row")).click();
     await expect(header).toHaveText(" · Live");
-    await nav.getByRole("button", { name: /gabber-studio/ }).click();
+    await nav.getByRole("button", { name: /gabber-studio/ }).and(nav.locator(".conversation-row")).click();
     await expect(header).toHaveText(" · Live");
     await chooseConversation(page);
     await expect(header).toHaveText(" · Live");
@@ -1208,7 +1208,7 @@ test("HUB-J12 peer clean exit and retained replay preserve healthy legacy attach
     await expect(page.locator(".status-stale").filter({ visible: true })).toHaveCount(0);
     console.info("cas-49cc native flap proof", { seconds: 30, streams,
       healthyAttaches: [hub.legacySocketOpens.get(PELICAN), hub.legacySocketOpens.get(OTTER)] });
-    await nav.getByRole("button", { name: /gabber-studio/ }).click();
+    await nav.getByRole("button", { name: /gabber-studio/ }).and(nav.locator(".conversation-row")).click();
     await expect(header).toHaveText(" · Live");
   });
 });

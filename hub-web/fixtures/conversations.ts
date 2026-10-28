@@ -303,9 +303,10 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
       return root;
     });
     reply(91, null, '# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```diff\n--- a/launch.ts\n+++ b/launch.ts\n@@ -1,25 +1,25 @@\n-launch()\n+launchWithEvidence()\n' + Array.from({ length: 24 }, (_, index) => ` context ${index}`).join('\n') + '\n```', 'answer', at(9, 44), [{ artifact_id: 'rich-visual-image', name: 'Evidence screenshot.png', mime: 'image/png', size_bytes: 1024, sha256: '9f'.repeat(32) }]);
-  } else if (state === 'conversation-sent-attachment') {
+  } else if (state === 'conversation-sent-attachment' || state === 'conversation-attachment-failure') {
     // Polish fixture; upload, ticket, reload and second-device behavior is HUB-J24.
     installAttachmentSheet((sheet, file) => {
+      if (state === 'conversation-attachment-failure') return inlineAttachment(sheet, file, async () => ({ ok: true, view: { artifact_id: file.artifact_id, url: new URL('/attachment-preview-missing.png', location.href).href } }));
       const root = inlineAttachment(sheet, file, () => new Promise(() => {}), { openPreview: true });
       const viewport = root.querySelector<HTMLElement>('.rich-media');
       if (viewport) {
@@ -320,6 +321,7 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     ].join('\n\n');
     history.submit('upload', supervisor, text, at(9, 40));
     history.acknowledge({ client_ref: 'upload', notification_id: 70, target: supervisor, stamped: true });
+    if (state === 'conversation-attachment-failure') reply(71, 70, 'This screenshot is unavailable too.', 'answer', at(9, 41), [{ artifact_id: 'art-failed-supervisor', name: 'Unavailable.png', mime: 'image/png', size_bytes: 2048, sha256: '9f'.repeat(32) }]);
   } else if (state === 'conversation-attachment') {
     // The report-card case: a receipt with prose, then its two artifacts laid on the thread as sheets.
     history.submit('report', supervisor, 'Send me the release report when the gate is green.', at(9, 40));

@@ -2800,11 +2800,25 @@ fn work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged() 
     let page = serde_json::to_vec(&DaemonMessage::WorkEvents {
         request_id: "events-1".into(),
         schema_version: crate::ui::factory::WORK_EVENT_SCHEMA_VERSION,
-        events: Vec::new(),
+        events: vec![serde_json::from_value(serde_json::json!({
+            "id":"v2-tool", "kind":"tool", "session":"factory-1",
+            "at":"2026-10-28T12:00:00Z", "label":"Read: lib.rs",
+            "tool":{"name":"Read","operation":"read","targets":["lib.rs"]},
+            "lifecycle":{"id":"call","stage":"end","outcome":"success"}
+        })).unwrap()],
         has_earlier: false,
         next_before: None,
     })
     .unwrap();
+    // The shared protocol accepts v1 and retains v2 while the hub relays original bytes.
+    let decoded: DaemonMessage = serde_json::from_slice(&page).unwrap();
+    let roundtrip = serde_json::to_value(decoded).unwrap();
+    assert_eq!(roundtrip["WorkEvents"]["events"][0]["tool"]["targets"], serde_json::json!(["lib.rs"]));
+    assert_eq!(roundtrip["WorkEvents"]["events"][0]["lifecycle"]["stage"], "end");
+    let legacy: crate::ui::factory::WorkEvent = serde_json::from_value(serde_json::json!({
+        "id":"v1", "kind":"tool", "session":"factory-1", "at":"2026-10-28T12:00:00Z", "label":"old"
+    })).unwrap();
+    assert!(legacy.tool.is_none() && legacy.lifecycle.is_none());
     let history = serde_json::to_vec(&DaemonMessage::ConversationHistory {
         request_id: "history-1".into(),
         messages: Vec::new(),
@@ -5316,9 +5330,11 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let read_credential = auth.exchange_pairing(exchange, Utc::now()).unwrap();
     let mut session = fixture_session("factory-a");
     session.project_dir = Some(root.parent().unwrap().display().to_string());
+    let mut other_session = session.clone();
+    other_session.name = "factory-b".into();
     let events = MachineEventBus::new(16);
     let app = router(HubState::new(
-        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session])),
+        SessionCatalog::new(RecordingReadModel::with_sessions(vec![session, other_session])),
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
     ).with_auth(auth));
@@ -5361,6 +5377,53 @@ async fn composer_upload_is_authenticated_bounded_and_idempotent() {
     let image: serde_json::Value = serde_json::from_slice(&to_bytes(image.into_body(), 65536).await.unwrap()).unwrap();
     assert_eq!(image["mime"], "image/png");
     assert_eq!(std::fs::read(image["path"].as_str().unwrap()).unwrap(), png);
+    // cas-195a: the real upload must be previewable without publishing to Cloud,
+    // including by another read-only paired device, but only in its own session.
+    let image_id = image["artifact_id"].as_str().unwrap();
+    let ticket_request = |session: &str| {
+        let uri = format!("/v1/sessions/{session}/artifacts/{image_id}/ticket");
+        Request::post(&uri).header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", read_credential.credential))
+            .header("dpop", sign_dpop(&read_signing, &read_credential.credential, "POST", &uri, Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .body(Body::empty()).unwrap()
+    };
+    assert_eq!(app.clone().oneshot(ticket_request("factory-b")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    let response = app.clone().oneshot(ticket_request("factory-a")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "a session's own upload must mint a preview ticket");
+    let ticket: serde_json::Value = serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+    for (session, range, expected) in [
+        ("factory-a", None, StatusCode::OK),
+        ("factory-a", Some("bytes=1-4"), StatusCode::PARTIAL_CONTENT),
+        ("factory-b", None, StatusCode::UNAUTHORIZED),
+    ] {
+        let mut request = Request::get(format!("/v1/sessions/{session}/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap()));
+        if let Some(range) = range { request = request.header("range", range); }
+        let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), expected);
+        if expected.is_success() {
+            assert_eq!(response.headers()["content-type"], "image/png");
+            assert_eq!(response.headers()["cache-control"], "private, no-store");
+            let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+            assert_eq!(bytes.as_ref(), if range.is_some() { &png[1..=4] } else { &png });
+        }
+    }
+    // Neither forged bytes nor symlink replacements become local preview access.
+    let image_path = std::path::Path::new(image["path"].as_str().unwrap());
+    std::fs::write(image_path, vec![b'x'; png.len()]).unwrap();
+    assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+    std::fs::write(image_path, &png).unwrap();
+    #[cfg(unix)]
+    for directory in [false, true] {
+        let original = if directory { image_path.parent().unwrap() } else { image_path };
+        let moved = temp.path().join(if directory { "moved-directory" } else { "moved-image" });
+        std::fs::rename(original, &moved).unwrap();
+        std::os::unix::fs::symlink(&moved, original).unwrap();
+        assert_eq!(app.clone().oneshot(ticket_request("factory-a")).await.unwrap().status(), StatusCode::NOT_FOUND);
+        let response = app.clone().oneshot(Request::get(format!("/v1/sessions/factory-a/artifacts/{image_id}/content?t={}", ticket["ticket"].as_str().unwrap())).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "an existing ticket must recheck storage");
+        std::fs::remove_file(original).unwrap();
+        std::fs::rename(moved, original).unwrap();
+    }
     // ISO-BMFF major and compatible brands, not the filename, identify phone media.
     for (brands, mime) in [
         (&b"heic\0\0\0\0mif1heic"[..], "image/heic"),

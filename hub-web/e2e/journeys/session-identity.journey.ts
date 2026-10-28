@@ -347,7 +347,10 @@ test("HUB-J14 project navigation spans machines, decisions and device collapse (
     await expect(old.locator(".conversation-account")).toHaveCount(0);
     await expect(old.locator("[data-harness]")).toHaveCount(0);
     await expect(list.getByRole("region", { name: "Needs you", exact: true }).getByRole("button")).toContainText("calm-puma-34");
-    for (const width of [1280, 390]) for (const scheme of ["light", "dark", "forced-colors"] as const) {
+    const capture = process.env.FULL_NAV_CAPTURE_DIR;
+    const widths = capture ? [1280, 390] : [390];
+    const schemes = capture ? ["light", "dark", "forced-colors"] as const : ["forced-colors"] as const;
+    for (const width of widths) for (const scheme of schemes) {
       await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
       await page.emulateMedia({ colorScheme: scheme === "dark" ? "dark" : "light", forcedColors: scheme === "forced-colors" ? "active" : "none", reducedMotion: "reduce" });
       expect(await page.evaluate(() => matchMedia("(prefers-reduced-motion: reduce)").matches)).toBe(true);

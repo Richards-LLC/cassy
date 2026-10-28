@@ -14279,6 +14279,9 @@ fn epic_anchor_content_presence(
         (Some(note), Some(ledger)) => Some(format!("{note}; {ledger}")),
         (note, ledger) => note.or(ledger),
     };
+    if let Some((commits, note)) = accepted_epic_delivery_drop_review(task, repo, anchor, target, paths) {
+        return (DeliveryContentPresence::Superseded { paths: paths.clone(), commits }, joined(Some(note)));
+    }
     if let Some((commits, note)) = delivery_evolution::worktree_regeneration_supersession(repo, anchor, target, paths) {
         return (DeliveryContentPresence::Superseded { paths: paths.clone(), commits }, joined(Some(note)));
     }
@@ -14292,6 +14295,66 @@ fn epic_anchor_content_presence(
         Some((note, remaining)) => (DeliveryContentPresence::Dropped { paths: remaining }, joined(note)),
         None => (presence, joined(None)),
     }
+}
+
+/// Read only the task-specific decision emitted by the child close gate,
+/// rather than treating a requested `reviewed-drop:` reason as acceptance.
+/// Keep this same input in the persisted epic verdict key.
+fn accepted_delivery_drop_decisions(task: &Task) -> impl Iterator<Item = &str> {
+    let prefix = format!("DECISION: reviewed delivery content supersession accepted for task {}; ", task.id);
+    task.notes.lines().filter_map(move |line| {
+        let line = line.trim();
+        let line = line.strip_prefix('[')
+            .and_then(|line| line.split_once("] ").map(|(_, decision)| decision))
+            .unwrap_or(line);
+        line.strip_prefix(prefix.as_str())
+    })
+}
+
+/// GH #1401: acceptance is tied to the recorded delivery, its reviewed paths
+/// and the named commits' final state. Recheck both the accepted target and
+/// today's target; a stale decision cannot waive new or unrelated loss.
+fn accepted_epic_delivery_drop_review(
+    task: &Task,
+    repo: &std::path::Path,
+    anchor: &str,
+    target: &str,
+    paths: &[String],
+) -> Option<(Vec<String>, String)> {
+    let prefix = format!("anchor={anchor}; target=");
+    for decision in accepted_delivery_drop_decisions(task) {
+        let Some((accepted_target, rest)) = decision.strip_prefix(prefix.as_str())
+            .and_then(|rest| rest.split_once("; dropped paths: ")) else { continue };
+        // The writer records an immutable full SHA, never a mutable ref.
+        if accepted_target.len() != 40 || !accepted_target.bytes().all(|b| b.is_ascii_hexdigit()) {
+            continue;
+        }
+        let Some((reviewed_paths, rest)) = rest.split_once("; superseding commits: ") else { continue };
+        let Some((commits, narrative)) = rest.split_once("; supervisor review: ") else { continue };
+        let reviewed_paths: Vec<String> = reviewed_paths.split(", ").map(str::to_owned).collect();
+        if paths.iter().any(|path| !reviewed_paths.contains(path)) {
+            continue;
+        }
+        let reason = format!("reviewed-drop: {commits} -- {narrative}");
+        if !matches!(validated_delivery_drop_review(repo, anchor, accepted_target, &reviewed_paths, Some(&reason)), Ok(Some(_))) {
+            continue;
+        }
+        let origin = format!("origin/{target}");
+        let current_ref = if git_ref_exists(repo, &origin) && git_commit_is_ancestor(repo, anchor, &origin) {
+            origin.as_str()
+        } else {
+            target
+        };
+        let Some(current_target) = resolve_branch_sha(repo, current_ref) else { continue };
+        if !git_commit_is_ancestor(repo, accepted_target, &current_target) {
+            continue;
+        }
+        if let Ok(Some(review)) = validated_delivery_drop_review(repo, anchor, target, &reviewed_paths, Some(&reason)) {
+            return Some((commits.split(", ").map(str::to_owned).collect(),
+                format!("accepted reviewed-drop: {review}")));
+        }
+    }
+    None
 }
 
 /// cas-3f8c: name the delivered lines the target lacks, so a supervisor can
@@ -33431,6 +33494,63 @@ esac
         );
     }
 
+    /// GH #1404: the worker renames its migration while merging the target,
+    /// so the rename belongs to the delivery anchor itself.
+    #[test]
+    fn migration_renamed_inside_own_anchor_merge_is_delivered_gh1404() {
+        let dir = init_factory_repo("worker");
+        let p = dir.path();
+        let old = "migrations/20261027200000_watched_creators.sql";
+        let new = "migrations/20261027210000_watched_creators.sql";
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
+        std::fs::write(p.join(old), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-test1: add watched creators migration"]);
+        git(p, &["checkout", "main"]);
+        std::fs::write(p.join("sibling.sql"), "CREATE TABLE sibling (id INT);\n").unwrap();
+        git(p, &["add", "."]);
+        git(p, &["commit", "-qm", "cas-beef: sibling migration"]);
+        git(p, &["checkout", "factory/worker"]);
+        git(p, &["merge", "--no-ff", "--no-commit", "main"]);
+        git(p, &["mv", old, new]);
+        git(p, &["commit", "-qm", "cas-test1: sync target and rename migration"]);
+        let anchor = head_sha(p);
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "factory/worker", "-m", "integrate delivery"]);
+
+        let mut task = worker_task("worker");
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(anchor);
+        let req = base_req(&task.id);
+        let mut window = window_at(0, "anchor rename");
+        window.identity.task_id = Some(task.id.clone());
+        let outcome = || run_factory_branch_merge_gate_with_attribution(
+            &task, &req, "main", p,
+            TaskCommitAttribution { receipt: None, window: Some(&window) },
+        );
+        let delivered = outcome();
+        assert!(
+            matches!(delivered, MergeStateGateOutcome::Proceed | MergeStateGateOutcome::ProceedWithNote(_)),
+            "the identical migration renamed inside its own anchor must be delivered: {delivered:?}"
+        );
+
+        // Reachability and the old path's absence cannot excuse losing the
+        // renamed file after integration.
+        git(p, &["rm", new]);
+        git(p, &["commit", "-qm", "drop renamed migration"]);
+        let dropped = outcome();
+        assert!(matches!(&dropped, MergeStateGateOutcome::Reject(reason)
+            if reason.contains("DELIVERY CONTENT DROPPED")), "{dropped:?}");
+        // Matching bytes after lost ownership are still not delivery.
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
+        std::fs::write(p.join(new), "CREATE TABLE watched_creators (id INT);\n").unwrap();
+        git(p, &["add", new]);
+        git(p, &["commit", "-qm", "unrelated recreation of migration"]);
+        let recreated = outcome();
+        assert!(matches!(&recreated, MergeStateGateOutcome::Reject(reason)
+            if reason.contains("DELIVERY CONTENT DROPPED")), "{recreated:?}");
+    }
+
     /// GH #1160: the final sync anchor comes after two migration renames and
     /// an intentional revert. The old paths are absent at that anchor, but
     /// attribution still measures their earlier task commits as dropped.
@@ -33553,6 +33673,39 @@ esac
                 && note.contains(&reverted)),
             "pre-anchor reviewed supersession must close: {result:?}"
         );
+        let MergeStateGateOutcome::ProceedWithNote(accepted) = result else {
+            unreachable!()
+        };
+        // GH #1401: a closed child's epic row must consume the accepted
+        // decision, including when a prior read cached the unreviewed loss.
+        task.status = TaskStatus::Closed;
+        let report = |task: &Task| {
+            let rows = collect_epic_branch_statuses(std::slice::from_ref(task), "main", p);
+            let rendered = render_epic_status_report("cas-epic", "main", &rows);
+            (rows.into_iter().next().unwrap(), rendered)
+        };
+        for notes in [
+            String::new(),
+            window.supervisor_override_reason.clone().unwrap(),
+            accepted.replace(&format!("anchor={anchor};"), &format!("anchor={introduction};")),
+            accepted.replace(&format!("superseding commits: {reverted};"),
+                &format!("superseding commits: {introduction};")),
+        ] {
+            task.notes = notes;
+            let (row, rendered) = report(&task);
+            assert!(row.dropped_paths.contains(&"analytics.vue".to_string()), "{rendered}");
+            assert!(row.blocks_epic_close(), "{rendered}");
+            assert!(rendered.contains("reachable anchor content is absent"), "{rendered}");
+        }
+        task.notes = format!("[2026-10-28 15:00] {accepted}");
+        let (row, rendered) = report(&task);
+        assert!(row.dropped_paths.is_empty(), "{rendered}");
+        assert!(!row.blocks_epic_close(), "{rendered}");
+        let note = row.content_evolution_note.expect("accepted review remains visible");
+        assert!(note.contains(&anchor) && note.contains(&reverted), "{note}");
+        assert!(!rendered.contains("reachable anchor content is absent"), "{rendered}");
+        task.notes.clear();
+        assert!(report(&task).0.blocks_epic_close(), "removing acceptance must invalidate the cached verdict");
     }
 
     #[test]

@@ -56,6 +56,7 @@ async fn cas_b8e8_close_proof_claims_need_a_receipt() {
         "CI green https://github.com/example/repo/actions/runs/123456789",
         "Supervisor reports tests passed (run_id=123456789)",
         "Supervisor reports tests passed (CI 123456789)",
+        "Supervisor reports tests passed, -1274.775s/-80.3% from baseline; evidence: `.cas/Proof.log`.",
         "Supervisor reports tests passed (run id 12)",
         "The test will not run; proof deferred to epic assembly",
         "Supervisor has not verified the tests; proof deferred to epic assembly",

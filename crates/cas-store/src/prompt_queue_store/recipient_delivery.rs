@@ -69,10 +69,7 @@ impl SqlitePromptQueueStore {
             "already surfaced; not acknowledged".to_string()
         };
         row.reference_only = true;
-        row.prompt = format!(
-            "Message {}: {status}. No new body; delivery is not evidence of task action.",
-            row.id
-        );
+        row.prompt = format!("Message {}: {status}.", row.id);
         // A summary can itself contain the original message. Keep the reference
         // bounded even when callers print both summary and prompt.
         row.summary = Some(format!("Message {}: {status}", row.id));

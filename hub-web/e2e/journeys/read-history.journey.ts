@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { inflateSync } from "node:zlib";
 import { test, expect, journeyPart } from "./journey";
 import type { DoubleOptions } from "./hub-double";
@@ -8,6 +8,79 @@ import { ATLAS, PELICAN } from "./world";
 const you = (id: number, text: string, at: string) => ({ notification_id: id, target: PELICAN, text, state: "acknowledged", stamped: true, device_id: "journey-device", operator_label: "Daniel", at });
 const sup = (id: number, replyTo: number, message: string, at: string, attachments: unknown[] = []) => ({ notification_id: id, reply_to: replyTo, message, summary: "", device_id: "journey-device", kind: "answer", attachments, at });
 const file = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "application/pdf", size_bytes: 88_064, sha256: "9f".repeat(32) });
+
+test("HUB-J4 prose tables keep words readable and render inline markdown", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  await journey.open();
+  await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+  await expect(page.locator("#conversation-connection")).toContainText("Live");
+  hub.supervisorSays(PELICAN, [
+    "| Tab | State |", "| --- | --- |",
+    "| **Daniel Open Hours** | Tracks *open hours* in `time-tracking`; [details](https://example.org/hours) stay available. |",
+    "| Weekly summary | Ready after the current work session ends. |", "",
+    "| # | What | Starts |", "| --- | --- | --- |",
+    "| C2 | **Review the current changes** and record the remaining work. | After `C1` |",
+    "| C3 | Publish the reviewed report when every check passes. | After C2 |",
+  ].join("\n"));
+  const tables = page.getByRole("log").getByRole("table");
+  await expect(tables).toHaveCount(2);
+  for (const width of [1280, 390]) for (const colorScheme of ["light", "dark"] as const) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 800 });
+    await page.emulateMedia({ colorScheme });
+    await journey.stage(`Read prose tables at ${width} in ${colorScheme}`, async () => {
+      for (let index = 0; index < 2; index++) {
+        const table = tables.nth(index);
+        await table.scrollIntoViewIfNeeded();
+        if (process.env.DELIVERY_QA) {
+          mkdirSync(process.env.DELIVERY_QA, { recursive: true });
+          await table.screenshot({ path: `${process.env.DELIVERY_QA}/table-${index + 2}-${width}-${colorScheme}.png` });
+          writeFileSync(`${process.env.DELIVERY_QA}/table-${index + 2}.html`, `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${readFileSync("dist/app.css", "utf8")}</style><body><div class="thread"><div class="bub">${await table.evaluate(node => node.outerHTML)}</div></div></body></html>`);
+        }
+        const rendered = await table.evaluate(node => {
+          const cells = [...node.querySelectorAll<HTMLElement>('[role="cell"]')];
+          // A word's Range stays on one line, including C2 in the three-column case.
+          const words = cells.flatMap(cell => {
+            const walker = document.createTreeWalker(cell, NodeFilter.SHOW_TEXT);
+            const counts: number[] = [];
+            for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+              for (const match of text.textContent!.matchAll(/[\p{L}\p{N}]+/gu)) {
+                const range = document.createRange();
+                range.setStart(text, match.index!); range.setEnd(text, match.index! + match[0].length);
+                counts.push(range.getClientRects().length);
+              }
+            }
+            return counts;
+          });
+          return {
+            words, bold: node.querySelector("strong")?.textContent,
+            code: node.querySelector("code")?.textContent,
+            italic: node.querySelector("em")?.textContent,
+            link: node.querySelector("a")?.getAttribute("href"),
+            proseAlignment: getComputedStyle(cells[1]!).textAlign,
+            proseFont: getComputedStyle(cells[1]!).fontFamily,
+            bodyFont: getComputedStyle(document.querySelector(".bub")!).fontFamily,
+            overflow: getComputedStyle(node).overflowX,
+            right: node.getBoundingClientRect().right,
+            pageWidth: document.documentElement.clientWidth,
+            pageScrollWidth: document.documentElement.scrollWidth,
+          };
+        });
+        expect.soft(rendered.words.every(count => count === 1), `words stay whole in ${index + 2} columns at ${width}`).toBe(true);
+        expect.soft(rendered.bold).toBe(index === 0 ? "Daniel Open Hours" : "Review the current changes");
+        expect.soft(rendered.code).toBe(index === 0 ? "time-tracking" : "C1");
+        if (index === 0) {
+          expect.soft(rendered.italic).toBe("open hours");
+          expect.soft(rendered.link).toBe("https://example.org/hours");
+        }
+        expect.soft(rendered.proseAlignment).toBe("left");
+        expect.soft(rendered.proseFont).toBe(rendered.bodyFont);
+        expect.soft(rendered.overflow).toBe("auto");
+        expect.soft(rendered.right).toBeLessThanOrEqual(rendered.pageWidth);
+        expect.soft(rendered.pageScrollWidth).toBe(rendered.pageWidth);
+      }
+    });
+  }
+});
 
 function historyWorld(): DoubleOptions {
   return {

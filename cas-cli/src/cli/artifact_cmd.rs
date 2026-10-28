@@ -104,8 +104,10 @@ pub fn execute(
         ArtifactCommands::Publish(args) => execute_publish(args, cas_root, cli.json),
         ArtifactCommands::Show(args) => execute_show(args, cas_root, cli.json),
         ArtifactCommands::Fetch(args) => {
-            let (artifact, path) =
-                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id)?;
+            let (artifact, path) = metadata_result(
+                crate::artifacts::proof::fetch_task(cas_root, &args.task, &args.id),
+                cli.json,
+            )?;
             if cli.json {
                 println!(
                     "{}",
@@ -163,6 +165,7 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
     let artifact = &outcome.artifact;
     let (storage, detail) = match &outcome.disposition {
         PublishDisposition::Committed { .. } => ("committed", None),
+        PublishDisposition::CommittedMetadataUnavailable { reason } => ("committed", Some(reason.clone())),
         PublishDisposition::StorageNotLive { reason } => ("not_live", Some(reason.clone())),
         PublishDisposition::NotLoggedIn => ("not_logged_in", None),
         PublishDisposition::UploadFailed { reason } => ("upload_failed", Some(reason.clone())),
@@ -177,6 +180,7 @@ fn publish_json(outcome: &PublishOutcome) -> serde_json::Value {
         "status": artifact.status,
         "storage": storage,
         "storage_detail": detail,
+        "metadata_state": outcome.disposition.metadata_state(),
         "cloud_url": artifact.cloud_url,
         "source": outcome.source.display().to_string(),
     })
@@ -198,13 +202,17 @@ fn print_publish(outcome: &PublishOutcome) {
     println!("     {}", outcome.disposition.summary());
     println!("     sha256 {}", artifact.sha256);
     match &outcome.disposition {
-        PublishDisposition::UploadFailed { reason } => {
+        PublishDisposition::UploadFailed { reason } | PublishDisposition::CommittedMetadataUnavailable { reason } => {
             // The failure detail is the actionable part; it is printed in full,
             // indented, rather than truncated into the summary line.
             for line in crate::cloud::presence::wrap_line(reason).lines() {
                 println!("     {line}");
             }
-            println!("  -> cas artifact show {}", artifact.id);
+            if matches!(outcome.disposition, PublishDisposition::CommittedMetadataUnavailable { .. }) {
+                println!("  -> cas cloud sync");
+            } else {
+                println!("  -> cas artifact show {}", artifact.id);
+            }
         }
         PublishDisposition::StorageNotLive { .. } | PublishDisposition::NotLoggedIn => {
             println!("  -> cas artifact show {}", artifact.id);
@@ -214,10 +222,7 @@ fn print_publish(outcome: &PublishOutcome) {
 }
 
 fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {
-    let store = SqliteArtifactStore::open(cas_root).context("opening the artifact store")?;
-    let Some(artifact) = store.get(&args.id)? else {
-        anyhow::bail!("no artifact {}", args.id);
-    };
+    let artifact = metadata_result(crate::artifacts::lookup_metadata(cas_root, None, &args.id), json)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&artifact)?);
@@ -244,6 +249,22 @@ fn execute_show(args: &ShowArgs, cas_root: &Path, json: bool) -> anyhow::Result<
     }
     println!("     created {}", artifact.created_at);
     Ok(())
+}
+
+fn metadata_result<T>(result: anyhow::Result<T>, json: bool) -> anyhow::Result<T> {
+    result.map_err(|error| {
+        if json {
+            if let Some(missing) = error.downcast_ref::<crate::artifacts::MetadataUnavailable>() {
+                println!("{}", serde_json::json!({
+                    "status": "error", "state": "metadata_unavailable",
+                    "artifact_id": missing.artifact_id, "task_id": missing.task_id,
+                    "message": error.to_string(),
+                }));
+                return super::JsonReportedFailure(error).into();
+            }
+        }
+        error
+    })
 }
 
 fn execute_list(args: &ListArgs, cas_root: &Path, json: bool) -> anyhow::Result<()> {

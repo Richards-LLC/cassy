@@ -56,7 +56,11 @@ export type ProtocolTime = {
   delay(callback: () => void, ms: number): void;
 };
 
+type ComposerUpload = { machine: string; session: string; id: string; mime: string; body: Buffer };
+
 export type DoubleOptions = {
+  /** Durable local uploads, shared with a separately paired device's hub double. */
+  composerUploads?: Map<string, ComposerUpload>;
   /** Unreceipted daemon replies, independent of the bounded history page. */
   pendingReplies?: Record<string, Array<Record<string, unknown>>>;
   /** Controlled journeys own the browser and protocol reply clock together. */
@@ -209,6 +213,12 @@ export class HubDouble {
   /** Every `/v1/pages/...` path the browser fetched, in order. */
   readonly pageRequests: string[] = [];
   readonly previewTicketRequests: string[] = [];
+  readonly composerUploads: Map<string, ComposerUpload>;
+  private readonly mediaTickets = new Map<string, { machine: string; session: string; id: string }>();
+
+  storeComposerUpload(machine: string, session: string, id: string, mime: string, body: Buffer): void {
+    this.composerUploads.set(`${machine}/${session}/${id}`, { machine, session, id, mime, body });
+  }
   private readonly sockets = new Map<string, WebSocketRoute>();
   private readonly waiters: Array<() => void> = [];
   private readonly protocolWaiters = new Set<() => void>();
@@ -285,6 +295,7 @@ export class HubDouble {
   private readonly live = new Map<string, { messages: Array<Record<string, unknown>>; replies: Array<Record<string, unknown>> }>();
 
   constructor(private readonly page: Page, private readonly options: DoubleOptions) {
+    this.composerUploads = options.composerUploads ?? new Map();
     for (const [session, rows] of Object.entries(options.pendingReplies ?? {})) this.pendingReplies.set(session, [...rows]);
   }
 
@@ -477,6 +488,9 @@ export class HubDouble {
     // cas-3aff: a visual page opened in its own tab is a new page; its
     // ticketed route is answered there too.
     await page.context().route(/^https:\/\/[^/]+\.test\/v1\/pages\//, (route) => this.visualPage(route, new URL(route.request().url()).pathname));
+    // The first navigation of a preview popup bypasses page routes. It must use
+    // the same scoped storage and capability checks as in-page image requests.
+    await page.context().route("https://*.test/v1/sessions/*/artifacts/*/content?*", route => this.hub(route));
     for (const base of Object.values(this.options.baseUrls ?? {})) await page.route(`${new URL(base).origin}/v1/**`, (route) => this.hub(route));
     await page.route(`${RELAY}/api/hub/pairing/**`, (route) => this.relay(route));
     await page.routeWebSocket((url) => url.pathname.startsWith("/v1/") && (url.hostname.endsWith(".test") || Object.values(this.options.baseUrls ?? {}).some((base) => new URL(base).host === url.host)), (ws) => (new URL(ws.url()).pathname === "/v1/attach" ? this.machineSocket(ws) : this.socket(ws)));
@@ -1023,15 +1037,38 @@ export class HubDouble {
       });
     }
     if (path === "/v1/auth/websocket-ticket") return route.fulfill({ json: { ticket: "journey-ticket" } });
-    // cassy#910: a signed view URL for an artifact the session published. An
-    // id starting `art-local` was never uploaded to Cloud.
-    const previewTicket = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/ticket$/.exec(path);
+    // Match real hub eligibility: a bounded media ref published in this thread,
+    // or this session's own stored composer upload. Unknown ids never get tickets.
+    const previewTicket = /^\/v1\/sessions\/([^/]+)\/artifacts\/([^/]+)\/ticket$/.exec(path);
     if (previewTicket && method === "POST") {
-      const id = decodeURIComponent(previewTicket[1]!);
+      const session = decodeURIComponent(previewTicket[1]!);
+      const id = decodeURIComponent(previewTicket[2]!);
       this.previewTicketRequests.push(id);
-      if (id.startsWith("art-local")) return route.fulfill({ status: 409, json: { error: "artifact_not_in_cloud" } });
+      if (!this.scopesFor(machineId).includes("session-read")) return route.fulfill({ status: 403 });
+      const upload = this.composerUploads.get(`${machineId}/${session}/${id}`);
+      const replies = [...(this.live.get(session)?.replies ?? []),
+        ...(this.options.history?.[session] ?? []).flatMap(page => page.replies)];
+      const published = replies.flatMap(reply => (reply.attachments ?? []) as Array<{ artifact_id: string; mime: string; size_bytes: number }>)
+        .find(ref => ref.artifact_id === id && !id.startsWith("art-local"));
+      const mime = upload?.mime ?? published?.mime ?? "";
+      const size = upload?.body.length ?? published?.size_bytes ?? 0;
+      if (!this.sessionsFor(machineId).some(row => row.name === session)
+          || !/^(image|video|audio)\/[a-zA-Z0-9.+-]+$|^application\/pdf$/.test(mime)
+          || size <= 0 || size > 25 * 1024 * 1024) return route.fulfill({ status: 404 });
       const count = this.previewTicketRequests.filter((value) => value === id).length;
-      return route.fulfill({ json: { ticket: `fixture-${id}-${count}`, expires_at: this.stamp(60_000) } });
+      const ticket = `fixture-${id}-${count}`;
+      this.mediaTickets.set(ticket, { machine: machineId, session, id });
+      return route.fulfill({ json: { ticket, expires_at: this.stamp(60_000) } });
+    }
+    const mediaContent = /^\/v1\/sessions\/([^/]+)\/artifacts\/([^/]+)\/content$/.exec(path);
+    if (mediaContent && method === "GET") {
+      const session = decodeURIComponent(mediaContent[1]!);
+      const id = decodeURIComponent(mediaContent[2]!);
+      const ticket = this.mediaTickets.get(url.searchParams.get("t") ?? "");
+      if (!ticket || ticket.machine !== machineId || ticket.session !== session || ticket.id !== id) return route.fulfill({ status: 401 });
+      const upload = this.composerUploads.get(`${machineId}/${session}/${id}`);
+      if (!upload) return route.fulfill({ status: 404 });
+      return route.fulfill({ contentType: upload.mime, body: upload.body, headers: { "cache-control": "private, no-store" } });
     }
     const artifactView = /^\/v1\/sessions\/[^/]+\/artifacts\/([^/]+)\/url$/.exec(path);
     if (artifactView) {

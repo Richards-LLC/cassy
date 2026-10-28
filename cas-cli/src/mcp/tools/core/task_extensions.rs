@@ -1,5 +1,10 @@
 use crate::mcp::tools::core::imports::*;
 
+pub(super) const BLOCKED_BY_LIFECYCLE: &str =
+    "Preparation may start; close waits for these tasks to finish.";
+pub(super) const BLOCKS_LIFECYCLE: &str =
+    "Their preparation may start; their close waits for this task to finish.";
+
 impl CasCore {
     // ========================================================================
     // Additional Task Tools
@@ -85,7 +90,7 @@ fn render_dependency_sections(
         .collect();
     if !blocked_by.is_empty() {
         output.push_str(&format!(
-            "Blocked by (this task will not start until these are done): {}\n",
+            "Blocked by: {}\n  {BLOCKED_BY_LIFECYCLE}\n",
             blocked_by.join(", ")
         ));
     }
@@ -109,7 +114,7 @@ fn render_dependency_sections(
         .collect();
     if !blocks.is_empty() {
         output.push_str(&format!(
-            "Blocks (these will not start until this task is done): {}\n",
+            "Blocks: {}\n  {BLOCKS_LIFECYCLE}\n",
             blocks.join(", ")
         ));
     }

@@ -29,14 +29,10 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         if (prior) expect(body).toEqual({ name: prior.name, data: prior.data });
         const stored = prior ?? { ...body, path: `/fixture/project/artifacts/art-${id}/${body.name}` };
         uploads.set(id, stored);
+        hub.storeComposerUpload("atlas", PELICAN, `art-${id}`, body.name.endsWith("png") ? "image/png" : "text/plain", Buffer.from(body.data, "base64"));
         if (!interrupted) { interrupted = true; await route.abort("connectionreset"); return; }
         await route.fulfill({ json: { artifact_id: `art-${id}`, path: stored.path, mime: body.name.endsWith("png") ? "image/png" : "text/plain" }, headers: { "access-control-allow-origin": "*" } });
       });
-      const contentRoute = "https://*.test/v1/sessions/*/artifacts/*/content?*";
-      const imageBytes = Buffer.from(PNG, "base64");
-      const serveImage = (route: import("@playwright/test").Route) => route.fulfill({ contentType: "image/png", body: imageBytes });
-      await page.route(contentRoute, serveImage);
-      await page.context().route(contentRoute, serveImage);
       let sentText = "";
       let queued = 0;
       const field = page.getByRole("textbox", { name: "Your message" });
@@ -89,6 +85,17 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         }
       });
       await journey.stage("Sent files show their names and an image preview after reload and on another phone", async () => {
+        // cas-195a: a permissive ticket/content double hid the real backend bug.
+        const imageId = `art-${[...uploads.entries()].find(([, upload]) => upload.name === "screenshot.png")![0]}`;
+        const denied = await page.evaluate(async ({ imageId, session }) => {
+          const paths = [
+            `/v1/sessions/${session}/artifacts/art-unknown/ticket`,
+            `/v1/sessions/foreign-session/artifacts/${imageId}/ticket`,
+            `/v1/sessions/${session}/artifacts/${imageId}/content?t=unknown`,
+          ];
+          return Promise.all(paths.map(async path => (await fetch(`https://atlas.test${path}`, { method: path.includes("/ticket") ? "POST" : "GET" })).status));
+        }, { imageId, session: PELICAN });
+        expect(denied).toEqual([404, 404, 401]);
         const assertFiles = async (target: typeof page) => {
           const log = target.getByRole("log");
           await expect(log).not.toContainText("/fixture/project/");
@@ -97,12 +104,14 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
           await image.scrollIntoViewIfNeeded();
           await expect(image).toBeVisible();
           await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
+          await expect(log.locator('a.sheet').filter({ hasText: "screenshot.png" }).locator('.plate img')).toBeVisible();
+          expect(await image.evaluate((node) => node.getBoundingClientRect().width)).toBe(48);
           expect(await target.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
         };
         await assertFiles(page);
-        if (colorScheme === "light") await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-${width}.png` });
+        await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-${width}-${colorScheme}.png` });
         const popup = page.waitForEvent("popup");
-        await page.getByRole("link", { name: "Open screenshot.png preview", exact: true }).click();
+        await page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" }).click();
         const preview = await popup;
         await preview.waitForURL(/\/artifacts\/art-.*\/content\?t=/);
         await preview.close();
@@ -114,18 +123,37 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
           try {
             const peer = await phone.newPage();
             await peer.clock.install({ time: journeyNow() });
-            const remote = new HubDouble(peer, { machines: [ATLAS], paired: ["atlas"], history: { [PELICAN]: [{
+            const remote = new HubDouble(peer, { machines: [ATLAS], paired: ["atlas"], composerUploads: hub.composerUploads, history: { [PELICAN]: [{
               messages: [{ notification_id: queued, target: "supervisor", text: sentText, state: "delivered", stamped: true, device_id: "sender-device", session: PELICAN, at: journeyStamp() }],
               replies: [], has_earlier: false,
             }] } });
             await remote.install();
-            await peer.route(contentRoute, route => route.fulfill({ contentType: "image/png", body: imageBytes }));
             await peer.goto(baseURL!); await remote.seedPaired(); await peer.reload();
             await peer.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
             await assertFiles(peer);
             await peer.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/sent-attachments-second-phone.png` });
           } finally { await phone.close(); }
         }
+      });
+      await journey.stage("A missing preview stays on its own file card", async () => {
+        // Forward a real HTTP 404 from this run's static server. The ticket and
+        // artifact request still take the normal application path.
+        const missing = await page.request.get(`${new URL(baseURL!).origin}/commander/attachment-preview-missing.png`);
+        expect(missing.status()).toBe(404);
+        await page.route(`https://atlas.test/v1/sessions/${PELICAN}/artifacts/*/content?*`, route => route.fulfill({ response: missing }));
+        await page.reload();
+        const sent = page.getByRole("log").locator('a.sheet').filter({ hasText: "screenshot.png" });
+        await expect(sent.locator('.preview-note')).toHaveText("Preview unavailable");
+        await expect(sent.locator('.rich-media')).toBeHidden();
+        hub.supervisorSays(PELICAN, "This screenshot is unavailable too.", { attachments: [{ artifact_id: "art-failed-preview", name: "Unavailable.png", mime: "image/png", size_bytes: 2048, sha256: "9f".repeat(32) }] });
+        const received = page.getByRole("log").locator('a.sheet').filter({ hasText: "Unavailable.png" });
+        await expect(received.locator('.preview-note')).toHaveText("Preview unavailable");
+        await expect(received.locator('.rich-media')).toBeHidden();
+        for (const card of [sent, received]) {
+          await card.scrollIntoViewIfNeeded();
+          expect((await card.boundingBox())!.height).toBeLessThan(104);
+        }
+        await page.screenshot({ path: `${process.env.JOURNEY_RECEIPTS ?? "e2e/.results"}/unavailable-${width}-${colorScheme}.png` });
       });
       await journey.stage("A refusal names its file and keeps the hub's reason", async () => {
         const pick = async (files: { name: string; mimeType: string; buffer: Buffer }[]) => {

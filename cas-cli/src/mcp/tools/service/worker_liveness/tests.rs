@@ -74,6 +74,46 @@ fn codex_all_states_and_terminal_aliases() {
 }
 
 #[test]
+fn fixed_cpu_evidence_agrees_while_cold_to_warm_sampling_changes_liveness() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("transcript.jsonl");
+    let at = (now() - chrono::Duration::seconds(394)).to_rfc3339();
+    for (cli, event) in [
+        (SupervisorCli::Codex, serde_json::json!({
+            "timestamp": at, "type": "response_item",
+            "payload": {"type": "function_call_output"},
+        })),
+        (SupervisorCli::Claude, serde_json::json!({
+            "timestamp": at, "type": "assistant",
+            "message": {"role": "assistant", "stop_reason": "tool_use"},
+        })),
+    ] {
+        std::fs::write(&path, format!("{event}\n")).unwrap();
+        let mut samples = std::collections::HashMap::new();
+        let cold = record_cpu_sample(&mut samples, 42, "original-process", 100);
+        let warm = record_cpu_sample(&mut samples, 42, "original-process", 110);
+        assert_eq!(cold, None);
+        assert_eq!(warm, Some(true));
+        for (cpu_busy, expected) in [(cold, Liveness::Stalled), (warm, Liveness::Executing)] {
+            let evidence = ProcessEvidence {
+                alive: Some(true), cpu_busy, detail: format!("fixed cpu sample: {cpu_busy:?}"),
+            };
+            let full = observe(cli, Some(&path), evidence.clone(), now(), 300);
+            let same_snapshot = observe(cli, Some(&path), evidence, now(), 300);
+            let summary = super::super::factory_ops::render_worker_liveness_summary(&[
+                ("worker".into(), same_snapshot.clone()),
+            ]);
+            assert_eq!(full.state, expected, "{cli:?}: {}", full.detail());
+            assert_eq!(same_snapshot.state, full.state);
+            assert!(summary.starts_with(&format!("liveness: {} |", expected.as_str())), "{summary}");
+            assert!(full.detail().starts_with(&format!("liveness: {} (", expected.as_str())));
+        }
+        // PID reuse cannot borrow the prior process's CPU activity.
+        assert_eq!(record_cpu_sample(&mut samples, 42, "replacement", 900), None);
+    }
+}
+
+#[test]
 fn codex_budget_abort_is_distinct_from_stall_and_idle() {
     let start = "{\"timestamp\":\"2026-09-10T19:00:00Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
     let budget = "{\"timestamp\":\"2026-09-10T19:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\",\"reason\":\"budget_limited\"}}\n";

@@ -1742,11 +1742,11 @@ fn a_tool_call_does_not_replay_a_body_being_typed_into_the_pane_cas_a1ed() {
 
 /// cas-6ccb (GH #1215 §3.4): `inbox_poll` marks rows seen before its response
 /// is read, so a row polled mid-turn and not acted on was lost. A polled row
-/// the agent never acknowledged is shown once more at its next turn, labelled
-/// as such; a row it acknowledged with message_ack is not, and nothing is
+/// the agent never acknowledged gets a reference at its next turn;
+/// a row it acknowledged with message_ack is not, and nothing is
 /// repeated inside the polling turn or after the one repeat.
 #[test]
-fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
+fn cas_afe0_polled_unacked_repeat_is_a_reference_and_an_acked_one_is_not_repeated() {
     let mut env = TestEnvGuard::new();
     worker_env(&mut env);
     let (_temp, cas_root) = teams_member_root();
@@ -1768,7 +1768,7 @@ fn cas_6ccb_a_polled_unacked_row_is_shown_once_more_and_an_acked_one_is_not() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let next_turn = worker.take_turn("continuing my work");
-    assert_eq!(next_turn.matches(kept).count(), 1, "{next_turn}");
+    assert_eq!(next_turn.matches(kept).count(), 0, "ordinary repeat must reference its ID, not reprint the body: {next_turn}");
     assert!(!next_turn.contains(acked), "an acknowledged row is not repeated: {next_turn}");
     assert!(next_turn.contains(&format!("[not acknowledged] Message #{kept_id}")), "{next_turn}");
     assert_eq!(

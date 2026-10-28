@@ -95,7 +95,7 @@ function normalizePlainText(source: string): string {
   return `# ${lead}${source.slice(lead.length)}`;
 }
 
-function appendInline(document: Document, parent: HTMLElement, source: string): void {
+export function appendInline(document: Document, parent: HTMLElement, source: string): void {
   let index = 0;
   let plainStart = 0;
   const flush = (end: number): void => {

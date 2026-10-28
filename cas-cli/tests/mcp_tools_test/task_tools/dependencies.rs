@@ -366,7 +366,7 @@ async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
         service
             .cas_task_close(Parameters(TaskCloseRequest {
                 no_delivery: None,
-                id: dependent_id,
+                id: dependent_id.clone(),
                 reason: Some("delivered despite blocker".to_string()),
                 supervisor_override: None,
                 legacy_bypass_code_review: None,
@@ -381,6 +381,57 @@ async fn open_blocks_allow_start_but_reject_close_and_ready_flags_cas_0487() {
         close.contains(&blocker_id) && close.to_ascii_lowercase().contains("blocking"),
         "close must refuse while the blocker remains open: {close}"
     );
+
+    // pin: dependency readback must explain the supported preparation start
+    // and close gate, in both directions, without contradicting the lifecycle.
+    for (id, label, other, lifecycle) in [
+        (
+            &dependent_id,
+            "Blocked by:",
+            &blocker_id,
+            "Preparation may start; close waits for these tasks to finish.",
+        ),
+        (
+            &blocker_id,
+            "Blocks:",
+            &dependent_id,
+            "Their preparation may start; their close waits for this task to finish.",
+        ),
+    ] {
+        let listed = extract_text(
+            service
+                .cas_task_dep_list(Parameters(IdRequest { id: id.clone() }))
+                .await
+                .expect("dep_list should succeed"),
+        );
+        let shown = extract_text(
+            service
+                .cas_task_show(Parameters(TaskShowRequest {
+                    id: id.clone(),
+                    with_deps: true,
+                    read: TaskReadOptions {
+                        full: true,
+                        ..Default::default()
+                    },
+                }))
+                .await
+                .expect("show should succeed"),
+        );
+        for (surface, output) in [("dep_list", listed), ("show", shown)] {
+            assert!(
+                output.contains(&format!("{label} {other}")),
+                "{surface} must preserve dependency direction: {output}"
+            );
+            assert!(
+                output.contains(lifecycle),
+                "{surface} must match the observed preparation/close lifecycle: {output}"
+            );
+            assert!(
+                !output.contains("will not start until"),
+                "{surface} must not claim ordinary dependencies block preparation: {output}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

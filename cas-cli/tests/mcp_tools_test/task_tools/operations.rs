@@ -7241,11 +7241,28 @@ async fn immutable_qa_assignment_does_not_follow_the_moving_epic() {
             let text = extract_text(result.expect("immutable QA must ignore moving epic ancestry"));
             assert!(!text.contains("rebase"), "immutable candidate must never get a rebase remedy: {text}");
             assert_eq!(tasks.get(&task.id).unwrap().assignee.as_deref(), Some(reviewer.name.as_str()));
+            // Reserving a review also preserves another clean idle checkout.
+            git(&checkout, &["checkout", "-q", "--detach", "epic/moving"]);
+            let idle_head = git(&checkout, &["rev-parse", "HEAD"]);
+            let assign = || serde_json::from_value::<cas_mcp::TaskRequest>(serde_json::json!({
+                "action":"update", "id":task.id, "assignee":reviewer.name,
+            })).unwrap();
+            let text = extract_text(service.task(Parameters(assign())).await.unwrap());
+            assert!(text.contains(&bound_head) && !text.contains("rebase"), "{text}");
+            assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), idle_head);
+            std::fs::write(checkout.join("file"), "reviewer's pending work").unwrap();
+            let error = service.task(Parameters(assign())).await.expect_err("dirty review checkout stays protected");
+            assert!(error.message.contains("tracked checkout changes"), "{error}");
+            git(&checkout, &["checkout", "--", "file"]);
+            git(&checkout, &["checkout", "-q", "--detach", &bound_head]);
         } else {
             let error = result.expect_err("implementation, unbound label and self-review remain guarded");
             if producer.is_none() {
                 // pin: the real17-commit regression keeps the implementation freshness guard.
                 assert!(error.message.contains("17 commits behind"), "{error}");
+            } else {
+                assert!(error.message.contains("no self-review"), "{error}");
+                assert!(!error.message.contains("rebase"), "{error}");
             }
             assert!(tasks.get(&task.id).unwrap().assignee.is_none());
         }

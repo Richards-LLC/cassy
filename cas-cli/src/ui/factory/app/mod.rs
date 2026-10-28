@@ -3182,7 +3182,7 @@ pub(crate) fn queue_supervisor_intro_prompt(
             "Codex supervisor startup: {} current workers.\n\
 Context and handoff receipts arrive through native SessionStart hooks.\n\
 Run cas-codex-supervisor-checklist once; triage from the supervisor core in your developer instructions.\n\
-Use cas-supervisor for planning, releases or recovery.\n\
+Use cas-supervisor for planning, releases or recovery; cas-codebase-design for module design.\n\
 First: mcp__cs__coordination action=whoami; inspect current epics and ready work.\n\
 Current workers: {worker_list}",
             worker_names.len()

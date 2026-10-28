@@ -5807,6 +5807,7 @@ mod cas_89e1_post_merge_message_type_tests {
             &envelope.target_branch_tip, &envelope.branch_tip,
             "Fresh worker delivery; please merge the branch.");
         eprintln!("MANIFEST_REPLAY review_bytes={} queued_bytes={}", review.len(), row.prompt.len());
+        // pin: bundle links move losslessly into the manifest instead of the relay.
         assert!(!row.prompt.contains("/proof/task-b/qa/bundle.json"), "relay must use one manifest reference");
         let artifacts = cas_store::SqliteArtifactStore::open(&cas_root).unwrap()
             .list_for_task(&task_b.id).unwrap();
@@ -5818,6 +5819,7 @@ mod cas_89e1_post_merge_message_type_tests {
         let roots = crate::artifacts::PublishRoots::new(&cas_root, &root, &task_b.id);
         let full = std::fs::read_to_string(roots.task_artifacts_dir.join(&manifest.name)).unwrap();
         assert!(full.contains(&review), "manifest must preserve the complete review");
+        // pin: literal evidence paths and changed file names survive manifest expansion.
         assert!(full.contains("/proof/task-b/qa/bundle.json"));
         assert!(full.contains("A\ttask-b.txt"));
         assert!(row.prompt.len() < review.len() / 2, "queued evidence should be bounded by a pointer");

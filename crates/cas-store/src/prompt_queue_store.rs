@@ -10589,6 +10589,14 @@ mod tests {
     #[test]
     fn started_digest_is_withdrawn_when_a_later_task_transition_supersedes_it() {
         let (temp, store) = create_test_store();
+        use crate::AgentStore;
+        let agents = crate::SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut supervisor = cas_types::Agent::new_with_role(
+            "supervisor-id".into(), "supervisor".into(), cas_types::AgentRole::Supervisor,
+        );
+        supervisor.factory_session = Some("session".into());
+        agents.register(&supervisor).unwrap();
         let tasks = SqliteTaskStore::open(temp.path()).unwrap();
         tasks.init().unwrap();
         let mut task = Task::new("cas-started-digest".into(), "relay target".into());

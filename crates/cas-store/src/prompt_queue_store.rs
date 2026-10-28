@@ -20286,6 +20286,7 @@ mod cas_bf890_notice_digest_tests {
         assert_eq!(drain(&store, HookDrain::NoticeDigest), ids);
         assert!(drain(&store, HookDrain::NoticeDigest).is_empty(), "one digest receipt per episode");
         let full = store.poll_named_for_recipient("supervisor", Some(SESSION), &[peer.supervisor_copy_id]).unwrap();
+        // pin: named reads preserve the full copied message byte for byte.
         assert_eq!(full[0].prompt, "Peer worker message copy — from w to peer: collision details");
         assert_eq!(store.peek_for_targets(&["peer"], Some(SESSION), 10).unwrap()[0].id, peer.recipient_id);
     }

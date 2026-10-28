@@ -28,7 +28,7 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
   }));
   await journey.stage("A failed image collapses into its own card", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.locator("#conversation-connection")).toContainText("Live");
     hub.supervisorSays(PELICAN, "Keep this image while reading later updates.", { attachments: [file("art-cached-image", "Cached image.png", "image/png")] });
     await expect(preview).toHaveAttribute("data-preview-state", "waiting");

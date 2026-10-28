@@ -1365,6 +1365,39 @@ fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
 }
 
 #[test]
+fn cas_afe0_reference_wire_never_becomes_a_body_receipt() {
+    let _env = env();
+    for cli in ["codex", "claude"] {
+        for terminal in [false, true] {
+            let mut f = Fixture::new();
+            let id = f.aged("worker", "supervisor", "Review the queued delivery details");
+            f.queue.record_recipient_transport_delivered(id, SUPERVISOR).unwrap();
+            f.queue.mark_transport_delivered(id).unwrap();
+            if terminal {
+                f.queue.acknowledge_for_recipients(id, &[SUPERVISOR.into()], None).unwrap();
+            } else {
+                f.queue.poll_unseen_for_recipient(SUPERVISOR, Some(SESSION), 1).unwrap();
+            }
+            let receipt = f.queue.recipient_receipt(id, SUPERVISOR).unwrap();
+            let projected = f.queue.recipient_delivery(id, SUPERVISOR).unwrap().unwrap();
+            assert!(!projected.is_full());
+            let projected = projected.into_prompt();
+            let wire = super::teams_body_fallback_text(&projected);
+            assert_eq!(wire, projected.prompt, "a reference carries no body provenance or reply hint");
+            let wire = if cli == "codex" {
+                super::super::delivery::frame_pty_payload(cas_mux::SupervisorCli::Codex, "worker", &wire)
+            } else {
+                format!("<teammate-message teammate_id=\"worker\">\n{wire}\n</teammate-message>")
+            };
+            f.supervisor_turn(cli, &wire);
+            f.scan();
+            assert_eq!(f.queue.recipient_receipt(id, SUPERVISOR).unwrap(), receipt,
+                "{cli}/terminal={terminal}: consuming a notice is not consuming the body");
+        }
+    }
+}
+
+#[test]
 fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
     let _env = env();
     for (cli, claimed, pasted) in [

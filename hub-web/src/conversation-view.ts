@@ -2,7 +2,7 @@ import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
-import { plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
+import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
 import { refusal } from "./refusal";
 import { shouldFollowTail } from "./transcript";
 import { reconcileChildren, ThreadWindow } from "./thread-window";
@@ -1851,20 +1851,28 @@ export function renderBody(document: Document, reply: OperatorReply, context?: T
     const table = document.createElement("div"); table.className = "evi"; table.setAttribute("role", "table");
     const columns = Math.max(block.table.header?.length ?? 0, ...block.table.rows.map((row) => row.length));
     table.dataset.columns = String(columns);
+    // Intrinsic table layout shares column widths across rows, preserving each
+    // word's minimum width. The outer sheet owns overflow on narrow screens.
+    const body = document.createElement("div"); body.className = "evi-body"; body.setAttribute("role", "rowgroup");
+    const evidence = (text: string): boolean => /^(?:[+-]?\d[\d,.]*(?:\s*(?:%|ms|s|x))?|(?:\d+\s+)?(?:pass(?:ed)?|ok|green|✓|flakes?|flaky|warn(?:ing)?|skipped|fail(?:ed)?|error|red))$/i.test(plainTextMarkdown(text).trim());
+    const evidenceColumns = Array.from({ length: columns }, (_, index) => {
+      const values = block.table.rows.map(row => row[index] ?? "").filter(value => value.trim());
+      return values.length > 0 && values.every(evidence);
+    });
     const row = (cells: string[], head: boolean): HTMLElement => {
       const line = document.createElement("div"); line.className = head ? "evi-row evi-head" : "evi-row"; line.setAttribute("role", "row");
-      // First column takes the slack, the rest hug their numbers; widths beyond three columns are set here, not in CSS.
-      if (columns !== 3) line.style.gridTemplateColumns = `minmax(0, 1fr)${" auto".repeat(Math.max(0, columns - 1))}`;
       for (let index = 0; index < columns; index += 1) {
         const cell = document.createElement("span"); cell.setAttribute("role", head ? "columnheader" : "cell");
-        const text = cells[index] ?? ""; cell.textContent = text;
-        const tone = head ? undefined : cellTone(text); if (tone) cell.classList.add(tone);
+        const text = cells[index] ?? ""; appendInline(document, cell, text);
+        if (head ? evidenceColumns[index] : evidence(text)) cell.classList.add("evi-number");
+        const tone = head ? undefined : cellTone(plainTextMarkdown(text)); if (tone) cell.classList.add(tone);
         line.append(cell);
       }
       return line;
     };
-    if (block.table.header) table.append(row(block.table.header, true));
-    for (const cells of block.table.rows) table.append(row(cells, false));
+    if (block.table.header) body.append(row(block.table.header, true));
+    for (const cells of block.table.rows) body.append(row(cells, false));
+    table.append(body);
     nodes.push(table);
   }
   if (options.attachments === "none") return nodes;

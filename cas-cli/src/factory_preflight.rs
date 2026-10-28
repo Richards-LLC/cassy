@@ -884,6 +884,15 @@ fn collect_capability_snapshot(
     receipts: &[HarnessConformanceReceipt],
     deadline: Deadline,
 ) -> cas_factory::CapabilitySnapshot {
+    collect_capability_snapshot_with_codex_accounts(default_versions, receipts, deadline, &[])
+}
+
+fn collect_capability_snapshot_with_codex_accounts(
+    default_versions: &HashMap<Harness, VersionProbe>,
+    receipts: &[HarnessConformanceReceipt],
+    deadline: Deadline,
+    codex_accounts: &[String],
+) -> cas_factory::CapabilitySnapshot {
     let registry = cas_factory::registry()
         .expect("embedded lane registry must expose valid capability routes");
     let mut jobs = Vec::new();
@@ -897,7 +906,14 @@ fn collect_capability_snapshot(
                 crate::capability::BinaryObservation::Unavailable
             }
         };
-        let account_dir = account_dir_for_harness(harness);
+        let mut account_dirs = vec![account_dir_for_harness(harness)];
+        if harness == Harness::CodexCli {
+            for account in codex_accounts {
+                if !account_dirs.iter().any(|dir| dir.as_ref() == Some(account)) {
+                    account_dirs.push(Some(account.clone()));
+                }
+            }
+        }
         let receipt = receipts
             .iter()
             .find(|receipt| receipt.harness == harness)
@@ -911,14 +927,16 @@ fn collect_capability_snapshot(
                 models.push(recipe.model.clone());
             }
         }
-        for model in models {
-            jobs.push((
-                harness,
-                model,
-                account_dir.clone(),
-                binary.clone(),
-                receipt.clone(),
-            ));
+        for account_dir in account_dirs {
+            for model in &models {
+                jobs.push((
+                    harness,
+                    model.clone(),
+                    account_dir.clone(),
+                    binary.clone(),
+                    receipt.clone(),
+                ));
+            }
         }
     }
 
@@ -939,7 +957,10 @@ fn collect_capability_snapshot(
                         deadline,
                     )
                 })
-            });
+            })
+            // Start every bounded probe before joining: a slow/default
+            // account must not consume the shared budget before a usable one.
+            .collect::<Vec<_>>();
         for handle in handles {
             if let Ok((identity, evidence)) = handle.join() {
                 snapshot.record(identity, evidence);
@@ -959,9 +980,23 @@ pub fn collect_live_capability_snapshot() -> cas_factory::CapabilitySnapshot {
     let deadline = Deadline::after(COLLECTION_BUDGET);
     let default_versions = probe_default_harness_versions(deadline);
     let receipts = harness_conformance_receipts().unwrap_or_default();
-    collect_capability_snapshot(&default_versions, &receipts, deadline)
+    // Lane mode asks whether a recipe can run on any registered account.
+    // Keep each observation keyed by its real CODEX_HOME; doctor/preflight
+    // still describe only their specifically selected account.
+    let codex_accounts = dirs::home_dir()
+        .and_then(|home| crate::accounts::discover(crate::accounts::Provider::Codex, &home).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|account| !account.retiring && account.has_login)
+        .map(|account| account.path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    collect_capability_snapshot_with_codex_accounts(
+        &default_versions,
+        &receipts,
+        deadline,
+        &codex_accounts,
+    )
 }
-
 fn classify_harnesses(
     receipts: Vec<HarnessConformanceReceipt>,
     default_versions: HashMap<Harness, VersionProbe>,
@@ -1820,13 +1855,18 @@ mod tests {
             assert_eq!(decision.spec.cli, cas_mux::SupervisorCli::Codex);
             assert_eq!(decision.spec.model.as_deref(), Some("gpt-6.1-sol"));
             assert_eq!(decision.spec.effort, Some(cas_mux::Effort::High));
-            assert_eq!(decision.spec.config_dir.as_deref(), account.to_str(),
-                "the account proven available must reach the worker's auth preflight");
+            assert_eq!(
+                decision.spec.config_dir.as_deref(),
+                account.to_str(),
+                "the account proven available must reach the worker's auth preflight"
+            );
             assert!(decision.warnings.is_empty());
 
             std::fs::remove_file(account.join("auth.json")).unwrap();
-            assert!(cas_factory::resolve_lane("standard", &collect_live_capability_snapshot()).is_err(),
-                "a registered directory without a usable login must not activate the lane");
+            assert!(
+                cas_factory::resolve_lane("standard", &collect_live_capability_snapshot()).is_err(),
+                "a registered directory without a usable login must not activate the lane"
+            );
             return;
         }
         let mut env = crate::test_support::TestEnvGuard::temp_home();
@@ -1848,12 +1888,21 @@ mod tests {
 
         // Keep the fake CLI on this child's PATH, never the process-global PATH.
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "factory_preflight::tests::standard_lane_uses_registered_codex_accounts_cas_09fe", "--nocapture"])
+            .args([
+                "--exact",
+                "factory_preflight::tests::standard_lane_uses_registered_codex_accounts_cas_09fe",
+                "--nocapture",
+            ])
             .env("CAS_09FE_CAPABILITY_CHILD", env.home())
             .env("PATH", &bin)
-            .output().unwrap();
-        assert!(output.status.success(), "{}\n{}",
-            String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn healthy_facts() -> PreflightFacts {

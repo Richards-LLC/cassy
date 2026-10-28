@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -35,7 +36,9 @@ class DeployTests(unittest.TestCase):
         for key in REAL_RUN(["git", "rev-parse", "--local-env-vars"], capture_output=True,
                             text=True, check=True).stdout.split():
             self.env.pop(key, None)
-        self.env.update(VERCEL_HUB_TOKEN="fixture-secret", GITHUB_REPOSITORY="example/cassy")
+        self.env.update(VERCEL_HUB_TOKEN="fixture-secret", GITHUB_REPOSITORY="example/cassy",
+                        GH_TOKEN="fixture-gh-token", GITHUB_TOKEN="fixture-github-token",
+                        HUB_UNRELATED_SECRET="unrelated-secret")
         self.git("init", "-q")
         self.git("config", "user.email", "fixture@example.com")
         self.git("config", "user.name", "Fixture")
@@ -66,9 +69,14 @@ class DeployTests(unittest.TestCase):
         self.previous_files = self.old
         self.receipt = self.repo / "hub-deployment.json"
         self.assets = []
+        self.verifications = []
+        self.clock = 0
+        self.sleeps = []
         self.patches = [patch.dict(os.environ, self.env, clear=True),
                         patch.object(hub.subprocess, "run", side_effect=self.command),
-                        patch.object(hub.HTTP, "open", side_effect=self.http)]
+                        patch.object(hub.HTTP, "open", side_effect=self.http),
+                        patch.object(hub, "time", SimpleNamespace(monotonic=lambda: self.clock,
+                                                                  sleep=self.sleep))]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)
@@ -78,10 +86,19 @@ class DeployTests(unittest.TestCase):
                         capture_output=True, text=True, check=True).stdout.strip()
 
     def command(self, args, **kwargs):
+        if args[0].endswith("verify-hub-dist.sh"):
+            self.verifications.append(kwargs["env"])
         if args[0] not in ("gh", "vercel"):
             return REAL_RUN(args, **kwargs)
         self.calls.append(args)
         self.assertNotIn("fixture-secret", " ".join(args))
+        if args[0] == "vercel":
+            for key in ("GH_TOKEN", "GITHUB_TOKEN", "HUB_UNRELATED_SECRET", "VERCEL_HUB_TOKEN"):
+                self.assertNotIn(key, kwargs["env"])
+            self.assertEqual(kwargs["env"]["VERCEL_TOKEN"], "fixture-secret")
+            self.assertEqual(kwargs["env"]["PATH"], self.env["PATH"])
+        else:
+            self.assertEqual(os.environ["GH_TOKEN"], "fixture-gh-token")
         if args[:3] == ["gh", "release", "view"]:
             data = json.dumps({"isDraft": False, "isPrerelease": self.prerelease})
         elif args[:3] == ["gh", "release", "upload"]:
@@ -141,13 +158,30 @@ class DeployTests(unittest.TestCase):
         # A protected production deployment may return a 200 SSO page.
         if self.fail_at == "live" and variant == "candidate" and url.hostname == "hub.petrastella.io":
             return Response(b"<html>Log in to Vercel</html>")
+        if (self.fail_at == "live_once" and variant == "candidate" and
+                url.hostname == "hub.petrastella.io" and path == "/"):
+            self.fail_at = None
+            return Response(self.old["index.html"] + b"stale alias")
         if self.fail_at == "immutable" and url.hostname == "candidate.vercel.app":
             raise HTTPError(request.full_url, 302, "SSO redirect", {}, None)
         return Response(files[name])
 
     def deploy(self, tag, *extra):
+        before = len(self.verifications)
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            return hub.main([tag, "--repo", str(self.repo), "--receipt", str(self.receipt), *extra])
+            result = hub.main([tag, "--repo", str(self.repo), "--receipt", str(self.receipt), *extra])
+        verifications = self.verifications[before:]
+        expected = 0 if "--dry-run" in extra or self.prerelease else 1
+        self.assertEqual(len(verifications), expected, "one dist verifier per real run")
+        for env in verifications:
+            dist = Path(env["DIST_DIR"])
+            self.assertEqual(dist.name, "commander")
+            self.assertEqual(Path(env["ORIGIN_INDEX"]), dist.parent / "index.html")
+        return result
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.clock += seconds
 
     def test_unchanged_live_tree_skips_upload_and_dry_runs_send_nothing(self):
         self.assertEqual(self.deploy("dryrun-v9.99.2-123", "--dry-run"), 0)
@@ -178,6 +212,8 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(self.aliased, "previous")
         self.assertEqual(self.assets[-1]["status"], "rolled_back")
         self.assertEqual(self.assets[-1]["previous_deployment_id"], "dpl_previous")
+        self.assertGreaterEqual(sum(self.sleeps), 55, "allow about a minute for alias propagation")
+        self.assertLessEqual(sum(self.sleeps), 60, "persistent mismatch must exhaust a bounded retry")
         # Identical app.js but a new lazy asset still reaches upload/promotion.
         self.calls.clear()
         self.fail_at = None
@@ -188,6 +224,15 @@ class DeployTests(unittest.TestCase):
         self.assertEqual(receipt["dist_tree"], self.tree)
         self.assertEqual(receipt["source_sha"], self.sha)
         self.assertEqual(receipt["deployment_id"], "dpl_candidate")
+
+    def test_alias_propagation_mismatch_retries_then_keeps_the_verified_deployment(self):
+        self.fail_at = "live_once"
+        self.assertEqual(self.deploy("v9.99.2"), 0)
+        self.assertEqual(self.assets[-1]["status"], "deployed")
+        self.assertEqual(self.aliased, "candidate")
+        self.assertEqual([c[2] for c in self.calls if c[:2] == ["vercel", "promote"]], ["dpl_candidate"])
+        self.assertEqual(len(self.sleeps), 1)
+        self.assertGreater(self.sleeps[0], 0)
 
 
 if __name__ == "__main__":

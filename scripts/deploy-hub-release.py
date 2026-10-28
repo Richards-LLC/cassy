@@ -19,6 +19,7 @@ import subprocess
 import tarfile
 import tempfile
 import sys
+import time
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -50,17 +51,17 @@ def command(args, **kwargs):
     return result.stdout.strip()
 
 
-def fetch(url, token=None):
+def fetch(url, token=None, timeout=60):
     headers = {"Cache-Control": "no-cache"}
     if token:
         headers["Authorization"] = "Bearer " + token
     try:
         # No redirect following or bypass credentials on static-file requests.
-        with HTTP.open(Request(url, headers=headers), timeout=60) as response:
+        with HTTP.open(Request(url, headers=headers), timeout=timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"expected anonymous HTTP 200: {url}")
             return response.read()
-    except (HTTPError, URLError) as error:
+    except (HTTPError, URLError, TimeoutError) as error:
         raise RuntimeError(f"HTTP verification failed: {url} ({getattr(error, 'code', 'network error')})") from None
 
 
@@ -75,7 +76,10 @@ class Vercel:
 
     def cli(self, *args):
         # CLI 59 supports VERCEL_TOKEN. The secret never appears on argv.
-        env = dict(os.environ, VERCEL_TOKEN=self.token, VERCEL_ORG_ID=TEAM,
+        # Keep Node's runtime context; GitHub credentials and other job secrets
+        # must not cross into the third-party deployment process.
+        env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR", "CI") if key in os.environ}
+        env.update(VERCEL_TOKEN=self.token, VERCEL_ORG_ID=TEAM,
                    VERCEL_PROJECT_ID=PROJECT, VERCEL_TELEMETRY_DISABLED="1")
         return command(["vercel", *args, "--scope", "richards-llc"], env=env)
 
@@ -190,13 +194,16 @@ def live_snapshot(vercel, deployment):
         return dict(pool.map(download, files.items()))
 
 
-def verify_origin(origin, snapshot):
+def verify_origin(origin, snapshot, deadline=None):
     expected = {"/commander/" + quote(name): data for name, (data, _) in snapshot.items()}
     expected.update({"/": snapshot["index.html"][0], "/commander/": snapshot["index.html"][0]})
 
     def verify(item):
         path, data = item
-        if fetch(origin + path) != data:
+        timeout = 60 if deadline is None else min(60, deadline - time.monotonic())
+        if timeout <= 0:
+            raise RuntimeError(f"verification deadline exceeded: {origin}")
+        if fetch(origin + path, timeout=timeout) != data:
             raise RuntimeError(f"byte mismatch (including possible SSO page): {origin}{path}")
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -204,7 +211,23 @@ def verify_origin(origin, snapshot):
     print(f"verified anonymous HTTP 200 and bytes: {origin} ({len(expected)} paths)")
 
 
-def upload(vercel, dist, scratch, tag, sha, tree):
+def verify_after_promote(snapshot):
+    # A successful promotion can precede alias propagation. Retry strict byte
+    # checks for at most a minute, including their HTTP time, before rollback.
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            verify_origin(ORIGIN, snapshot, deadline=deadline)
+            return
+        except RuntimeError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            print("hosted hub has not verified yet; retrying after alias propagation", file=sys.stderr)
+            time.sleep(min(5, remaining))
+
+
+def assemble_site(dist, scratch):
     site = scratch / "site"
     public = site / "public"
     shutil.copytree(dist, public / "commander")
@@ -214,6 +237,10 @@ def upload(vercel, dist, scratch, tag, sha, tree):
     (site / "vercel.json").write_text(json.dumps({"$schema": SCHEMA}) + "\n")
     (site / ".vercel").mkdir()
     (site / ".vercel/project.json").write_text(json.dumps({"orgId": TEAM, "projectId": PROJECT}))
+    return site
+
+
+def upload(vercel, site, tag, sha, tree):
     # Match the proven manual static upload: no package, source checkout or build.
     url = vercel.cli("deploy", "--cwd", str(site), "--yes", "--prod", "--skip-domain",
                      "--meta", "hubDistTree=" + tree, "--meta", "hubSourceTag=" + tag,
@@ -248,9 +275,9 @@ def main(argv=None):
         with tempfile.TemporaryDirectory(prefix="hub-release-") as tmp:
             scratch = Path(tmp)
             sha, tree, dist, snapshot = source_dist(args.repo, args.tag, scratch)
-            # Ported Cloud verifier also applies to an unchanged release.
-            command([str(Path(__file__).with_name("verify-hub-dist.sh"))],
-                    env=dict(os.environ, DIST_DIR=str(dist), ORIGIN_INDEX=str(dist / "index.html")))
+            # One verifier run, against the assembled root/Commander pair,
+            # including releases whose live tree turns out to be unchanged.
+            site = assemble_site(dist, scratch)
             alias = vercel.api("/v4/aliases/hub.petrastella.io")
             if alias.get("projectId") != PROJECT:
                 raise RuntimeError("hub domain does not belong to cas-hub-static")
@@ -267,13 +294,13 @@ def main(argv=None):
                 verify_origin(ORIGIN, snapshot)
                 receipt["status"] = "unchanged"
             else:
-                candidate = upload(vercel, dist, scratch, args.tag, sha, tree)
+                candidate = upload(vercel, site, args.tag, sha, tree)
                 receipt.update(deployment_id=candidate["id"], immutable_url=candidate["origin"])
                 verify_origin(candidate["origin"], snapshot)
                 # Rollback covers a failed/timeout promotion too: it may have moved aliases.
                 try:
                     vercel.cli("promote", candidate["id"], "--yes")
-                    verify_origin(ORIGIN, snapshot)
+                    verify_after_promote(snapshot)
                 except Exception:
                     print(f"promotion/verification failed; restoring {previous['id']}", file=sys.stderr)
                     try:

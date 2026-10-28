@@ -151,7 +151,8 @@ async fn test_search_with_content() {
     for index in 0..6 {
         service.cas_task_create(Parameters(serde_json::from_value(serde_json::json!({
             "title": format!("boundedreceipt {index} {}", "large task title ".repeat(50)),
-            "description": "Evidence remains available through explicit expansion"
+            "description": "Evidence remains available through explicit expansion",
+            "risk": "none", "door": "two-way"
         })).unwrap())).await.unwrap();
     }
     let service = cas::mcp::tools::service::CasService::new(service, None);

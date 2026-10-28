@@ -27785,6 +27785,93 @@ mod merge_state_gate_tests {
         );
     }
 
+    #[tokio::test]
+    async fn approved_correction_must_land_after_rejected_anchor_cas_53bb() {
+        use crate::store::{open_agent_store, open_rule_store, open_skill_store, open_store, open_task_store, open_worktree_store};
+        use cas_types::{Agent, AgentRole, VerificationProofBoundary, WorkTarget, Worktree};
+
+        let mut env = TestEnvGuard::temp_home();
+        let (dir, bare) = handoff_repo();
+        let p = dir.path();
+        std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
+        git(p, &["add", ".gitignore"]);
+        git(p, &["commit", "-q", "-m", "fix(cas-53bb): initial delivery A"]);
+        let a = head_sha(p);
+        let preserved = "factory/worker-cas-53bb";
+        git(p, &["branch", preserved]);
+        git(p, &["push", "-q", "origin", "factory/worker", preserved]);
+        git(p, &["checkout", "-q", "main"]);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge A"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let wt = tempfile::tempdir().unwrap();
+        git(p, &["worktree", "add", "-q", wt.path().to_str().unwrap(), "factory/worker"]);
+
+        let root = p.join(".cas");
+        std::fs::create_dir_all(&root).unwrap();
+        env.set("CAS_ROOT", &root);
+        env.set("XDG_CONFIG_HOME", env.home().join(".config"));
+        std::fs::write(root.join("config.toml"), "[project]\ncanonical_id = 'cas-53bb-fixture'\n[verification]\nenabled = true\n[code_review]\nowner = 'worker'\n").unwrap();
+        open_store(&root).unwrap().init().unwrap();
+        open_rule_store(&root).unwrap().init().unwrap();
+        open_skill_store(&root).unwrap().init().unwrap();
+        let tasks = open_task_store(&root).unwrap();
+        tasks.init().unwrap();
+        let agents = open_agent_store(&root).unwrap();
+        agents.init().unwrap();
+        agents.register(&Agent::new_with_role("worker-id".into(), "worker".into(), AgentRole::Worker)).unwrap();
+        agents.register(&Agent::new_with_role("supervisor-id".into(), "supervisor".into(), AgentRole::Supervisor)).unwrap();
+        let worktrees = open_worktree_store(&root).unwrap();
+        worktrees.init().unwrap();
+        let worktree = Worktree::new(Worktree::generate_id(), "factory/worker".into(), "main".into(), wt.path().to_path_buf());
+        worktrees.add(&worktree).unwrap();
+        let mut task = worker_task("worker");
+        task.id = "cas-53bb".into();
+        task.status = TaskStatus::AwaitingMerge;
+        task.risk = vec![TaskRisk::None];
+        task.worktree_id = Some(worktree.id.clone());
+        task.deliverables.factory_branch_anchor = Some(a.clone());
+        task.deliverables.parked_branch = Some(preserved.into());
+        task.deliverables.work_target = Some(WorkTarget { repo_selector: "project:cas-53bb-fixture".into(), target_branch: "main".into() });
+        tasks.add(&task).unwrap();
+        let supervisor = CasCore::with_daemon(root.clone(), None, None);
+        supervisor.set_agent_id_for_testing("supervisor-id".into());
+        let worker = CasCore::with_daemon(root.clone(), None, None);
+        worker.set_agent_id_for_testing("worker-id".into());
+        let dispatch = |head: &str| {
+            let proof = super::super::repository_proof::capture_repository_proof_with_anchors(p, wt.path(), vec![head.into()]).unwrap();
+            cas_store::create_verification_dispatch_bound(&root, &task.id, "worker-id", "supervisor-id", &VerificationProofBoundary::task_at(proof), chrono::Utc::now() + chrono::Duration::minutes(10), false).unwrap()
+        };
+        let verdict = |id: String, status: &str| crate::mcp::tools::VerificationAddRequest {
+            task_id: task.id.clone(), status: status.into(), summary: "Reviewed exact delivery boundary".into(), confidence: Some(0.99),
+            issues: None, files_reviewed: Some("fixed.txt".into()), duration_ms: None, verification_type: None, verifier_capability: None, dispatch_id: Some(id),
+        };
+        let first = dispatch(&a);
+        supervisor.cas_verification_add(Parameters(verdict(first.id, "rejected"))).await.unwrap();
+        std::fs::write(wt.path().join("fixed.txt"), "correction B\n").unwrap();
+        git(wt.path(), &["add", "fixed.txt"]);
+        git(wt.path(), &["commit", "-q", "-m", "fix(cas-53bb): correct rejected A at B"]);
+        let b = head_sha(wt.path());
+        // The worker pushes its actual lane, never the preservation ref.
+        git(wt.path(), &["push", "-q", "origin", "factory/worker"]);
+        let second = dispatch(&b);
+        supervisor.cas_verification_add(Parameters(verdict(second.id, "approved"))).await.unwrap();
+        let response = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        let text = format!("{response:?}");
+        let parked = tasks.get(&task.id).unwrap();
+        assert_ne!(parked.status, TaskStatus::Closed, "{text}");
+        assert!(text.contains("MERGE REQUIRED") && text.contains(&b), "{text}");
+        assert_eq!(parked.deliverables.factory_branch_anchor.as_deref(), Some(b.as_str()), "{text}");
+        assert_eq!(parked.deliverables.parked_branch.as_deref(), Some("factory/worker"), "{text}");
+        assert_eq!(rev_parse_local(p, &format!("origin/{preserved}")), a);
+        git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "merge correction B"]);
+        git(p, &["push", "-q", "origin", "main"]);
+        let closed = worker.cas_task_close(Parameters(base_req(&task.id))).await.unwrap();
+        assert_eq!(tasks.get(&task.id).unwrap().status, TaskStatus::Closed, "{closed:?}");
+        assert!(git_commit_is_ancestor(p, &b, "origin/main"));
+        // Keep the backing remote alive through every close-time fetch.
+        drop(bare);
+    }
+
     #[cfg(unix)]
     async fn queue_proof_close_cas_4386(case: &str) -> (Task, String) {
         use crate::mcp::CasService;

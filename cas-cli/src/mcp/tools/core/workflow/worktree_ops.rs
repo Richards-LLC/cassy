@@ -6269,6 +6269,16 @@ mod tests {
         assert!(matches!(state(&format!("{cancelled},{success}")), BranchCiState::Green { .. }));
         assert!(matches!(state(cancelled), BranchCiState::Pending { .. }));
         assert!(matches!(state(&format!("{cancelled},{success},{failure}")), BranchCiState::Red { .. }));
+        // cas-53bb: publishing a second ref at the same SHA can register a
+        // queued duplicate after this check already completed. The newest
+        // completed conclusion remains the verdict; other check names still
+        // owe their own completion.
+        let queued = r#"{"id":4,"name":"Fast Validation","status":"queued","conclusion":null}"#;
+        assert!(matches!(state(&format!("{success},{queued}")), BranchCiState::Green { .. }));
+        assert!(matches!(state(&format!("{success},{failure},{queued}")), BranchCiState::Red { .. }));
+        assert!(matches!(state(queued), BranchCiState::Pending { .. }));
+        let runs: Vec<serde_json::Value> = serde_json::from_str(&format!("[{success},{queued}]")).unwrap();
+        assert!(!super::check_runs_still_running(&runs));
         assert!(matches!(state(classifier), BranchCiState::Pending { .. }));
         assert!(matches!(
             require_code_validation(state(classifier)),

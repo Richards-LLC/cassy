@@ -10,6 +10,9 @@
  * anywhere but the operator's own paired machines.
  */
 
+import { NOTICE_KIND } from "./operator-notices";
+import type { AttentionItem } from "./types";
+
 /** Each counted action and the registry journey (docs/qa/journeys.yaml) it measures. */
 export const USAGE_ACTIONS = {
   "pair.code": "HUB-J1",
@@ -155,4 +158,9 @@ export const usage = new UsageCounter();
 
 export function countUsage(action: UsageAction): void {
   usage.count(action);
+}
+
+/** Count a delivered notice being retired, once for the still-open group. */
+export function countAttentionDelivery(items: readonly Pick<AttentionItem, "kind" | "acknowledgedAt">[], counter: Pick<UsageCounter, "count"> = usage): void {
+  if (items.some(item => item.kind === NOTICE_KIND && !item.acknowledgedAt)) counter.count("attention.delivery");
 }

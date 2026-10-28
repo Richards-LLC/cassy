@@ -202,6 +202,7 @@ impl CasCore {
         })?;
 
         let mut read_status = String::new();
+        let mut batch_summary = String::new();
 
         let target = task
             .deliverables
@@ -215,10 +216,10 @@ impl CasCore {
             .origin_project
             .as_deref()
             .unwrap_or("unassigned legacy row");
-        let origin = if project_id.is_some()
+        let foreign_origin = project_id.is_some()
             && task.origin_project.is_some()
-            && !super::task_owned_by_project(&task, &self.cas_root, project_id.as_deref())
-        {
+            && !super::task_owned_by_project(&task, &self.cas_root, project_id.as_deref());
+        let origin = if foreign_origin {
             format!("{origin} — this task is owned elsewhere")
         } else {
             origin.to_string()
@@ -383,6 +384,17 @@ impl CasCore {
         }
 
         if let Some(batch) = task.deliverables.integration_batch.as_ref() {
+            batch_summary = format!(
+                "{}: {}@{}\n",
+                if task.status == TaskStatus::AwaitingMerge {
+                    "Staged in integration batch"
+                } else {
+                    "Integration batch receipt"
+                },
+                excerpt(&batch.branch, 60),
+                batch.tip
+            );
+
             output.push_str(&format!(
                 "{}: {}@{} (base {}, delivery {}, supervisor {})\n",
                 if task.status == TaskStatus::AwaitingMerge {
@@ -710,23 +722,32 @@ impl CasCore {
             }
         }
 
+        let origin_summary = if foreign_origin {
+            format!(
+                "{} — this task is owned elsewhere",
+                excerpt(task.origin_project.as_deref().unwrap_or(""), 40)
+            )
+        } else {
+            excerpt(&origin, 40)
+        };
         let header = format!(
-            "Task: {} - {}\nStatus: {:?}\nAssignee: {}\nPriority: P{}; Depth: {}; Delivery mode: {}\nOrigin project: {}\nTarget: {}\n",
+            "Task: {} - {}\nStatus: {:?}\nAssignee: {}\nOrigin project: {}\nPriority: P{}; Depth: {}; Delivery mode: {}\nTarget: {}\n",
             task.id,
             excerpt(&task.title, 60),
             task.status,
             excerpt(task.assignee.as_deref().unwrap_or("(unassigned)"), 40),
+            origin_summary,
             task.priority.0,
             task.depth,
             task.delivery_mode,
-            excerpt(&origin, 40),
             excerpt(&target, 80),
         );
         let summary = format!(
-            "{}\n{}{}\nNotes:\n{}",
+            "{}\n{}{}{}\nNotes:\n{}",
             excerpt(&header, 400),
             task_scope(&task),
             excerpt(&read_status, 200),
+            batch_summary,
             task_show_notes(&task.notes, &task.id)
         );
         Ok(Self::success(render_task_read(

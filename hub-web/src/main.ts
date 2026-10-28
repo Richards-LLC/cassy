@@ -184,7 +184,7 @@ installAttachmentSheet((sheet, file, context) => {
   const thread = threadOf(context);
   if (!thread) return sheet;
   const available = () => connectionStates.get(thread.machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
+  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available, openPreview: context.turn.event.kind === "send" });
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
@@ -5700,7 +5700,7 @@ app.addEventListener("click", (event) => {
         const ticket = await visualPageView(machineId, session, artifactId);
         return ticket ? { ok: true, view: { artifact_id: artifactId, url: ticket.url } } : connection.visualPage(session, artifactId);
       }
-      : () => connection.artifactView(session, artifactId),
+      : () => link.closest(".turn.you") ? connection.artifactPreview(session, artifactId) : connection.artifactView(session, artifactId),
     openWindow: () => window.open("about:blank", "_blank"),
     notify: (message, result) => {
       if (artifactIsLocalOnly(result)) localOnlyArtifacts.add(localKey);

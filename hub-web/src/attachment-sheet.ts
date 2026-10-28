@@ -172,7 +172,7 @@ export function renderAttachmentSheet(document: Document, attachment: ArtifactRe
   const label = `${joinSpoken([attachment.name, mark, size, supervisor && `from ${supervisor}`])}. Open`;
   sheet.dataset.label = label;
   sheet.setAttribute("aria-label", label);
-  sheet.title = `${attachment.mime} · ${attachment.size_bytes} bytes · sha256 ${attachment.sha256.slice(0, 12)}…`;
+  sheet.title = [attachment.mime, attachment.size_bytes >= 0 ? `${attachment.size_bytes} bytes` : "", attachment.sha256 ? `sha256 ${attachment.sha256.slice(0, 12)}…` : ""].filter(Boolean).join(" · ");
   const plate = document.createElement("span"); plate.className = "plate"; plate.textContent = mark; plate.setAttribute("aria-hidden", "true");
   const text = document.createElement("span"); text.className = "ftext";
   const name = document.createElement("span"); name.className = "fname"; name.textContent = attachment.name;
@@ -254,7 +254,7 @@ export const attachmentSheetRenderer = (_reply: OperatorReply, context: TurnRend
   const attachment = context.attachment;
   if (!attachment) throw new Error("attachment renderer called without an attachment");
   // cas-d8a5 (journey F32): "from the cas-src supervisor" when the project is known.
-  const sheet = renderAttachmentSheet(context.document, attachment, context.spokenSupervisor ? `the ${context.spokenSupervisor}` : context.supervisor);
+  const sheet = renderAttachmentSheet(context.document, attachment, context.turn.event.kind === "send" ? "you" : context.spokenSupervisor ? `the ${context.spokenSupervisor}` : context.supervisor);
   const pages = visualPageSource;
   return pages && isVisualPage(attachment) ? renderVisualPage(context.document, attachment, sheet, () => pages(attachment.artifact_id, context)) : sheet;
 };

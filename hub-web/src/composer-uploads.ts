@@ -1,8 +1,9 @@
 import "./composer-uploads.css";
+import { sentAttachmentReference } from "./sent-attachments";
 
 const MAX_BYTES = 10 * 1024 * 1024;
-interface PendingFile { id: string; file: File; preview?: string; thumbnail?: string; path?: string }
-type Upload = (id: string, name: string, data: string) => Promise<{ path: string; artifact_id: string }>;
+interface PendingFile { id: string; file: File; preview?: string; thumbnail?: string; path?: string; mime?: string }
+type Upload = (id: string, name: string, data: string) => Promise<{ path: string; artifact_id: string; mime: string }>;
 
 /** Bytes remain in this page through socket reconnects and shell replacements. */
 export class ComposerUploads {
@@ -53,13 +54,14 @@ export class ComposerUploads {
             reader.readAsDataURL(entry.file);
           });
           try {
-            entry.path = (await upload(entry.id, entry.file.name, data)).path;
+            const uploaded = await upload(entry.id, entry.file.name, data);
+            entry.path = uploaded.path; entry.mime = uploaded.mime;
           } catch (error) {
             throw new Error(`${entry.file.name}: ${error instanceof Error ? error.message : "The upload failed."}`);
           }
         }
       }
-      return [text, ...this.files.map(entry => `Attached file: ${entry.path}`)].filter(Boolean).join("\n\n");
+      return [text, ...this.files.map(entry => sentAttachmentReference({ path: entry.path!, mime: entry.mime!, size: entry.file.size }))].filter(Boolean).join("\n\n");
     } catch (error) {
       this.error = `Files were not sent. ${error instanceof Error ? error.message : "The upload failed."} Your files are kept here.`;
       throw new Error(this.error);

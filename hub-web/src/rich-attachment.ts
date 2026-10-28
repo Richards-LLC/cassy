@@ -22,7 +22,7 @@ function previewElement(document: Document): Preview {
 }
 
 /** Reserve media's final viewport before any lazy code, URL or bytes arrive. */
-export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>, options: { machineId?: string; available?: () => boolean } = {}): HTMLElement {
+export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchView: () => Promise<ArtifactViewResult | undefined>, options: { machineId?: string; available?: () => boolean; openPreview?: boolean } = {}): HTMLElement {
   const mime = file.mime.split(";")[0]!.trim().toLowerCase();
   if (!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|ogg)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/pdf)$/.test(mime)) return sheet;
   const document = sheet.ownerDocument;
@@ -44,7 +44,11 @@ export function inlineAttachment(sheet: HTMLElement, file: ArtifactRef, fetchVie
       label.textContent = "Preview unavailable. Open the file below."; viewport.replaceChildren(label);
     }
   };
-  root.append(viewport, sheet);
+  if (options.openPreview && mime.startsWith("image/")) {
+    const link = document.createElement("a"); link.href = sheet.getAttribute("href")!;
+    link.setAttribute("aria-label", `Open ${file.name} preview`);
+    link.append(viewport); root.append(link, sheet);
+  } else root.append(viewport, sheet);
   return root;
 }
 

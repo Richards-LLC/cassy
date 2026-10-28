@@ -1,3 +1,4 @@
+import { sentAttachments, sentMessageLabel } from "./sent-attachments";
 import { fitMachineLine, hostMarkup } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
@@ -383,7 +384,7 @@ function earlierSessionNode(document: Document, entry: EarlierSession, now: numb
       time.textContent = stampLabel(event.at, now) ?? "";
     }
     const text = document.createElement("p");
-    text.textContent = plainTextMarkdown(event.kind === "send" ? event.value.text : event.value.message);
+    text.textContent = plainTextMarkdown(event.kind === "send" ? sentMessageLabel(event.value.text) : event.value.message);
     item.append(who, " ", time, text);
     list.append(item);
   }
@@ -1127,7 +1128,7 @@ export class ConversationView {
     if (!reply.reply_to_session || reply.reply_to === null) return undefined;
     const entry = this.history.earlierSessions().find((entry) => entry.session === reply.reply_to_session);
     const question = entry?.events.find((event) => event.kind === "send" && event.value.notificationId === reply.reply_to);
-    return question?.kind === "send" ? question.value.text : undefined;
+    return question?.kind === "send" ? sentMessageLabel(question.value.text) : undefined;
   }
 
   /** An ask or blocker repaints when the operator answers it, not only when its own event changes. */
@@ -1459,7 +1460,20 @@ export class ConversationView {
       origin.textContent = `from ${send.deviceLabel}`;
       bubble.append(origin);
     }
-    bubble.append(...paragraphs(document, send.text));
+    const { text, attachments } = sentAttachments(send.text);
+    bubble.append(...paragraphs(document, text));
+    if (attachments.length) {
+      const reply: OperatorReply = { notification_id: send.notificationId ?? 0, reply_to: null, message: text, summary: "", device_id: "", attachments };
+      const context = this.context(document, turn, reply);
+      const renderer = turnRenderers.get("attachment");
+      for (const attachment of attachments) {
+        if (renderer) bubble.append(renderer(reply, { ...context, attachment }));
+        else {
+          const link = document.createElement("a"); link.href = `#artifact:${encodeURIComponent(attachment.artifact_id)}`;
+          link.textContent = attachment.name; bubble.append(link);
+        }
+      }
+    }
     if (send.state === "sending") {
       const state = document.createElement("span");
       state.className = `conversation-delivery${send.held ? " conversation-held" : ""}`; state.setAttribute("role", "status");

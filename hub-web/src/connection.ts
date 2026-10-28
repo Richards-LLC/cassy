@@ -659,7 +659,7 @@ export class HubConnectionSupervisor {
     this.clockOffsetMs = Math.abs(offset) > 5_000 ? offset : 0;
   }
 
-  uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string }> {
+  uploadFile(session: string, id: string, name: string, data: string): Promise<{ path: string; artifact_id: string; mime: string }> {
     // Budget the base64 wire payload at 64 KiB/s (512 kbit/s), plus signing,
     // JSON overhead and hub storage time. Ordinary reads keep their short deadline.
     const timeoutMs = 10_000 + Math.ceil(data.length / 65_536) * 1000;

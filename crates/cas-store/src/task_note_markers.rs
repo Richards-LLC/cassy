@@ -74,17 +74,19 @@ pub(crate) fn replace_raw_artifact_note(notes: &str, receipt: &str) -> Option<St
     let raw = receipt.lines()
         .filter(|line| !line.starts_with("ARTIFACT_PROOF:"))
         .collect::<Vec<_>>().join("\n");
-    let copies = notes.match_indices(&raw)
-        .filter_map(|(start, _)| {
-            let end = start + raw.len();
-            ((start == 0 || notes[..start].ends_with("\n\n"))
-                && (end == notes.len() || notes[end..].starts_with("\n\n")))
-                .then_some(start..end)
+    let blocks = note_blocks(notes);
+    let copies = blocks.iter()
+        .filter(|block| **block == raw)
+        .map(|block| {
+            // note_blocks borrows complete slices of notes. Keep their byte
+            // ranges so replacing a duplicate leaves all other text intact.
+            let start = block.as_ptr() as usize - notes.as_ptr() as usize;
+            start..start + block.len()
         }).collect::<Vec<_>>();
     if copies.is_empty() {
         return None;
     }
-    let mut enriched_exists = contains_complete_lines(notes, receipt);
+    let mut enriched_exists = blocks.contains(&receipt);
     let mut next = notes.to_string();
     for mut range in copies.into_iter().rev() {
         if enriched_exists {

@@ -322,6 +322,7 @@ export class HubConnectionSupervisor {
   private readonly desiredSessions = new Set<string>();
   private readonly machineSubscriptions = new Set<string>();
   private healthPing?: { id: number; startedAt: number };
+  private machineInfoKnown = false;
   private readonly eventRecovery = new EventRecovery();
   private readonly diagnostics = new ConnectionDiagnostics();
   private connectionGeneration = 0;
@@ -485,8 +486,9 @@ export class HubConnectionSupervisor {
       if (stage === "auth") {
         this.transition("auth", "auth");
         await this.withStageTimeout("auth", async (signal) => {
-          await this.refreshMachineInfo(signal);
-          await this.refreshSessions(signal);
+          // Independent signed reads share the stage budget without spending
+          // the catalog's deadline waiting for the capability probe first.
+          await Promise.all([this.refreshMachineInfo(signal), this.refreshSessions(signal)]);
         });
         stage = "attaching";
       }
@@ -717,14 +719,21 @@ export class HubConnectionSupervisor {
     try {
       const info = await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, signal);
       if (typeof info.version === "string") this.diagnostics.build(info.version);
-      this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
-      this.callbacks.onMachineInfo?.(info);
+      this.acceptMachineInfo(info);
     } catch (error) {
       if (error instanceof AuthenticationError || error instanceof TransientAuthError) throw error;
-      // Older hubs can still offer the read-only session surface. The UI shows
-      // a visible compatibility warning and leaves capability-gated controls off.
-      this.callbacks.onMachineInfo?.(undefined);
+      // Only a missing endpoint proves an old hub. A timeout or busy store
+      // cannot revoke capabilities this paired hub already advertised.
+      if (error instanceof HubRequestError && [404, 405, 501].includes(error.status)) {
+        this.acceptMachineInfo({ schema_version: 1, version: "unknown", capabilities: [] });
+      }
     }
+  }
+
+  private acceptMachineInfo(info: HubMachineInfo): void {
+    this.machineInfoKnown = true;
+    this.machineMultiplex = info.capabilities.includes("machine_multiplex_v2");
+    this.callbacks.onMachineInfo?.(info);
   }
 
   /**
@@ -1040,7 +1049,8 @@ export class HubConnectionSupervisor {
         this.machineSocket.send(JSON.stringify({ channel: "health", ping: id }));
         return;
       }
-      await this.request("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
+      const info = await this.request<HubMachineInfo>("GET", "/v1/machine", undefined, AbortSignal.timeout(3_000));
+      if (!this.machineInfoKnown) this.acceptMachineInfo(info);
       const wasUnsteady = this.unsteady();
       this.missedHeartbeats = 0;
       this.lastHeartbeatAt = Date.now();

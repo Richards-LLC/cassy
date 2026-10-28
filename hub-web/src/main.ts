@@ -3219,7 +3219,7 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
     machineLabel: machine?.label,
     session: selectedSession,
     supervisor: supervisorTarget(session),
-    daemonAttach: machine ? hubSupports(machine.id, "daemon_attach") : false,
+    daemonAttach: machine ? machineInfo.get(machine.id)?.capabilities.includes("daemon_attach") : undefined,
     scopes: machine?.scopes ?? [],
     leaseHeldByMe: lease?.held_by_me === true,
     leaseControllerLabel: lease?.held_by_me ? undefined : lease?.controller_label,

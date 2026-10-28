@@ -51,6 +51,7 @@ export type SupervisorSendBlock =
   | "empty"
   | "no-session"
   | "no-supervisor"
+  | "checking-hub"
   | "unsupported-hub"
   | "missing-scope";
 
@@ -63,7 +64,7 @@ export interface SupervisorSendContext {
   readonly machineLabel: string | undefined;
   readonly session: string | undefined;
   readonly supervisor: string | undefined;
-  readonly daemonAttach: boolean;
+  readonly daemonAttach: boolean | undefined;
   readonly scopes: readonly Scope[];
   readonly leaseHeldByMe: boolean;
   readonly leaseControllerLabel: string | undefined;
@@ -90,6 +91,9 @@ export function planSupervisorSend(context: SupervisorSendContext): SupervisorSe
   // the fact that this device is refused whatever it types.
   if (!context.machineLabel || !context.session) {
     return { kind: "blocked", block: "no-session", reason: "Choose a paired machine and a live session before sending a message." };
+  }
+  if (context.daemonAttach === undefined) {
+    return { kind: "blocked", block: "checking-hub", reason: "Checking this machine's message support. Commander retries when the connection returns." };
   }
   if (!context.daemonAttach) {
     return {

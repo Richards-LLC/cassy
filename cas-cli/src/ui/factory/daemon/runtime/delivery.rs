@@ -1508,16 +1508,24 @@ impl FactoryDaemon {
                 }
                 // cas-1f0c: a queued row's body reaches a Claude Teams
                 // recipient through the CAS hook only; its inbox gets a pointer.
-                let inbox_text = if let Some((id, body)) = queued {
+                let delivery = if let Some((id, _)) = queued {
                     let queue = cas_store::SqlitePromptQueueStore::open_read_only(self.app.cas_dir())?;
-                    let delivery = queue.recipient_delivery(id, target)?
-                        .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?;
-                    Some(match delivery {
-                        cas_store::RecipientDelivery::Full(_) => claude_teams_inbox_text(text, body, source, id),
-                        cas_store::RecipientDelivery::Reference(row)
-                        | cas_store::RecipientDelivery::Settled(row) => row.prompt,
-                    })
+                    Some(queue.recipient_delivery(id, target)?
+                        .ok_or_else(|| anyhow::anyhow!("queued recipient message unavailable"))?)
                 } else { None };
+                let reference = match &delivery {
+                    Some(cas_store::RecipientDelivery::Reference(row)
+                        | cas_store::RecipientDelivery::Settled(row)) => Some(row),
+                    _ => None,
+                };
+                // Use the projection for every payload field and for a Teams
+                // failure's PTY fallback, which otherwise resurrects the body.
+                let text = reference.map_or(text, |row| row.prompt.as_str());
+                let summary = reference.map_or(summary, |row| row.summary.as_deref());
+                let inbox_text = queued.map(|(id, body)| {
+                    if reference.is_some() { text.to_string() }
+                    else { claude_teams_inbox_text(text, body, source, id) }
+                });
                 let inbox_text = inbox_text.as_deref().unwrap_or(text);
                 let write = if let Some(native) = completed_native {
                     native.result

@@ -3087,8 +3087,8 @@ impl CasService {
                 let delivery = queue.recipient_delivery(row.id, &worker.name)
                     .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?
                     .ok_or_else(|| Self::error(ErrorCode::INTERNAL_ERROR, "recovery row unavailable"))?;
-                let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(
-                    &delivery.into_prompt());
+                let row = delivery.into_prompt();
+                let body = crate::ui::factory::daemon::runtime::queue_and_events::teams_body_fallback_text(&row);
                 if let Err(error) = inbox.write_to_inbox(
                     &worker.name,
                     &row.source,

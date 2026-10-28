@@ -1083,7 +1083,15 @@ mod tests {
         // A real terminal pair in its default canonical mode.
         let (mut master, mut slave) = (0, 0);
         assert_eq!(
-            unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) },
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
             0
         );
         let mut keyboard = unsafe { std::fs::File::from_raw_fd(master) };

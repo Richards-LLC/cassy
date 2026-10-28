@@ -220,7 +220,7 @@ describe("binding Cassy Cloud browser invariants", () => {
     // pin: scope this source check to the real send handler exercised by J24.
     const submit = source.slice(source.indexOf("async function submitSupervisorMessage("), source.indexOf("function capturePairingDraft():"));
     // pin: J24 proves the browser behavior; keep the submit path tied to its status reset.
-    expect(submit).toMatch(/if \(sent && uploads && hasAttachments\) \{\s*uploads\.clear\(\);\s*if \(!messageStatus\?\.held\) clearComposerStatus\(\);/);
+    expect(submit).toMatch(/if \(sent && uploads && hasAttachments\) \{\s*uploads\.clear\(\);\s*if \(messageStatus\?\.session === submissionKey && !messageStatus\?\.held\) clearComposerStatus\(\);/);
   });
 
   // Contract: a deferred structural change flushes after focus/gestures end.

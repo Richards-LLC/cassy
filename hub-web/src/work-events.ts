@@ -323,6 +323,17 @@ export type ChipTone = "ok" | "warn" | "crit" | "idle";
 
 export interface TaskChip { readonly id: string; readonly subject: string; readonly verb: string; readonly tone: ChipTone; readonly label: string }
 
+/** Explicit tool results can report failure even when the legacy flag is absent. */
+export function workFailed(event: WorkEvent): boolean {
+  return event.error || event.lifecycle?.outcome === "error" || (event.tool?.exit_code !== undefined && event.tool.exit_code !== 0);
+}
+
+/** Routine turn bookends stay available together, without two rows per turn. */
+export function turnNotice(event: WorkEvent): boolean {
+  return event.kind === "notice" && !workFailed(event) && event.lifecycle?.phase === undefined
+    && (event.lifecycle?.stage === "start" || event.lifecycle?.stage === "end");
+}
+
 /** A task event as a chip: its task id and transition. Others stay rows. */
 export function taskChip(event: WorkEvent): TaskChip | undefined {
   if (event.kind !== "task") return undefined;
@@ -336,14 +347,14 @@ export function taskChip(event: WorkEvent): TaskChip | undefined {
 export function workSummary(events: readonly WorkEvent[]): string {
   const count = (kind: WorkEventKind): number => events.filter((event) => event.kind === kind).length;
   const tools = count("tool"), thinking = count("thinking"), todos = count("todo");
-  const failed = events.filter((event) => event.kind === "tool" && event.error).length;
-  const others = events.length - tools - thinking - todos - events.filter((event) => taskChip(event) !== undefined).length;
+  const failed = events.filter((event) => event.kind === "tool" && workFailed(event)).length;
+  const others = events.filter((event) => !["tool", "thinking", "todo"].includes(event.kind) && !taskChip(event) && !turnNotice(event)).length;
   const parts: string[] = [];
   if (thinking > 0) parts.push("Thought");
   if (tools > 0) parts.push(`ran ${tools} tool${tools === 1 ? "" : "s"}${failed > 0 ? ` (${failed} failed)` : ""}`);
   if (todos > 0) parts.push(`updated todos`);
   if (others > 0) parts.push(`${others} event${others === 1 ? "" : "s"}`);
-  if (parts.length === 0) return "Task updates";
+  if (parts.length === 0) return events.some((event) => taskChip(event)) ? "Task updates" : "Turn activity";
   const text = parts.join(", ");
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
@@ -351,6 +362,26 @@ export function workSummary(events: readonly WorkEvent[]): string {
 /** The words a row shows: thinking reads as "Thinking", the rest as labelled. */
 export function rowText(event: WorkEvent): string {
   if (event.kind === "thinking") return event.label ? `Thinking: ${event.label}` : "Thinking…";
+  const tool = event.kind === "tool" ? event.tool : undefined;
+  if (tool) {
+    const files = tool.counts?.files;
+    const fileScope = files === undefined ? tool.targets.join(", ") : `${files} file${files === 1 ? "" : "s"}`;
+    const scope = (verb: string, value: string): string => value ? `${verb} · ${value}` : verb;
+    const running = event.lifecycle?.stage === "start" || event.lifecycle?.stage === "phase";
+    if (tool.operation === "read") return scope("Read", fileScope);
+    if (tool.operation === "search") {
+      const matches = tool.counts?.matches;
+      return scope("Search", matches === undefined ? tool.targets.join(", ") : `${matches} match${matches === 1 ? "" : "es"}`);
+    }
+    if (tool.operation === "command") return tool.exit_code === undefined
+      ? (running ? "Running command" : "Command") : `Ran command · exit ${tool.exit_code}`;
+    if (tool.operation === "edit") {
+      const verb = running ? "Editing" : event.lifecycle?.outcome === "success" ? "Edited" : "Edit";
+      return files === undefined ? scope(verb, fileScope) : `${verb} ${files} file${files === 1 ? "" : "s"}`;
+    }
+    // Opaque wrappers remain opaque. Their original hint is more useful than "Other".
+    return event.label || tool.name;
+  }
   return event.label || event.kind;
 }
 

@@ -265,6 +265,10 @@ function scheduleConversationLayout(): void {
   if (conversationLayoutFrame !== undefined) return;
   conversationLayoutFrame = requestAnimationFrame(() => {
     conversationLayoutFrame = undefined;
+    const list = document.querySelector<HTMLElement>("#conversation-list");
+    // A phone's list is display:none while reading. Even a scrollTop write
+    // on it forces layout of the visible thread, with no position to restore.
+    if (list && !(phoneLayout() && selectedSession)) keepConversationListPlace(list, selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined);
     fitConversationHost(document);
     markRailEdges();
   });
@@ -4398,7 +4402,6 @@ function renderConversationList(): void {
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
   }, endConversationSession);
-  keepConversationListPlace(container, shown.find((row) => row.selected)?.key);
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();

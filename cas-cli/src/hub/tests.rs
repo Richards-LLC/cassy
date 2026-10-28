@@ -16,6 +16,121 @@ use crate::ui::factory::{
     SessionState, daemon_capabilities,
 };
 
+/// The catalog follows each recorded supervisor account, never the hub's
+/// provider environment; a machine-only pairing cannot read those identities.
+#[tokio::test]
+async fn conversation_catalog_uses_recorded_accounts_and_session_read_scope_cas_c021() {
+    use base64::Engine as _;
+    use chrono::Utc;
+    use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::rand_core::OsRng;
+    use crate::store::{AgentStore, SqliteAgentStore, init_cas_dir};
+    use crate::ui::factory::create_metadata;
+
+    let mut env = crate::test_support::TestEnvGuard::temp_home();
+    let home = env.home().to_path_buf();
+    let claude = home.join("claude-account");
+    let codex = home.join("codex-account");
+    for dir in [&claude, &codex, &home.join(".codex")] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(claude.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"claude@example.test"}}"#).unwrap();
+    std::fs::write(home.join(".claude.json"), r#"{"oauthAccount":{"emailAddress":"default-claude@example.test"}}"#).unwrap();
+    for (dir, email) in [(&codex, "codex@example.test"), (&home.join(".codex"), "default-codex@example.test")] {
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(format!(r#"{{"email":"{email}"}}"#));
+        std::fs::write(dir.join("auth.json"), serde_json::json!({"tokens":{"id_token":format!("header.{claims}.signature")}}).to_string()).unwrap();
+    }
+    let project = home.join("project");
+    let cas_root = init_cas_dir(&project).unwrap();
+    std::fs::write(cas_root.join("config.toml"), "[project]\ncanonical_id = \"catalog-project\"\n").unwrap();
+    let unrelated = init_cas_dir(&home.join("unrelated")).unwrap();
+    env.set("CAS_ROOT", unrelated);
+    let agents = SqliteAgentStore::open(&cas_root).unwrap();
+    agents.init().unwrap();
+    let cases = [
+        ("claude", "claude", Some(claude.clone()), Some("claude@example.test")),
+        ("codex", "codex", Some(codex.clone()), Some("codex@example.test")),
+        ("default-claude", "claude", Some(home.join(".claude")), Some("default-claude@example.test")),
+        ("default-codex", "codex", Some(home.join(".codex")), Some("default-codex@example.test")),
+        ("grok", "grok", None, None),
+        ("opencode", "opencode", None, None),
+        ("legacy", "claude", None, None),
+        ("unknown", "new-harness", None, None),
+    ];
+    let mut sessions = Vec::new();
+    for (name, harness, selector, _) in &cases {
+        env.set("CAS_FACTORY_SUPERVISOR_CLI", harness);
+        env.set("CLAUDE_CONFIG_DIR", &claude);
+        env.set("CODEX_HOME", &codex);
+        if name.starts_with("default-") {
+            env.remove("CLAUDE_CONFIG_DIR");
+            env.remove("CODEX_HOME");
+        }
+        let mut agent = cas_types::Agent::new(format!("catalog-{name}"), name.to_string());
+        agent.role = cas_types::AgentRole::Supervisor;
+        agent.factory_session = Some(name.to_string());
+        crate::mcp::daemon::apply_factory_worker_metadata(&mut agent, None);
+        if *name == "legacy" {
+            agent.metadata.remove("supervisor_account_dir");
+        } else {
+            assert_eq!(agent.metadata.get("supervisor_account_dir").map(std::path::PathBuf::from), *selector, "{name}: registration records only this harness's selector");
+        }
+        agents.register(&agent).unwrap();
+        sessions.push(SessionInfo {
+            name: name.to_string(),
+            metadata: create_metadata(name, std::process::id(), name, &[], None, project.to_str(), Some(4173)),
+            is_running: true,
+            socket_exists: true,
+        });
+    }
+    // Valid but unrelated ambient accounts must not fill in legacy identities.
+    env.set("CLAUDE_CONFIG_DIR", &codex);
+    env.set("CODEX_HOME", &claude);
+    let projected = LocalSessionReadModel::default().project(&sessions);
+    let temp = private_tempdir();
+    let auth = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    let pair = |scopes: std::collections::BTreeSet<Scope>| {
+        let signing = SigningKey::random(&mut OsRng);
+        let invitation = auth.mint_pairing("https://controller.example", scopes.clone(), Utc::now()).unwrap();
+        let mut exchange = PairingExchange::test_fixture(invitation.token, "machine-test", "https://controller.example", scopes);
+        exchange.public_key_jwk = public_jwk(&signing);
+        (signing, auth.exchange_pairing(exchange, Utc::now()).unwrap())
+    };
+    let readers = [pair([Scope::SessionRead].into_iter().collect()), pair([Scope::MachineRead].into_iter().collect())];
+    let events = MachineEventBus::new(16);
+    let app = router(HubState::new(
+        SessionCatalog::new(RecordingReadModel::with_sessions(projected)),
+        Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
+        DaemonConnector::new(SessionMultiplexer::new(8), events.clone()), events,
+    ).with_auth(auth));
+    for (index, (signing, credential)) in readers.iter().enumerate() {
+        let response = app.clone().oneshot(Request::get("/v1/sessions")
+            .header("origin", "https://controller.example")
+            .header("authorization", format!("DPoP {}", credential.credential))
+            .header("dpop", sign_dpop(signing, &credential.credential, "GET", "/v1/sessions", Utc::now(), &uuid::Uuid::new_v4().to_string()))
+            .body(Body::empty()).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        if index == 1 {
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert!(!String::from_utf8_lossy(&bytes).contains("account_email"));
+            continue;
+        }
+        assert_eq!(status, StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let rows = body["sessions"].as_array().unwrap();
+        assert_eq!(rows.len(), cases.len());
+        for (name, harness, _, email) in &cases {
+            let row = rows.iter().find(|row| row["name"] == *name).unwrap();
+            assert_eq!(row["harness"].as_str(), (*harness != "new-harness").then_some(*harness), "{name}");
+            assert_eq!(row["account_email"].as_str(), *email, "{name}");
+            assert_eq!(row["project"], "catalog-project");
+            assert_eq!(row["machine_online"], true);
+            if email.is_none() { assert!(row.get("account_email").is_none(), "{name}: unknown email is omitted"); }
+        }
+    }
+}
+
 /// cas-5e53: an already-open SSE grant must end after another auth-store
 /// process revokes its device, even with no event traffic or browser heartbeat.
 #[tokio::test]

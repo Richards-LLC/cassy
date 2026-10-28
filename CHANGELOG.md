@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [3.86.0] - 2026-10-28
+
 ### Added — Commander without the terminal
 
 - **Conversations open fast** — Was: opening a long supervisor conversation

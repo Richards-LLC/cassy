@@ -407,11 +407,30 @@ pub(crate) fn queue_approved_verification_close_retry(
     cas_root: &Path,
     task: &cas_types::Task,
     dispatch_id: &str,
-) -> Result<Option<i64>, String> {
-    if task.is_terminal() || !matches!(task.status, TaskStatus::InProgress | TaskStatus::AwaitingMerge) {
-        return Ok(None);
+) -> Result<ApprovedCloseRetry, String> {
+    // cas-7fc3 (GH #1388): a worker waiting, Blocked, on exactly this
+    // dispatch is the documented verification wait. Its approval is what the
+    // worker waits for, so it gets the retry like an in-progress worker.
+    let eligible = match task.status {
+        TaskStatus::InProgress | TaskStatus::AwaitingMerge => true,
+        TaskStatus::Blocked => {
+            super::super::block_hold::blocked_only_by_verification_wait(cas_root, &task.id, dispatch_id)
+        }
+        _ => false,
+    };
+    if !eligible {
+        return Ok(ApprovedCloseRetry::NotQueued(match task.status {
+            TaskStatus::Blocked => format!(
+                "task {} is blocked by a hold other than the verification wait for {dispatch_id}; resolve that hold, then retry task close",
+                task.id
+            ),
+            status => format!("task {} is {status}", task.id),
+        }));
     }
-    queue_assignee_notice(cas_root, task, |worker_name| {
+    if let AutoUnblockWorkerTarget::Skipped(reason) = auto_unblock_worker_target(cas_root, task)? {
+        return Ok(ApprovedCloseRetry::NotQueued(reason));
+    }
+    let queued = queue_assignee_notice(cas_root, task, |worker_name| {
         (
             format!("verification-approved-close:{dispatch_id}:worker:{worker_name}"),
             format!(
@@ -420,7 +439,23 @@ pub(crate) fn queue_approved_verification_close_retry(
             ),
             format!("Verification approved: retry close {}", task.id),
         )
+    })?;
+    Ok(match queued {
+        Some(prompt_id) => ApprovedCloseRetry::Queued(prompt_id),
+        None => ApprovedCloseRetry::NotQueued(format!(
+            "task {} has no live assigned worker",
+            task.id
+        )),
     })
+}
+
+/// cas-7fc3: the outcome of queueing a worker close retry after an approved
+/// verdict. `NotQueued` names the specific reason, never a generic
+/// "no live worker" when the worker is live but another gate holds.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ApprovedCloseRetry {
+    Queued(i64),
+    NotQueued(String),
 }
 
 /// cas-eda0: tell the assigned worker, once per task, that Cassy closed its
@@ -1934,11 +1969,63 @@ mod tests {
         assert!(!rows[0].urgent);
 
         task.status = TaskStatus::Closed;
-        assert_eq!(
+        assert!(matches!(
             queue_approved_verification_close_retry(temp.path(), &task, "vdispatch-approved-2")
                 .unwrap(),
-            None,
+            ApprovedCloseRetry::NotQueued(_),
+        ));
+        assert_eq!(queue.peek_all(10).unwrap().len(), 1);
+    }
+
+    /// cas-7fc3 (GH #1388): a live worker Blocked on the documented
+    /// verification wait for exactly this dispatch gets the close retry. A
+    /// task held by any other blocker is not retried, and the receipt names
+    /// that hold rather than claiming no live worker exists.
+    #[test]
+    fn approved_verification_retries_close_for_worker_in_verification_wait_cas_7fc3() {
+        let _env = TestEnvGuard::with_vars(&[("CAS_FACTORY_SESSION", "sess-verdict-wait")]);
+        let temp = TempDir::new().unwrap();
+        let agents = SqliteAgentStore::open(temp.path()).unwrap();
+        agents.init().unwrap();
+        let mut worker =
+            agent_in_session("wait-worker-id", "wait-worker", AgentRole::Worker, "sess-verdict-wait");
+        worker.status = AgentStatus::Idle;
+        agents.register(&worker).unwrap();
+        let tasks = cas_store::SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let blocked = |id: &str, blocker: &str| {
+            let mut task = Task::new(id.into(), "No-code artifact delivery".into());
+            task.status = TaskStatus::Blocked;
+            task.assignee = Some("wait-worker".into());
+            task.execution_note = Some("no-code".into());
+            task.notes = format!("[2026-10-27 15:00] 🚫 BLOCKER {blocker}");
+            tasks.add(&task).unwrap();
+            task
+        };
+
+        let waiting = blocked(
+            "cas-verdict-wait",
+            &crate::mcp::tools::core::task::block_hold::verification_wait_note("vdispatch-wait"),
         );
+        let queued =
+            queue_approved_verification_close_retry(temp.path(), &waiting, "vdispatch-wait").unwrap();
+        assert!(matches!(queued, ApprovedCloseRetry::Queued(_)), "{queued:?}");
+        let queue = SqlitePromptQueueStore::open(temp.path()).unwrap();
+        queue.init().unwrap();
+        let rows = queue.peek_all(10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, "wait-worker");
+        // pin: the retry prompt must name the task whose wait was approved.
+        assert!(rows[0].prompt.contains("Retry task close id=cas-verdict-wait now"));
+
+        let held = blocked("cas-verdict-held", "Waiting on the operator's decision about scope.");
+        let refused =
+            queue_approved_verification_close_retry(temp.path(), &held, "vdispatch-held").unwrap();
+        let ApprovedCloseRetry::NotQueued(reason) = refused else {
+            panic!("a task held by another blocker must not be retried: {refused:?}");
+        };
+        assert!(reason.contains("blocked by a hold other than the verification wait"), "{reason}");
+        assert!(!reason.contains("no live assigned worker"), "{reason}");
         assert_eq!(queue.peek_all(10).unwrap().len(), 1);
     }
 

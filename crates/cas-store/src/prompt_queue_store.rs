@@ -11744,6 +11744,8 @@ mod tests {
         let ordinary = store
             .enqueue_with_session("worker", "supervisor", "ordinary", "live")
             .unwrap();
+        store.park_for_busy_recipient(fresh, Some("recipient has a tool call in flight"),
+            Utc::now() + chrono::Duration::seconds(120)).unwrap();
         store.mark_transport_delivered(delivered).unwrap();
         {
             let conn = store.conn.lock().unwrap();

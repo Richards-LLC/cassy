@@ -589,6 +589,45 @@ async fn no_delivery_isolates_held_and_integrated_sibling_lanes_gh1370() {
     }
 }
 
+/// A derived empty ref cannot erase work on B's publicly recorded source.
+#[tokio::test]
+async fn no_delivery_keeps_generic_source_work_despite_empty_task_ref_gh1370() {
+    let mut env = TestEnvGuard::temp_home();
+    for remote_only in [false, true] {
+        let f = fixture(&mut env, "main");
+        let repo = f.dir.path();
+        let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+        git(repo, &["merge", "-q", "--ff-only", LANE]);
+        git(repo, &["push", "-q", "origin", "main"]);
+        let agents = open_agent_store(&f.cas_dir()).unwrap();
+        let mut agent = agents.get("nocode-worker-session").unwrap();
+        agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+        agents.update(&agent).unwrap();
+        let id = "cas-b137";
+        let mut task = assigned(id, TaskType::Task, "main");
+        task.status = TaskStatus::Open;
+        f.put(&task);
+        let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+        let source = f.task(id).deliverables.factory_branch_start.unwrap();
+        assert_eq!(source.branch, LANE, "{started}");
+        git(repo, &["branch", &format!("{LANE}-{id}"), &source.base_sha]);
+        std::fs::write(worker_path.join("own.rs"), "pub fn own() {}\n").unwrap();
+        git(&worker_path, &["add", "own.rs"]);
+        git(&worker_path, &["commit", "-q", "-m", "fix(cas-b137): real generic-source work"]);
+        git(&worker_path, &["push", "-q", "origin", LANE]);
+        if remote_only {
+            git(&worker_path, &["reset", "-q", "--hard", &source.base_sha]);
+        }
+        assert!(f.task(id).deliverables.factory_branch_anchor.is_none());
+        let response = call(&f.worker, serde_json::json!({
+            "action":"close", "id":id, "reason":"Claims no delivery", "no_delivery":true,
+        })).await;
+        assert!(response.contains("NO DELIVERY CLOSE REJECTED"), "remote_only={remote_only}: {response}");
+        assert_eq!(f.task(id).status, TaskStatus::InProgress, "{response}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&source));
+    }
+}
+
 /// GH #1133: a deploy-only task targeting `main`, started on a lane whose tip
 /// is another task's delivery. The worker declares no-code at close.
 #[tokio::test]

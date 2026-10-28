@@ -48,3 +48,13 @@ missing: 59% used means 41% left, and 95% used is excluded at the 90% threshold.
 Only a missing/zero percentage without a reset is unopened; a past timestamp
 still proves rollover. A losing unknown weekly reset says `weekly reset unknown;
 known resets first`. The short reason fits the existing bounded picker row.
+
+## Chooser presentation (2026-10-28)
+
+The recommendation policy and its reasons are unchanged; the terminal chooser
+now presents them through [account-picker.brief.md](account-picker.brief.md).
+The recommended row shows a `✓ recommended` mark and its weekly line instead of
+a third reason line. Duplicate and never-used folders are hidden from the
+chooser rather than labelled. Comparative reasons (`resets later than`,
+`known resets first`) are implied by the weekly lines and no longer printed;
+threshold exclusions remain as a `⚠` tag. Commander profile text is unchanged.

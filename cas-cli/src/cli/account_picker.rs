@@ -588,19 +588,32 @@ static TYPEAHEAD: std::sync::Mutex<String> = std::sync::Mutex::new(String::new()
 /// A typed-ahead Ctrl-D: ends the line it follows, as the terminal would.
 const TYPED_EOF: char = '\u{4}';
 
-/// inquire reads through crossterm 0.25, which takes every byte available on
-/// the terminal at once and queues the events after Enter privately. A later
-/// `std::io::stdin()` read can never see them, so move them out here. A queued
-/// Ctrl-C cancels now, as it would have the moment it was typed.
+/// Hand the email prompt's type-ahead over at the point the terminal's own
+/// line discipline takes input back.
+///
+/// inquire reads through crossterm 0.25, which takes every byte available at
+/// once and keeps the events after Enter in a private queue that a later
+/// `std::io::stdin()` read never sees. Draining that queue with `poll(0)` also
+/// reads the terminal once the queue is empty, and crossterm drops the empty
+/// read that is a canonical EOF. So first take whatever the now-canonical
+/// terminal already holds (finished lines and EOF markers, typed after the
+/// prompt left raw mode), then the queue, which was typed before it. Only
+/// finished records carry over: the queue's unfinished, never-displayed tail
+/// is dropped. A queued Ctrl-C cancels now, as it would have when typed.
 fn stash_typeahead(provider_label: &str) -> Result<()> {
     use crossterm_inquire::event::{self, Event};
-    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(unix)]
+    let canonical = {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() { drain_canonical(libc::STDIN_FILENO) } else { String::new() }
+    };
+    #[cfg(not(unix))]
+    let canonical = String::new();
+    let mut queued = String::new();
     while event::poll(std::time::Duration::ZERO).unwrap_or(false) {
         let Ok(event) = event::read() else { break };
         let Event::Key(key) = event else { continue };
-        if queue_key(&mut typed, key).is_break() {
-            typed.clear();
-            drop(typed);
+        if queue_key(&mut queued, key).is_break() {
             // Nothing is staged yet; die by SIGINT like an ordinary Ctrl-C.
             #[cfg(unix)]
             unsafe {
@@ -609,7 +622,41 @@ fn stash_typeahead(provider_label: &str) -> Result<()> {
             anyhow::bail!("new {provider_label} login cancelled");
         }
     }
+    queued.truncate(queued.rfind(['\n', TYPED_EOF]).map_or(0, |end| end + 1));
+    let mut typed = TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    typed.push_str(&queued);
+    typed.push_str(&canonical);
     Ok(())
+}
+
+/// Read what a canonical-mode terminal has ready without blocking: finished
+/// lines, and an empty read for each EOF (Ctrl-D), recorded as `TYPED_EOF`.
+/// Erase, kill and signals were already applied by the line discipline.
+/// Stops at the first EOF; a line flushed by Ctrl-D without a newline ends in
+/// EOF too.
+#[cfg(unix)]
+fn drain_canonical(fd: libc::c_int) -> String {
+    let mut drained = Vec::new();
+    loop {
+        let mut ready = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        if unsafe { libc::poll(&mut ready, 1, 0) } != 1 || ready.revents & libc::POLLIN == 0 {
+            break;
+        }
+        let mut chunk = [0u8; 1024];
+        let read = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if read <= 0 {
+            if read == 0 {
+                drained.push(TYPED_EOF as u8);
+            }
+            break;
+        }
+        drained.extend_from_slice(&chunk[..read as usize]);
+        if !drained.ends_with(b"\n") {
+            drained.push(TYPED_EOF as u8);
+            break;
+        }
+    }
+    String::from_utf8_lossy(&drained).into_owned()
 }
 
 /// Apply one queued key with the terminal line discipline's meaning.
@@ -627,6 +674,10 @@ fn queue_key(
         KeyCode::Char('d') if control => typed.push(TYPED_EOF),
         KeyCode::Enter => typed.push('\n'),
         KeyCode::Char('j') if control => typed.push('\n'),
+        // Ctrl-U erases the unfinished line, never a finished record.
+        KeyCode::Char('u') if control => {
+            typed.truncate(typed.rfind(['\n', TYPED_EOF]).map_or(0, |end| end + 1))
+        }
         KeyCode::Backspace if !typed.is_empty() && !typed.ends_with(['\n', TYPED_EOF]) => {
             typed.pop();
         }
@@ -638,113 +689,21 @@ fn queue_key(
     std::ops::ControlFlow::Continue(())
 }
 
-/// What the reader typed ahead of the question that asks for it.
-#[derive(Debug, Eq, PartialEq)]
-pub(crate) enum TypedAhead {
-    /// A finished answer as `read_line` returns it: `y\n`, or `""` for EOF.
-    Line(String),
-    /// Unfinished: the question must keep editing it, not freeze it.
-    Partial(String),
+/// The next finished line typed ahead of the question that asks for it, as
+/// `read_line` returns it: `y\n`, or `""` for Ctrl-D (EOF). An unfinished
+/// fragment is discarded: it was read after the email's Enter and never shown,
+/// and from here the terminal's own line discipline owns all input.
+pub(crate) fn take_typeahead_line() -> Option<String> {
+    next_typed_line(&mut TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
 }
 
-pub(crate) fn take_typeahead() -> Option<TypedAhead> {
-    next_typed(&mut TYPEAHEAD.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
-}
-
-fn next_typed(typed: &mut String) -> Option<TypedAhead> {
+fn next_typed_line(typed: &mut String) -> Option<String> {
     let Some(end) = typed.find(['\n', TYPED_EOF]) else {
-        return (!typed.is_empty()).then(|| TypedAhead::Partial(std::mem::take(typed)));
+        typed.clear();
+        return None;
     };
     let line: String = typed.drain(..=end).collect();
-    // EOF ends the answer unsent, even after an unfinished line.
-    Some(TypedAhead::Line(if line.ends_with(TYPED_EOF) { String::new() } else { line }))
-}
-
-/// How an edited answer ended.
-pub(crate) enum EditedLine {
-    Line(String),
-    Interrupted,
-}
-
-/// Finish an unfinished typed-ahead line with the reader that already holds
-/// it, in raw mode, so the shown prefix stays editable: Backspace, Ctrl-U and
-/// Enter edit and send it, Ctrl-D is EOF (an empty, cancelling answer) and
-/// Ctrl-C interrupts. `stop` is polled every 50 ms for signals delivered meanwhile.
-pub(crate) fn edit_typed_line(prefix: String, mut stop: impl FnMut() -> bool) -> Result<EditedLine> {
-    use crossterm_inquire::event::{self, Event};
-    use std::io::Write;
-    struct Raw;
-    impl Drop for Raw {
-        fn drop(&mut self) {
-            let _ = crossterm_inquire::terminal::disable_raw_mode();
-        }
-    }
-    let mut line = prefix;
-    let mut err = std::io::stderr();
-    write!(err, "{line}")?;
-    err.flush()?;
-    crossterm_inquire::terminal::enable_raw_mode()?;
-    let _raw = Raw;
-    loop {
-        if stop() {
-            return Ok(EditedLine::Interrupted);
-        }
-        if !event::poll(std::time::Duration::from_millis(50))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else { continue };
-        let before = line.chars().count();
-        match edit_key(&mut line, key) {
-            LineEdit::Pending => {
-                let after = line.chars().count();
-                if after < before {
-                    write!(err, "{}", "\x08 \x08".repeat(before - after))?;
-                } else if after > before {
-                    write!(err, "{}", line.chars().last().unwrap_or_default())?;
-                }
-            }
-            LineEdit::Done(answer) => {
-                write!(err, "\r\n")?;
-                return Ok(EditedLine::Line(answer));
-            }
-            LineEdit::Interrupt => {
-                write!(err, "^C\r\n")?;
-                return Ok(EditedLine::Interrupted);
-            }
-        }
-        err.flush()?;
-    }
-}
-
-enum LineEdit {
-    Pending,
-    Done(String),
-    Interrupt,
-}
-
-fn edit_key(line: &mut String, key: crossterm_inquire::event::KeyEvent) -> LineEdit {
-    use crossterm_inquire::event::{KeyCode, KeyEventKind, KeyModifiers};
-    if key.kind == KeyEventKind::Release {
-        return LineEdit::Pending;
-    }
-    let control = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Char('c') if control => return LineEdit::Interrupt,
-        KeyCode::Char('d') if control => return LineEdit::Done(String::new()),
-        KeyCode::Char('u') if control => line.clear(),
-        // A newline already queued by the terminal (Enter typed during the
-        // login) is read as Ctrl-J once raw mode is on.
-        KeyCode::Enter => return LineEdit::Done(format!("{line}\n")),
-        KeyCode::Char('j') if control => return LineEdit::Done(format!("{line}\n")),
-        KeyCode::Backspace => {
-            line.pop();
-        }
-        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
-            line.push(c)
-        }
-        _ => {}
-    }
-    LineEdit::Pending
+    Some(if line.ends_with(TYPED_EOF) { String::new() } else { line })
 }
 
 /// What one seeding pass did, so the caller can report it honestly.
@@ -1112,25 +1071,47 @@ mod tests {
         ] {
             assert!(queue_key(&mut typed, queued).is_continue());
         }
-        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Line("y\n".into())));
-        // Ctrl-D on an empty line is EOF, which cancels like stdin EOF.
-        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Line(String::new())));
-        // An unfinished line stays editable at the question.
-        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Partial("n".into())));
-        assert_eq!(next_typed(&mut typed), None);
-        for queued in [key(KeyCode::Char('y')), ctrl('d')] {
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("y\n"));
+        // Ctrl-D is EOF, which cancels like stdin EOF.
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some(""));
+        // An unfinished, undisplayed fragment does not carry over.
+        assert_eq!(next_typed_line(&mut typed), None);
+        assert!(typed.is_empty());
+        for queued in [key(KeyCode::Char('y')), ctrl('j'), key(KeyCode::Char('y')), ctrl('u'), key(KeyCode::Enter)] {
             assert!(queue_key(&mut typed, queued).is_continue());
         }
-        assert_eq!(next_typed(&mut typed), Some(TypedAhead::Line(String::new())));
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("y\n"));
+        // Ctrl-U erased the second `y` before its Enter: an empty answer.
+        assert_eq!(next_typed_line(&mut typed).as_deref(), Some("\n"));
         assert!(queue_key(&mut typed, ctrl('c')).is_break());
-        // The question's editor continues that same line discipline.
-        let mut line = "n".to_string();
-        assert!(matches!(edit_key(&mut line, key(KeyCode::Backspace)), LineEdit::Pending));
-        line.push('y');
-        assert!(matches!(edit_key(&mut line, ctrl('d')), LineEdit::Done(eof) if eof.is_empty()));
-        assert!(matches!(edit_key(&mut line, key(KeyCode::Enter)), LineEdit::Done(answer) if answer == "y\n"));
-        assert!(matches!(edit_key(&mut line, ctrl('j')), LineEdit::Done(answer) if answer == "y\n"));
-        assert!(matches!(edit_key(&mut line, ctrl('c')), LineEdit::Interrupt));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_input_ready_at_the_handoff_keeps_lines_and_eof() {
+        // A real terminal pair in its default canonical mode: the line
+        // discipline applies erase, and Ctrl-D on an empty line is an empty
+        // read. Nothing typed after the email prompt may be swallowed.
+        let (mut master, mut slave) = (0, 0);
+        assert_eq!(
+            unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), std::ptr::null()) },
+            0
+        );
+        let write = |bytes: &[u8]| {
+            assert_eq!(unsafe { libc::write(master, bytes.as_ptr().cast(), bytes.len()) }, bytes.len() as isize);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        assert_eq!(drain_canonical(slave), "");
+        write(b"nx\x7f\x7fy\r\x04later\r");
+        assert_eq!(drain_canonical(slave), "y\n\u{4}");
+        assert_eq!(drain_canonical(slave), "later\n");
+        // A line flushed by Ctrl-D without Enter is EOF too, never an answer.
+        write(b"\x15y\x04");
+        assert_eq!(next_typed_line(&mut drain_canonical(slave)).as_deref(), Some(""));
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
     }
 
     #[test]

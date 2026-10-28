@@ -45,7 +45,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
 
   await journey.stage("Open the session: only its conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(log).toContainText("Looking at the ledger import now.");
     await expect(log).not.toContainText("never reached it");
@@ -273,7 +273,7 @@ test("HUB-J15 see a delivery problem as attention, not conversation", async ({ p
     await expect(attentionItems).toHaveCount(0);
     // After a reload the resolved notice does not come back.
     await page.reload();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
     await expect(log).toContainText("The ledger import is red");
     await expect(attentionItems).toHaveCount(0);
     expect(await deliveryCount(), "resolved history and explicit resolution do not count twice").toBe(beforeResolution + 1);
@@ -325,7 +325,7 @@ test("HUB-J15 pending attention notices drain once across reconnect", journeyPar
     open.onerror = () => reject(open.error);
   }));
   const choose = async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /Accounting/ }).and(page.locator(".conversation-row")).click();
   };
   await journey.stage("Offline notices commit only to attention and drain every pending batch", async () => {
     await journey.open(); await choose();

@@ -89,7 +89,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
         await expect(apps).toBeFocused();
       });
       await journey.stage("Open this project's tasks in Explorer", async () => {
-        await list.getByRole("button", { name: /cas-src/ }).click();
+        await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
         if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
         const link = page.locator("#status-view, .conversation-context").getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" });
         await expect(link).toBeVisible();
@@ -106,7 +106,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
           await page.keyboard.press("Escape");
           await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
         }
-        await list.getByRole("button", { name: /gabber-studio/ }).click();
+        await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
         await expect(page.getByRole("link", { name: "All tasks in Explorer (opens in a new tab)" })).toHaveCount(0);
         if (width === 390) await page.getByRole("button", { name: "‹ Conversations", exact: true }).click();
         await openApps();

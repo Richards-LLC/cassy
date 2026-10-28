@@ -67,7 +67,7 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
 
   await journey.stage("Open the conversation", async () => {
     await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
   });
 
@@ -223,7 +223,7 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
   });
 
   await journey.stage("Reply to a machine a day ahead", async () => {
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /gabber-studio/ }).and(page.locator(".conversation-row")).click();
     await expect(page.getByRole("log").getByText("Mac build is queued behind the nightly.")).toBeVisible();
     const composer = page.getByRole("textbox", { name: "Your message" });
     await composer.fill("Thanks — ping me when it starts.");
@@ -251,14 +251,14 @@ test("HUB-J7 answer a question in the thread", async ({ page, journey }) => {
     // in the machine's sequence, and no time reads later than a turn below it.
     const list = page.getByRole("navigation", { name: "Choose a supervisor" });
     const shape = (labels: string[]) => labels.map((label) => label.replace(/\d{1,2}:\d{2}/g, "HH:MM"));
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("log").getByText("A second gate went red; the train is still held.")).toBeVisible();
     const before = await threadOrder(page);
     // cas-8d52 (journey F11): the reload comes minutes later; every turn keeps
     // the time the visit showed, not the reload's.
     await page.clock.fastForward(180_000);
     await page.reload();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("log").getByText("A second gate went red; the train is still held.")).toBeVisible();
     const after = await threadOrder(page);
     expect(shape(after), JSON.stringify({ before, after })).toEqual(shape(before));
@@ -334,7 +334,7 @@ test("HUB-J7 double-tapping the bookmark jumps without answering (cas-450b, cas-
   let ask = 0;
   await journey.stage("Read a question on a short phone screen", async () => {
     await page.setViewportSize({ width: 390, height: 440 }); await journey.open();
-    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
     await expect.poll(() => hub.hasSocket(PELICAN), { timeout: 15_000 }).toBe(true);
     ask = hub.supervisorSays(PELICAN, "Open the PR and cut a release?", { kind: "ask", options: ["Open PR", "Hold release"] });
     await expect(page.locator(".pinned-expand")).toBeVisible();

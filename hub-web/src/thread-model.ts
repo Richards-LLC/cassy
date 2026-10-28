@@ -194,9 +194,12 @@ export function statusAsks(message: string): boolean {
   return STATUS_ASK.test(message);
 }
 
-/** Only a short status with no ask folds into the quiet coalesced line. */
+/** Fenced source must reach Markdown rendering, regardless of status length. */
+const STATUS_FENCE = /^ {0,3}(?:`{3,}|~{3,})/m;
+
+/** Only a short, plain status with no ask folds into the quiet coalesced line. */
 export function foldsAsStatus(message: string): boolean {
-  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message);
+  return message.trim().length <= STATUS_FOLD_LIMIT && !statusAsks(message) && !STATUS_FENCE.test(message);
 }
 
 /**

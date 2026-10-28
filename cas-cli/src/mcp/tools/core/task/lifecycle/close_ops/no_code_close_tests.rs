@@ -1253,6 +1253,46 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
 /// Start, rather than commit subject conventions, establishes the new task's
 /// boundary on a reused lane. A foreign claim after that boundary still refuses.
 #[tokio::test]
+async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
+    let mut env = TestEnvGuard::temp_home();
+    let f = fixture(&mut env, "main");
+    let repo = f.dir.path();
+    let worker_path = f.cas_dir().join("worktrees").join(WORKER);
+    git(repo, &["merge", "-q", "--ff-only", LANE]);
+    git(repo, &["push", "-q", "origin", "main"]);
+    let agents = open_agent_store(&f.cas_dir()).unwrap();
+    let mut agent = agents.get("nocode-worker-session").unwrap();
+    agent.metadata.insert("clone_path".into(), worker_path.display().to_string());
+    agents.update(&agent).unwrap();
+    let id = "cas-a1c3";
+    let mut task = assigned(id, TaskType::Bug, "main");
+    task.status = TaskStatus::Open;
+    f.put(&task);
+    let started = call(&f.worker, serde_json::json!({"action":"start", "id":id})).await;
+    let recorded = f.task(id).deliverables.factory_branch_start.unwrap();
+    assert!(started.contains(&format!("Recorded source branch: {LANE}")), "{started}");
+    assert!(started.contains(&format!("Start base: {}", recorded.base_sha)), "{started}");
+    assert!(!started.contains("rebind_branch"), "matching checkout needs no recovery: {started}");
+
+    let replacement = format!("{LANE}-{id}");
+    git(&worker_path, &["checkout", "-q", "-b", &replacement]);
+    for full in [false, true] {
+        let started = call(&f.worker, serde_json::json!({
+            "action":"start", "id":id, "brief":!full,
+        })).await;
+        assert!(started.contains(&format!("Recorded source branch: {LANE}")), "{started}");
+        assert!(started.contains(&format!("Start base: {}", recorded.base_sha)), "{started}");
+        assert!(started.contains("WARNING") && started.contains(&replacement)
+            && started.contains("supervisor") && started.contains("rebind_branch"), "{started}");
+        let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
+        assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
+        assert!(shown.contains(&format!("Start base: {}", recorded.base_sha)), "{shown}");
+        assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&recorded));
+        assert_eq!(git(&worker_path, &["branch", "--show-current"]), replacement);
+    }
+}
+
+#[tokio::test]
 async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
     let mut env = TestEnvGuard::temp_home();
     for (lane, foreign_after_start, rebase_after_start) in [

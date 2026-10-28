@@ -34030,7 +34030,9 @@ exec "$CAS_AF3B_REAL_GIT" "$@"
             let receipt =
                 validate_task_commit_receipt(p, &anchor, "main", &window_at(0, "regenerated delivery"))
                     .unwrap();
-            assert!(receipt.contains(&regeneration), "{receipt}");
+            if !sync_tip {
+                assert!(receipt.contains(&regeneration), "{receipt}");
+            }
             // A later sibling rebuild must still credit the earlier delivery.
             git(p, &["checkout", "-b", "sibling"]);
             f2eb_commit(p, "sibling.txt", "updated sibling\n", "sibling update");

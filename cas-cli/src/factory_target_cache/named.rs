@@ -501,4 +501,150 @@ mod tests {
             "named route entered unrelated stale-agent GC"
         );
     }
+
+    async fn legacy_mcp_request(
+        service: &crate::mcp::CasService,
+        target: &Path,
+        dry_run: bool,
+    ) -> serde_json::Value {
+        use rmcp::handler::server::wrapper::Parameters;
+        let request = serde_json::from_value(serde_json::json!({"action":"gc_cleanup",
+            "reclaim_unknown_target":target, "force":true, "dry_run":dry_run}))
+        .unwrap();
+        let result = service.factory_request(Parameters(request)).await.unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result
+            .content
+            .iter()
+            .filter_map(|content| match &content.raw {
+                rmcp::model::RawContent::Text(text) => Some(text.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(
+            text.lines()
+                .find_map(|line| line.strip_prefix("TARGET_CACHE_STATUS_JSON="))
+                .expect(&text),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_exact_mcp_routes_preserve_scope_and_destructive_guards() {
+        let (_env, cas, unrelated, _task, _policy) = fixture();
+        let config = format!(
+            "{}target_cache_min_idle_secs = 60\n",
+            fs::read_to_string(cas.join("config.toml")).unwrap()
+        );
+        fs::write(cas.join("config.toml"), &config).unwrap();
+        let core = crate::mcp::CasCore::with_daemon(cas.clone(), None, None);
+        core.set_agent_id_for_testing("supervisor".into());
+        let supervisor = cas_types::Agent::new_with_role(
+            "supervisor".into(),
+            "supervisor".into(),
+            cas_types::AgentRole::Supervisor,
+        );
+        crate::store::open_agent_store(&cas)
+            .unwrap()
+            .register(&supervisor)
+            .unwrap();
+        let service = crate::mcp::CasService::new(core, None);
+        let checkout = cas.join("epic-missing-gitdir");
+        fs::create_dir_all(&checkout).unwrap();
+        fs::write(
+            checkout.join(".git"),
+            "gitdir: /nonexistent-eaf7/git-admin\n",
+        )
+        .unwrap();
+        let targets = [
+            checkout.join("target"),
+            cas.join("merge-sweeps/assembly-target"),
+        ];
+        let old =
+            filetime::FileTime::from_system_time(SystemTime::now() - Duration::from_secs(7200));
+        let age = |target: &Path| {
+            for entry in WalkDir::new(target).contents_first(true) {
+                filetime::set_file_mtime(entry.unwrap().path(), old).unwrap();
+            }
+        };
+        for target in &targets {
+            fs::create_dir_all(target.join("debug")).unwrap();
+            fs::write(target.join("debug/output"), b"regenerable").unwrap();
+            fs::write(target.join("debug/.cargo-lock"), b"").unwrap();
+            fs::write(target.parent().unwrap().join("source.rs"), b"keep WIP").unwrap();
+            age(target);
+        }
+        let proof = cas.join("artifacts/cas-proof/LEDGER.md");
+        fs::create_dir_all(proof.parent().unwrap()).unwrap();
+        fs::write(&proof, b"durable proof").unwrap();
+        for target in &targets {
+            let preview = legacy_mcp_request(&service, target, true).await;
+            assert_eq!(
+                preview["caches"].as_array().unwrap().len(),
+                1,
+                "named route scanned unrelated caches: {preview}"
+            );
+            assert_eq!(
+                preview["caches"][0]["path"],
+                serde_json::to_value(target).unwrap()
+            );
+            assert_eq!(preview["reclaimed_bytes"], 0);
+            let parent = legacy_mcp_request(&service, target.parent().unwrap(), false).await;
+            assert_eq!(parent["reclaimed_bytes"], 0);
+            let alias = target.with_file_name("alias-target");
+            std::os::unix::fs::symlink(target, &alias).unwrap();
+            let alias_report = legacy_mcp_request(&service, &alias, false).await;
+            assert_eq!(alias_report["reclaimed_bytes"], 0);
+            let output = target.join("debug/output");
+            let handle = fs::File::open(&output).unwrap();
+            let live = legacy_mcp_request(&service, target, false).await;
+            assert_eq!(live["reclaimed_bytes"], 0);
+            assert_eq!(live["caches"][0]["disposition"], "live_process", "{live}");
+            drop(handle);
+            fs::write(&output, b"regenerable").unwrap();
+            let recent = legacy_mcp_request(&service, target, false).await;
+            assert_eq!(recent["reclaimed_bytes"], 0);
+            assert_eq!(
+                recent["caches"][0]["disposition"], "recent_write",
+                "{recent}"
+            );
+            age(target);
+            fs::write(target.join("LEDGER.md"), b"embedded proof").unwrap();
+            age(target);
+            let evidence = legacy_mcp_request(&service, target, false).await;
+            assert_eq!(evidence["reclaimed_bytes"], 0);
+            assert_eq!(
+                fs::read(target.join("LEDGER.md")).unwrap(),
+                b"embedded proof"
+            );
+            fs::remove_file(target.join("LEDGER.md")).unwrap();
+            age(target);
+            let dangling = target.parent().unwrap().join("dangling-evidence");
+            std::os::unix::fs::symlink(target.join("absent-evidence"), &dangling).unwrap();
+            fs::write(
+                cas.join("config.toml"),
+                format!("{config}artifacts_root = {:?}\n", dangling),
+            )
+            .unwrap();
+            let indeterminate = legacy_mcp_request(&service, target, false).await;
+            assert_eq!(indeterminate["reclaimed_bytes"], 0);
+            assert_eq!(
+                indeterminate["caches"][0]["disposition"], "indeterminate",
+                "{indeterminate}"
+            );
+            fs::write(cas.join("config.toml"), &config).unwrap();
+            assert_eq!(fs::read(&output).unwrap(), b"regenerable");
+            let reclaimed = legacy_mcp_request(&service, target, false).await;
+            assert!(!target.exists(), "legacy exact reclaim failed: {reclaimed}");
+            assert_eq!(reclaimed["caches"].as_array().unwrap().len(), 1);
+            assert_eq!(reclaimed["caches"][0]["disposition"], "reclaimed");
+            assert_eq!(
+                fs::read(target.parent().unwrap().join("source.rs")).unwrap(),
+                b"keep WIP"
+            );
+            assert_eq!(fs::read(&proof).unwrap(), b"durable proof");
+            assert!(unrelated.join("debug/output").is_file());
+        }
+    }
 }

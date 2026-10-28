@@ -1,5 +1,5 @@
 import { test, expect, type Request } from "@playwright/test";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { claimReceiptDirectory } from "./receipt-directory.mjs";
 import {
@@ -601,6 +601,39 @@ test("HUB-J7 real ask choices survive reload and the phone answer names its ques
       await context.close().catch(() => undefined);
       await command("cleanup");
     }
+  }
+});
+
+// The disposable project's config must load when the real upload stores bytes;
+// protocol doubles cannot catch a malformed config in real-hub-server.mjs.
+test("HUB-J24 real hub composer upload stores the picked file", {
+  annotation: { type: "journey-part", description: "real hub, parsed fixture config, host file readback" },
+}, async ({ page }) => {
+  try {
+    const fixture = await command("reset", { messageControl: true });
+    const pairing = new URL(fixture.pairUrl);
+    pairing.pathname = "/commander/";
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.addInitScript(() => localStorage.setItem("cas-commander:dormant", "1"));
+    await page.goto(pairing.href);
+    await page.getByRole("textbox", { name: "Your name (shown on the machine)" }).fill("Disposable upload QA");
+    await page.getByRole("button", { name: "Pair", exact: true }).click();
+    await expect(page.locator("#pair-dialog")).toBeHidden();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    const bytes = Buffer.from("Real fixture upload must load the project config.\n");
+    const chooser = page.waitForEvent("filechooser");
+    await page.getByRole("button", { name: "Attach files", exact: true }).click();
+    await (await chooser).setFiles({ name: "fixture-config.txt", mimeType: "text/plain", buffer: bytes });
+    const uploaded = page.waitForResponse(response =>
+      response.request().method() === "POST" && new URL(response.url()).pathname.includes("/uploads/"));
+    await page.getByRole("button", { name: /^Send to the .+ supervisor$/, exact: true }).click();
+    const response = await uploaded;
+    expect(response.status(), await response.text()).toBe(200);
+    const stored = await response.json();
+    expect(await readFile(stored.path)).toEqual(bytes);
+    await expect(page.locator(".composer-uploads")).toBeHidden();
+  } finally {
+    await command("cleanup");
   }
 });
 

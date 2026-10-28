@@ -393,6 +393,7 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director],
             "direct readiness and later park/manual evidence must create only one transport");
         let full = queue.poll_named_for_recipient(&prompt.target, Some(session), &[manual_id]).unwrap();
+        // pin: explicit evidence reads preserve the complete submitted body.
         assert_eq!(full[0].prompt, manual, "manual evidence survives dedupe");
         // Restore this test's active-task scenario for its new-tip controls.
         task.status = status;

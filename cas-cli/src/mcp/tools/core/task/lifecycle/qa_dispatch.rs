@@ -430,8 +430,8 @@ impl CasCore {
         Some(report)
     }
 
-    /// Use the same durable delivery ranges as the implementer's evidence
-    /// gate. A branch-wide diff can include UI inherited at task start.
+    /// Use the implementer's validated start range when one exists. Legacy
+    /// deliveries retain their existing receipt/target classification.
     fn attributed_qa_paths(
         &self,
         task: &Task,
@@ -441,12 +441,10 @@ impl CasCore {
     ) -> Option<Vec<String>> {
         let history = self.open_agent_store().ok()?
             .get_lease_history(&task.id, None).ok()?;
-        if !super::close_ops::task_attribution::has_recorded_delivery_boundary(task, &history) {
-            return None;
-        }
         let identity = super::close_ops::task_commit_identity_in_repo(
             repo, task, Some(head.to_owned()),
         ).ok()?;
+        identity.start_base.as_ref()?;
         let window = super::close_ops::resolve_task_commit_receipt_window(
             task.created_at, &history, identity,
         );

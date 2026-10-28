@@ -1486,7 +1486,7 @@ fn merge_task_notes(local: &str, remote: &str) -> String {
     let remote_has_provenance = remote.split("\n\n").any(is_provenance_paragraph);
     let mut blocks = Vec::<(Option<chrono::NaiveDateTime>, usize, String)>::new();
     for (is_local, notes) in [(true, local), (false, remote)] {
-        for block in notes.split("\n\n") {
+        for block in cas_store::task_note_markers::note_blocks(notes) {
             let block = block.trim();
             if block.is_empty()
                 || (is_local && remote_has_provenance && is_provenance_paragraph(block))
@@ -2371,7 +2371,7 @@ impl CloudSyncer {
             };
             let trusted_provenance =
                 take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
-            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
                 &mut remote_task.notes, &remote_task.id,
             );
             // cas-7a63: a row without its own origin cannot be attributed.
@@ -3573,7 +3573,7 @@ impl CloudSyncer {
             };
             let trusted_provenance =
                 take_rendered_provenance(&mut remote_task.notes, rendered_from_provenance);
-            let trusted_proofs = crate::artifacts::proof::take_published_proof_lines(
+            let trusted_proofs = crate::artifacts::proof::take_published_proof_notes(
                 &mut remote_task.notes, &remote_task.id,
             );
             // cas-7a63: a row without its own origin cannot be attributed.

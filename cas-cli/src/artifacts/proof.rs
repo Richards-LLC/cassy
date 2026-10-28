@@ -61,24 +61,28 @@ fn validate(artifact: &PublishedArtifact, task_id: &str) -> anyhow::Result<()> {
 }
 
 /// A pulled owner row can carry proof lines that were written by the source
-/// machine's trusted publisher. Move valid committed records out of ordinary
-/// task text so replication appends them through the trusted sink as well.
-pub(crate) fn take_published_proof_lines(notes: &mut String, task_id: &str) -> Vec<String> {
+/// machine's trusted publisher. Carry each validated record with its complete
+/// note so the trusted sink can upgrade the raw copy without detaching proof.
+pub(crate) fn take_published_proof_notes(notes: &mut String, task_id: &str) -> Vec<String> {
     let mut trusted = Vec::new();
     let mut ordinary = Vec::new();
-    for line in notes.lines() {
-        let published = line
-            .strip_prefix(MARKER)
-            .and_then(|json| serde_json::from_str::<PublishedArtifact>(json).ok())
-            .is_some_and(|record| validate(&record, task_id).is_ok());
-        if published {
-            trusted.push(line.to_string());
-        } else {
-            ordinary.push(line);
+    for block in cas_store::task_note_markers::note_blocks(notes) {
+        let proofs = block.lines().filter(|line| {
+            line.strip_prefix(MARKER)
+                .and_then(|json| serde_json::from_str::<PublishedArtifact>(json).ok())
+                .is_some_and(|record| validate(&record, task_id).is_ok())
+        }).collect::<Vec<_>>();
+        if !proofs.is_empty() {
+            // Trust only the records validated above, never other marker lines
+            // that happen to share the same incoming note.
+            trusted.push(cas_store::task_note_markers::neutralize_new_markers(
+                block, Some(&proofs.join("\n")),
+            ).into_owned());
         }
+        ordinary.push(block.lines().filter(|line| !proofs.contains(line)).collect::<Vec<_>>().join("\n"));
     }
     if !trusted.is_empty() {
-        *notes = ordinary.join("\n");
+        *notes = ordinary.into_iter().filter(|block| !block.is_empty()).collect::<Vec<_>>().join("\n\n");
     }
     trusted
 }

@@ -6645,6 +6645,45 @@ mod cas_89e1_post_merge_message_type_tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn cas_ad3d_named_long_poll_does_not_repeat_the_consumed_body() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_FACTORY_SESSION", "factory-a");
+        env.set("CAS_AGENT_NAME", "supervisor-a");
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::store::init_cas_dir(temp.path()).unwrap();
+        let core = crate::mcp::server::CasCore::with_daemon(root.clone(), None, None);
+        register_gh_1171_fleet(&core, false);
+        let agents = core.open_agent_store().unwrap();
+        let mut supervisor = agents.get("supervisor-a-id").unwrap();
+        supervisor.factory_session = Some("factory-a".into());
+        agents.update(&supervisor).unwrap();
+        core.set_agent_id_for_testing(supervisor.id.clone());
+        let queue = crate::store::open_prompt_queue_store(&root).unwrap();
+        let long = "Complete delivery evidence. ".repeat(250);
+        let id = queue.enqueue_with_session("worker-a", "supervisor-a", &long, "factory-a").unwrap();
+        let untouched = queue.enqueue_with_session("worker-a", "supervisor-a", "Another request", "factory-a").unwrap();
+        let service = gh_1171_service(&core);
+        let response = response_text(service.inbox_poll(serde_json::from_value(serde_json::json!({
+            "action":"inbox_poll", "notification_id":id, "limit":1
+        })).unwrap()).await.unwrap());
+        assert!(response.contains(&long));
+        let input = crate::hooks::HookInput {
+            agent_role: Some("supervisor".into()),
+            session_id: "sup-session".into(),
+            ..Default::default()
+        };
+        let mut budget = cas_store::HOOK_SURFACE_BUDGET_CHARS;
+        let next = crate::hooks::handlers::handlers_middle::factory_inbox::surface_polled_unacked(
+            &root, &input, chrono::Utc::now() + chrono::Duration::seconds(1), &mut budget,
+        );
+        assert!(next.and_then(|out| out.text).is_none(), "a named body read must not be injected at the next turn");
+        assert!(queue.peek_for_targets(&["supervisor-a"], Some("factory-a"), 10).unwrap().iter().all(|row| row.id != id));
+        assert!(queue.recipient_receipt(untouched, "supervisor-a").unwrap().is_none(), "named consumption must not settle other mail");
+        assert!(queue.message_delivery_report(id).unwrap().unwrap().confirmed_at.is_none());
+    }
+
     /// GH #1171: a worker's `target=supervisor` failed with "Cannot resolve
     /// 'supervisor'" while its supervisor was live and messaging it, because
     /// that supervisor's row carried no factory session and a second

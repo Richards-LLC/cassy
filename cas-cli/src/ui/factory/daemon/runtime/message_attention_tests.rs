@@ -137,6 +137,33 @@ impl Fixture {
         store.register(&worker).unwrap();
     }
 
+    fn supervisor_turn(&self, cli: &str, text: &str) {
+        let account = self.root.path().join(cli);
+        let session_id = "019f84af-3121-7950-ba14-b01db2da1154";
+        let now = chrono::Utc::now() - chrono::Duration::seconds(400);
+        let (path, records) = if cli == "codex" {
+            (account.join(format!("sessions/2026/10/15/rollout-{session_id}.jsonl")), vec![
+                serde_json::json!({"timestamp":now.to_rfc3339(),"type":"session_meta","payload":{"id":session_id,"cwd":self.root.path(),"originator":"codex-tui","source":"cli"}}),
+                serde_json::json!({"timestamp":now.to_rfc3339(),"type":"event_msg","payload":{"type":"task_started","turn_id":"consumed"}}),
+                serde_json::json!({"timestamp":now.to_rfc3339(),"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}],"internal_chat_message_metadata_passthrough":{"turn_id":"consumed"}}}),
+            ])
+        } else {
+            let slug = self.root.path().to_string_lossy().replace('/', "-");
+            (account.join(format!("projects/{slug}/{session_id}.jsonl")), vec![
+                serde_json::json!({"timestamp":now.to_rfc3339(),"type":"user","message":{"role":"user","content":text}}),
+            ])
+        };
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, records.iter().map(|r| format!("{r}\n")).collect::<String>()).unwrap();
+        let store = open_agent_store(&self.cas_dir).unwrap();
+        let mut agent = store.get(&format!("{SUPERVISOR}-id")).unwrap();
+        agent.cc_session_id = Some(session_id.into());
+        agent.metadata.insert("supervisor_cli".into(), cli.into());
+        agent.metadata.insert("worker_account_dir".into(), account.to_string_lossy().into());
+        agent.metadata.insert("clone_path".into(), self.root.path().to_string_lossy().into());
+        store.register(&agent).unwrap();
+    }
+
     fn scan(&mut self) -> Vec<cas_store::QueuedPrompt> {
         self.daemon
             .pane_silent_since
@@ -1318,5 +1345,36 @@ fn cas_37b8_fyi_rows_left_unread_raise_no_alarm_and_stay_unacked() {
     );
     for id in [lifecycle, peer] {
         assert!(f.queue.queued_prompt(id).unwrap().unwrap().acked_at.is_none(), "row {id}");
+    }
+}
+
+#[test]
+fn cas_ad3d_consumed_injection_is_durable_and_transport_only_stays_unread() {
+    let _env = env();
+    for cli in ["codex", "claude"] {
+        let mut f = Fixture::new();
+        let id = f.aged("worker", "supervisor", "Please review the completed delivery");
+        // The same body with another id must stay unread: body equality or a
+        // later turn alone cannot correlate the delivery.
+        let unread = f.aged("worker", "supervisor", "Please review the completed delivery");
+        for row in [id, unread] {
+            f.queue.record_recipient_transport_delivered(row, SUPERVISOR).unwrap();
+            f.queue.mark_transport_delivered(row).unwrap();
+        }
+        let row = f.queue.queued_prompt(id).unwrap().unwrap();
+        let wire = super::teams_body_fallback_text(&row);
+        let wire = if cli == "codex" {
+            super::super::delivery::frame_pty_payload(cas_mux::SupervisorCli::Codex, "worker", &wire)
+        } else {
+            format!("<teammate-message teammate_id=\"worker\">\n{wire}\n</teammate-message>")
+        };
+        f.supervisor_turn(cli, &wire);
+        let alarms = f.scan();
+        let report = f.queue.message_delivery_report(id).unwrap().unwrap();
+        assert_eq!(report.recipient_receipt, Some(cas_store::SurfacingSource::ObservedWake), "{cli}: consumed wire must get a durable receipt");
+        assert!(report.confirmed_at.is_none(), "consumption is not explicit acknowledgement");
+        assert!(alarms.iter().any(|r| r.prompt.contains(&format!("message {unread},"))), "{cli}: the other transport-only message must still alarm");
+        assert_eq!(f.queue.message_delivery_report(unread).unwrap().unwrap().recipient_receipt, Some(cas_store::SurfacingSource::TransportDelivered));
+        assert!(f.queue.poll_unseen_for_recipient(SUPERVISOR, Some(SESSION), 10).unwrap().iter().all(|r| r.id != id));
     }
 }

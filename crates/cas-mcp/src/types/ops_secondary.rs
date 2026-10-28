@@ -781,9 +781,9 @@ pub struct FactoryRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
-    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// gc_cleanup only: exact absolute retired worker or legacy unknown-owner target.
     /// Requires force=true, dry_run=false and the configured positive quiet window.
-    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[schemars(description = "gc_cleanup: exact retired worker or unknown-owner target; force=true dry_run=false.")]
     #[serde(default)]
     pub reclaim_unknown_target: Option<String>,
 
@@ -1507,9 +1507,9 @@ pub struct CoordinationRequest {
     #[serde(default, deserialize_with = "deser::option_bool")]
     pub artifacts: Option<bool>,
 
-    /// gc_cleanup only: exact absolute unknown-owner cache path authorized for reclaim.
+    /// gc_cleanup only: exact absolute retired worker or legacy unknown-owner target.
     /// Requires force=true, dry_run=false and the configured positive quiet window.
-    #[schemars(description = "gc_cleanup: exact unknown-owner target; force=true dry_run=false.")]
+    #[schemars(description = "gc_cleanup: exact retired worker or unknown-owner target; force=true dry_run=false.")]
     #[serde(default)]
     pub reclaim_unknown_target: Option<String>,
 

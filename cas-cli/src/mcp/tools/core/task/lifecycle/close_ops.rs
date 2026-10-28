@@ -8153,9 +8153,30 @@ impl CasCore {
         // cas-e74c: resolve the work-cycle identity before the later
         // delivery/review gates. cas-a699 needs the same current-cycle
         // boundary used by the delivery and verification gates below.
+        // GH #1370: absence must use this task's actual start source, just
+        // as branch resolution does for legacy starts recorded before the
+        // worker switched away from an earlier parked delivery (GH #1353).
+        // A derived ref is not authority: first prove that neither local
+        // nor origin recorded source holds this task's or unnamed work.
+        // Keep the durable start untouched and use this view only for the
+        // explicit no_delivery attempt, in both attribution and measurement.
+        let no_delivery_task = no_delivery_declared.then(|| {
+            let mut measured = task.clone();
+            if let Some(start) = measured.deliverables.factory_branch_start.as_mut()
+                && task.assignee.as_deref() == Some(start.assignee.as_str())
+                && start.branch == format!("factory/{}", start.assignee)
+                && let Some(branch) = worker_task_branch_ref(
+                    &close_project_root, &start.assignee, &task.id,
+                )
+                && no_delivery_source_is_empty_or_sibling_only(&close_project_root, &task)
+            {
+                start.branch = branch.strip_prefix("origin/").unwrap_or(&branch).to_string();
+            }
+            measured
+        });
         let mut task_commit_identity = match task_commit_identity_in_repo(
             &close_project_root,
-            &task,
+            no_delivery_task.as_ref().unwrap_or(&task),
             cas_store::get_latest_worker_delivery(&self.cas_root, &task.id)
                 .ok()
                 .flatten()
@@ -8718,7 +8739,7 @@ impl CasCore {
             }
             let repo = worker_worktree_path.as_deref().unwrap_or(close_project_root.as_path());
             let measurement = match measure_no_delivery(
-                repo, &task, &resolved_parent_branch, delivery_receipt,
+                repo, no_delivery_task.as_ref().unwrap_or(&task), &resolved_parent_branch, delivery_receipt,
                 commit_receipt_window.as_ref(),
             ) {
                 Ok(measurement) => measurement,
@@ -15695,6 +15716,49 @@ pub(crate) fn merge_only_delivery(repo: &std::path::Path, lane: &str, target: &s
     matches!((tree(tip), tree(first_parent)), (Some(tip), Some(first)) if tip != first)
 }
 
+/// A generic start can precede allocation of its real task lane. That lane
+/// may replace the recorded source only after proving every local/origin
+/// source commit since the immutable start belongs to a sibling. Unknown,
+/// unnamed and own commits retain the recorded source and its ordinary gates.
+fn no_delivery_source_is_empty_or_sibling_only(repo: &std::path::Path, task: &Task) -> bool {
+    let Some(start) = task.deliverables.factory_branch_start.as_ref() else { return false; };
+    let identity = task_commit_identity(task, None);
+    if task.assignee.as_deref() != Some(start.assignee.as_str())
+        || task.deliverables.work_target.as_ref() != Some(&start.work_target)
+        || !identity.known_commits.is_empty()
+        || !is_safe_git_refname(&start.branch)
+        || !crate::mcp::tools::core::task::repo_context::repo_answers_to(repo, &start.work_target.repo_selector)
+    {
+        return false;
+    }
+    let Ok(output) = std::process::Command::new("git")
+        .args(["for-each-ref", "--format=%(objectname)",
+            &format!("refs/heads/{}", start.branch),
+            &format!("refs/remotes/origin/{}", start.branch)])
+        .current_dir(repo).measurement_output()
+    else { return false; };
+    if !output.status.success() || !output.stderr.is_empty() { return false; }
+    let Ok(inventory) = String::from_utf8(output.stdout) else { return false; };
+    let tips: std::collections::HashSet<_> = inventory.lines().collect();
+    if tips.is_empty() { return false; }
+    for tip in tips {
+        if !git_commit_is_ancestor(repo, &start.base_sha, tip) { return false; }
+        let Some(history) = crate::git_evidence::git_text(repo, &[
+            "log", "-n", "201", "--format=%H%x1f%s%x1e",
+            &format!("{}..{tip}", start.base_sha), "--",
+        ]) else { return false; };
+        let records: Vec<_> = history.split('\u{1e}').map(str::trim).filter(|record| !record.is_empty()).collect();
+        if records.len() > 200 { return false; }
+        for record in records {
+            let Some((sha, subject)) = record.split_once('\u{1f}') else { return false; };
+            if identity.matches_known_commit(sha) || !message_claims_other_task(subject, Some(&task.id)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Prove absence for a fresh no_delivery declaration, rather than interpreting
 /// an empty diff (or a failed Git probe) as permission to bypass delivery gates.
 /// Inspect both local and origin refs: a merged local lane cannot hide a newer
@@ -15747,14 +15811,34 @@ fn measure_no_delivery(
     };
     let target_sha = resolve_branch_sha(repo, &format!("{target_ref}^{{commit}}"))
         .ok_or("integration target is unavailable")?;
-    let head = resolve_branch_sha(repo, "HEAD^{commit}").ok_or("checkout HEAD is unavailable")?;
-    let mut measured = vec![("HEAD".to_string(), head.clone())];
-    for candidate in task_delivery_branch_candidates(task) {
+    let source = task.deliverables.factory_branch_start.as_ref();
+    if let Some(start) = source
+        && (task.assignee.as_deref() != Some(start.assignee.as_str())
+            || delivery.work_target.as_ref() != Some(&start.work_target))
+    {
+        return Err("recorded task source does not match its delivery identity".into());
+    }
+    let mut measured = Vec::new();
+    // A validated start positively identifies this task's lane. The shared
+    // checkout and reusable worker branch can now belong to A or C; neither
+    // supplies B's delivery evidence. Legacy tasks without a start retain
+    // their conservative inventory instead of guessing that work is absent.
+    let candidates = if let Some(start) = source {
+        vec![start.branch.clone()]
+    } else {
+        let head = resolve_branch_sha(repo, "HEAD^{commit}").ok_or("checkout HEAD is unavailable")?;
+        measured.push(("HEAD".to_string(), head));
+        task_delivery_branch_candidates(task)
+    };
+    for candidate in candidates {
         for reference in [format!("refs/heads/{candidate}"), format!("refs/remotes/origin/{candidate}")] {
             if let Some(sha) = refs.get(&reference) {
                 measured.push((reference, sha.clone()));
             }
         }
+    }
+    if measured.is_empty() {
+        return Err("recorded task source is unavailable; missing delivery cannot be proven".into());
     }
     for (reference, sha) in &measured {
         if !matches!(known_unmerged_factory_commits(repo, sha, &target_sha), KnownUnmergedCount::KnownZero) {

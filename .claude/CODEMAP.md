@@ -135,6 +135,7 @@
 - `hub-web/src/work-events.ts`, `hub-web/src/work-picture.ts`, `hub-web/src/work-rows-view.ts`, `hub-web/src/worker-timeline.ts` - lazy work pages, collapsed supervisor work and live worker timelines.
 - `hub-web/src/pairing-dialog.ts`, `hub-web/src/pair-share.ts`, `hub-web/src/write-grant.ts` - pairing, native sharing/clipboard fallback and folder grants.
 - `cas-cli/src/hub/`, `cas-cli/src/hub/operator_inbox/` - pairing/auth, daemon relays, durable phone input, projects and recovery audits.
+- `cas-cli/src/hub/auth/cache.rs`, `cas-cli/src/hub/auth/audit.rs` - stat-validated auth snapshots, process-local capabilities and batched rotating audits.
 - `cas-cli/src/hub/composer_upload.rs` - DPoP-authenticated, bounded upload storage, host MIME sniffing and persistent upload identity.
 - `hub-web/src/composer-uploads.ts`, `hub-web/src/composer-uploads.css` - lazy composer file/text previews and upload-before-send integration.
 - `hub-web/src/sent-attachments.ts` - durable named upload references, legacy path decoding, and safe sender display labels.

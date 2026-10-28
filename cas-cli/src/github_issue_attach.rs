@@ -94,6 +94,15 @@ pub fn parse_issue_refs(text: &str, default_repo: Option<&str>) -> Vec<IssueRef>
         }
     }
     for caps in REPO_REF.captures_iter(text) {
+        // Task/GH shorthand names an issue in the default repo. GH_REF
+        // handles it below; it must not also invent a task-id/gh repo.
+        if caps[2].eq_ignore_ascii_case("gh")
+            && caps[1].strip_prefix("cas-").is_some_and(|id| {
+                id.len() == 4 && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            continue;
+        }
         if let Some(n) = number(&caps[3]) {
             found.push((
                 caps.get(1).map_or(0, |m| m.start()),

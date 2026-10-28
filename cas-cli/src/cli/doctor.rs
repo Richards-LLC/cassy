@@ -1715,8 +1715,8 @@ fn lesson_recurrence_check(runs: &[crate::cli::release_report::LessonRecurrence]
 }
 
 /// cas-dd56: open GitHub issues whose every referencing task is closed with
-/// its delivery in a release tag. A failed `gh` is a stated skip, not an
-/// empty list.
+/// its delivery in a release tag. Partial lookups retain findings and name
+/// unchecked references; a wholly unavailable check is an explicit skip.
 fn shipped_issues_check(
     tasks: &[crate::types::Task],
     default_repo: Option<&str>,
@@ -1725,23 +1725,43 @@ fn shipped_issues_check(
 ) -> Check {
     const NAME: &str = "shipped issues";
     let Some(repo) = default_repo else {
-        return Check::new(NAME, CheckStatus::Info, "skipped: no GitHub repository resolved for this project");
+        return Check::new(
+            NAME,
+            CheckStatus::Info,
+            "skipped: no GitHub repository resolved for this project",
+        );
     };
-    match crate::issue_reconcile::shipped_open_issues(tasks, Some(repo), states, tag_containing) {
-        Err(error) => Check::new(NAME, CheckStatus::Info, format!("skipped: could not list open issues ({error})")),
-        Ok(shipped) if shipped.is_empty() => Check::new(
+    let report = match crate::issue_reconcile::shipped_open_issues(
+        tasks,
+        Some(repo),
+        states,
+        tag_containing,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            return Check::new(
+                NAME,
+                CheckStatus::Info,
+                format!("skipped: could not list open issues ({error})"),
+            );
+        }
+    };
+    let mut check = if report.shipped.is_empty() {
+        Check::new(
             NAME,
             CheckStatus::Ok,
             format!("no open {repo} issue has all of its referencing tasks shipped"),
-        ),
-        Ok(shipped) => Check::new(
+        )
+    } else {
+        Check::new(
             NAME,
             CheckStatus::Warning,
             format!(
                 "{} open issue(s) whose referencing tasks have all shipped; close them with the \
                  release version: {}",
-                shipped.len(),
-                shipped
+                report.shipped.len(),
+                report
+                    .shipped
                     .iter()
                     .map(|item| format!(
                         "{} ({})",
@@ -1755,8 +1775,16 @@ fn shipped_issues_check(
                     .collect::<Vec<_>>()
                     .join("; ")
             ),
-        ),
+        )
+    };
+    if !report.unchecked.is_empty() {
+        check.status = CheckStatus::Warning;
+        check.message.push_str(&format!(
+            "; could not check: {}",
+            report.unchecked.join("; ")
+        ));
     }
+    check
 }
 
 /// Report the effective destinations and distinguish an inferred project
@@ -7192,9 +7220,15 @@ mod tests {
         let repo = Some("Richards-LLC/cassy");
 
         let check = shipped_issues_check(&tasks, repo, &States(Ok([1158, 1170].into())), &tags);
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
         assert!(
-            check.message.contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
             "{}",
             check.message
         );
@@ -7204,24 +7238,64 @@ mod tests {
         assert!(matches!(check.status, CheckStatus::Ok), "{}", check.message);
 
         let check = shipped_issues_check(&tasks, repo, &States(Err("gh: offline".into())), &tags);
-        assert!(matches!(check.status, CheckStatus::Info), "{}", check.message);
-        assert!(check.message.contains("skipped: could not list open issues") && check.message.contains("gh: offline"));
+        assert!(
+            matches!(check.status, CheckStatus::Info),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("skipped: could not list open issues")
+                && check.message.contains("gh: offline")
+        );
 
         let check = shipped_issues_check(&tasks, None, &States(Ok([1158].into())), &tags);
-        assert!(check.message.starts_with("skipped: no GitHub repository"), "{}", check.message);
-
+        assert!(
+            check.message.starts_with("skipped: no GitHub repository"),
+            "{}",
+            check.message
+        );
 
         let mut mixed = tasks.clone();
-        mixed.push(crate::types::Task::new("cas-bad".into(), "broken/repo#9: fix".into()));
+        mixed.push(crate::types::Task::new(
+            "cas-bad".into(),
+            "broken/repo#9: fix".into(),
+        ));
         let check = shipped_issues_check(&mixed, repo, &States(Ok([1158].into())), &tags);
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
-        assert!(check.message.contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"), "{}", check.message);
-        assert!(check.message.contains("could not check") && check.message.contains("broken/repo#9") && check.message.contains("repository unavailable"), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check
+                .message
+                .contains("Richards-LLC/cassy#1158 (cas-ship in v3.50.0)"),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("could not check")
+                && check.message.contains("broken/repo#9")
+                && check.message.contains("repository unavailable"),
+            "{}",
+            check.message
+        );
         assert!(!check.message.contains("skipped:"), "{}", check.message);
 
         let check = shipped_issues_check(&mixed, repo, &States(Ok([].into())), &tags);
-        assert!(matches!(check.status, CheckStatus::Warning), "{}", check.message);
-        assert!(check.message.contains("no open Richards-LLC/cassy issue") && check.message.contains("broken/repo#9"), "{}", check.message);
+        assert!(
+            matches!(check.status, CheckStatus::Warning),
+            "{}",
+            check.message
+        );
+        assert!(
+            check.message.contains("no open Richards-LLC/cassy issue")
+                && check.message.contains("broken/repo#9"),
+            "{}",
+            check.message
+        );
     }
 
     #[test]

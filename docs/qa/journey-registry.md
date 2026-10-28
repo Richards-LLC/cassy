@@ -385,6 +385,12 @@ G1–G3 run before the merge request, using the committed delivery head and the 
 attributed diff (including deletions and rename sources). They read Git snapshots;
 uncommitted changes do not repair a delivery. Missing registries disable these gates.
 
+After publication, upkeep reads the parked delivery's actual integration merge
+against its first parent. An automatic dist regeneration commit after that merge
+does not replace the source delta or hide its changed bug case. Incoming target
+work and later registry repairs are outside that integration delta; a missing
+or unchanged case still refuses the close.
+
 Header `enforce` accepts `off`, `observe`, `enforce`, or `strict`, and takes precedence
 over local `qa.registry.enforce`. At each revision the local setting is fallback
 only when the header has no policy; its default is `enforce`. A delivery uses the

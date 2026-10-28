@@ -75,6 +75,22 @@ pub(super) fn delivery_snapshot(
     window: Option<&TaskCommitReceiptWindow>,
     receipt: Option<&str>,
 ) -> Result<(String, String, Option<Vec<String>>), String> {
+    // A published delivery owns its integration delta. Re-selecting commits
+    // from the now-merged lane can drop unnamed upkeep commits before a target
+    // sync. The recorded publication may itself be a generated-only follow-up;
+    // find the integration of the immutable parked anchor beneath it instead.
+    // Its first-parent delta excludes incoming target work and later repairs.
+    if task.status == TaskStatus::AwaitingMerge
+        && let Some(anchor) = task.deliverables.factory_branch_anchor.as_deref()
+        && let Some(published) = task.deliverables.green_merge_commit.as_deref()
+        && let Some(head) = super::super::qa_evidence_gate::delivered_head(task, repo, target, receipt)
+        && resolve_branch_sha(repo, anchor).as_deref() == Some(head.as_str())
+        && git_commit_is_ancestor(repo, published, &freshest_target_ref(repo, target))
+        && let Some((base, integrated)) = crate::qa_evidence::delivery_range(repo, &head, published, None)
+        && crate::git_evidence::git_commit_parent_count(repo, &integrated) > 1
+    {
+        return Ok((base, integrated, None));
+    }
     let (base, head) = snapshot_range(task, repo, target, window, receipt)?;
     let paths = window.and_then(|w| task_attribution::paths(repo, target, w, Some(&head)));
     if window.is_some() && paths.is_none() {

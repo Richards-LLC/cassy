@@ -3390,17 +3390,15 @@ impl CasCore {
                 reused_factory_branch_reset.as_deref().unwrap_or_default(),
                 unanchored_warning.unwrap_or_default()
             );
+            let cited_pointer = crate::github_issue_attach::cited_issue_lines(&self.cas_root, &task)
+                .into_iter().next().map(|line| format!("Cited issue: {line}")).unwrap_or_default();
             let response = format!(
-                "Started task: {} - {}\nDelivery mode: {}{}{}\n{}\n{}\n{}\nNotes:\n{}",
-                task.id,
-                excerpt(&task.title, 60),
-                task.delivery_mode,
-                excerpt(&advisory, 160),
-                start_guidance(&task),
-                task_scope(&task),
-                excerpt(&execution_state.unwrap_or_default(), 120),
-                excerpt(&related_context, 120),
+                "Started task: {} - {}\nDelivery mode: {}{}{}\n{}\nNotes:\n{}\n{}\n{}\n{}",
+                task.id, excerpt(&task.title, 60), task.delivery_mode,
+                excerpt(&advisory, 160), start_guidance(&task), task_scope(&task),
                 task_show_notes(&task.notes, &task.id),
+                excerpt(&execution_state.unwrap_or_default(), 120),
+                excerpt(&related_context, 120), excerpt(&cited_pointer, 220),
             );
             let hint = read_hint(&task.id, "show");
             return Ok(Self::success(format!(

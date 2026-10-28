@@ -6979,12 +6979,8 @@ async fn rejected_assignee_reports_that_the_whole_multi_field_update_was_aborted
             .peek_for_targets(&[&worker.name], Some("assignment-session"), 10)
             .unwrap();
         // pin: the worker consumes this copyable task-start command from its queued assignment.
-        assert!(
-            dispatch
-                .iter()
-                .any(|row| row.prompt.contains(&format!("action=start id={id}"))),
-            "accepted creation must reach the same worker it displays"
-        );
+        assert!(dispatch.iter().any(|row| row.prompt.contains(&format!("action=start id={id}"))),
+            "accepted creation must reach the same worker it displays");
     }
     let shown = extract_text(
         service

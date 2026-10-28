@@ -369,14 +369,17 @@ impl TranscriptIndex {
         };
         let (exit_code, session) = result_facts(result, 0);
         let parent = self.poll_parents.remove(call);
-        let running = session.is_some() && exit_code.is_none() && !error;
-        let failed = error
+        let result_status = result.get("task").unwrap_or(result);
+        let failed = result_status.get("interrupted").and_then(Value::as_bool) == Some(true)
+            || result_status.get("status").and_then(Value::as_str) == Some("failed")
+            || error
             || result
                 .get("isError")
                 .or_else(|| result.get("is_error"))
                 .and_then(Value::as_bool)
                 == Some(true)
             || exit_code.is_some_and(|code| code != 0);
+        let running = session.is_some() && exit_code.is_none() && !failed;
         for target in std::iter::once(index).chain(parent) {
             let indexed = &mut self.events[target];
             indexed.result_line = Some(line);
@@ -581,7 +584,7 @@ impl TranscriptIndex {
             }
             Some("system") => match value.get("subtype").and_then(Value::as_str) {
                 Some("turn_duration") => {
-                    self.lifecycle_notice(at, offset, "end", None, Some("success"))
+                    self.lifecycle_notice(at, offset, "end", None, Some("unknown"))
                 }
                 Some("compact_boundary") => {
                     self.lifecycle_notice(at, offset, "phase", Some("compacted"), Some("success"))
@@ -606,7 +609,7 @@ impl TranscriptIndex {
                 if let Some(turn) = payload.get("turn_id").and_then(Value::as_str) {
                     self.turn = Some(turn.to_owned());
                 }
-                self.lifecycle_notice(at, offset, "start", Some("setup"), None);
+                self.lifecycle_notice(at, offset, "start", None, None);
             }
             Some("event_msg")
                 if matches!(
@@ -621,6 +624,8 @@ impl TranscriptIndex {
                     None,
                     Some(if kind == Some("turn_aborted") {
                         "cancelled"
+                    } else if payload.get("error").is_some_and(|error| !error.is_null()) {
+                        "error"
                     } else {
                         "success"
                     }),

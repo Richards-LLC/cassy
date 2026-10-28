@@ -154,7 +154,7 @@ fn codex_rollout_reasoning_and_calls_become_events() {
     assert!(!has_earlier);
     let shapes: Vec<_> = events.iter().map(|event| (event.kind, event.label.as_str(), event.error)).collect();
     assert_eq!(shapes, vec![
-        (WorkEventKind::Notice, "setup", false),
+        (WorkEventKind::Notice, "Turn started", false),
         (WorkEventKind::Thinking, "Reading the queue", false),
         (WorkEventKind::Tool, "shell: git status", true),
         (WorkEventKind::Todo, "Todos 1/2 · Merge", false),
@@ -471,6 +471,20 @@ fn v2_lifecycle_updates_existing_calls_and_notifies_on_completion() {
     assert_eq!(wire["lifecycle"]["stage"], "end");
     assert_eq!(wire["lifecycle"]["outcome"], "error");
     assert_eq!(wire["tool"]["exit_code"], 3);
+    let claude = temp.path().join("claude.jsonl");
+    write_lines(&claude, &[
+        json!({"type":"assistant","timestamp":at(1),"message":{"content":[{"type":"tool_use","id":"bg","name":"Bash","input":{"command":"long command"}}]}}),
+        json!({"type":"user","timestamp":at(2),"toolUseResult":{"isAsync":true,"backgroundTaskId":"job"},"message":{"content":[{"type":"tool_result","tool_use_id":"bg","content":"launched"}]}}),
+        json!({"type":"assistant","timestamp":at(3),"message":{"content":[{"type":"tool_use","id":"poll","name":"TaskOutput","input":{"task_id":"job"}}]}}),
+        json!({"type":"user","timestamp":at(4),"toolUseResult":{"task":{"task_id":"job","status":"completed","exitCode":0}},"message":{"content":[{"type":"tool_result","tool_use_id":"poll","content":"done"}]}}),
+        json!({"type":"system","subtype":"turn_duration","timestamp":at(5)}),
+    ]);
+    let (scope, stores, mut index) = (super::tests::scope(cas_mux::SupervisorCli::Claude), WorkEventStores::default(), WorkEventIndex::default());
+    let (events, _, _) = page(&mut index, &scope, &stores, &claude, None, 10);
+    let wire = serde_json::to_value(events).unwrap();
+    assert_eq!(wire[0]["lifecycle"]["outcome"], "success");
+    assert_eq!(wire[0]["tool"]["exit_code"], 0);
+    assert_eq!(wire[2]["lifecycle"]["outcome"], "unknown", "turn_duration reports completion without a success verdict");
 }
 
 #[test]

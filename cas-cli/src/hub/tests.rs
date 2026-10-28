@@ -5485,13 +5485,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     std::fs::write(auth_path, saved).unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
-    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-image", now - chrono::Duration::minutes(6)).unwrap().ticket;
+    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-video", now - chrono::Duration::minutes(6)).unwrap().ticket;
     let valid = tickets["art-image"].clone();
     let mut tampered = valid.clone();
     tampered.replace_range(3..4, if &tampered[3..4] == "A" { "B" } else { "A" });
     for (case, session, artifact, mut ticket) in [
         ("missing", OPS_SESSION, "art-image", String::new()),
-        ("expired", OPS_SESSION, "art-image", expired),
+        ("expired", OPS_SESSION, "art-video", expired),
         ("tampered", OPS_SESSION, "art-image", tampered),
         ("wrong artifact", OPS_SESSION, "art-pdf", valid.clone()),
         ("wrong session", "another-session", "art-image", valid.clone()),

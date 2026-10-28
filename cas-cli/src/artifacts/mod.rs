@@ -38,6 +38,8 @@ use cloud::{
 };
 use paths::{PublishRoots, resolve_publishable_path};
 
+pub use proof::{MetadataUnavailable, lookup_metadata};
+
 /// 64 KiB: large enough that hashing a 25 MiB file is a handful of syscalls,
 /// small enough not to matter on a constrained host.
 const HASH_CHUNK: usize = 64 * 1024;
@@ -47,6 +49,8 @@ const HASH_CHUNK: usize = 64 * 1024;
 pub enum PublishDisposition {
     /// Recorded locally and committed to Cloud storage.
     Committed { cloud_url: Option<String> },
+    /// Cloud has the bytes, but its portable task reference was not saved.
+    CommittedMetadataUnavailable { reason: String },
     /// Recorded locally; Cloud storage is not live on this endpoint yet.
     StorageNotLive { reason: String },
     /// Recorded locally; this installation has no cloud credentials.
@@ -57,10 +61,21 @@ pub enum PublishDisposition {
 }
 
 impl PublishDisposition {
-    /// Only a completed Cloud commit is delivered across machines; every
-    /// other disposition retains a local record without claiming delivery.
+    /// Whether Cloud committed the bytes. Portable metadata can fail separately.
     pub fn is_committed(&self) -> bool {
-        matches!(self, PublishDisposition::Committed { .. })
+        matches!(
+            self,
+            PublishDisposition::Committed { .. }
+                | PublishDisposition::CommittedMetadataUnavailable { .. }
+        )
+    }
+
+    pub fn metadata_state(&self) -> &'static str {
+        match self {
+            Self::Committed { .. } => "task_reference_recorded",
+            Self::CommittedMetadataUnavailable { .. } => "metadata_unavailable",
+            _ => "local_only",
+        }
     }
 
     /// One line for a person, naming what happened and what follows from it.
@@ -73,6 +88,9 @@ impl PublishDisposition {
             }
             PublishDisposition::Committed { cloud_url: None } => {
                 "stored in Cloud (private)".to_string()
+            }
+            PublishDisposition::CommittedMetadataUnavailable { .. } => {
+                "stored in Cloud; peer metadata unavailable".to_string()
             }
             PublishDisposition::StorageNotLive { .. } => {
                 "recorded locally; Cloud storage is not live yet".to_string()
@@ -346,7 +364,7 @@ pub fn publish(
         });
     };
 
-    let disposition = match upload(client, context.store, &artifact, &source) {
+    let mut disposition = match upload(client, context.store, &artifact, &source) {
         Ok(cloud_url) => PublishDisposition::Committed { cloud_url },
         Err(UploadFailure::NotLive { reason }) => PublishDisposition::StorageNotLive { reason },
         Err(other) => PublishDisposition::UploadFailed {
@@ -360,6 +378,12 @@ pub fn publish(
         .get(&artifact.id)
         .map_err(|error| PublishError::Store(error.to_string()))?
         .unwrap_or(artifact);
+
+    if disposition.is_committed() {
+        if let Err(error) = proof::record_published(&context.roots.project_root.join(".cas"), &artifact) {
+            disposition = PublishDisposition::CommittedMetadataUnavailable { reason: error.to_string() };
+        }
+    }
 
     Ok(PublishOutcome {
         artifact,
@@ -652,6 +676,7 @@ mod tests {
                 cloud_url: Some("https://c/x".to_string()),
             },
             PublishDisposition::Committed { cloud_url: None },
+            PublishDisposition::CommittedMetadataUnavailable { reason: "task reference unavailable".into() },
             PublishDisposition::StorageNotLive {
                 reason: "not live".to_string(),
             },
@@ -665,7 +690,7 @@ mod tests {
             assert!(!summary.is_empty());
             assert_eq!(
                 case.is_committed(),
-                matches!(case, PublishDisposition::Committed { .. })
+                matches!(case, PublishDisposition::Committed { .. } | PublishDisposition::CommittedMetadataUnavailable { .. })
             );
         }
     }
@@ -716,6 +741,13 @@ mod cloud_double_tests {
         fs::create_dir_all(&task_dir).unwrap();
         let file = task_dir.join("report.pdf");
         fs::write(&file, b"hello world").unwrap();
+        crate::store::open_task_store(&cas_root)
+            .unwrap()
+            .add(&crate::types::Task::new(
+                "cas-29624".into(),
+                "artifact".into(),
+            ))
+            .unwrap();
         Fixture {
             store: SqliteArtifactStore::open(&cas_root).unwrap(),
             roots: PublishRoots::new(&cas_root, &artifacts_root, "cas-29624"),
@@ -827,6 +859,15 @@ mod cloud_double_tests {
             let outcome = publish(&context, &f.file).expect("publish");
             cas_store::shared_db::install_busy_handler(&pooled.lock().unwrap()).unwrap();
             assert!(outcome.disposition.is_committed(), "{outcome:?}");
+            let task = crate::store::open_task_store(&f.roots.project_root.join(".cas"))
+                .unwrap()
+                .get("cas-29624")
+                .unwrap();
+            assert!(
+                task.notes.contains(&outcome.artifact.id) && task.notes.contains("ARTIFACT_PROOF:"),
+                "plain publish must carry its committed metadata to peers: {}",
+                task.notes
+            );
             assert_eq!(f.store.list_for_task("cas-29624").unwrap().len(), 1);
             let (note, warnings) = proof::prepare_note(
                 &f.store, "cas-29624", &outcome.artifact.id,

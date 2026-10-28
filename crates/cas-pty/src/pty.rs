@@ -1080,7 +1080,7 @@ impl PtyConfig {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
                 .or_else(|| std::env::var(name).ok());
-            if let Some(value) = value {
+            if let Some(value) = value.filter(|value| name != "CODEX_HOME" || !value.is_empty()) {
                 let value = serde_json::to_string(&value)
                     .expect("serializing an MCP environment path string cannot fail");
                 self.args.extend([
@@ -4683,9 +4683,12 @@ echo SMOKE_DONE
             std::fs::write(home.join("auth.json"), "fixture-auth-never-log").unwrap();
         }
         assert!(!dirs::home_dir().unwrap().join(".codex/auth.json").exists());
-        env.set("CODEX_HOME", &inherited);
-
-        for selected in [None, Some(&explicit)] {
+        for (empty_inherited, selected) in [(false, None), (false, Some(&explicit)), (true, None)] {
+            if empty_inherited {
+                env.set("CODEX_HOME", "");
+            } else {
+                env.set("CODEX_HOME", &inherited);
+            }
             let mut config = PtyConfig::codex(
                 "account-probe", "supervisor", temp.path().to_path_buf(),
                 None, None, None, None, None, None,
@@ -4708,7 +4711,12 @@ echo SMOKE_DONE
             let bytes = std::fs::read(&args_file).unwrap();
             let args = std::str::from_utf8(&bytes).unwrap();
             let forwarded = args.split('\0')
-                .find(|arg| arg.starts_with("mcp_servers.cs.env.CODEX_HOME="))
+                .find(|arg| arg.starts_with("mcp_servers.cs.env.CODEX_HOME="));
+            if empty_inherited {
+                assert!(forwarded.is_none(), "empty inherited CODEX_HOME must act as unset: {args}");
+                continue;
+            }
+            let forwarded = forwarded
                 .expect("the supervisor's CAS MCP child must inherit its effective CODEX_HOME");
             let parsed: toml::Value = toml::from_str(forwarded).unwrap();
             let actual = parsed["mcp_servers"]["cs"]["env"]["CODEX_HOME"].as_str().unwrap();

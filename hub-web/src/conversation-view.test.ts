@@ -382,12 +382,14 @@ describe("ConversationView (Pebble thread)", () => {
   it("renders a markdown table as an evidence table with toned cells", () => {
     const history = new ConversationHistory();
     const view = new ConversationView(document, history, "sup"); document.body.replaceChildren(view.element);
-    history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | 412 | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
+    history.reply(reply(1, "answer", "Every pack:\n\n| pack | cases | result |\n| --- | --- | --- |\n| core | **412** | pass |\n| cli | 318 | 1 flake |"), at(9, 30)); view.update();
     const table = view.element.querySelector<HTMLElement>(".evi")!;
     expect(table.dataset.columns).toBe("3");
     expect(table.querySelectorAll(".evi-row")).toHaveLength(3);
     expect(table.querySelector(".evi-head span")?.textContent).toBe("pack");
     expect(table.querySelector(".pass")?.textContent).toBe("pass"); expect(table.querySelector(".flake")?.textContent).toBe("1 flake");
+    expect([...table.querySelectorAll('.evi-number[role="cell"]')].map(cell => cell.textContent)).toEqual(["412", "pass", "318", "1 flake"]);
+    expect(table.querySelector(".evi-number strong")?.textContent).toBe("412");
     expect(view.element.querySelector(".bub p")?.textContent).toBe("Every pack:");
   });
   it("renders markdown bodies in the thread and a plain-text waiting bookmark", () => {

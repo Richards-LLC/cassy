@@ -702,6 +702,7 @@ dependencies = [
  "claude_rs",
  "code-mode-mcp",
  "criterion 0.5.1",
+ "crossterm 0.25.0",
  "crossterm 0.29.0",
  "dirs",
  "dotenvy",

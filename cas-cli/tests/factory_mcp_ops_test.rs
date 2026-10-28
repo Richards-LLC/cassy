@@ -14895,6 +14895,18 @@ async fn cas009c_worker_reply_to_supervisor_by_name_threads_and_acknowledges() {
     assert!(!text.contains("Take option B."), "an actual reply makes even a named read terminal: {text}");
     assert!(text.contains("answered"), "{text}");
 
+    let broadcast = env.prompt_queue().enqueue("supervisor", "all_workers", "Shared follow-up instruction").unwrap();
+    env.service.coordination(Parameters(reply("cosmic-bear-43", "Answered the shared instruction.", broadcast)))
+        .await.expect("reply to broadcast");
+    let mut named = coord_msg("inbox_poll", "unused", "unused", None);
+    named.notification_id = Some(broadcast);
+    let result = env.service.coordination(Parameters(named)).await.unwrap();
+    let text = get_text(&result);
+    assert!(!text.contains("Shared follow-up instruction"), "{text}");
+    assert!(text.contains("answered"), "{text}");
+    assert_eq!(env.prompt_queue().poll_unseen_for_recipient("another-worker", None, 10).unwrap()[0].prompt,
+        "Shared follow-up instruction", "another recipient still gets the first body");
+
 }
 
 /// cas-009c AC3: a lifecycle row, a broadcast and the director's rows are

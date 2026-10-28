@@ -2972,12 +2972,14 @@ mod tests {
         // The oversized transport is also subject to recipient state: a poll
         // in another turn, an ACK or an answer must not recover its old body.
         queue.poll_named_for_recipient(worker, Some(&session), &[long_id]).unwrap();
-        deliver(long_id, &long).await;
+        daemon.deliver_queued_to_worker(worker, "supervisor", &long, None, long_id, &long)
+            .await.unwrap();
         let repeated = read_inbox().last().unwrap().text.clone();
         assert!(!repeated.contains(long.trim()), "{repeated}");
         assert!(repeated.contains("not acknowledged"), "{repeated}");
         queue.acknowledge_for_recipients(long_id, &[worker.into()], None).unwrap();
-        deliver(long_id, &long).await;
+        daemon.deliver_queued_to_worker(worker, "supervisor", &long, None, long_id, &long)
+            .await.unwrap();
         let terminal = read_inbox().last().unwrap().text.clone();
         assert!(!terminal.contains(long.trim()), "{terminal}");
         assert!(terminal.contains("acknowledged"), "{terminal}");

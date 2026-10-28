@@ -1895,8 +1895,9 @@ impl CasService {
         // This is strong evidence for exactly one row; the conservative
         // generic reply-inference rule below remains unchanged.
         let explicit_reply_to = req.in_reply_to;
-        // Only a direct reply acknowledges the row it names (cas-009c).
-        let mut explicit_reply_acks = false;
+        // Direct replies settle their addressed copy; a broadcast answer
+        // settles only this recipient, never the shared row (cas-009c).
+        let mut explicit_reply_settles = false;
         let mut replied_blocker = None;
         if let Some(notification_id) = explicit_reply_to {
             let prior = queue
@@ -1931,7 +1932,11 @@ impl CasService {
             ];
             let reference =
                 classify_reply_reference(&prior.source, &prior.target, &counterparty, &me);
-            explicit_reply_acks = reference == Some(ReplyReference::DirectReply);
+            explicit_reply_settles = reference == Some(ReplyReference::DirectReply)
+                || (reference == Some(ReplyReference::Thread)
+                    && prior.target.eq_ignore_ascii_case("all_workers")
+                    && counterparty.iter().any(|name| !name.is_empty() && name.eq_ignore_ascii_case(&prior.source))
+                    && !me.iter().any(|name| !name.is_empty() && name.eq_ignore_ascii_case(&prior.source)));
             match reference {
                 Some(ReplyReference::DirectReply) => {
                     replied_blocker = crate::prompt_revalidation::parse_blocker_envelope(&prior.prompt)
@@ -2991,7 +2996,7 @@ impl CasService {
                     )
                 })?;
         }
-        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_acks) {
+        if let Some(notification_id) = explicit_reply_to.filter(|_| explicit_reply_settles) {
             let sender_name = agent_from_store.as_ref().map(|a| a.name.as_str())
                 .unwrap_or(display_name.as_str());
             let sender_aliases = crate::harness_policy::inbox_aliases(sender_name, role == "supervisor");

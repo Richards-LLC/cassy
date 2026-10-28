@@ -89,6 +89,8 @@ pub struct Account {
     pub login_state: LoginState,
     /// Empty means usage unknown, not zero usage.
     pub windows: Vec<UsageWindow>,
+    /// When native capacity was observed; absent means no accepted observation.
+    pub usage_observed_at: Option<DateTime<Utc>>,
     /// Independent findings; selection policies decide which to exclude.
     pub flags: AccountFlags,
 }
@@ -195,6 +197,7 @@ pub(crate) fn account(provider: Provider, home: &Path, folder: PathBuf) -> Accou
         identity,
         plan,
         windows: Vec::new(),
+        usage_observed_at: None,
         login_state: if never {
             LoginState::NeverLoggedIn
         } else {
@@ -368,7 +371,7 @@ pub(crate) fn picker_usage_summaries(
     receive_updates(&mut rows, receiver, until);
     rows.into_iter()
         .filter_map(|row| {
-            crate::cli::limits::summarize_windows(&row.windows).map(|summary| (row.name, summary))
+            crate::cli::limits::summarize_account_at(&row, Utc::now()).map(|summary| (row.name, summary))
         })
         .collect()
 }
@@ -431,6 +434,7 @@ fn receive_updates(
             if let Some(own) = &mut usage[i] {
                 own.plan = snapshot.plan.clone();
                 own.windows = snapshot.windows.clone();
+                own.observed_at = snapshot.observed_at;
             } else {
                 usage[i] = Some(snapshot.clone());
             }
@@ -447,6 +451,7 @@ fn receive_updates(
             } else if snapshot.authenticated {
                 set_login(a, LoginState::LoggedIn);
             }
+            a.usage_observed_at = snapshot.observed_at;
             a.windows = snapshot.windows;
         }
     }

@@ -268,19 +268,10 @@ pub(crate) fn write_bounce(
         return;
     };
     if candidate.consumed {
-        // The read job supplied message-specific transcript evidence. Recheck
-        // identity before writing; a replaced row must not inherit the read.
-        if queue
-            .queued_prompt(candidate.row.id)
-            .ok()
-            .flatten()
-            .is_some_and(|row| same_message(&row, &candidate.row))
-            && let Err(error) = queue.record_recipient_surfaced(
-                candidate.row.id,
-                &candidate.row.target,
-                cas_store::SurfacingSource::ObservedWake,
-            )
-        {
+        // Only this positively correlated path may finish a transport claim.
+        // The store validates the expected message and promotes atomically;
+        // generic wake receipts (including pane growth) retain prior semantics.
+        if let Err(error) = queue.record_transcript_consumed(&candidate.row) {
             tracing::warn!(%error, message_id = candidate.row.id, "could not persist transcript-correlated consumption");
         }
         return;

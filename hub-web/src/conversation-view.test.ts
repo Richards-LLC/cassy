@@ -268,6 +268,7 @@ describe("ConversationView (Pebble thread)", () => {
     view.update();
     // A stand-in layout: every element in the thread, in document order, is 50px tall, stacked from the thread's top edge and moved by scrollTop.
     const msgs = view.element.querySelector<HTMLElement>(".msgs")!;
+    Object.defineProperty(view.element, "clientHeight", { configurable: true, value: 200 });
     const rect = (top: number, height: number) => ({ top, bottom: top + height, height, left: 0, right: 100, width: 100, x: 0, y: top, toJSON: () => ({}) }) as DOMRect;
     let bannerOffset = 0;
     const original = Element.prototype.getBoundingClientRect;

@@ -3410,7 +3410,7 @@ impl CasCore {
                 )
             })?;
             let offset = format!("Notes for task {}\n{}\n\n", task.id, "=".repeat(task.id.len() + 15)).len()
-                + saved.notes.rfind(&note).ok_or_else(|| Self::error(
+                + saved.notes.rfind(&cas_store::task_note_markers::neutralize_new_markers(&note, None)).ok_or_else(|| Self::error(
                     ErrorCode::INTERNAL_ERROR,
                     "Task started, but its saved start instructions are unavailable; read task notes full=true before acting",
                 ))?;

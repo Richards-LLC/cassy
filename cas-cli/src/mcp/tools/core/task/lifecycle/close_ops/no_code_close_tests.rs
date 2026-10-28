@@ -1250,8 +1250,7 @@ async fn no_code_task_with_own_task_branch_commit_still_refuses_gh1177() {
     }
 }
 
-/// Start, rather than commit subject conventions, establishes the new task's
-/// boundary on a reused lane. A foreign claim after that boundary still refuses.
+/// Diagnostics expose the immutable source through the real task dispatcher.
 #[tokio::test]
 async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
     let mut env = TestEnvGuard::temp_home();
@@ -1290,8 +1289,19 @@ async fn start_and_show_report_recorded_source_without_rebinding_gh1407() {
         assert_eq!(f.task(id).deliverables.factory_branch_start.as_ref(), Some(&recorded));
         assert_eq!(git(&worker_path, &["branch", "--show-current"]), replacement);
     }
+    let mut task = f.task(id);
+    task.status = TaskStatus::AwaitingMerge;
+    task.deliverables.parked_branch = Some(replacement.clone());
+    f.put(&task);
+    for full in [false, true] {
+        let shown = call(&f.worker, serde_json::json!({"action":"show", "id":id, "full":full})).await;
+        assert!(shown.contains(&format!("Recorded source branch: {LANE}")), "{shown}");
+        assert!(shown.contains(&format!("Parked branch: {replacement}")), "{shown}");
+    }
 }
 
+/// Start, rather than commit subject conventions, establishes the new task's
+/// boundary on a reused lane. A foreign claim after that boundary still refuses.
 #[tokio::test]
 async fn reused_lane_start_attributes_unnamed_delivery_cas_ead0() {
     let mut env = TestEnvGuard::temp_home();

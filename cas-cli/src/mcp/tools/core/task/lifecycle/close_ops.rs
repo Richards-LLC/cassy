@@ -27795,9 +27795,10 @@ mod merge_state_gate_tests {
         let (dir, bare) = handoff_repo();
         let p = dir.path();
         std::fs::create_dir_all(p.join("cas-cli/tests")).unwrap();
+        std::fs::write(p.join("delivery.rs"), "pub fn delivery() {}\n").unwrap();
         std::fs::write(p.join("cas-cli/tests/queue_proof_test.rs"), "// integration target\n").unwrap();
         std::fs::write(p.join(".gitignore"), ".cas/\n").unwrap();
-        git(p, &["add", ".gitignore", "cas-cli"]);
+        git(p, &["add", ".gitignore", "cas-cli", "delivery.rs"]);
         git(p, &["commit", "-q", "-m", "test(cas-4386): delivery with scoped proof obligation"]);
         let delivery = head_sha(p);
         let tree = rev_parse_local(p, "HEAD^{tree}");
@@ -27808,11 +27809,20 @@ mod merge_state_gate_tests {
         let queue = head_sha(p);
         git(p, &["checkout", "-q", "main"]);
         git(p, &["merge", "-q", "--no-ff", "factory/worker", "-m", "land delivery"]);
-        git(p, &["push", "-q", "origin", "main"]);
         assert_ne!(head_sha(p), queue);
+        let before_delivery = rev_parse_local(p, "main~1");
+        let before_tree = rev_parse_local(p, "main~1^{tree}");
+        if case == "dropped" {
+            git(p, &["rm", "delivery.rs"]);
+        } else {
+            std::fs::write(p.join("later.txt"), "unrelated later main change\n").unwrap();
+            git(p, &["add", "later.txt"]);
+        }
+        git(p, &["commit", "-q", "-m", "advance main after the queue landing"]);
+        git(p, &["push", "-q", "origin", "main"]);
         let tree = if case == "wrong-tree" { "a".repeat(40) } else { tree };
-        let proof_head = if case == "before-delivery" { rev_parse_local(p, "main~1") } else { queue };
-        let tree = if case == "before-delivery" { rev_parse_local(p, "main~1^{tree}") } else { tree };
+        let proof_head = if case == "before-delivery" { before_delivery } else { queue };
+        let tree = if case == "before-delivery" { before_tree } else { tree };
         let mut run = serde_json::json!({
             "id": 4386, "event": "merge_group", "status": "completed", "conclusion": "success",
             "path": ".github/workflows/ci.yml", "head_sha": proof_head,
@@ -27895,6 +27905,14 @@ esac
             assert!(text.contains("scoped proof receipt has base"), "{case}: {text}");
             assert!(!task.notes.contains("MERGE_QUEUE_PROOF:"), "{case}: {}", task.notes);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn supervisor_queue_proof_keeps_delivery_content_gate_cas_4386() {
+        let (task, text) = queue_proof_close_cas_4386("dropped").await;
+        assert_ne!(task.status, TaskStatus::Closed, "{text}");
+        assert!(text.contains("DELIVERY CONTENT DROPPED"), "{text}");
     }
 
     #[test]

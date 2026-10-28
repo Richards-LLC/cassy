@@ -206,6 +206,10 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J17-STATUS-TRUTH:
+    statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
+    check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
+    bug: {task: cas-0a75}
   HUB-J17-FLEET-INVALIDATION:
     statement: A fleet change overlapping an older heartbeat obtains a fresh catalog, so a stopped worker disappears
       without waiting for the next heartbeat.
@@ -264,7 +268,7 @@ invariants:
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
   HUB-J22-GOAL:
-    statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
+    statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
@@ -286,6 +290,11 @@ bug_families:
     tasks: [cas-abb7]
     invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
     journeys: [HUB-J22]
+  stale-worker-and-delivery-projection:
+    title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
+    tasks: [cas-0a75]
+    invariants: [HUB-J17-STATUS-TRUTH]
+    journeys: [HUB-J17]
   prose-table-column-collapse:
     title: A prose column must never consume its siblings' word widths or render inline markdown literally
     tasks: [cas-8bb3]
@@ -1695,6 +1704,7 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-STATUS-TRUTH
   - HUB-J17-FLEET-INVALIDATION
   - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
   traffic:
@@ -1988,6 +1998,7 @@ journeys:
     trigger: A paired supervisor conversation at 1280x800 and 390x844 in light and dark
   steps:
   - Open plain text without loading rich renderers
+  - Copy exact source and wrap a code frame with the keyboard
   - Read a diagram and inspect its source; bad input stays readable
   - Expand a unified diff
   - Decode an inline image without moving its file caption
@@ -1997,6 +2008,8 @@ journeys:
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/markdown-renderer.ts
+  - hub-web/src/code-frame.ts
+  - hub-web/src/code-frame.css
   - hub-web/src/rich-code.ts
   - hub-web/src/rich-diagram.ts
   - hub-web/src/rich-diff.ts

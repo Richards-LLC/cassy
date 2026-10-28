@@ -1,6 +1,6 @@
 import { test, expect, type Request } from "@playwright/test";
-import { readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { access, chmod, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { claimReceiptDirectory } from "./receipt-directory.mjs";
 import {
   saveQaTrace,
@@ -633,6 +633,24 @@ test("HUB-J24 real hub composer upload stores the picked file", {
     expect(await readFile(stored.path)).toEqual(bytes);
     await expect(page.locator(".composer-uploads")).toBeHidden();
   } finally {
+    await command("cleanup");
+  }
+});
+
+test("HUB-J13 real fixture keeps cleanup state when removal is refused", {
+  annotation: { type: "journey-part", description: "real hub, failed removal and explicit recovery" },
+}, async () => {
+  const fixture = await command("reset", { newSession: true });
+  const home = dirname(fixture.project);
+  try {
+    // A real filesystem refusal, without racing a writer or mocking rm.
+    await chmod(home, 0o500);
+    await expect(command("cleanup")).rejects.toThrow(/EACCES/);
+    await chmod(home, 0o700);
+    await command("cleanup");
+    await expect(access(home)).rejects.toMatchObject({ code: "ENOENT" });
+  } finally {
+    await chmod(home, 0o700).catch(error => { if (error.code !== "ENOENT") throw error; });
     await command("cleanup");
   }
 });

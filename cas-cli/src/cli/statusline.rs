@@ -308,6 +308,7 @@ mod tests {
             "rate_limits":{"five_hour":{"used_percentage":23}},
             "secret_unrecognized_field":"must-not-be-cached"
         }"#).unwrap();
+        // pin: native model.display_name still maps to the existing session output.
         assert_eq!(session.model.as_deref(), Some("Opus"));
         let usage = super::super::limits::account_usage(crate::accounts::Provider::Claude, &dir);
         assert_eq!(usage.windows[0].used_percent, Some(23.0));

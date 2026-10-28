@@ -246,6 +246,11 @@ fn usage_cache() -> &'static UsageCache {
 }
 
 pub(crate) fn cached_account_usage(provider: crate::accounts::Provider, dir: &Path) -> Option<AccountUsage> {
+    if provider == crate::accounts::Provider::Claude {
+        // Status reads the small native snapshot too, so an old in-process
+        // entry cannot bypass its freshness or account-identity checks.
+        return Some(account_usage(provider, dir));
+    }
     usage_cache().lock().ok()?.get(&(provider.name(), dir.canonicalize().unwrap_or_else(|_| dir.to_owned()))).cloned()
 }
 
@@ -696,6 +701,8 @@ mod tests {
         snapshot.observed_at = Utc::now() - chrono::Duration::minutes(6);
         fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();
         assert!(collect_claude("fixture", &dir).windows.is_empty(), "stale capacity is unknown");
+        assert!(cached_account_usage(crate::accounts::Provider::Claude, &dir).unwrap().windows.is_empty(),
+            "worker status must not retain an older in-process snapshot");
         snapshot.observed_at = Utc::now();
         snapshot.windows[0].reset_at = Some((Utc::now() - chrono::Duration::seconds(1)).to_rfc3339());
         fs::write(dir.join(CLAUDE_SNAPSHOT_FILE), serde_json::to_vec(&snapshot).unwrap()).unwrap();

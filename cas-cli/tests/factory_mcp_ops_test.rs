@@ -369,6 +369,21 @@ enum IsolatedCodexState {
     Unavailable,
 }
 
+/// A real ChatGPT catalogue keeps model admission active in spawn fixtures.
+fn write_codex_account_fixture(account: &std::path::Path, models: &[&str]) {
+    std::fs::create_dir_all(account).expect("create synthetic Codex account");
+    std::fs::write(account.join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{}}"#)
+        .expect("write synthetic Codex auth");
+    std::fs::write(
+        account.join("models_cache.json"),
+        serde_json::json!({
+            "fetched_at": chrono::Utc::now(),
+            "client_version": "0.0.0-test",
+            "models": models.iter().map(|slug| serde_json::json!({"slug": slug})).collect::<Vec<_>>(),
+        }).to_string(),
+    ).expect("write synthetic Codex model catalogue");
+}
+
 /// Run one availability-sensitive integration test in its own process.
 ///
 /// The production probe reads process HOME/PATH internally, so a per-Command
@@ -9842,6 +9857,10 @@ async fn test_coordination_interrupt_action_is_urgent() {
 /// caught at test time, not at factory-start time.
 #[test]
 fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly() {
+    // An inherited account need not exist: the child owns its account fixture.
+    let account = TempDir::new().expect("ambient account parent");
+    let missing = account.path().join("absent-account");
+    let _guard = EnvGuard::set(&[("CODEX_HOME", missing.to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_isolated_child",
         IsolatedCodexState::Available,
@@ -9903,6 +9922,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
         "cas-efc4 AC2: worker_spec must encode the effort override: {spec_json}"
     );
 
+    let spec: cas_mux::WorkerSpec = serde_json::from_str(spec_json).expect("valid Codex spec");
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert_eq!(spec.requester_config_dir.as_deref(), expected_account.to_str());
+
     // Second entry: omitted overrides now resolves to the safe Codex worker floor
     // instead of inheriting the supervisor/session defaults.
     let claude_entry = &entries[1];
@@ -9925,6 +9948,10 @@ async fn test_efc4_heterogeneous_codex_then_claude_spawn_queued_correctly_in_iso
 /// break the other.
 #[test]
 fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness() {
+    // A valid but incompatible inherited account must not select the child's models.
+    let account = TempDir::new().expect("incompatible ambient Codex account");
+    write_codex_account_fixture(account.path(), &["unrelated-model"]);
+    let _guard = EnvGuard::set(&[("CODEX_HOME", account.path().to_str().unwrap())]);
     run_isolated_codex_test(
         "test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolated_child",
         IsolatedCodexState::Available,
@@ -9997,6 +10024,21 @@ async fn test_efc4_model_and_effort_reach_spawn_spec_for_each_harness_in_isolate
         claude_spec.contains("medium"),
         "claude effort in spec: {claude_spec}"
     );
+
+    // The fixture exercises catalogue admission, rather than bypassing it via
+    // API-key auth or a missing/stale cache. Refusal must not enqueue work.
+    let unlisted = "fixture-unlisted-model";
+    let mut rejected = factory_req("spawn_workers");
+    rejected.count = Some(1);
+    rejected.cli = Some("codex".into());
+    rejected.model = Some(unlisted.into());
+    let error = env.service.factory_request(Parameters(rejected)).await
+        .expect_err("an unlisted model must still be refused");
+    assert!(error.message.contains(unlisted) && error.message.contains("models_cache.json"), "{error}");
+    let expected_account = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".codex");
+    assert!(error.message.contains(expected_account.to_str().unwrap()), "{error}");
+    assert_eq!(env.spawn_queue().peek(10).expect("peek after refusal").len(), 2);
+
 }
 
 /// cas-efc4 AC4: `worker_status` must surface worktree/git metadata

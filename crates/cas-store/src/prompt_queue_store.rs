@@ -16650,6 +16650,7 @@ mod tests {
         let (temp, store) = create_test_store();
         register_bounce_sender(&store, "supervisor", "factory-a");
         register_bounce_sender(&store, "done-worker", "factory-a");
+        store.conn.lock().unwrap().execute("UPDATE agents SET role='worker' WHERE name='done-worker'", []).unwrap();
         let tasks = SqliteTaskStore::open(temp.path()).unwrap();
         tasks.init().unwrap();
         let mut task = Task::new("cas-done".into(), "delivery".into());
@@ -20352,6 +20353,42 @@ mod cas_bf890_notice_digest_tests {
         // pin: named reads preserve the full copied message byte for byte.
         assert_eq!(full[0].prompt, "Peer worker message copy — from w to peer: collision details");
         assert_eq!(store.peek_for_targets(&["peer"], Some(SESSION), 10).unwrap()[0].id, peer.recipient_id);
+    }
+
+    /// One parked tip has one merge wake even when three producers relay it.
+    /// A new tip, blocker, operator message and verification verdict keep
+    /// independent delivery, and all supplemental evidence stays readable.
+    #[test]
+    fn supervisor_noise_merge_episode_has_one_wake() {
+        use crate::{SqliteTaskStore, TaskStore};
+        let (temp, store) = store();
+        register(&store, "lead-sup", "supervisor", "active", SESSION);
+        register(&store, "w", "worker", "active", SESSION);
+        let tasks = SqliteTaskStore::open(temp.path()).unwrap();
+        tasks.init().unwrap();
+        let mut task = cas_types::Task::new("cas-delivery".into(), "parked".into());
+        task.status = cas_types::TaskStatus::AwaitingMerge;
+        task.assignee = Some("w".into());
+        task.deliverables.factory_branch_anchor = Some("a".repeat(40));
+        tasks.add(&task).unwrap();
+        let worker = QueueOrigin::RegisteredAgent { agent_id: format!("id-w-{SESSION}") };
+        let at = Utc::now().to_rfc3339();
+        let lifecycle = format!("<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"w\" notification_id=\"1\" occurrence=\"{at}\" branch_tip=\"{}\">MERGE REQUIRED</task-lifecycle>", task.id, "a".repeat(40));
+        let first = store.enqueue_idempotent("lifecycle-wake:1", "supervisor", &lifecycle, Some(SESSION), None, None, "park-1", Some(&QueueOrigin::Daemon)).unwrap();
+        let first = match first { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
+        let ready = format!("READY TO MERGE\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>", task.id);
+        let ready_id = store.enqueue_worker_action_with_outcome("w", "lead-sup", &ready, "w", SESSION, None, None, false, &worker).unwrap().id();
+        let merge = |head: char| format!("proof: kept whole\n\n<cas-merge-request>{{\"task_id\":\"{}\",\"branch_tip\":\"{}\",\"target_branch\":\"epic/test\",\"target_branch_tip\":\"{}\"}}</cas-merge-request>", task.id, head.to_string().repeat(40), "c".repeat(40));
+        let duplicate = store.enqueue_urgent_with_outcome("w", "lead-sup", &merge('a'), Some(SESSION), None, None, false, Some(&worker)).unwrap().id();
+        let fresh = store.enqueue_urgent_with_outcome("w", "lead-sup", &merge('b'), Some(SESSION), None, None, false, Some(&worker)).unwrap().id();
+        let blocker = store.enqueue_urgent_with_outcome("w", "supervisor", "new blocker <cas-blocker worker=\"w\"></cas-blocker>", Some(SESSION), None, None, false, Some(&worker)).unwrap().id();
+        let verdict = store.enqueue_idempotent("verification-verdict:1", "supervisor", "verification approved", Some(SESSION), None, None, "verdict", Some(&QueueOrigin::Daemon)).unwrap();
+        let verdict = match verdict { EnqueueIdempotentResult::Created(id) => id, _ => unreachable!() };
+        assert_eq!(selected(&store), vec![first, fresh, blocker, verdict]);
+        let digested = drain(&store, HookDrain::NoticeDigest);
+        assert_eq!(digested, vec![ready_id, duplicate]);
+        let evidence = store.poll_named_for_recipient("lead-sup", Some(SESSION), &[duplicate]).unwrap();
+        assert_eq!(evidence[0].prompt, merge('a'));
     }
 
     /// Acceptance 2: an abandoned message to a recipient from an earlier

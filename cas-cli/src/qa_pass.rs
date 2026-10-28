@@ -1930,6 +1930,16 @@ mod tests {
     #[test]
     fn merge_gate_binds_only_recorded_rounds() {
         let qa = QaConfig::default();
+        let waived = pass("old-tip", cas_types::QaPassState::Waived);
+        assert!(merge_gate(&task(), &qa, &[waived.clone()], "new-tip").is_ok(),
+            "a historical waiver must not opt batch deliveries back into per-task QA");
+        let mut per_task = qa.clone();
+        per_task.mode = crate::config::QaMode::PerTask;
+        assert!(merge_gate(&task(), &per_task, &[waived.clone()], "new-tip").is_err());
+        let mut requested = pass("new-tip", cas_types::QaPassState::Pending);
+        requested.round = waived.round + 1;
+        assert!(merge_gate(&task(), &qa, &[waived, requested], "new-tip").is_err(),
+            "a newer explicit QA request still gates the delivery");
         assert!(merge_gate(&task(), &qa, &[], "aaaa1111").is_ok());
         // A path-eligible delivery is bound once the park recorded a round.
         assert!(

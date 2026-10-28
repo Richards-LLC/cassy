@@ -191,3 +191,32 @@ describe("desktop context rail (P10)", () => {
     expect(document.activeElement).toBe(link);
   });
 });
+
+it("resizes the desktop panel with keyboard and pointer bounds, restores device width, and ignores phone input", async () => {
+  const { syncContextResize } = await import("./context-resize");
+  mountShell();
+  const host = shell();
+  const environment = { width: 1280, phone: false, saved: "320" };
+  const storage = { getItem: () => environment.saved, setItem: (_key: string, value: string) => { environment.saved = value; } };
+  const options = { width: () => environment.width, phone: () => environment.phone, storage };
+  syncContextResize(host, options);
+  const grip = host.querySelector<HTMLElement>('[role="separator"]')!;
+  expect(grip.getAttribute("aria-valuenow")).toBe("320");
+  grip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }));
+  expect(environment.saved).toBe("336");
+  grip.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+  expect(Number(grip.getAttribute("aria-valuenow"))).toBeLessThanOrEqual(480);
+  grip.dispatchEvent(new MouseEvent("pointerdown", { clientX: 900, button: 0 }));
+  grip.dispatchEvent(new MouseEvent("pointermove", { clientX: 2000 }));
+  grip.dispatchEvent(new MouseEvent("pointerup"));
+  expect(environment.saved).toBe("240");
+  environment.width = 390; environment.phone = true;
+  syncContextResize(host, options);
+  const saved = environment.saved;
+  grip.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft" }));
+  expect(environment.saved).toBe(saved);
+  expect(grip.hidden).toBe(true);
+  environment.width = 1600; environment.phone = false;
+  mountShell(); syncContextResize(shell(), options);
+  expect(shell().querySelector('[role="separator"]')?.getAttribute("aria-valuenow")).toBe("240");
+});

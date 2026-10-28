@@ -143,15 +143,16 @@ pub use protocol::{
     ClientMessage, ConversationHistoryMessage, ConversationHistoryReply, DaemonMessage, OperatorNotice,
     MessageAttribution, OperatorReplyPayload, OperatorTurnKind, PROTOCOL_VERSION, PaneBootstrap,
     PaneInfo, PaneKind, PaneSizeAuthority, ProtocolCapability, SessionMetadata, SessionState,
-    WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, daemon_capabilities,
+    WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind, WorkTool, WorkToolCounts, WorkLifecycle, WorkReasoning,
+    WorkChangedFile, WorkChangedFiles, daemon_capabilities,
 };
 pub use renderer::{FactoryViewMode, MissionControlFocus};
 pub use session::{
-    SessionInfo, SessionManager, create_metadata, daemon_log_path, daemon_trace_log_path,
+    SessionInfo, SessionManager, SessionEndOutcome, create_metadata, daemon_log_path, daemon_trace_log_path,
     generate_session_name, metadata_path, panic_log_path, provisioner_pin_path, session_log_dir,
     socket_path, tui_log_path,
 };
-pub(crate) use session::{daemon_identity_is_live, record_daemon_lifecycle};
+pub(crate) use session::{EndedSession, daemon_identity_is_live, record_daemon_lifecycle};
 use std::io;
 use std::path::Path;
 

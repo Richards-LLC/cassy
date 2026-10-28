@@ -100,7 +100,7 @@ pub(super) fn admit_ready(cas_dir: &Path, ready: &Ready) -> bool {
 
 /// Local ref reads are cheap; network evidence belongs to the external lane.
 /// Keep both refs: a push can change origin without moving the local tip.
-fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String)> {
+fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Option<(String, String, String, bool)> {
     let DirectorEvent::WorkerIdle { worker, active_task: Some(active) } = event else { return None; };
     let task = crate::store::open_task_store_local(&repo.join(".cas")).ok()?.get(&active.task_id).ok()?;
     let resolve = |branch: &str| crate::git_evidence::resolve_ref_commit_sha(repo, branch);
@@ -114,8 +114,29 @@ fn fingerprint(event: &DirectorEvent, data: &DirectorData, repo: &Path) -> Optio
     // a ref, so they belong to the fingerprint that decides when to re-read.
     let staged = task.deliverables.integration_batch.is_some();
     let declined = tip.as_ref().is_some_and(|tip| task.deliverables.declined_factory_anchors().contains(tip));
-    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined));
-    Some((task.id, tip.unwrap_or_default(), refs))
+    let marked_ready = tip.as_deref().is_some_and(|tip| {
+        crate::ui::factory::director::delivery_marked_ready(&task, tip)
+    });
+    let refs = format!("{:?}", (task.status, &branch, resolve(&branch), resolve(&format!("origin/{branch}")), lease, staged, declined, marked_ready));
+    Some((task.id, tip.unwrap_or_default(), refs, marked_ready))
+}
+
+/// Missing CI is not an actionable merge decision for a no-code or
+/// documentation-only delivery. Unknown Git evidence stays eligible so a
+/// failed path read cannot silently hide a code delivery.
+fn suppress_unknown_ci(repo: &Path, data: &DirectorData, task_id: &str, tip: &str) -> bool {
+    let Some(task) = crate::store::open_task_store_local(&repo.join(".cas"))
+        .ok().and_then(|store| store.get(task_id).ok()) else { return false; };
+    if task.execution_note.as_deref() == Some("no-code") { return true; }
+    let (_, target, _) = crate::ui::factory::director::resolve_merge_target_for_task(data, task_id);
+    let Some(target) = target else { return false; };
+    let base = format!("origin/{target}");
+    let Some(paths) = crate::git_evidence::git_text(repo, &["diff", "--name-only", &base, tip, "--"])
+    else { return false; };
+    !paths.is_empty() && paths.lines().all(|path| {
+        let path = path.to_ascii_lowercase();
+        path.ends_with(".md") || path.starts_with("docs/") || path.contains("/docs/")
+    })
 }
 
 /// One observation supplies both readiness and worker waits. Settled results
@@ -125,7 +146,16 @@ pub(super) fn read_delivery(
     cache: &ProbeCache, event: &DirectorEvent, data: &DirectorData, repo: &Path, now: DateTime<Utc>,
 ) -> (Option<Ready>, Option<(String, WorkerWait)>) {
     let cas_dir = repo.join(".cas");
-    let Some((task, tip, refs)) = fingerprint(event, data, repo) else { return (None, None); };
+    let Some((task, tip, refs, marked_ready)) = fingerprint(event, data, repo) else { return (None, None); };
+    // Check live task evidence before reusing either an in-memory read or a
+    // durable READY receipt: a same-tip checkpoint note can withdraw readiness.
+    if !marked_ready { return (None, None); }
+    if crate::store::open_task_store_local(&cas_dir).ok()
+        .and_then(|store| store.get(&task).ok())
+        .is_some_and(|task| crate::ui::factory::director::hold_decision_after_park(&task.notes))
+    {
+        return (None, None);
+    }
     if let Some(ready) = prior_ready(&cas_dir, &task, &tip) {
         return (Some(ready), None);
     }
@@ -146,7 +176,12 @@ pub(super) fn read_delivery(
     let wait = read_worker_wait(event, data, &cas_dir, repo);
     let mut ci = wait.as_ref().map(|(_, wait)| wait.ci).unwrap_or("unknown");
     let ready = read(event, data, repo, wait.as_ref().map(|(_, wait)| wait), &mut ci);
-    let refs = fingerprint(event, data, repo).map(|(_, _, refs)| refs).unwrap_or(refs);
+    if (ci == "unknown" || ready.as_ref().is_some_and(|ready| ready.ci == "unknown"))
+        && suppress_unknown_ci(repo, data, &task, &tip)
+    {
+        return (None, None);
+    }
+    let refs = fingerprint(event, data, repo).map(|(_, _, refs, _)| refs).unwrap_or(refs);
     let mut reads = cache.reads.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // An older in-flight observation cannot overwrite a newer request's read.
     if reads.get(&task).is_none_or(|previous| previous.checked_at <= now) {
@@ -518,6 +553,10 @@ fn read_active(worker: &str, task_id: &str, data: &DirectorData, repo: &Path, kn
         task_id, worker, task.deliverables.parked_branch.as_deref(), None, resolve, |_, _| false,
     );
     let tip = tip?;
+    if !crate::ui::factory::director::delivery_marked_ready(&task, &tip) {
+        *observed_ci = "not-ready";
+        return None;
+    }
     let known = known.filter(|known| known.task == task_id && known.tip.as_deref() == Some(&tip));
     // cas-43d2: a rejected tip stays rejected until the worker commits, which
     // moves the fingerprint; settle it instead of re-reading every minute.

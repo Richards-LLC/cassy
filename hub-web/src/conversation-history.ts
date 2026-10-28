@@ -471,6 +471,10 @@ export class ConversationHistory {
       this.keepEarlier({ kind: "send", value: { id: `history:${message.notification_id}`, target: message.target, text: message.text, state: incoming, notificationId: message.notification_id, stamped: message.stamped, deviceLabel: message.operator_label, ...(message.reply_to === undefined ? {} : { replyTo: message.reply_to }) }, at: ConversationHistory.timestamp(message.at), session: message.session }, message.session!);
       return;
     }
+    // A reconnect can lose MessageQueued even though the durable turn arrived.
+    // Reuse receipt correlation before the notification-id merge: the pending
+    // send knows its client_ref, but cannot yet know the queue's notification id.
+    if (message.client_ref) this.acknowledge({ client_ref: message.client_ref, notification_id: message.notification_id, target: message.target, stamped: message.stamped, operator_label: message.operator_label });
     const existing = this.events.find((event) => event.kind === "send" && event.value.notificationId === message.notification_id);
     if (existing?.kind === "send") {
       existing.value.target = message.target;
@@ -487,6 +491,8 @@ export class ConversationHistory {
       // not re-open the ask it answered or move it across the session line
       // (cas-1f13); in_reply_to never changes after the send.
       existing.value.replyTo = message.reply_to ?? existing.value.replyTo;
+      delete existing.value.unconfirmedAt;
+      delete existing.value.restored;
       existing.session ??= message.session;
       return;
     }
@@ -494,7 +500,7 @@ export class ConversationHistory {
     // cas-e7b1: an unsettled message restored from the journal that the machine's
     // history now shows did arrive. It becomes that row instead of a second
     // copy of the message.
-    const restored = this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
+    const restored = message.client_ref ? undefined : this.events.find((event) => event.kind === "send" && event.value.restored && (event.value.state === "sending" || event.value.state === "unconfirmed") && event.value.notificationId === undefined
       && event.value.sentAt !== undefined && event.value.target === message.target && event.value.text === message.text
       && (at === undefined || at >= event.value.sentAt - RESTORED_MATCH_WINDOW_MS));
     if (restored?.kind === "send") {

@@ -80,7 +80,7 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
 
   await journey.stage("Open a conversation; only the thread shows", async () => {
     await journey.open();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
     await expect(interrupt).toBeVisible();
     await expect(interrupt).toHaveText("Interrupt");
@@ -126,12 +126,12 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     // Studio iPad takes control of the session; reopening the conversation
     // reads who holds it.
     hub.holdLease(PELICAN, "Studio iPad");
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
     // cas-97d58 F11: the cas-src toast belongs to cas-src; it does not stay up
     // (or stay in the accessibility tree) under gabber-studio's own Interrupt.
     await expect(page.getByText("Interrupted the cas-src supervisor.")).toHaveCount(0);
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(page.locator(".conversation-identity h1")).toHaveText("cas-src");
     // The reopened conversation has read who holds control before the press:
     // with the holder still unknown, the take is not forced (queue run
@@ -158,13 +158,13 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
     await interrupt.click();
     await hub.waitFor(() => interrupts(hub).length === 3);
     const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
-    await list.getByRole("button", { name: /gabber-studio/ }).click();
+    await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
     await released;
     await expect(page.locator(".conversation-identity h1")).toHaveText("gabber-studio");
   });
 
   await journey.stage("A take that finishes after leaving cannot keep the old conversation", async () => {
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     let resume!: () => void;
     let started!: () => void;
     const waiting = new Promise<void>((resolve) => { started = resolve; });
@@ -178,7 +178,7 @@ test("HUB-J18 interrupt or read the supervisor from its conversation", async ({ 
       await interrupt.click();
       await waiting;
       const released = page.waitForRequest((request) => request.method() === "DELETE" && new URL(request.url()).pathname === `/v1/sessions/${PELICAN}/lease`);
-      await list.getByRole("button", { name: /gabber-studio/ }).click();
+      await list.getByRole("button", { name: /gabber-studio/ }).and(list.locator(".conversation-row")).click();
       resume();
       await released;
       expect(interrupts(hub), "the abandoned take must not interrupt the old supervisor").toHaveLength(3);
@@ -199,7 +199,7 @@ test("HUB-J18 Interrupt recovers when the first lease read is still pending", jo
 
   try {
     await journey.open();
-    await list.getByRole("button", { name: /cas-src/ }).click();
+    await list.getByRole("button", { name: /cas-src/ }).and(list.locator(".conversation-row")).click();
     await expect(interrupt).toBeVisible();
     await leaseRead.started;
 
@@ -233,7 +233,7 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
 
       await journey.stage(`Open the conversation at ${width} in ${colorScheme}`, async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.getByRole("button", { name: "Send to the cas-src supervisor", exact: true })).toBeVisible();
         await expectOnlyTheThread(page);
         if (!admin) {
@@ -280,7 +280,7 @@ for (const [width, colorScheme] of [[390, "light"], [390, "dark"], [1280, "dark"
         await page.reload();
         const back = page.getByRole("button", { name: "‹ Conversations", exact: true });
         if (await back.isVisible().catch(() => false)) await back.click();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(interrupt).toBeVisible();
         // cas-d043 G02: the header names the device in control before any take.
         await expect(page.locator("#conversation-control")).toHaveText(" · Studio iPad in control");

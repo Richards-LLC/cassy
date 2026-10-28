@@ -697,6 +697,11 @@ fn prompt_poison_sweep_due(last: Option<Instant>, now: Instant) -> bool {
 /// it (provenance line, reply hint, body), so the teammate turn that renders it
 /// carries the `[cas #N …]` envelope and body the turn recorder matches.
 pub(crate) fn teams_body_fallback_text(queued: &cas_store::QueuedPrompt) -> String {
+    // A reference is not a first body delivery. Keep body provenance and
+    // reply framing out of the wire consumed by transcript correlation.
+    if queued.reference_only {
+        return queued.prompt.clone();
+    }
     use crate::mcp::tools::service::agent_search_system::message::{
         commander_reply_command, first_message_provenance,
     };
@@ -12290,13 +12295,15 @@ pub(super) fn commander_history_send(
         return None;
     }
     let (reply_to, text) = commander_history_message_text(&row.prompt);
+    let delivery = if terminal { None } else { queue.message_delivery_report(row.id).ok().flatten() };
     Some(crate::ui::factory::ConversationHistoryMessage {
         notification_id: row.id,
+        client_ref: delivery.as_ref().and_then(|report| report.client_ref.clone()),
         target: row.target,
         text,
         // A durable row proves queue acceptance. Cleanup's processed_at is
         // not transport proof, and a gated row has never reached the supervisor.
-        state: if terminal || queue.message_delivery_report(row.id).ok().flatten()
+        state: if terminal || delivery
             .is_some_and(|report| report.delivered_at.is_some()) {
             "delivered".to_string()
         } else {
@@ -13115,17 +13122,16 @@ mod tests {
             scopes: vec!["message:send".into()],
             operator_verified: true,
         };
-        let receipt = daemon.dispatch_commander_control(
-            super::super::delivery::CommanderControl::SendMessage {
-                target: "supervisor".into(),
-                text: "Yes please, reconcile it.".into(),
-                summary: None,
-                urgent: false,
-                client_ref: Some("ben-send".into()),
-                in_reply_to: None,
-                attribution,
-            },
-        ).await.unwrap().unwrap();
+        let send = super::super::delivery::CommanderControl::SendMessage {
+            target: "supervisor".into(),
+            text: "Yes please, reconcile it.".into(),
+            summary: None,
+            urgent: false,
+            client_ref: Some("ben-send".into()),
+            in_reply_to: None,
+            attribution,
+        };
+        let receipt = daemon.dispatch_commander_control(send.clone()).await.unwrap().unwrap();
         let receipt_json = serde_json::to_value(&receipt).unwrap();
         assert_eq!(receipt_json["MessageQueued"]["operator_label"], "Ben",
             "the origin's receipt must name the person, not just the hardware");
@@ -13141,6 +13147,11 @@ mod tests {
                 .is_none()
         );
         let live = daemon.live_operator_message(id).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(&live).unwrap()["client_ref"], "ben-send",
+            "a lost live ACK must remain correlatable through the durable turn");
+        let retried = daemon.dispatch_commander_control(send).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(retried).unwrap()["MessageQueued"]["notification_id"], id,
+            "retrying the same client_ref must return the original row");
         assert_eq!(live.state, "acknowledged");
         assert_eq!(live.operator_label.as_deref(), Some("Ben"));
         // The inert supervisor has not consumed the row. A reload and another
@@ -13154,6 +13165,8 @@ mod tests {
             };
             assert_eq!(messages.len(), 1, "{device}'s accepted turn");
             assert_eq!(messages[0].notification_id, live.notification_id);
+            assert_eq!(serde_json::to_value(&messages[0]).unwrap()["client_ref"], "ben-send",
+                "{device}'s durable history must retain send identity after ACK loss");
             assert_eq!(messages[0].text, live.text);
             assert_eq!(messages[0].operator_label.as_deref(), Some("Ben"),
                 "both people must see Ben's name on reload");

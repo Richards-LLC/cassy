@@ -335,15 +335,13 @@ impl CasService {
                 ),
             ));
         };
-        let pass = cas_store::waive_qa_pass(
-            &self.inner.cas_root,
+        let (pass, retired) = self.inner.waive_qa_round(
             task_id,
             &supervisor,
             &implementer,
             &branch,
             &chosen.head,
             reason,
-            chrono::Utc::now(),
         )
         .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, format!("qa_waive rejected: {error}")))?;
         // What the receipt adds: why a newer tip was chosen, or that the
@@ -382,7 +380,7 @@ impl CasService {
             ));
         }
         Ok(Self::success(format!(
-            "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.",
+            "Independent QA waived for {task_id} @{} (pass {}).{binding} The waiver is logged on the task; merge and close accept this exact tip only.{retired}",
             pass.head8(),
             pass.id
         )))
@@ -434,6 +432,32 @@ impl CasService {
     /// Close the QA work item of a withdrawn round so no reviewer picks it up.
     pub(crate) fn close_withdrawn_qa_task(&self, pass: &QaPass, reason: &str) -> String {
         self.inner.cancel_withdrawn_qa_task(pass, reason)
+    }
+
+    /// Repair one closed delivery's historical orphans without changing QA evidence.
+    pub(super) async fn verification_qa_reconcile(
+        &self, req: VerificationRequest,
+    ) -> Result<CallToolResult, McpError> {
+        let supervisor = self.inner.resolve_live_supervisor_authority()
+            .map_err(|_| Self::error(ErrorCode::INVALID_PARAMS,
+                "qa_reconcile requires a live registered supervisor"))?;
+        let task_id = required(req.task_id.as_deref(), "task_id (one closed delivery)")?;
+        let limit = req.limit.unwrap_or(25);
+        if !(1..=100).contains(&limit) {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS, "qa_reconcile limit must be 1..100"));
+        }
+        let task = self.inner.open_task_store()?.get(task_id)
+            .map_err(|error| Self::error(ErrorCode::INVALID_PARAMS, error.to_string()))?;
+        if task.status != TaskStatus::Closed {
+            return Err(Self::error(ErrorCode::INVALID_PARAMS,
+                "qa_reconcile requires a closed delivery; active deliveries use normal QA lifecycle retirement"));
+        }
+        let retired = self.inner.reconcile_obsolete_qa_tasks(task_id, limit, &supervisor.id)
+            .map_err(|error| Self::error(ErrorCode::INTERNAL_ERROR, error.to_string()))?;
+        Ok(Self::success(format!(
+            "QA reconciliation for {task_id}: {} obsolete QA child(ren) cancelled (limit {limit}). Pass records, findings and current rounds retained.{}",
+            retired.len(), retired.iter().map(|id| format!("\n- {id}")).collect::<String>(),
+        )))
     }
 
     pub(super) async fn verification_qa_status(

@@ -21,3 +21,37 @@ it("does not turn an explicitly empty session into a project-wide worker list", 
   expect(workerProgress([], [{ name: "a" }], [])).toEqual([]);
   expect(workerProgress(undefined, [{ name: "sup", role: "supervisor" }, { name: "a" }], []).map(worker => worker.name)).toEqual(["a"]);
 });
+
+it("scopes server-shaped project epics to the supervisor and keeps the full board reachable", async () => {
+  const { releaseProgress, taskGroups } = await import("./progress-model");
+  const tasks = [
+    { id: "merge", epic_id: "release", status: "AwaitingMerge" },
+    { id: "blocked", epic_id: "release", status: "Blocked" },
+    { id: "work", epic_id: "release", status: "InProgress" },
+    { id: "ready", epic_id: "release", status: "Open" },
+    { id: "other", epic_id: "other", status: "InProgress" },
+    { id: "unknown", status: "Open" },
+    { id: "closed-child", epic_id: "closed", status: "Open" },
+    { id: "cancelled-child", epic_id: "cancelled", status: "Open" },
+    { id: "verified-child", epic_id: "verified", status: "Open" },
+  ];
+  const epics = [{ id: "release", status: "inprogress", assignee: "supervisor-id", title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5, last_merged_at: "2026-10-28T14:00:00Z" } },
+    { id: "other", status: "open", assignee: "another-supervisor" },
+    { id: "closed", status: "closed", assignee: "supervisor-id" },
+    { id: "cancelled", status: "cancelled", epic_verification_owner: "supervisor" },
+    { id: "verified", status: "open", epic_verification_owner: "supervisor" },
+  ];
+  const supervisors = ["supervisor", "supervisor-id"];
+  expect(releaseProgress(epics, "release", tasks, supervisors)).toMatchObject({ title: "Release 3.87", progress: { total: 8, merged: 3, merges_per_hour: 1.5 } });
+  expect(taskGroups(tasks, epics, [], false, supervisors, "release").map(group => [group.label, group.tasks.map(task => task.id)])).toEqual([
+    ["Needs you", ["merge", "blocked"]], ["In progress", ["work"]], ["Ready", ["ready"]],
+  ]);
+  expect(taskGroups(tasks, epics, [], true, supervisors, "release").flatMap(group => group.tasks).map(task => task.id)).toContain("other");
+  expect(taskGroups(tasks, epics, [], true, supervisors, "release").flatMap(group => group.tasks).map(task => task.id)).toContain("unknown");
+  const unpinned = taskGroups(tasks, epics, [], false, supervisors).flatMap(group => group.tasks).map(task => task.id);
+  expect(unpinned).toEqual(["merge", "blocked", "work", "ready", "verified-child"]);
+  expect(releaseProgress([...epics].reverse(), null, [], supervisors)?.id).toBe("verified");
+  expect(releaseProgress(epics, "closed", tasks, supervisors)?.id).toBe("release");
+  expect(releaseProgress(epics.filter(epic => ["other", "closed", "cancelled"].includes(epic.id)), null, tasks, supervisors)).toBeUndefined();
+  expect(taskGroups(tasks, [], [], false, supervisors).flatMap(group => group.tasks)).toEqual([]);
+});

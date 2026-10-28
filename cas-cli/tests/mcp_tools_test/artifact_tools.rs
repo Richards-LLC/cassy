@@ -229,7 +229,9 @@ async fn showing_an_unknown_artifact_names_the_id() {
         );
         assert_eq!(error.data.as_ref().unwrap()["artifact_id"], "art-nope");
         let mut command = std::process::Command::new(cas::test_paths::cas_binary());
-        command.current_dir(temp.path()).args(["--json", "artifact", action]);
+        command
+            .current_dir(temp.path())
+            .args(["--json", "artifact", action]);
         if action == "fetch" {
             command.args(["--task", "cas-proof"]);
         }
@@ -306,12 +308,17 @@ async fn post_is_dispatched_and_its_failures_are_named() {
 async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     use cas::store::open_task_store;
     use cas::types::Task;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let mut env = TestEnvGuard::temp_home();
     let (peer, service) = setup_cas_service(&mut env);
-    let task = Task::new("cas-proof".into(), "native proof".into());
+    let mut peer_config = cas::config::Config::load(&peer.path().join(".cas")).unwrap();
+    peer_config.project.get_or_insert_default().canonical_id =
+        Some("github.com/source/blue".into());
+    peer_config.save(&peer.path().join(".cas")).unwrap();
+    let mut task = Task::new("cas-proof".into(), "native proof".into());
+    task.origin_project = Some("github.com/source/blue".into());
     open_task_store(&peer.path().join(".cas"))
         .unwrap()
         .add(&task)
@@ -357,7 +364,7 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"hello world"))
         .mount_as_scoped(&server)
         .await;
-    let cloud = serde_json::json!({"endpoint": server.uri(), "token": "fixture-token"});
+    let cloud = serde_json::json!({"endpoint": server.uri(), "token": "fixture-token", "team_id": "team-source"});
     std::fs::write(peer.path().join(".cas/cloud.json"), cloud.to_string()).unwrap();
     let source = write_in_checkout(&peer, "native-proof.log", b"hello world");
     let published = extract_text(
@@ -376,6 +383,17 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .lines()
         .find_map(|line| line.strip_prefix("artifact_id: "))
         .unwrap();
+    let attachment =
+        cas::cloud::peer_mailbox::resolve_attachment(&peer.path().join(".cas"), id).unwrap();
+    let sent = cas::cloud::peer_mailbox::attach_pointers("peer proof", &[attachment]);
+    let (received, _) = cas::cloud::peer_mailbox::split_attachments(&sent);
+    let cas::cloud::peer_mailbox::PeerAttachment::Artifact {
+        id: attached_id, ..
+    } = &received[0]
+    else {
+        panic!("peer message lost its artifact pointer");
+    };
+    assert_eq!(attached_id, id);
     let synced = open_task_store(&peer.path().join(".cas"))
         .unwrap()
         .get(&task.id)
@@ -446,7 +464,10 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         ))
         .await
         .unwrap_err();
-    assert!(override_attempt.message.contains("ARTIFACT_PROOF"), "{override_attempt:?}");
+    assert!(
+        override_attempt.message.contains("ARTIFACT_PROOF"),
+        "{override_attempt:?}"
+    );
     let agents = cas::store::open_agent_store(&peer.path().join(".cas")).unwrap();
     let mut recipient = cas::types::Agent::new(
         "proof-recipient-id".to_string(),
@@ -455,7 +476,12 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
     recipient.heartbeat();
     agents.register(&recipient).unwrap();
     let holder = format!("test-session-{}", std::process::id());
-    assert!(agents.try_claim(&task.id, &holder, 600, None).unwrap().is_success());
+    assert!(
+        agents
+            .try_claim(&task.id, &holder, 600, None)
+            .unwrap()
+            .is_success()
+    );
     let before_transfer = open_task_store(&peer.path().join(".cas"))
         .unwrap()
         .get(&task.id)
@@ -505,7 +531,9 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         .to_string();
     let owner_tasks = open_task_store(&owner.path().join(".cas")).unwrap();
     owner_tasks.add(&synced).unwrap();
-    owner_tasks.append_trusted_note(&task.id, &published_proof).unwrap();
+    owner_tasks
+        .append_trusted_note(&task.id, &published_proof)
+        .unwrap();
     // These are two machines in one project, not two unrelated fixture projects.
     let mut owner_config = cas::config::Config::load(&owner.path().join(".cas")).unwrap();
     owner_config.project.get_or_insert_default().canonical_id = synced.origin_project.clone();
@@ -576,10 +604,204 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
         "verified references enter the owner's existing ledger"
     );
 
+    // A peer message can cross projects on the same account. The receiving
+    // project has neither the source task nor the source artifact ledger row.
+    Mock::given(method("GET"))
+        .and(path("/api/account/projects"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"projects": [
+            {"team_id":"team-source","canonical_id":"github.com/source/blue","scope":"team"},
+            {"team_id":"team-recipient","canonical_id":"github.com/recipient/red","scope":"team"}
+        ]})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(query_param("project_id", "github.com/source/blue"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&synced))
+        .mount(&server)
+        .await;
+    let (foreign, foreign_service) = setup_cas_service(&mut env);
+    let mut foreign_config = cas::config::Config::load(&foreign.path().join(".cas")).unwrap();
+    foreign_config.project.get_or_insert_default().canonical_id =
+        Some("github.com/recipient/red".into());
+    foreign_config.save(&foreign.path().join(".cas")).unwrap();
+    let foreign_cloud = serde_json::json!({"endpoint": server.uri(), "token": "fixture-token", "team_id": "team-recipient"});
+    std::fs::write(
+        foreign.path().join(".cas/cloud.json"),
+        foreign_cloud.to_string(),
+    )
+    .unwrap();
+    assert!(
+        open_task_store(&foreign.path().join(".cas"))
+            .unwrap()
+            .get(&task.id)
+            .is_err()
+    );
+    let mut foreign_fetch = req("fetch");
+    foreign_fetch.task_id = Some(task.id.clone());
+    foreign_fetch.id = Some(attached_id.clone());
+    let fetched = extract_text(
+        foreign_service
+            .artifact(Parameters(foreign_fetch.clone()))
+            .await
+            .unwrap(),
+    );
+    let foreign_path = fetched
+        .lines()
+        .find_map(|line| line.strip_prefix("path: "))
+        .unwrap();
+    assert_eq!(std::fs::read(foreign_path).unwrap(), b"hello world");
+    assert!(fetched.contains(sha));
+    let mut forged_id = foreign_fetch.clone();
+    forged_id.id = Some("art-forged".into());
+    let forged = foreign_service
+        .artifact(Parameters(forged_id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        forged.data.as_ref().unwrap()["state"],
+        "metadata_unavailable"
+    );
+    assert!(
+        open_task_store(&foreign.path().join(".cas"))
+            .unwrap()
+            .get(&task.id)
+            .is_err()
+    );
+
+    let fresh_recipient = |env: &mut TestEnvGuard| {
+        let (root, service) = setup_cas_service(env);
+        let mut config = cas::config::Config::load(&root.path().join(".cas")).unwrap();
+        config.project.get_or_insert_default().canonical_id =
+            Some("github.com/recipient/red".into());
+        config.save(&root.path().join(".cas")).unwrap();
+        std::fs::write(
+            root.path().join(".cas/cloud.json"),
+            foreign_cloud.to_string(),
+        )
+        .unwrap();
+        (root, service)
+    };
+    let mut conflicting = synced.clone();
+    conflicting.origin_project = Some("github.com/source/green".into());
+    conflicting.notes = conflicting.notes.replace(sha, &"0".repeat(64));
+    let alternate = Mock::given(method("GET"))
+        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(query_param("project_id", "github.com/source/green"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&conflicting))
+        .mount_as_scoped(&server)
+        .await;
+    let two_scopes = Mock::given(method("GET"))
+        .and(path("/api/account/projects"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"projects": [
+                {"team_id":"team-source","canonical_id":"github.com/source/blue","scope":"team"},
+                {"team_id":"team-source","canonical_id":"github.com/source/green","scope":"team"}
+            ]})),
+        )
+        .with_priority(1)
+        .mount_as_scoped(&server)
+        .await;
+    let (_ambiguous, ambiguous_service) = fresh_recipient(&mut env);
+    let ambiguous = ambiguous_service
+        .artifact(Parameters(foreign_fetch.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        ambiguous.message.contains("conflicting"),
+        "{}",
+        ambiguous.message
+    );
+    drop(two_scopes);
+    drop(alternate);
+
+    let mut bad_proof = synced.clone();
+    bad_proof.notes = bad_proof.notes.replace(sha, &"0".repeat(64));
+    let mismatched = Mock::given(method("GET"))
+        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(query_param("project_id", "github.com/source/blue"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&bad_proof))
+        .with_priority(2)
+        .mount_as_scoped(&server)
+        .await;
+    let (bad_proof_root, bad_proof_service) = fresh_recipient(&mut env);
+    let bad_digest = bad_proof_service
+        .artifact(Parameters(foreign_fetch.clone()))
+        .await
+        .unwrap_err();
+    assert!(
+        bad_digest.message.contains("artifact_checksum_mismatch"),
+        "{}",
+        bad_digest.message
+    );
+    assert!(
+        cas_store::SqliteArtifactStore::open(&bad_proof_root.path().join(".cas"))
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .is_none()
+    );
+    drop(mismatched);
+
+    let (outsider, outsider_service) = fresh_recipient(&mut env);
+    std::fs::write(
+        outsider.path().join(".cas/cloud.json"),
+        serde_json::json!({"endpoint":server.uri(),"token":"outsider","team_id":"team-recipient"})
+            .to_string(),
+    )
+    .unwrap();
+    Mock::given(method("GET"))
+        .and(path("/api/account/projects"))
+        .and(header("Authorization", "Bearer outsider"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"projects": [
+                {"team_id":"team-source","canonical_id":"github.com/source/blue","scope":"team"}
+            ]})),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(header("Authorization", "Bearer outsider"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    let denied = outsider_service
+        .artifact(Parameters(foreign_fetch.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.data.as_ref().unwrap()["state"],
+        "metadata_unavailable"
+    );
+    assert!(
+        cas_store::SqliteArtifactStore::open(&outsider.path().join(".cas"))
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .is_none()
+    );
+
     drop(download);
+    // Restore the view fixture after the scoped controls for the existing
+    // checksum regression below.
+    Mock::given(method("GET"))
+        .and(path("/api/artifacts/cloud-proof/url"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "artifact_id": "cloud-proof", "url": format!("{}/download?signature=secret", server.uri())
+        })))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/download"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(b"wrong bytes"))
+        .with_priority(1)
         .mount(&server)
         .await;
     let error = owner_service
@@ -605,6 +827,49 @@ async fn proof_note_publishes_and_resolves_on_another_machine_cas_4bb2() {
             .iter()
             .filter(|r| r.url.path() == "/download")
             .all(|r| !r.headers.contains_key("authorization"))
+    );
+
+    // A forged owner in a scoped task response cannot lend its proof to the
+    // authenticated source project.
+    let mut forged_owner = synced.clone();
+    forged_owner.origin_project = Some("github.com/attacker/other".into());
+    Mock::given(method("GET"))
+        .and(path("/api/account/projects"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"projects": [
+                {"team_id":"team-source","canonical_id":"github.com/source/blue","scope":"team"}
+            ]})),
+        )
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/teams/team-source/sync/tasks/cas-proof"))
+        .and(query_param("project_id", "github.com/source/blue"))
+        .and(header("Authorization", "Bearer fixture-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&forged_owner))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let (forged_root, forged_service) = fresh_recipient(&mut env);
+    let refused = forged_service
+        .artifact(Parameters(foreign_fetch))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        refused
+            .data
+            .as_ref()
+            .unwrap_or_else(|| panic!("{refused:?}"))["state"],
+        "metadata_unavailable"
+    );
+    assert!(
+        cas_store::SqliteArtifactStore::open(&forged_root.path().join(".cas"))
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .is_none()
     );
 }
 

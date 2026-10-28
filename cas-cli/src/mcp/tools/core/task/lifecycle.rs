@@ -3366,8 +3366,9 @@ impl CasCore {
         ) && current != start.branch {
             source_readback.push_str(&format!(
                 "WARNING: checkout branch {current} differs from recorded source branch {}.\n\
-                 Recovery: ask the supervisor to use task action=rebind_branch id={}; repeated start does not rebind.\n",
+                 Recovery: ask the supervisor to use {prefix}task action=rebind_branch id={}; repeated start does not rebind.\n",
                 start.branch, task.id,
+                prefix = crate::mcp::tools::core::guidance::supervisor_prefix(),
             ));
         }
 

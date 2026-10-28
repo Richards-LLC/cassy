@@ -5209,7 +5209,8 @@ fn is_duration_word(word: &str) -> bool {
 fn operator_policy_command_textual(command: &str) -> bool {
     static SET_WORD: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let set_word = SET_WORD.get_or_init(|| {
-        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)").expect("valid set pattern")
+        regex::Regex::new(r"(?:^|[^A-Za-z0-9_.\-])set(?:[^A-Za-z0-9_.\-]|$)")
+            .expect("valid set pattern")
     });
     let names_policy = (command.contains("factory.write_roots") && set_word.is_match(command))
         || command.contains("grant-write")
@@ -5217,8 +5218,35 @@ fn operator_policy_command_textual(command: &str) -> bool {
     if !names_policy {
         return false;
     }
+    let shell_command = shell_command_without_heredoc_bodies(command);
+    let mut bodies = shell_heredoc_bodies(command).into_iter();
+    // An unquoted heredoc expands command substitutions before its reader
+    // receives the data. Only complete quoted bodies are provably literal.
+    // Use the existing delimiter/body ordering, failing closed if incomplete.
+    let expanding_policy = shell_command
+        .lines()
+        .flat_map(heredoc_delimiters)
+        .any(|delimiter| {
+            let body = bodies.next();
+            body.is_none_or(|body| !delimiter.literal_body && runs_substitution(&[body]))
+        });
     let statements = shell_statement_words(command);
-    statements.is_empty()
+    let clipboard = statements.iter().any(|words| {
+        matches!(
+            words.first().map(String::as_str),
+            Some("pbcopy" | "wl-copy" | "xclip")
+        )
+    });
+    // A literal clipboard sink handles data, but never sanctions surrounding
+    // output redirections, substitutions or shell groups. Expanding heredoc
+    // scopes were checked above; never exempt the whole pipeline.
+    let clipboard_effects = clipboard
+        && factory_shell_tokens(&shell_command)
+            .iter()
+            .any(|token| matches!(token, ShellToken::Operator('>' | '(' | ')')));
+    expanding_policy
+        || clipboard_effects
+        || statements.is_empty()
         || !statements
             .iter()
             .all(|words| !runs_substitution(words) && read_only_statement(words))
@@ -5235,9 +5263,9 @@ fn runs_substitution(words: &[String]) -> bool {
         .any(|word| word.contains("$(") || word.contains('`') || word.contains("<(") || word.contains(">("))
 }
 
-/// A statement that only reads or prints: it cannot change the policy by
-/// itself (a printed command piped into a shell has the shell as another,
-/// non-read-only statement).
+/// A statement that only reads or prints (including literal clipboard data):
+/// it cannot change the policy by itself. A printed command piped into a
+/// shell has the shell as another, non-read-only statement.
 fn read_only_statement(words: &[String]) -> bool {
     let Some(index) = unwrapped_command_index(words) else {
         return words.is_empty();
@@ -5250,7 +5278,9 @@ fn read_only_statement(words: &[String]) -> bool {
     match words[index].as_str() {
         name @ ("grep" | "egrep" | "fgrep" | "rg" | "cat" | "head" | "tail" | "wc" | "sort"
         | "uniq" | "cut" | "ls" | "echo" | "printf" | "cd" | "pwd" | "true" | "false"
-        | "test" | "[") => index == 0 && policy_reader_flags(name, args),
+        | "test" | "[" | "pbcopy" | "wl-copy" | "xclip") => {
+            index == 0 && policy_reader_flags(name, args)
+        }
         "set" => index == 0 && policy_set_flags(args),
         "git" => index == 0 && policy_git_flags(args),
         "cas" => {
@@ -5513,6 +5543,11 @@ fn policy_reader_flags(name: &str, args: &[String]) -> bool {
         ),
         "echo" => (&["-n", "-e", "-E"], &[], false),
         "printf" | "true" | "false" => (&[], &[], false),
+        // Bare output-only clipboard programs, with known data/format flags.
+        // Wrappers and executable paths remain outside this exception.
+        "pbcopy" => (&[], &["-pboard"], false),
+        "wl-copy" => (&["-n", "--trim-newline"], &["-t", "--type"], false),
+        "xclip" => (&["-i", "-in"], &["-selection"], false),
         "cd" | "pwd" => (&["-L", "-P"], &[], false),
         "test" | "[" => (
             &[
@@ -6284,8 +6319,8 @@ fn unsanctioned_factory_path_with_worktree(
     // Once a durable clone binding exists, cwd is only a tool location and
     // must not widen the contract. Keep cwd as the standalone-worker fallback
     // for sessions that have no registered or environment-provided root.
-    let mut sanctioned =
-        vec![worktree_root.unwrap_or_else(|| std::path::PathBuf::from(&input.cwd))];
+    let project_root = worktree_root.unwrap_or_else(|| std::path::PathBuf::from(&input.cwd));
+    let mut sanctioned = vec![project_root.clone()];
     sanctioned.push(crate::config::resolved_factory_artifacts_root(
         configured_artifacts_root.as_deref(),
     ));
@@ -6324,7 +6359,8 @@ fn unsanctioned_factory_path_with_worktree(
             .is_some_and(|root| resolved_path.starts_with(root))
     });
     if is_harness_session_scratchpad(&resolved_path, &input.session_id)
-        || (is_supervisor && is_harness_file_memory_path(&resolved_path, home.as_deref()))
+        || (is_supervisor
+            && is_harness_file_memory_path(&resolved_path, home.as_deref(), &project_root))
         || is_explicitly_sanctioned
     {
         return None;
@@ -6585,47 +6621,27 @@ fn lexically_normalize_path(path: std::path::PathBuf) -> std::path::PathBuf {
     normalized
 }
 
-/// The Claude harness persists its direct file memory per project below
-/// `~/.claude/projects/<project>/memory`, or an account-specific sibling such
-/// as `~/.claude-work/projects/<project>/memory`.  This is a narrow
-/// supervisor-only workspace-contract exception: all components after HOME
-/// are fixed except the account suffix, project slug, and files below memory.
-/// Reject parent traversal so the exception cannot authorize an adjacent
-/// harness directory.
-fn is_harness_file_memory_path(path: &std::path::Path, home: Option<&std::path::Path>) -> bool {
-    use std::path::Component;
-
-    let Some(home) = home else {
+/// Only the active Claude config root's current-project memory is a
+/// supervisor workspace exception. Canonicalize the config root itself so
+/// account symlinks work, but keep the project/memory suffix literal: a
+/// symlink below it must not widen the sanctioned subtree.
+fn is_harness_file_memory_path(
+    path: &std::path::Path,
+    home: Option<&std::path::Path>,
+    project_root: &std::path::Path,
+) -> bool {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| home.map(|home| home.join(".claude")));
+    let Some(config) = config.filter(|config| config.is_absolute()) else {
         return false;
     };
-    let Ok(home) = home.canonicalize() else {
+    let Ok(config) = config.canonicalize() else {
         return false;
     };
-    let Ok(relative) = path.strip_prefix(&home) else {
-        return false;
-    };
-    let mut components = relative.components();
-    let Some(Component::Normal(config_dir)) = components.next() else {
-        return false;
-    };
-    let Some(config_dir) = config_dir.to_str() else {
-        return false;
-    };
-    if config_dir != ".claude"
-        && !config_dir
-            .strip_prefix(".claude-")
-            .is_some_and(|suffix| !suffix.is_empty())
-    {
-        return false;
-    }
-    if components.next() != Some(Component::Normal(std::ffi::OsStr::new("projects")))
-        || !matches!(components.next(), Some(Component::Normal(_)))
-        || components.next() != Some(Component::Normal(std::ffi::OsStr::new("memory")))
-    {
-        return false;
-    }
-
-    components.all(|component| matches!(component, Component::Normal(_)))
+    let slug = crate::factory_context_reset::claude_project_slug(&project_root.to_string_lossy());
+    path.starts_with(config.join("projects").join(slug).join("memory"))
 }
 
 /// Shell redirection to these character devices is a stream operation, not
@@ -6647,16 +6663,31 @@ mod workspace_contract_tests {
     fn harness_file_memory_canonicalizes_home_without_allowing_symlink_escape() {
         use std::os::unix::fs::symlink;
 
+        let _env = TestEnvGuard::new();
         let home = tempfile::tempdir().expect("home");
         let outside = tempfile::tempdir().expect("outside");
-        let memory = home.path().join(".claude/projects/project/memory");
+        let project = std::path::Path::new("/project");
+        let slug = crate::factory_context_reset::claude_project_slug(&project.to_string_lossy());
+        let memory = home
+            .path()
+            .join(".claude/projects")
+            .join(slug)
+            .join("memory");
         std::fs::create_dir_all(&memory).expect("memory directory");
         let inside = canonicalize_for_containment(&memory.join("context.md")).unwrap();
-        assert!(is_harness_file_memory_path(&inside, Some(home.path())));
+        assert!(is_harness_file_memory_path(
+            &inside,
+            Some(home.path()),
+            project
+        ));
 
         symlink(outside.path(), memory.join("escape")).expect("escape symlink");
         let escaped = canonicalize_for_containment(&memory.join("escape/secret.md")).unwrap();
-        assert!(!is_harness_file_memory_path(&escaped, Some(home.path())));
+        assert!(!is_harness_file_memory_path(
+            &escaped,
+            Some(home.path()),
+            project
+        ));
     }
 
     fn bash_input(command: &str, cwd: &Path) -> HookInput {
@@ -7612,6 +7643,26 @@ mod workspace_contract_tests {
     /// however the command is wrapped.
     #[test]
     fn cas_3147_agent_shell_cannot_run_operator_policy_commands() {
+        let mut env = TestEnvGuard::temp_home();
+        env.set("CAS_AGENT_ROLE", "supervisor");
+        env.set("CAS_FACTORY_MODE", "1");
+        let project = tempfile::tempdir().unwrap();
+        env.set("CAS_CLONE_PATH", project.path());
+        let root = crate::store::init_cas_dir(project.path()).unwrap();
+        let decision = |command: &str| {
+            let out = handle_pre_tool_use(&bash_input(command, project.path()), Some(&root)).unwrap();
+            let value = serde_json::to_value(out).unwrap();
+            (
+                value["hookSpecificOutput"]["permissionDecision"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                value["hookSpecificOutput"]["permissionDecisionReason"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
         for command in [
             "cas config set factory.write_roots ~/soundwave-config",
             "/home/u/.local/bin/cas config set factory.write_roots ''",
@@ -7621,8 +7672,8 @@ mod workspace_contract_tests {
             "script -qc 'cas config set factory.write_roots /x' /dev/null",
             "setsid cas config set factory.write_roots /x",
         ] {
-            let denial = operator_policy_command_denial(command)
-                .unwrap_or_else(|| panic!("{command} must be refused"));
+            let (status, denial) = decision(command);
+            assert_eq!(status, "deny", "{command}: {denial}");
             assert!(denial.contains("operator"), "{denial}");
         }
         for allowed in [
@@ -7631,7 +7682,59 @@ mod workspace_contract_tests {
             "git commit -m 'document cas config set factory.write_roots'",
             "rg 'grant-write' cas-cli/src",
         ] {
-            assert_eq!(operator_policy_command_denial(allowed), None, "{allowed}");
+            let (status, reason) = decision(allowed);
+            assert_ne!(status, "deny", "{allowed}: {reason}");
+        }
+        for operation in [
+            r#"set factory.write_roots "~/x""#,
+            "grant-write --task cas-1234 --path /x --reason example",
+            "revoke-write --task cas-1234 --path /x",
+        ] {
+            let mutation = format!("cas config {operation}");
+            for sink in ["wl-copy", "pbcopy", "xclip -selection clipboard"] {
+                for copy in [
+                    format!("printf '%s' '{mutation}' | {sink}"),
+                    format!("echo '{mutation}' | {sink}"),
+                    format!("cat <<'COMMAND' | {sink}\n{mutation}\nCOMMAND"),
+                ] {
+                    let (status, reason) = decision(&copy);
+                    assert_eq!(status, "allow", "copy is data: {copy}: {reason}");
+                }
+            }
+            for copy in [
+                format!("cat <<'COMMAND' | pbcopy\n$({mutation})\nCOMMAND"),
+                format!("cat <<COMMAND | pbcopy\n{mutation}\nCOMMAND"),
+            ] {
+                let (status, reason) = decision(&copy);
+                assert_eq!(status, "allow", "literal body stays data: {copy}: {reason}");
+            }
+            for invocation in [
+                mutation.clone(),
+                format!("sh -c '{mutation}'"),
+                format!("eval \"{mutation}\""),
+                format!("env X=1 {mutation}"),
+                format!("printf '%s' x | xargs {mutation}"),
+                format!("printf '%s' '{mutation}' | sh"),
+                format!("printf '%s' '{mutation}' | pbcopy; {mutation}"),
+                format!("printf '%s' '{mutation}' | env X=1 pbcopy"),
+                format!("printf '%s' '{mutation}' | /tmp/pbcopy"),
+                format!("printf '%s' '{mutation}' $(printf x) | wl-copy"),
+                format!("printf '%s' '{mutation}' \"$(printf x)\" | pbcopy"),
+                format!("printf '%s' \"$({mutation})\" | pbcopy"),
+                format!("printf '%s' '{mutation}' | pbcopy > command.txt"),
+                format!("printf '%s' '{mutation}' | wl-copy 2> errors.txt"),
+                format!("cat <<COMMAND | pbcopy\n$({mutation})\nCOMMAND"),
+                format!("cat <<COMMAND | wl-copy\n`{mutation}`\nCOMMAND"),
+                format!("cat <<COMMAND\n$({mutation})\nCOMMAND"),
+                format!("cat <<'COM'MAND | pbcopy\nliteral clipboard text\nCOMMAND\n{mutation}"),
+            ] {
+                let (status, reason) = decision(&invocation);
+                assert_eq!(
+                    status, "deny",
+                    "execution stays closed: {invocation}: {reason}"
+                );
+                assert!(reason.contains("OPERATOR-ONLY"), "{invocation}: {reason}");
+            }
         }
     }
 

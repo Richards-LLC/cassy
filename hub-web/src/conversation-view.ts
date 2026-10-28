@@ -1,5 +1,5 @@
 import { sentAttachments, sentMessageLabel } from "./sent-attachments";
-import { fitMachineLine, hostMarkup } from "./conversation-shell";
+import { fitMachineLine, hostMarkup, sessionEndSummary } from "./conversation-shell";
 import { joinSpoken, spokenSupervisor, supervisorDescription } from "./spoken-names";
 import { machineMonogram } from "./machine-accent";
 import { appendInline, plainTextMarkdown, renderMarkdown } from "./markdown-renderer";
@@ -11,7 +11,7 @@ import { machineName } from "./conversation-list";
 import { BROWSER_BLOCKED, BROWSER_UNSUPPORTED, CANT_REACH_RETRYING, NEEDS_PAIRING, UNSTEADY } from "./connection-state";
 import { CONVERSATION_OPENING, OPENING_MOTION_DELAY_MS, openingLine } from "./connection-state-view";
 import { sessionCodename, type ConversationEvent, type ConversationHistory, type ConversationSend, type EarlierSession } from "./conversation-history";
-import type { ArtifactRef, OperatorReply, OperatorTurnKind } from "./types";
+import type { ArtifactRef, OperatorReply, OperatorTurnKind, SessionEndOutcome } from "./types";
 import type { WorkEvent } from "./work-events";
 import { renderWork, workSignature, type WorkRowsContext } from "./work-rows-view";
 import {
@@ -93,6 +93,7 @@ export function registerTurnRenderer(kind: RenderableKind, render: TurnRenderer)
 }
 
 export interface ConversationViewOptions {
+  sessionEnd?: () => SessionEndOutcome | undefined;
   /** Supervisor codename; bold in the thread header and the accessible label. */
   supervisor: string;
   /** Machine label and project name for the mono line beneath the name. */
@@ -420,6 +421,7 @@ export class ConversationView {
   private readonly head: HTMLElement;
   private readonly loadEarlier: HTMLButtonElement;
   private readonly msgs: HTMLElement;
+  private readonly endReceipt: HTMLElement;
   private readonly empty: HTMLElement;
   /** Other sessions' turns, collapsed and labelled (cas-55a4); never part of the log. */
   private readonly earlier: HTMLElement;
@@ -543,6 +545,10 @@ export class ConversationView {
       if (this.window.hasEarlier) { this.moveWindow(true); return; }
       this.options.loadEarlier?.();
     };
+    this.endReceipt = document.createElement("section");
+    this.endReceipt.className = "session-end-receipt";
+    this.endReceipt.setAttribute("role", "status");
+    this.endReceipt.hidden = true;
     this.msgs = document.createElement("div"); this.msgs.className = "msgs";
     this.msgs.setAttribute("role", "log");
     this.above = document.createElement("div"); this.below = document.createElement("div");
@@ -559,7 +565,7 @@ export class ConversationView {
     this.unsent.onclick = () => this.restoreUnsent();
     this.earlier = document.createElement("section"); this.earlier.className = "earlier-sessions"; this.earlier.hidden = true;
     this.earlier.setAttribute("aria-label", "Earlier sessions");
-    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.jump);
+    this.element.append(...(this.options.header === false ? [] : [this.head]), this.earlier, this.loadEarlier, this.msgs, this.loadLater, this.empty, this.endReceipt, this.jump);
     this.pinned = document.createElement("div"); this.pinned.className = "pinned-ask"; this.pinned.hidden = true;
     bindSwipeDismiss(this.pinned, { onDismiss: () => { const ask = this.history.pinnedAsk(); if (ask) this.dismissAsk(ask.notification_id, false); } });
     if (this.options.accentClass) this.pinned.classList.add(this.options.accentClass);
@@ -703,7 +709,8 @@ export class ConversationView {
     const loadingEarlier = this.options.loadingEarlier?.() === true;
     this.loadEarlier.hidden = !hasEarlier;
     this.renderLoadEarlier(loadingEarlier);
-    const working = this.options.working?.() === true;
+    const ended = this.options.sessionEnd?.();
+    const working = !ended && this.options.working?.() === true;
     // A dismissed failed send leaves the thread (cas-16eed); the unsent chip brings it back.
     const work = this.options.work?.();
     if (!reuseModel || !this.model) {
@@ -748,6 +755,16 @@ export class ConversationView {
     this.renderUnsent();
     this.renderEmpty(model.length === 0, this.options.loadingHistory?.() === true);
     this.renderEarlier(model.length === 0);
+    this.endReceipt.hidden = !ended;
+    if (ended) {
+      this.empty.hidden = true;
+      const title = document.createElement("strong"); title.textContent = "Session ended";
+      const summary = document.createElement("p"); summary.textContent = sessionEndSummary(ended);
+      const details = document.createElement("p"); details.className = "session-end-orphans";
+      details.textContent = [ended.orphans.length ? `Still alive: ${ended.orphans.join(", ")}.` : "", ended.unverified?.length ? `Stop not verified: ${ended.unverified.join(", ")}.` : ""].filter(Boolean).join(" ");
+      details.hidden = !details.textContent;
+      this.endReceipt.replaceChildren(title, summary, details);
+    }
     const held = anchor && this.anchorNode(anchor);
     if (anchor && held) {
       // The button sits above every turn, so the browser's own scroll

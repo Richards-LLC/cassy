@@ -354,3 +354,23 @@ existing temporary/worktree discovery exclusions. Doctor reports one
 **managed file drift** finding pointing to `cas update`; outside project edits
 are not managed drift. Full host convergence is verified after installing the
 release, not by modifying real repositories during worker development.
+
+### Hub auth state and audit durability
+
+`hub/auth/cache.rs` holds durable pairing/device snapshots behind an `RwLock`.
+Each read checks mtime, size and inode; only a changed file is parsed. Durable
+mutations still take `auth.lock` before reading and atomically replace
+`auth.json`, so independent CLI revocations and pairing writes serialize.
+Readers enforce revocation on their next check (streams check every 250 ms).
+Tickets and DPoP replay IDs stay in memory; startup removes legacy records,
+and pre-existing credentials cannot use proofs from the boot second or earlier.
+Device activity is checkpointed at most once per five minutes; a crash may
+lose that much `last_used_at` activity. Socket lease refreshes stay in memory.
+
+`hub/auth/audit.rs` owns one bounded writer thread per store, independent of the
+auth lock and usable without a Tokio runtime. A request waits for its append
+result; fsync runs once per batch of 64 rows or 250 ms. An abrupt process exit
+can lose the current batch. Append and background-sync failures retain the
+private audit-health report; a failed sync must succeed before another append
+is accepted. Rotation uses its own cross-process lock and retains three
+backups of an 8 MiB active log (a larger legacy log becomes the first backup).

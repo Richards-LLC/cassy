@@ -2131,8 +2131,10 @@ fn systemd_unit_command(
     let mut command = std::process::Command::new("systemd-run");
     command.arg("--user")
         .arg(format!("--unit=cas-factory-{name}"))
+        .arg("--slice=agent.slice")
         .arg("--collect")
         .arg("--property=Type=exec")
+        .arg("--property=Nice=5")
         .arg(format!("--property=StandardError=append:{}", log_path.display()))
         .arg("--property=StandardOutput=null")
         .arg(format!("--working-directory={}", root.display()));
@@ -2341,6 +2343,8 @@ mod launch_tests {
         );
         let args = command.get_args().map(|arg| arg.to_string_lossy().to_string()).collect::<Vec<_>>();
         assert!(args.contains(&"--unit=cas-factory-demo-1".to_string()));
+        assert!(args.contains(&"--slice=agent.slice".to_string()), "{args:?}");
+        assert!(args.contains(&"--property=Nice=5".to_string()), "{args:?}");
         assert!(args.contains(&"reap-daemon".to_string()));
         assert!(!args.iter().any(|arg| arg.starts_with("--property=KillMode=")));
         assert!(args.contains(&"--setenv=PATH".to_string()));
@@ -2739,7 +2743,7 @@ pub(crate) fn supervisor_sessions(sessions: Vec<HubSession>, reveal_dormant: boo
     sessions
         .into_iter()
         .filter(|session| {
-            reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
+            session.ended.is_some() || reveal_dormant || (!session.dormant && session.liveness == super::DaemonLiveness::Live)
         })
         .filter(|session| !session.supervisor.trim().is_empty())
         .collect()
@@ -3951,7 +3955,47 @@ async fn proxy_machine_socket<R: SessionReadModel>(
         return;
     }
 
-    let (mut sink, mut source) = socket.split();
+    let (mut wire_sink, mut wire_source) = socket.split();
+    let (sink, mut writes) = tokio::sync::mpsc::channel::<Message>(64);
+    let (reads, mut source) = tokio::sync::mpsc::channel(64);
+    // The transport has no catalog, daemon attach, store or command work.
+    // A subscription can wait seconds on those without preventing this
+    // already-authenticated socket from answering its liveness probe.
+    let transport = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                incoming = wire_source.next() => {
+                    let Some(incoming) = incoming else { break; };
+                    match &incoming {
+                        Ok(Message::Ping(payload)) => {
+                            if wire_sink.send(Message::Pong(payload.clone())).await.is_err() { break; }
+                            continue;
+                        }
+                        Ok(Message::Text(text)) => {
+                            if let Ok(envelope) = serde_json::from_str::<MachineClientEnvelope>(text)
+                                && envelope.channel == "health"
+                            {
+                                if let Some(ping) = envelope.ping {
+                                    let pong = serde_json::json!({"channel":"health","pong":ping});
+                                    if wire_sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
+                                }
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                    let ended = matches!(&incoming, Ok(Message::Close(_)) | Err(_));
+                    // Bound command backlog independently of health. Closing
+                    // on overflow preserves command order without silent loss.
+                    if reads.try_send(incoming).is_err() || ended { break; }
+                }
+                outgoing = writes.recv() => {
+                    let Some(outgoing) = outgoing else { break; };
+                    if wire_sink.send(outgoing).await.is_err() { break; }
+                }
+            }
+        }
+    });
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<MachineOutbound>(64);
     let mut subscriptions = std::collections::HashMap::<String, tokio::task::JoinHandle<()>>::new();
     let mut machine_events = state.events.subscribe();
@@ -4014,7 +4058,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                 }
                 None => break,
             },
-            incoming = source.next() => match incoming {
+            incoming = source.recv() => match incoming {
                 Some(Ok(Message::Ping(payload))) => {
                     if sink.send(Message::Pong(payload)).await.is_err() { break; }
                 }
@@ -4030,13 +4074,6 @@ async fn proxy_machine_socket<R: SessionReadModel>(
                         if sink.send(Message::Text(error.to_string().into())).await.is_err() { break; }
                         continue;
                     };
-                    if envelope.channel == "health" {
-                        if let Some(ping) = envelope.ping {
-                            let pong = serde_json::json!({"channel":"health","pong":ping});
-                            if sink.send(Message::Text(pong.to_string().into())).await.is_err() { break; }
-                        }
-                        continue;
-                    }
                     if envelope.channel == "events" && envelope.subscribe {
                         events_subscribed = true;
                         continue;
@@ -4182,6 +4219,7 @@ async fn proxy_machine_socket<R: SessionReadModel>(
     for (_, handle) in subscriptions {
         handle.abort();
     }
+    transport.abort();
 }
 
 async fn acquire_lease<R: SessionReadModel>(
@@ -4748,6 +4786,7 @@ mod machine_protocol_tests {
         let frame = serde_json::to_vec(&DaemonMessage::OperatorMessage(
             crate::ui::factory::ConversationHistoryMessage {
                 notification_id: 41,
+                client_ref: None,
                 target: "supervisor".into(),
                 text: "Question".into(),
                 state: "sending".into(),

@@ -465,6 +465,54 @@ fn opens_note_entry(line: &str) -> bool {
         && bytes[5] == b'-'
 }
 
+/// Lane CI proves its selected checks, not that a test-first delivery is
+/// complete. Only an explicit worker delivery-ready return contract binds
+/// completion to this tip; check/test PASS receipts do not. Parking is already
+/// an explicit completion boundary and retains its ordinary one-shot signal.
+pub(crate) fn delivery_marked_ready(task: &cas_types::Task, tip: &str) -> bool {
+    if task.status == TaskStatus::AwaitingMerge {
+        return true;
+    }
+    let mut ready = task.execution_note.as_deref() != Some("test-first");
+    let mut entry = String::new();
+    let settle = |entry: &str, ready: &mut bool| {
+        // The notes tool stores the first payload field on the header line.
+        // Parse the return contract at the payload boundary, never a quoted
+        // example or a PASS substring inside ordinary validation evidence.
+        let body = entry.trim();
+        let body = if opens_note_entry(body.lines().next().unwrap_or_default()) {
+            body[18..].trim_start()
+        } else { body };
+        let body = body.strip_prefix("📝 PROGRESS")
+            .or_else(|| body.strip_prefix(DECISION_NOTE_MARKER)).unwrap_or(body).trim_start();
+        let mut fields = body.lines();
+        let declared_ready = fields.next() == Some("status: ready")
+            && fields.next().and_then(|line| line.strip_prefix("tip:"))
+                .and_then(|value| value.split_whitespace().next()) == Some(tip);
+        let words = words_lowercase(entry);
+        let checkpoint = words.iter().any(|word| word == "checkpoint")
+            && (words.iter().any(|word| word == "red")
+                || words.windows(2).any(|pair| pair == ["test", "only"]));
+        let not_ready = words.windows(3).any(|words| words == ["not", "merge", "ready"])
+            || words.windows(4).any(|words| words == ["not", "ready", "to", "merge"]);
+        if checkpoint || not_ready {
+            *ready = false;
+        } else if declared_ready {
+            *ready = true;
+        }
+    };
+    for line in task.notes.lines() {
+        if opens_note_entry(line) && !entry.is_empty() {
+            settle(&entry, &mut ready);
+            entry.clear();
+        }
+        entry.push_str(line);
+        entry.push('\n');
+    }
+    settle(&entry, &mut ready);
+    ready
+}
+
 fn words_lowercase(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|word| !word.is_empty())

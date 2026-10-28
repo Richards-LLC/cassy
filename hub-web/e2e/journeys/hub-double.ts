@@ -20,13 +20,19 @@ export type Session = {
   supervisor: string;
   project_dir: string;
   workers: string[];
-  liveness: "live";
+  liveness: "live" | "stale_metadata";
+  ended?: import("../../src/types").SessionEndOutcome;
   dormant?: boolean;
   /** The session's newest queue row (cas-55a4), as the hub catalog reports it. */
   last_activity_at?: string;
   last_activity?: string;
   /** The project's Cassy Cloud identity (cas-eaa3), as the hub reports it. */
   cloud_project_id?: string;
+  /** Additive catalog identity; older hubs omit these fields. */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  machine_online?: boolean;
 };
 
 export type Machine = { id: string; label: string; sessions: Session[] };
@@ -114,9 +120,9 @@ export type WorkWorld = {
 
 /** A session's fleet in the double: agents with a spawn generation, tasks, epics and the focused one (cas-a474). */
 export type FleetWorld = {
-  agents: Array<{ name: string; status: string; current_task?: string | null; generation: number; role?: string; latest_activity?: { summary: string } }>;
-  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string }>;
-  epics: Array<{ id: string; title?: string }>;
+  agents: Array<{ id?: string; name: string; status: string; current_task?: string | null; generation: number; role?: string; liveness?: string; latest_activity?: { summary: string; created_at_rfc3339?: string } }>;
+  tasks: Array<{ id: string; title: string; status: string; assignee?: string | null; updated_at: string; tip?: string; branch?: string; epic_id?: string | null; delivery_state?: string | null }>;
+  epics: Array<{ id: string; title?: string; status?: string; assignee?: string | null; epic_verification_owner?: string | null; progress?: { total: number; merged: number; merges_per_hour: number; last_merged_at?: string | null } }>;
   focused_epic: string | null;
   /** Names new workers get, in order. */
   spawnNames: string[];
@@ -243,6 +249,8 @@ export class HubDouble {
   private readonly sessionSocketsByMachine = new Map<string, Set<WebSocketRoute>>();
   /** Health pings the double answered, per machine. */
   readonly pongs = new Map<string, number>();
+  /** Delay real health responses using the journey's protocol clock. */
+  healthPongDelayMs = 0;
   /**
    * GET /v1/sessions answered, per machine (cas-9772). Every catalog the page
    * renders arrives through one of these, so a journey bounds "the page shows
@@ -520,7 +528,7 @@ export class HubDouble {
       agents: fleet.agents,
       tasks_in_progress: fleet.tasks.filter((task) => task.status !== "open"),
       tasks_ready: fleet.tasks.filter((task) => task.status === "open"),
-      epics: fleet.epics.map((epic) => ({ ...epic, focused: epic.id === fleet.focused_epic })),
+      epics: fleet.epics.map((epic) => ({ ...epic, status: epic.status ?? "open", focused: epic.id === fleet.focused_epic })),
       focused_epic: fleet.focused_epic,
     };
   }
@@ -1337,7 +1345,9 @@ export class HubDouble {
       if (frame.channel === "health" && typeof frame.ping === "number") {
         this.pongs.set(machineId, (this.pongs.get(machineId) ?? 0) + 1);
         this.observed();
-        ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        const reply = () => ws.send(JSON.stringify({ channel: "health", pong: frame.ping }));
+        if (this.healthPongDelayMs > 0) this.delay(reply, this.healthPongDelayMs);
+        else reply();
         return;
       }
       if (frame.channel === "events") return;

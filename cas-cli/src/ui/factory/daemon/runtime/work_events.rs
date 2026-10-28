@@ -23,7 +23,9 @@ use serde_json::Value;
 use super::jobs::{Criticality, JobSpec, Lane};
 use super::prompt_queue_jobs::{ExternalOutcome, QueueJobs};
 use crate::ui::factory::{
-    DaemonMessage, WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkEvent, WorkEventKind,
+    DaemonMessage, WORK_EVENT_PAGE_SIZE, WORK_EVENT_SCHEMA_VERSION, WorkChangedFile,
+    WorkChangedFiles, WorkEvent, WorkEventKind, WorkLifecycle, WorkReasoning, WorkTool,
+    WorkToolCounts,
 };
 
 /// How much of a transcript's tail is indexed when first read. Older turns
@@ -198,6 +200,7 @@ struct Indexed {
     line: u64,
     block: usize,
     result_line: Option<u64>,
+    result_call: Option<String>,
 }
 
 /// Forward, incremental index of one transcript's work events.
@@ -210,6 +213,9 @@ struct TranscriptIndex {
     events: Vec<Indexed>,
     open_calls: HashMap<String, usize>,
     turn: Option<String>,
+    command_sessions: HashMap<String, usize>,
+    poll_parents: HashMap<String, usize>,
+    changed_files: HashMap<Option<String>, Vec<WorkChangedFile>>,
 }
 
 impl TranscriptIndex {
@@ -222,6 +228,9 @@ impl TranscriptIndex {
             events: Vec::new(),
             open_calls: HashMap::new(),
             turn: None,
+            command_sessions: HashMap::new(),
+            poll_parents: HashMap::new(),
+            changed_files: HashMap::new(),
         }
     }
 
@@ -230,7 +239,11 @@ impl TranscriptIndex {
         let len = file.metadata()?.len();
         if self.end.is_some_and(|end| len < end) {
             // Truncated or replaced: start over.
-            *self = Self::new(self.source.clone(), &self.session.clone(), self.path.clone());
+            *self = Self::new(
+                self.source.clone(),
+                &self.session.clone(),
+                self.path.clone(),
+            );
         }
         let mut position = match self.end {
             Some(end) if end == len => return Ok(()),
@@ -268,7 +281,15 @@ impl TranscriptIndex {
         Ok(())
     }
 
-    fn push(&mut self, at: DateTime<Utc>, line: u64, block: usize, kind: WorkEventKind, text: String, call: Option<&str>) {
+    fn push(
+        &mut self,
+        at: DateTime<Utc>,
+        line: u64,
+        block: usize,
+        kind: WorkEventKind,
+        text: String,
+        call: Option<&str>,
+    ) {
         let event = WorkEvent {
             id: format!("t:{}:{line:015}:{block:03}", self.source.agent_id),
             kind,
@@ -279,6 +300,10 @@ impl TranscriptIndex {
             label: label(&text),
             has_detail: true,
             error: false,
+            tool: None,
+            lifecycle: None,
+            reasoning: None,
+            changed_files: None,
         };
         let (key, event) = keyed(event, at);
         if let Some(call) = call {
@@ -290,15 +315,193 @@ impl TranscriptIndex {
             line,
             block,
             result_line: None,
+            result_call: None,
         });
     }
 
-    fn settle(&mut self, call: &str, line: u64, error: bool) {
-        if let Some(index) = self.open_calls.remove(call) {
-            let indexed = &mut self.events[index];
-            indexed.result_line = Some(line);
-            indexed.event.error = error;
+    fn annotate_tool(&mut self, name: &str, input: &Value, call: Option<&str>) {
+        let short = name.rsplit('.').next().unwrap_or(name);
+        let parent = if matches!(short, "write_stdin" | "TaskOutput") {
+            input
+                .get(if short == "TaskOutput" { "task_id" } else { "session_id" })
+                .and_then(session_key)
+                .and_then(|id| self.command_sessions.get(&id).copied())
+        } else {
+            None
+        };
+        // Polls are observations of the same operation. Carry its identity and
+        // scope on the newer row, even if the original has paged out of view.
+        let continuation = parent.map(|parent| {
+            let event = &self.events[parent].event;
+            (event.tool.clone(), event.lifecycle.clone())
+        });
+        let Some(indexed) = self.events.last_mut() else {
+            return;
+        };
+        indexed.event.tool = Some(tool_payload(name, input));
+        indexed.event.lifecycle = Some(WorkLifecycle {
+            id: call
+                .map(str::to_owned)
+                .unwrap_or_else(|| indexed.event.id.clone()),
+            stage: "start".into(),
+            phase: None,
+            outcome: None,
+            started_at: Some(indexed.event.at.clone()),
+            ended_at: None,
+        });
+        if let Some((tool, Some(mut lifecycle))) = continuation {
+            indexed.event.tool = tool;
+            lifecycle.stage = "phase".into();
+            lifecycle.phase = Some("running".into());
+            lifecycle.outcome = None;
+            lifecycle.ended_at = None;
+            indexed.event.lifecycle = Some(lifecycle);
         }
+        if let (Some(call), Some(parent)) = (call, parent) {
+            self.poll_parents.insert(call.to_owned(), parent);
+        }
+    }
+
+    fn annotate_reasoning(&mut self, source: &str) {
+        if let Some(indexed) = self.events.last_mut() {
+            indexed.event.reasoning = Some(WorkReasoning {
+                summary: indexed.event.label.clone(),
+                source: source.into(),
+            });
+        }
+    }
+
+    fn settle(
+        &mut self,
+        call: &str,
+        line: u64,
+        at: DateTime<Utc>,
+        error: bool,
+        result: &Value,
+        known_success: bool,
+    ) {
+        let Some(index) = self.open_calls.remove(call) else {
+            return;
+        };
+        let (exit_code, session) = result_facts(result, 0);
+        let parent = self.poll_parents.remove(call);
+        let result_status = result.get("task").unwrap_or(result);
+        let failed = result_status.get("interrupted").and_then(Value::as_bool) == Some(true)
+            || result_status.get("status").and_then(Value::as_str) == Some("failed")
+            || error
+            || result
+                .get("isError")
+                .or_else(|| result.get("is_error"))
+                .and_then(Value::as_bool)
+                == Some(true)
+            || exit_code.is_some_and(|code| code != 0);
+        let running = session.is_some() && exit_code.is_none() && !failed;
+        for target in std::iter::once(index).chain(parent) {
+            let indexed = &mut self.events[target];
+            indexed.result_line = Some(line);
+            indexed.result_call = Some(call.to_owned());
+            indexed.event.error = failed;
+            if let Some(tool) = &mut indexed.event.tool {
+                tool.exit_code = exit_code;
+                let files = result.get("numFiles").and_then(Value::as_u64);
+                let matches = result.get("numMatches").and_then(Value::as_u64);
+                if files.is_some() || matches.is_some() {
+                    tool.counts = Some(WorkToolCounts { files, matches });
+                }
+            }
+            if let Some(lifecycle) = &mut indexed.event.lifecycle {
+                lifecycle.stage = if running { "phase" } else { "end" }.into();
+                lifecycle.phase = running.then(|| "running".into());
+                lifecycle.ended_at = (!running).then(|| at.to_rfc3339());
+                lifecycle.outcome = (!running).then(|| {
+                    if failed {
+                        "error"
+                    } else if known_success || exit_code == Some(0) {
+                        "success"
+                    } else {
+                        "unknown"
+                    }
+                    .into()
+                });
+            }
+            if running && let Some(session) = &session {
+                self.command_sessions
+                    .insert(session.clone(), parent.unwrap_or(index));
+            }
+            if !running
+                && !failed
+                && (known_success || exit_code == Some(0))
+                && indexed.event.turn.is_some()
+                && let Some(tool) = &indexed.event.tool
+                && tool.operation == "edit"
+            {
+                let files = self
+                    .changed_files
+                    .entry(indexed.event.turn.clone())
+                    .or_default();
+                for path in &tool.targets {
+                    let file = WorkChangedFile {
+                        path: path.clone(),
+                        operation: "edit".into(),
+                        source_event_id: indexed.event.id.clone(),
+                    };
+                    if let Some(existing) = files.iter_mut().find(|file| &file.path == path) {
+                        *existing = file;
+                    } else if files.len() < 128 {
+                        files.push(file);
+                    }
+                }
+                if !files.is_empty() {
+                    indexed.event.changed_files = Some(WorkChangedFiles {
+                        files: files.clone(),
+                        provenance: "successful_tool_calls".into(),
+                        complete: false,
+                    });
+                }
+            }
+        }
+        let turn = self.events[index].event.turn.clone();
+        if let Some(files) = self.changed_files.get(&turn) {
+            for indexed in &mut self.events {
+                if indexed.event.turn == turn
+                    && let Some(summary) = &mut indexed.event.changed_files
+                {
+                    summary.files = files.clone();
+                }
+            }
+        }
+        if !running && let Some(parent) = parent {
+            self.command_sessions.retain(|_, index| *index != parent);
+        }
+    }
+
+    fn lifecycle_notice(
+        &mut self,
+        at: DateTime<Utc>,
+        offset: u64,
+        stage: &str,
+        phase: Option<&str>,
+        outcome: Option<&str>,
+    ) {
+        let text = phase.unwrap_or(if stage == "end" {
+            "Turn completed"
+        } else {
+            "Turn started"
+        });
+        self.push(at, offset, 0, WorkEventKind::Notice, text.into(), None);
+        let indexed = self.events.last_mut().unwrap();
+        indexed.event.has_detail = false;
+        indexed.event.lifecycle = Some(WorkLifecycle {
+            id: self
+                .turn
+                .clone()
+                .unwrap_or_else(|| indexed.event.id.clone()),
+            stage: stage.into(),
+            phase: phase.map(str::to_owned),
+            outcome: outcome.map(str::to_owned),
+            started_at: (stage == "start").then(|| at.to_rfc3339()),
+            ended_at: (stage == "end").then(|| at.to_rfc3339()),
+        });
     }
 
     fn index_line(&mut self, offset: u64, bytes: &[u8]) {
@@ -313,6 +516,7 @@ impl TranscriptIndex {
         if bytes.starts_with(b"{\"type\":\"")
             && !bytes.starts_with(b"{\"type\":\"assistant\"")
             && !bytes.starts_with(b"{\"type\":\"user\"")
+            && !bytes.starts_with(b"{\"type\":\"system\"")
         {
             return;
         }
@@ -327,21 +531,30 @@ impl TranscriptIndex {
         match value.get("type").and_then(Value::as_str) {
             Some("user") => {
                 let blocks = content.and_then(Value::as_array);
-                let results: Vec<(&str, bool)> = blocks
+                let results: Vec<(&str, bool, &Value)> = blocks
                     .into_iter()
                     .flatten()
-                    .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+                    .filter(|block| {
+                        block.get("type").and_then(Value::as_str) == Some("tool_result")
+                    })
                     .filter_map(|block| {
                         Some((
                             block.get("tool_use_id")?.as_str()?,
                             block.get("is_error").and_then(Value::as_bool) == Some(true),
+                            block,
                         ))
                     })
                     .collect();
-                for (call, error) in &results {
-                    self.settle(call, offset, *error);
+                for (call, error, block) in &results {
+                    let result = if results.len() == 1 {
+                        value.get("toolUseResult").unwrap_or(block)
+                    } else {
+                        block
+                    };
+                    self.settle(call, offset, at, *error, result, true);
                 }
-                if results.is_empty() && value.get("isMeta").and_then(Value::as_bool) != Some(true) {
+                if results.is_empty() && value.get("isMeta").and_then(Value::as_bool) != Some(true)
+                {
                     self.turn = value
                         .get("promptId")
                         .or_else(|| value.get("uuid"))
@@ -351,14 +564,27 @@ impl TranscriptIndex {
                 }
             }
             Some("assistant") => {
-                for (block, item) in content.and_then(Value::as_array).into_iter().flatten().enumerate() {
+                for (block, item) in content
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                {
                     match item.get("type").and_then(Value::as_str) {
                         Some("thinking") => {
                             let text = item.get("thinking").and_then(Value::as_str).unwrap_or("");
                             // Claude Code records most thinking as an empty,
                             // signed block: nothing to show.
                             if !text.trim().is_empty() {
-                                self.push(at, offset, block, WorkEventKind::Thinking, text.to_owned(), None);
+                                self.push(
+                                    at,
+                                    offset,
+                                    block,
+                                    WorkEventKind::Thinking,
+                                    text.to_owned(),
+                                    None,
+                                );
+                                self.annotate_reasoning("claude_thinking");
                             }
                         }
                         Some("tool_use") => {
@@ -367,11 +593,21 @@ impl TranscriptIndex {
                             let call = item.get("id").and_then(Value::as_str);
                             let (kind, text) = tool_summary(name, &input);
                             self.push(at, offset, block, kind, text, call);
+                            self.annotate_tool(name, &input, call);
                         }
                         _ => {}
                     }
                 }
             }
+            Some("system") => match value.get("subtype").and_then(Value::as_str) {
+                Some("turn_duration") => {
+                    self.lifecycle_notice(at, offset, "end", None, Some("unknown"))
+                }
+                Some("compact_boundary") => {
+                    self.lifecycle_notice(at, offset, "phase", Some("compacted"), Some("success"))
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -381,19 +617,46 @@ impl TranscriptIndex {
             return;
         };
         let Some(at) = timestamp(&value) else { return };
-        let Some(payload) = value.get("payload") else { return };
+        let Some(payload) = value.get("payload") else {
+            return;
+        };
         let kind = payload.get("type").and_then(Value::as_str);
         match value.get("type").and_then(Value::as_str) {
             Some("event_msg") if matches!(kind, Some("task_started" | "turn_started")) => {
                 if let Some(turn) = payload.get("turn_id").and_then(Value::as_str) {
                     self.turn = Some(turn.to_owned());
                 }
+                self.lifecycle_notice(at, offset, "start", None, None);
+            }
+            Some("event_msg")
+                if matches!(
+                    kind,
+                    Some("task_complete" | "turn_complete" | "turn_aborted")
+                ) =>
+            {
+                self.lifecycle_notice(
+                    at,
+                    offset,
+                    "end",
+                    None,
+                    Some(if kind == Some("turn_aborted") {
+                        "cancelled"
+                    } else if payload.get("error").is_some_and(|error| !error.is_null()) {
+                        "error"
+                    } else {
+                        "success"
+                    }),
+                );
+            }
+            Some("compacted") => {
+                self.lifecycle_notice(at, offset, "phase", Some("compacted"), Some("success"))
             }
             Some("response_item") => match kind {
                 Some("reasoning") => {
                     let text = codex_reasoning(payload);
                     if !text.trim().is_empty() {
                         self.push(at, offset, 0, WorkEventKind::Thinking, text, None);
+                        self.annotate_reasoning("codex_summary");
                     }
                 }
                 Some("function_call" | "custom_tool_call" | "local_shell_call") => {
@@ -401,11 +664,15 @@ impl TranscriptIndex {
                     let (event_kind, text) = tool_summary(&name, &input);
                     let call = payload.get("call_id").and_then(Value::as_str);
                     self.push(at, offset, 0, event_kind, text, call);
+                    self.annotate_tool(&name, &input, call);
                 }
-                Some("function_call_output" | "custom_tool_call_output" | "local_shell_call_output") => {
+                Some(
+                    "function_call_output" | "custom_tool_call_output" | "local_shell_call_output",
+                ) => {
                     if let Some(call) = payload.get("call_id").and_then(Value::as_str) {
-                        let error = codex_output_failed(payload);
-                        self.settle(call, offset, error);
+                        let result = payload.get("output").unwrap_or(&Value::Null);
+                        let known_success = published_success(result, 0);
+                        self.settle(call, offset, at, false, result, known_success);
                     }
                 }
                 _ => {}
@@ -433,8 +700,11 @@ impl TranscriptIndex {
     /// The unredacted detail of one indexed event.
     fn detail(&self, line: u64, block: usize) -> Option<String> {
         let indexed = self.find(line, block)?;
+        if !indexed.event.has_detail { return None }
         let value = self.read_line(line)?;
-        let result = indexed.result_line.and_then(|offset| self.read_line(offset));
+        let result = indexed
+            .result_line
+            .and_then(|offset| self.read_line(offset));
         match self.source.cli {
             cas_mux::SupervisorCli::Codex => {
                 let payload = value.get("payload")?;
@@ -446,14 +716,22 @@ impl TranscriptIndex {
                     .as_ref()
                     .and_then(|value| value.pointer("/payload/output"))
                     .map(output_text);
-                Some(tool_detail(&name, &input, output.as_deref(), indexed.event.error))
+                Some(tool_detail(
+                    &name,
+                    &input,
+                    output.as_deref(),
+                    indexed.event.error,
+                ))
             }
             _ => {
                 let item = value.pointer("/message/content")?.get(block)?;
                 if indexed.event.kind == WorkEventKind::Thinking {
-                    return item.get("thinking").and_then(Value::as_str).map(str::to_owned);
+                    return item
+                        .get("thinking")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
                 }
-                let call = item.get("id").and_then(Value::as_str);
+                let call = indexed.result_call.as_deref().or_else(|| item.get("id").and_then(Value::as_str));
                 let output = result.as_ref().and_then(|value| {
                     value
                         .pointer("/message/content")?
@@ -501,14 +779,156 @@ fn codex_call(payload: &Value) -> (String, Value) {
     (name, input)
 }
 
-fn codex_output_failed(payload: &Value) -> bool {
-    let Some(raw) = payload.get("output").and_then(Value::as_str) else {
+/// Only structured runner metadata; do not guess exit status from tool prose.
+fn result_facts(value: &Value, depth: usize) -> (Option<i64>, Option<String>) {
+    if depth > 8 {
+        return (None, None);
+    }
+    if let Some(text) = value.as_str() {
+        if let Ok(value) = serde_json::from_str::<Value>(text) {
+            return result_facts(&value, depth + 1);
+        }
+        // Older Codex shell tools publish a fixed runner header before Final output.
+        let header = text
+            .split_once("Final output:")
+            .map(|(header, _)| header)
+            .unwrap_or("");
+        let code = header.lines().find_map(|line| {
+            line.strip_prefix("Process exited with code ")?
+                .trim()
+                .parse()
+                .ok()
+        });
+        let session = header.lines().find_map(|line| {
+            line.strip_prefix("Process running with session ID ")
+                .map(|id| id.trim().to_owned())
+        });
+        return (code, session);
+    }
+    let value = value.get("task").unwrap_or(value);
+    let code = value
+        .get("exit_code")
+        .or_else(|| value.get("exitCode"))
+        .or_else(|| value.pointer("/metadata/exit_code"))
+        .and_then(Value::as_i64);
+    let session = value.get("session_id").and_then(session_key)
+        .or_else(|| (value.get("isAsync").and_then(Value::as_bool) == Some(true))
+            .then(|| value.get("backgroundTaskId").and_then(session_key)).flatten())
+        .or_else(|| (value.get("status").and_then(Value::as_str) == Some("running"))
+            .then(|| value.get("task_id").and_then(session_key)).flatten());
+    if code.is_some() || session.is_some() {
+        return (code, session);
+    }
+    if let Some(parts) = value.as_array() {
+        for part in parts {
+            let result = result_facts(part.get("text").unwrap_or(part), depth + 1);
+            if result.0.is_some() || result.1.is_some() {
+                return result;
+            }
+        }
+    }
+    (None, None)
+}
+
+/// apply_patch has a published success header; arbitrary output is not proof of an edit.
+fn published_success(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
         return false;
+    }
+    if let Some(text) = value.as_str() {
+        return if let Ok(value) = serde_json::from_str::<Value>(text) {
+            published_success(&value, depth + 1)
+        } else {
+            text.starts_with("Success. Updated the following files:")
+        };
+    }
+    if value.get("success").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    value.as_array().is_some_and(|parts| {
+        parts
+            .iter()
+            .any(|part| published_success(part.get("text").unwrap_or(part), depth + 1))
+    })
+}
+
+fn session_key(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_u64().map(|id| id.to_string()))
+}
+
+fn tool_payload(name: &str, input: &Value) -> WorkTool {
+    let short = name.rsplit('.').next().unwrap_or(name);
+    let operation = match short {
+        "Read" | "read_file" => "read",
+        "Grep" | "Glob" | "grep" | "search" | "search_query" => "search",
+        "Bash" | "shell" | "shell_command" | "exec_command" | "local_shell" => "command",
+        "Edit" | "MultiEdit" | "Write" | "apply_patch" => "edit",
+        _ => "other",
     };
-    serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|output| output.pointer("/metadata/exit_code")?.as_i64())
-        .is_some_and(|code| code != 0)
+    let clean = |text: &str| bounded(&redact(text), 2048).0;
+    let mut targets: Vec<String> = ["file_path", "path", "file", "target_file"]
+        .iter()
+        .filter_map(|key| input.get(*key).and_then(Value::as_str))
+        .map(clean)
+        .collect();
+    if short == "apply_patch"
+        && let Some(patch) = input
+            .as_str()
+            .or_else(|| input.get("patch").and_then(Value::as_str))
+    {
+        for line in patch.lines() {
+            if let Some(path) = [
+                "*** Update File: ",
+                "*** Add File: ",
+                "*** Delete File: ",
+                "*** Move to: ",
+            ]
+            .iter()
+            .find_map(|prefix| line.strip_prefix(prefix))
+                && targets.len() < 128
+            {
+                targets.push(clean(path));
+            }
+        }
+    }
+    targets.sort();
+    targets.dedup();
+    let files = matches!(operation, "read" | "edit")
+        .then_some(targets.len() as u64)
+        .filter(|count| *count > 0);
+    let command = input
+        .get("cmd")
+        .or_else(|| input.get("command"))
+        .map(|command| {
+            clean(&if let Some(parts) = command.as_array() {
+                parts
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                command.as_str().unwrap_or("").to_owned()
+            })
+        });
+    WorkTool {
+        name: clean(name),
+        operation: operation.into(),
+        targets,
+        command,
+        cwd: input
+            .get("cwd")
+            .or_else(|| input.get("workdir"))
+            .and_then(Value::as_str)
+            .map(clean),
+        exit_code: None,
+        counts: files.map(|files| WorkToolCounts {
+            files: Some(files),
+            matches: None,
+        }),
+    }
 }
 
 fn output_text(value: &Value) -> String {
@@ -517,7 +937,11 @@ fn output_text(value: &Value) -> String {
         Value::Array(parts) => parts
             .iter()
             .map(|part| match part.get("type").and_then(Value::as_str) {
-                Some("text") => part.get("text").and_then(Value::as_str).unwrap_or("").to_owned(),
+                Some("text" | "input_text" | "output_text") => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
                 Some(other) => format!("[{other}]"),
                 None => part.to_string(),
             })
@@ -615,7 +1039,12 @@ fn words(event_type: &str) -> String {
 /// A supervisor-queue row as a work event.
 fn queue_event(session: &str, row: &cas_store::SupervisorNotification) -> (SortKey, WorkEvent) {
     let payload: Value = serde_json::from_str(&row.payload).unwrap_or(Value::Null);
-    let field = |key: &str| payload.get(key).and_then(Value::as_str).filter(|text| !text.is_empty());
+    let field = |key: &str| {
+        payload
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+    };
     let event_type = row.event_type.as_str();
     let (kind, text) = if event_type == "task_lifecycle" || event_type.starts_with("task_") {
         let transition = field("transition").unwrap_or(event_type);
@@ -631,7 +1060,12 @@ fn queue_event(session: &str, row: &cas_store::SupervisorNotification) -> (SortK
         let subject = field("task_id").unwrap_or("task");
         let title = field("title").or(field("task_title")).unwrap_or("");
         let verb = words(verb);
-        (WorkEventKind::Task, format!("{subject} {verb}: {title}").trim_end_matches([':', ' ']).to_owned())
+        (
+            WorkEventKind::Task,
+            format!("{subject} {verb}: {title}")
+                .trim_end_matches([':', ' '])
+                .to_owned(),
+        )
     } else {
         let kind = if event_type.starts_with("worker") {
             WorkEventKind::Worker
@@ -664,6 +1098,10 @@ fn queue_event(session: &str, row: &cas_store::SupervisorNotification) -> (SortK
             label: label(&text),
             has_detail: true,
             error: false,
+            tool: None,
+            lifecycle: None,
+            reasoning: None,
+            changed_files: None,
         },
         row.created_at,
     )
@@ -686,6 +1124,10 @@ fn hook_event(scope: &WorkEventScope, event: &cas_types::Event) -> (SortKey, Wor
             label: label(&event.summary),
             has_detail: false,
             error: false,
+            tool: None,
+            lifecycle: None,
+            reasoning: None,
+            changed_files: None,
         },
         event.created_at,
     )
@@ -721,7 +1163,12 @@ pub(crate) struct WorkEventIndex {
 }
 
 impl WorkEventIndex {
-    fn refresh(&mut self, scope: &WorkEventScope, sources: &[&SupervisorSource], resolve: TranscriptResolver<'_>) {
+    fn refresh(
+        &mut self,
+        scope: &WorkEventScope,
+        sources: &[&SupervisorSource],
+        resolve: TranscriptResolver<'_>,
+    ) {
         self.transcripts
             .retain(|id, _| scope.members().any(|source| &source.agent_id == id));
         for &source in sources {
@@ -769,7 +1216,11 @@ impl WorkEventIndex {
             ),
             None => None,
         };
-        let limit = usize::from(if limit == 0 { WORK_EVENT_PAGE_SIZE } else { limit.min(WORK_EVENT_PAGE_SIZE) });
+        let limit = usize::from(if limit == 0 {
+            WORK_EVENT_PAGE_SIZE
+        } else {
+            limit.min(WORK_EVENT_PAGE_SIZE)
+        });
         let wanted = limit + 1;
         let earlier = |key: &SortKey| cursor.as_ref().is_none_or(|cursor| key < cursor);
         // A row in the cursor's millisecond may still be unserved.
@@ -779,15 +1230,19 @@ impl WorkEventIndex {
 
         let sources = scope.transcripts(agent);
         self.refresh(scope, &sources, resolve);
-        let ours = |event: &WorkEvent| agent.is_none_or(|name| event.agent.as_deref() == Some(name));
+        let ours =
+            |event: &WorkEvent| agent.is_none_or(|name| event.agent.as_deref() == Some(name));
         let mut candidates: Vec<(SortKey, WorkEvent)> = Vec::new();
         let read: Vec<&TranscriptIndex> = sources
             .iter()
             .filter_map(|source| self.transcripts.get(&source.agent_id))
             .collect();
         for index in read {
-            let mut eligible: Vec<&Indexed> =
-                index.events.iter().filter(|indexed| earlier(&indexed.key)).collect();
+            let mut eligible: Vec<&Indexed> = index
+                .events
+                .iter()
+                .filter(|indexed| earlier(&indexed.key))
+                .collect();
             eligible.sort_by(|left, right| right.key.cmp(&left.key));
             candidates.extend(
                 eligible
@@ -797,9 +1252,17 @@ impl WorkEventIndex {
             );
         }
         if let Some(queue) = &stores.queue {
-            let supervisors: Vec<String> =
-                scope.supervisors.iter().map(|source| source.agent_id.clone()).collect();
-            for row in queue.list_for_session_until(&scope.session, &supervisors, until, wanted + BOUNDARY_SLACK)? {
+            let supervisors: Vec<String> = scope
+                .supervisors
+                .iter()
+                .map(|source| source.agent_id.clone())
+                .collect();
+            for row in queue.list_for_session_until(
+                &scope.session,
+                &supervisors,
+                until,
+                wanted + BOUNDARY_SLACK,
+            )? {
                 let (key, event) = queue_event(&scope.session, &row);
                 if earlier(&key) && ours(&event) {
                     candidates.push((key, event));
@@ -856,11 +1319,17 @@ impl WorkEventIndex {
             _ => None,
         };
         self.probe_paths
-            .retain(|id, _| scope.workers.iter().any(|source| &source.agent_id == id));
+            .retain(|id, _| scope.members().any(|source| &source.agent_id == id));
         let mut fingerprint = newest.unwrap_or_default();
-        for source in &scope.workers {
-            let cached = self.probe_paths.get(&source.agent_id).filter(|path| path.is_file()).cloned();
-            let Some(path) = cached.or_else(|| resolve(source)) else { continue };
+        for source in scope.members() {
+            let cached = self
+                .probe_paths
+                .get(&source.agent_id)
+                .filter(|path| path.is_file())
+                .cloned();
+            let Some(path) = cached.or_else(|| resolve(source)) else {
+                continue;
+            };
             let len = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
             self.probe_paths.insert(source.agent_id.clone(), path);
             fingerprint.push_str(&format!("|{}={len}", source.agent_id));
@@ -937,8 +1406,14 @@ impl WorkEventIndex {
 
 /// A request the job lane answers.
 pub(crate) enum WorkEventRequest {
-    Page { before: Option<String>, limit: u16, agent: Option<String> },
-    Detail { event_id: String },
+    Page {
+        before: Option<String>,
+        limit: u16,
+        agent: Option<String>,
+    },
+    Detail {
+        event_id: String,
+    },
 }
 
 /// How often the change probe runs while a client follows the stream.
@@ -984,7 +1459,8 @@ impl WorkEventService {
         }
         self.next += 1;
         let key = format!("{JOB_KIND}:{client_id}:{}", self.next);
-        self.pending.insert(key.clone(), (client_id, request_id.clone()));
+        self.pending
+            .insert(key.clone(), (client_id, request_id.clone()));
         let index = Arc::clone(&self.index);
         let spec = JobSpec {
             kind: JOB_KIND,
@@ -995,7 +1471,14 @@ impl WorkEventService {
             budget: JOB_BUDGET,
         };
         let submitted = jobs.submit_external(spec, move || {
-            let message = answer(&index, &cas_dir, &project_path, &session, request_id, request);
+            let message = answer(
+                &index,
+                &cas_dir,
+                &project_path,
+                &session,
+                request_id,
+                request,
+            );
             Box::new(message) as Box<dyn std::any::Any + Send>
         });
         use super::jobs::Submitted;
@@ -1062,7 +1545,10 @@ impl WorkEventService {
         let Some(fingerprint) = fingerprint else {
             return Vec::new();
         };
-        let changed = self.fingerprint.as_ref().is_some_and(|previous| previous != &fingerprint);
+        let changed = self
+            .fingerprint
+            .as_ref()
+            .is_some_and(|previous| previous != &fingerprint);
         self.fingerprint = Some(fingerprint);
         if !changed {
             return Vec::new();
@@ -1073,7 +1559,9 @@ impl WorkEventService {
             .into_iter()
             .map(|client_id| WorkEventReply {
                 client_id,
-                message: DaemonMessage::WorkEventsAppended { schema_version: WORK_EVENT_SCHEMA_VERSION },
+                message: DaemonMessage::WorkEventsAppended {
+                    schema_version: WORK_EVENT_SCHEMA_VERSION,
+                },
             })
             .collect()
     }
@@ -1092,7 +1580,10 @@ impl WorkEventService {
             .filter_map(|result| {
                 if result.key == PROBE_KEY {
                     let fingerprint = match result.outcome {
-                        Ok(ExternalOutcome::Done(done)) => done.downcast::<Option<String>>().ok().and_then(|found| *found),
+                        Ok(ExternalOutcome::Done(done)) => done
+                            .downcast::<Option<String>>()
+                            .ok()
+                            .and_then(|found| *found),
                         _ => None,
                     };
                     notices.extend(self.settle_probe(fingerprint));
@@ -1104,7 +1595,9 @@ impl WorkEventService {
                         Ok(message) => *message,
                         Err(_) => failure(request_id, "work events failed"),
                     },
-                    Ok(ExternalOutcome::Dropped) => failure(request_id, "work events are busy; retry"),
+                    Ok(ExternalOutcome::Dropped) => {
+                        failure(request_id, "work events are busy; retry")
+                    }
                     Err(panicked) => {
                         tracing::warn!(error = %panicked.message, "work events job panicked");
                         failure(request_id, "work events failed")
@@ -1131,7 +1624,12 @@ fn with_index<T>(
     cas_dir: &Path,
     project_path: &Path,
     session: &str,
-    run: impl FnOnce(&mut WorkEventIndex, &WorkEventScope, &WorkEventStores, TranscriptResolver<'_>) -> anyhow::Result<T>,
+    run: impl FnOnce(
+        &mut WorkEventIndex,
+        &WorkEventScope,
+        &WorkEventStores,
+        TranscriptResolver<'_>,
+    ) -> anyhow::Result<T>,
 ) -> anyhow::Result<T> {
     let agents = crate::store::open_agent_store(cas_dir)?.list(None)?;
     let scope = WorkEventScope::from_agents(session, &agents);
@@ -1144,7 +1642,9 @@ fn with_index<T>(
             source.account_dir.as_deref(),
         )
     };
-    let mut index = index.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut index = index
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     run(&mut index, &scope, &stores, &resolve)
 }
 
@@ -1157,21 +1657,48 @@ fn answer(
     request: WorkEventRequest,
 ) -> DaemonMessage {
     let id = request_id.clone();
-    with_index(index, cas_dir, project_path, session, |index, scope, stores, resolve| match request {
-        WorkEventRequest::Page { before, limit, agent } => {
-            index.page(scope, stores, resolve, request_id, before.as_deref(), limit, agent.as_deref())
-        }
-        WorkEventRequest::Detail { event_id } => Ok(index.detail(scope, stores, resolve, request_id, event_id)),
-    })
+    with_index(
+        index,
+        cas_dir,
+        project_path,
+        session,
+        |index, scope, stores, resolve| match request {
+            WorkEventRequest::Page {
+                before,
+                limit,
+                agent,
+            } => index.page(
+                scope,
+                stores,
+                resolve,
+                request_id,
+                before.as_deref(),
+                limit,
+                agent.as_deref(),
+            ),
+            WorkEventRequest::Detail { event_id } => {
+                Ok(index.detail(scope, stores, resolve, request_id, event_id))
+            }
+        },
+    )
     .unwrap_or_else(|error| failure(id, &format!("work events failed: {error}")))
 }
 
 /// The change probe's job: the stream's fingerprint, or `None` when the
 /// stores cannot be read this time.
-fn probe(index: &Mutex<WorkEventIndex>, cas_dir: &Path, project_path: &Path, session: &str) -> Option<String> {
-    with_index(index, cas_dir, project_path, session, |index, scope, stores, resolve| {
-        index.fingerprint(scope, stores, resolve)
-    })
+fn probe(
+    index: &Mutex<WorkEventIndex>,
+    cas_dir: &Path,
+    project_path: &Path,
+    session: &str,
+) -> Option<String> {
+    with_index(
+        index,
+        cas_dir,
+        project_path,
+        session,
+        |index, scope, stores, resolve| index.fingerprint(scope, stores, resolve),
+    )
     .inspect_err(|error| tracing::debug!(%error, "work events: change probe failed"))
     .ok()
 }

@@ -34,7 +34,7 @@ for (const [width, colorScheme, part] of [[1280, "light", false], [390, "dark", 
       const announcer = page.locator("#fleet-ops-announcer");
       await journey.stage("Open the fleet", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         if (width === 390) await page.getByRole("button", { name: "Tasks & progress", exact: true }).click();
         await expect(rail.getByRole("button", { name: "Write access…" })).toBeVisible();
       });
@@ -180,24 +180,13 @@ test.describe("write access without factory:manage cas_ab04", () => {
     const hub = await journey.hub({ machines: [fleetMachine(ATLAS)], paired: ["atlas"], scopes: { atlas: [...SCOPES, "factory-operate"] }, fleet: { [PELICAN]: fleet() } });
     await journey.stage("A pairing without factory:manage", async () => {
       await journey.open();
-      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
-      const grant = page.locator("#status-view").getByRole("button", { name: "Write access…" });
-      await expect(grant).toHaveAttribute("aria-disabled", "true");
-      // A disabled control still says why; activating it does nothing.
-      await grant.focus();
-      await page.keyboard.press("Enter");
-      await expect(page.locator("#status-view .write-grant")).toHaveCount(0);
-      // cas-ba64: the shared lead, this control group's permission and the
-      // Paired machines instruction are all in its accessible description.
-      const descriptionIds = (await grant.getAttribute("aria-describedby"))?.split(" ") ?? [];
-      expect(descriptionIds).toHaveLength(3);
-      expect(await Promise.all(descriptionIds.map(async (id) => page.locator(`#${id}`).textContent()))).toEqual([
-        "Not allowed on this pairing.",
-        "Write access: needs Stop and restart workers and sessions.",
-        "Pair again from Paired machines to add the Stop and restart workers and sessions permission.",
-      ]);
+      await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+      await expect(page.locator("#status-view").getByRole("button", { name: "Write access…" })).toHaveCount(0);
+      const permissions = page.locator("#status-view .fleet-permissions");
+      await permissions.locator("summary").focus(); await page.keyboard.press("Enter");
+      await expect(permissions).toContainText("Pair again from Paired machines to add the Stop and restart workers and sessions permission.");
       expect(hub.writeGrants).toHaveLength(0);
-      await page.locator("#paired-machines-toggle").click();
+      await permissions.getByRole("link", { name: "Open Paired machines" }).click();
       const manage = page.locator('#paired-machines-dialog [data-machine-id="atlas"] [data-permission="manage"]');
       await expect(manage.locator(".fleet-permission-reason")).toHaveText("Needs the Stop and restart workers and sessions permission.");
       await expect(manage.locator(".fleet-permission-also")).toHaveText("Also needed to grant a task write access outside its worktree.");

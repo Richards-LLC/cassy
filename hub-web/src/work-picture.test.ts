@@ -24,6 +24,24 @@ describe("work events (cas-ff22)", () => {
     expect([workEventSupport(["work_events"]), workEventSupport(["work_events", "work_events_live"]), workEventSupport([])]).toEqual(["pull", "live", "none"]);
   });
 
+  it("preserves optional v2 families while keeping legacy and malformed rows readable", () => {
+    const extensions = {
+      tool: { name: "Read", operation: "read", targets: ["a.ts"], counts: { files: 1 } },
+      lifecycle: { id: "call-1", stage: "end", outcome: "success" },
+      reasoning: { summary: "Published", source: "codex_summary" },
+      changed_files: { files: [{ path: "a.ts", operation: "edit", source_event_id: "a" }], provenance: "successful_tool_calls", complete: false },
+    };
+    const page = workEventsPage({ request_id: "v2", schema_version: 2, events: [
+      wire("a", 1, extensions), wire("legacy", 2),
+      wire("bad", 3, { tool: { name: 4 }, lifecycle: null, reasoning: [], changed_files: { files: "bad" } }),
+      wire("future", 4, { tool: { name: "future", operation: "teleport", targets: [] }, lifecycle: { id: "f", stage: "future" } }),
+    ] })!;
+    expect(page.events[0]).toMatchObject(extensions);
+    expect(page.events.map((event) => event.label)).toEqual(["a", "legacy", "bad", "future"]);
+    expect(page.events[2]).not.toHaveProperty("tool");
+    expect(page.events[3]).toMatchObject({ tool: { operation: "teleport" }, lifecycle: { stage: "future" } });
+  });
+
   it("reads nothing while Show work is off, polls only a daemon without change notices, and re-reads on a notice", () => {
     let support: "pull" | "live" = "live";
     const transport: WorkEventTransport = {

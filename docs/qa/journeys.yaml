@@ -64,6 +64,10 @@ invariants:
     statement: the link pairs this browser and I reach the supervisor
     check: 'Walk HUB-J2 in hub-web/e2e/journeys/pair-link.journey.ts; verify the expected experience and edge paths
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the exchange endpoint is doubled'
+  HUB-J3-SESSION-ENDED:
+    statement: A supervisor exit closes its conversation with a dated receipt, confirmed worker stop count and named surviving workers; the row and header say Ended and sends cannot queue to the dead session.
+    check: 'Run the session-ended case in conversation-stage.test.ts and hub::tests::cec1_session_end_projection_survives_cleanup_without_ending_a_replacement; capture a real supervisor /exit with at least two workers and verify the receipt within ten seconds, local twelve-hour time, ended row/header and composer guidance.'
+    bug: {task: cas-cec1}
   HUB-J3-GOAL:
     statement: I can tell which conversation has something new and get to it quickly
     check: 'Walk HUB-J3 in hub-web/e2e/journeys/find-conversation.journey.ts; verify the expected experience and
@@ -82,6 +86,9 @@ invariants:
     statement: Every supervisor table column preserves whole words and compact identifiers, prose uses left-aligned body type, inline markdown renders safely, and wide tables scroll inside the message without widening the page.
     check: 'Run the HUB-J4 prose tables case in hub-web/e2e/journeys/read-history.journey.ts: Tab / State with Daniel Open Hours and formatted prose, and # / What / Starts with C2/C3, at 1280 and 390 in light and dark. The existing numeric-evidence case in conversation-view.test.ts keeps numeric/status cells aligned and toned.'
     bug: {task: cas-8bb3}
+  HUB-J4-MESSAGE-HIERARCHY:
+    statement: Supervisor replies expose a readable h1–h3 outline and labeled Note, Warning and Caution prose without creating actionable ask or blocker cards.
+    check: 'Run the HUB-J4 headings and labeled caveats case in read-history.journey.ts at desktop and phone in light, dark and forced colors; verify semantic headings, safe inline content, an unfilled margin rule and no attention controls.'
   HUB-J5-GOAL:
     statement: my message reaches the supervisor and I see its answer
     check: 'Walk HUB-J5 in hub-web/e2e/journeys/reply-typed.journey.ts; verify the expected experience and edge
@@ -142,6 +149,10 @@ invariants:
     check: Run the supervisor working indicator regression in conversations.test.ts and the single revoked machine part of network-switch.journey.ts with a recent Output frame, then verify an answered real Claude supervisor at its idle prompt and during reconnecting.
     bug:
       task: cas-a252
+  HUB-J12-LOADED-HOST-LIVENESS:
+    statement: Slow catalog or capability reads do not condemn a responding machine; cached pending conversations show its actual connection state, and session retries pause while it is down and stay bounded when it returns.
+    check: Run the busy-catalog machine-pong Rust regression, connection-lifecycle and pending-label regressions, then pair the hosted build to an isolated release hub with 1.8-second reads and a catalog past its deadline; require steady Live and actual hub loss within ten seconds and recovery within five.
+    bug: {task: cas-9957}
   HUB-J11-DEVICE-ATTACHMENT:
     bug:
       task: cas-9e46
@@ -154,6 +165,10 @@ invariants:
       reproduces what a switch leaves behind (reset sockets, half-open sockets, offline, no event at all); a real
       phone moving between radios and a laptop truly sleeping are not driven, and a sleeping page is simulated by
       its visibility events'
+  HUB-J12-DURABLE-SEND-REF:
+    statement: A send whose live ACK is lost across reconnect is matched to its durable history by client_ref and reaches its confirmed state once, without another Retry or merging a different send with identical text.
+    check: Run the cas-d17f pending-sends client regression and cas_3f40_accepted_send_keeps_live_receipt_on_both_devices_history Rust regression; batch real-hub proof drops the live ACK, reconnects, and reads back one queue row and one supervisor inbox delivery for that client_ref.
+    bug: {task: cas-d17f}
   HUB-J13-GOAL:
     statement: I start a supervisor on a project from my phone, without SSH, and land in its conversation
     check: 'Walk HUB-J13 in hub-web/e2e/journeys/launch-session.journey.ts; verify the expected experience and edge
@@ -206,6 +221,14 @@ invariants:
       in docs/qa/journeys.md against the rendered UI and protocol-double state. Gaps: the hub double serves `POST
       /v1/sessions/<s>/operations` with the brief''s contract (op_id dedupe, 409 stale, FleetChanged); the real
       endpoint (S1, S2) is verified when those land; the phone part is S6'
+  HUB-J17-STATUS-TRUTH:
+    statement: The selected session's live workers show their current task and authoritative worker_status liveness, and a delivery contained in its target shows Merged, closing without a merge request.
+    check: Run the focused_epic_tests worker/delivery seam cases and the real-hub panel walk with a different ambient factory session; compare worker-status, task-store ownership and Git containment with the rendered worker and task rows.
+    bug: {task: cas-0a75}
+  HUB-J17-SUPERVISOR-SCOPE:
+    statement: Default task groups and the release header use this supervisor's open pinned epic, otherwise its assigned or verification-owned epics; foreign and terminal epics stay behind All tasks.
+    check: Run the server-shaped progress-model regression and HUB-J7 truthful-progress case with an unpinned supervisor ID, several project epics, another owner and a closed epic; verify the real-store focused_epic_tests status projection preserves status, assignee and epic_verification_owner.
+    bug: {task: cas-5a42}
   HUB-J17-FLEET-INVALIDATION:
     statement: A fleet change overlapping an older heartbeat obtains a fresh catalog, so a stopped worker disappears
       without waiting for the next heartbeat.
@@ -264,11 +287,15 @@ invariants:
       a protocol double; the daemon''s transcript indexing, redaction, per-agent timeline, change probe and the
       hub''s follower-only relay are proven by the Rust tests (`work_events::tests`, `hub::tests::work_events_reach_only_the_requesting_socket_and_old_clients_are_unchanged`)'
   HUB-J22-GOAL:
-    statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
+    statement: copy exact fenced source and wrap long code lines, and inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
   HUB-J24-GOAL:
     statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
     check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
+  HUB-J22-CACHED-PREVIEW-RECOVERY:
+    statement: A transiently failed image keeps a compact note and recovers when its cached card scrolls back into the live conversation after an offscreen reconnect.
+    check: Run the HUB-J22 cached failed thumbnail Chromium regression; prove the same node leaves the DOM during reconnect, returns, decodes the image and removes its note, with exactly one renewed ticket.
+    bug: {task: cas-abb7}
   HUB-J24-SENT-ATTACHMENT:
     statement: Sent uploads show an image thumbnail or named file sheet without host paths, including after reload and on another paired device; the supervisor retains the exact resolvable artifact reference.
     check: Run HUB-J24 at desktop and 390px in light/dark; read back exact uploaded paths from the sent wire text, decode the same stored image bytes, open the preview, reload, and hydrate the same durable text on a fresh paired phone context. The real-hub HUB-J24 walk must decode an uploaded PNG through actual ticket/content routes. hub::tests::composer_upload_is_authenticated_bounded_and_idempotent proves local ticket/content/range access and cross-session/symlink denial; the protocol double must refuse unknown or foreign uploads. The composer-uploads seam regression also covers a server-sniffed PNG with a non-image filename and legacy bare-path history.
@@ -277,6 +304,26 @@ invariants:
     statement: A supported phone attachment up to 10 MiB has a payload-sized transfer deadline, retains its sniffed media type, and a refused upload names its file and hub reason without prescribing a reconnect for a type refusal.
     check: Run the 4/10 MiB throttled upload rows in connection-recovery.test.ts, the J24 refusal stages, and hub::tests::composer_upload_is_authenticated_bounded_and_idempotent with MIME artifact-store readback.
 bug_families:
+  lost-ack-history-correlation:
+    title: Durable send identity must settle accepted sends after ACK loss without inviting duplicate retries
+    tasks: [cas-d17f]
+    invariants: [HUB-J12-DURABLE-SEND-REF, HUB-J5-RECEIPT-STAGES]
+    journeys: [HUB-J5, HUB-J12]
+  fenced-status-folding:
+    title: Short status replies containing fenced source must keep their code frame and exact Copy instead of folding into plain progress
+    tasks: [cas-5a76]
+    invariants: [HUB-J22-GOAL]
+    journeys: [HUB-J22]
+  hidden-cached-preview-retry:
+    title: A hidden waiting preview must regain geometry before IntersectionObserver can retry it after cached DOM re-entry
+    tasks: [cas-abb7]
+    invariants: [HUB-J22-CACHED-PREVIEW-RECOVERY]
+    journeys: [HUB-J22]
+  stale-worker-and-delivery-projection:
+    title: Session-scoped execution evidence and target containment must override missing or stale panel lifecycle data
+    tasks: [cas-0a75]
+    invariants: [HUB-J17-STATUS-TRUTH]
+    journeys: [HUB-J17]
   prose-table-column-collapse:
     title: A prose column must never consume its siblings' word widths or render inline markdown literally
     tasks: [cas-8bb3]
@@ -606,6 +653,7 @@ journeys:
   - hub-web/src/viewport.ts
   invariants:
   - HUB-J3-GOAL
+  - HUB-J3-SESSION-ENDED
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -686,6 +734,7 @@ journeys:
   - HUB-J4-GOAL
   - HUB-J4-VISUAL-SANDBOX
   - HUB-J4-READABLE-PROSE-TABLES
+  - HUB-J4-MESSAGE-HIERARCHY
   traffic:
     share_pct: null
     basis: 'Accepted debt 2026-10-26: one operator and no Commander usage instrumentation; the only countable source (cas.db prompt_queue commander:* rows) sees reply sends only, so no per-journey share can be apportioned.'
@@ -785,6 +834,7 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J5-GOAL
+  - HUB-J12-DURABLE-SEND-REF
   - HUB-J5-SEND-WITHOUT-PANE-LEASE
   - HUB-J5-RECEIPT-STAGES
   - HUB-J5-ANSWER-MONOTONIC
@@ -1279,7 +1329,9 @@ journeys:
   - hub-web/src/worker-visibility.ts
   invariants:
   - HUB-J12-GOAL
+  - HUB-J12-DURABLE-SEND-REF
   - HUB-J12-TRUTHFUL-WORKING
+  - HUB-J12-LOADED-HOST-LIVENESS
   - HUB-J5-RECEIPT-STAGES
   traffic:
     share_pct: null
@@ -1623,10 +1675,10 @@ journeys:
     focused; confirming stops it, and a stale stop says what changed
   - Ask the supervisor to merge — the awaiting-merge task's button shows the exact message first; Send sends it
     once and the row reads "Asked … ago"
-  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header says "Not
-    allowed on this pairing" once, gives one short permission line per control group, and ends with one instruction
-    that matches Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command appears
-    without a disabled Stop and restart button.
+  - A pairing without factory:manage — Stop… is disabled and names the missing permission; the header hides
+    unavailable controls behind one collapsed Permissions line. Expanding it explains the actual grant and re-pair
+    actions and links to Paired machines. In Paired machines, Needs comes before Also needed, and the re-pair command
+    appears without a disabled Stop and restart button.
   owner_groups:
   - commander_runtime
   - commander_dependencies
@@ -1672,6 +1724,8 @@ journeys:
   - hub-web/src/pairing-scopes.ts
   - hub-web/src/pending-pairing.ts
   - hub-web/src/progress-model.ts
+  - hub-web/src/progress-view.ts
+  - hub-web/src/context-resize.ts
   - hub-web/src/raw-output.ts
   - hub-web/src/refusal.ts
   - hub-web/src/request-deadline.ts
@@ -1686,6 +1740,8 @@ journeys:
   - hub-web/src/write-grant.ts
   invariants:
   - HUB-J17-GOAL
+  - HUB-J17-STATUS-TRUTH
+  - HUB-J17-SUPERVISOR-SCOPE
   - HUB-J17-FLEET-INVALIDATION
   - HUB-J17-FLEET-INVALIDATION-FAILED-DRAIN
   traffic:
@@ -1979,14 +2035,18 @@ journeys:
     trigger: A paired supervisor conversation at 1280x800 and 390x844 in light and dark
   steps:
   - Open plain text without loading rich renderers
+  - Copy exact source and wrap a code frame with the keyboard
   - Read a diagram and inspect its source; bad input stays readable
   - Expand a unified diff
   - Decode an inline image without moving its file caption
   - Read the real PDF first page inline
   - Play video and audio on demand; unavailable files keep Open
+  - Scroll a failed thumbnail out of the DOM, reconnect while it is cached, and scroll back to the recovered image
   owner_groups: [commander_runtime, commander_dependencies]
   owners:
   - hub-web/src/markdown-renderer.ts
+  - hub-web/src/code-frame.ts
+  - hub-web/src/code-frame.css
   - hub-web/src/rich-code.ts
   - hub-web/src/rich-diagram.ts
   - hub-web/src/rich-diff.ts
@@ -1998,7 +2058,7 @@ journeys:
   - hub-web/e2e/journeys/rich-content.journey.ts
   - hub-web/playwright.rich-content-hub.config.ts
   - hub-web/scripts/rich-content-visual-qa.mjs
-  invariants: [HUB-J22-GOAL]
+  invariants: [HUB-J22-GOAL, HUB-J22-CACHED-PREVIEW-RECOVERY]
   traffic:
     share_pct: null
     basis: New evidence-reading journey; no per-journey usage instrumentation.

@@ -1,9 +1,11 @@
+import { sessionEndSummary, syncEndedComposer } from "./conversation-shell";
 import { openInstallationInventory } from "./installation-inventory";
 import { closeAppSwitcherAfterFollow, explorerOrigin, explorerUrl } from "./app-switcher";
 import { InstallationAccess, watchInstallations } from "./installation-access";
 import { installationStore } from "./storage";
 
-import { statusClass, statusLabel, workerProgress } from "./progress-model";
+import { statusClass, statusLabel, workerProgress, releaseProgress, taskGroups, type ReleaseEpic, type ProgressTask } from "./progress-model";
+import { releaseHeader } from "./progress-view";
 import { presentFleetSheet } from "./fleet-sheet";
 import { CAUSE_COPY } from "./connection-diagnostics";
 import { withRequestDeadline } from "./request-deadline";
@@ -13,7 +15,8 @@ import { pendingSessionLabel, retainPendingSessions, visibleCatalog } from "./wo
 import "./styles.css";
 // Glass, Commander's look (cas-675e): re-colours the house tokens, adds depth.
 import "./glass.css";
-import { activityTime, ConversationList, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
+import { activityTime, filterConversationRows, groupConversationRows, machineActivityAt, plainActivity, type ConversationRow } from "./conversation-list";
+import { ProjectNavigation } from "./project-navigation";
 import { paletteEnterTarget, sessionJumpCommandMarkup } from "./palette-commands";
 import { applyHistoryCursor, ConversationHistory, supervisorWorking } from "./conversation-history";
 import { gridPlaceholder, threadBeforePanes } from "./early-thread";
@@ -184,7 +187,7 @@ installAttachmentSheet((sheet, file, context) => {
   const thread = threadOf(context);
   if (!thread) return sheet;
   const available = () => connectionStates.get(thread.machineId)?.phase === "live";
-  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available, openPreview: context.turn.event.kind === "send" });
+  return inlineAttachment(sheet, file, async () => available() ? connections.get(thread.machineId)?.artifactPreview(thread.session, file.artifact_id) : undefined, { machineId: thread.machineId, available });
 }, async (artifactId, context) => {
   const thread = threadOf(context);
   return thread ? (await visualPageView(thread.machineId, thread.session, artifactId))?.url : undefined;
@@ -210,7 +213,7 @@ const readReplies = new Map<string, number>();
 let conversationRows: ConversationRow[] = [];
 /** The list search's text (journey F8); rows render filtered by it. */
 let conversationSearchQuery = "";
-const conversationList = new ConversationList();
+const conversationList = new ProjectNavigation();
 const pendingSubmissions = new Set<string>();
 /**
  * The thread for machine:session. With `session`, the thread learns which
@@ -265,6 +268,8 @@ function scheduleReplyPresentation(): void {
 // status and attention renders record whether they had anything for the open
 // thread; asks, blockers and attachments are read from its history.
 let contextProgress = false;
+const allProgressTasks = new Set<string>();
+let revealedPhoneNotice: object | undefined;
 let contextAttention = 0;
 function syncConversationContext(): void {
   // With no thread open there is nothing for the rail to hold: the last
@@ -454,6 +459,7 @@ function mountConversation(key: string, mount: HTMLElement): void {
       machine: machines.get(selectedMachineId!)?.label,
       project: projectTitle(hubSession?.project_dir),
       header: false,
+      sessionEnd: () => sessions.get(threadMachineId)?.find((item) => item.name === threadSession)?.ended,
       // Only recent pane activity drives the working line. A queued or
       // transported message alone never proves the supervisor took a turn.
       working: () => supervisorWorking(
@@ -568,7 +574,7 @@ function syncEarlyThread(): void {
   const grid = document.querySelector<HTMLElement>("#conversation-stage");
   const threadKey = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
   const wanted = Boolean(grid && threadKey && grid.dataset.sessionKey === threadKey)
-    && threadBeforePanes({ placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) });
+    && (Boolean(sessions.get(selectedMachineId!)?.find((item) => item.name === selectedSession)?.ended && !grid?.querySelector(":scope > .conversation-thread-slot")) || threadBeforePanes({ placeholder: gridPlaceholder(grid!), history: conversationHistories.get(threadKey!) }));
   for (const [key, view] of [...conversationViews]) {
     if (!key.endsWith(`:${EARLY_THREAD}`) || (wanted && key === earlyThreadKey(threadKey!))) continue;
     // A catalog/attach render may retire the early view before the queued
@@ -897,12 +903,14 @@ function createConnection(machine: StoredMachine): HubConnectionSupervisor {
       catalogExpiresAt.set(machine.id, Date.now() + ttl);
       window.clearTimeout(catalogExpiryTimers.get(machine.id));
       if (Number.isFinite(ttl)) catalogExpiryTimers.set(machine.id, window.setTimeout(() => render(), ttl));
+      for (const item of items) connections.get(machine.id)?.setSessionEnded(item.name, Boolean(item.ended));
       retireEndedSessionNotices(machine.id, items);
       // A session the operator ended is gone, not unreachable: it is never retained (cas-55a4).
       sessions.set(machine.id, retainPendingSessions(sessions.get(machine.id) ?? [], items, name => !endedSessions.has(sessionKey(machine.id, name)) && (conversationHistories.get(sessionKey(machine.id, name))?.hasPending() ?? false)));
       if (!openPairedSession(machine.id, visibleSessions(machine.id))) restoreLastSession(machine.id, visibleSessions(machine.id));
       attachPreviewedSession(machine.id);
       attachIncomingConversationPreviews(machine.id, items);
+      updateConversationViews();
       render();
     },
     onMachineEvent: (event) => {
@@ -1775,6 +1783,7 @@ async function attachSelectedSession(machineId: string, session: string): Promis
   // doesn't narrow under the operator a moment later (cas-813a).
   if (!statuses.has(sessionKey(machineId, session))) statusPending.add(sessionKey(machineId, session));
   render();
+  if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return;
   renderTerminalConnecting(machineId, session);
   await Promise.all([loadStatus(machineId, session), loadLease(machineId, session)]);
   // cas-4646: a newer tap has moved on while these loaded; this open is stale
@@ -1904,6 +1913,7 @@ function renderConnectionSurface(machineId: string, session: string, snapshot: C
   if (selectedMachineId !== machineId || selectedSession !== session) return;
   const grid = document.querySelector<HTMLElement>("#conversation-stage");
   if (grid?.dataset.sessionKey !== sessionKey(machineId, session)) return;
+  if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) { clearDisconnectedState(grid); return; }
   // A fatal machine verdict wins over a session's last retry snapshot.
   const machineState = connectionStates.get(machineId);
   if (machineState?.fatal === true) snapshot = machineState;
@@ -2031,7 +2041,8 @@ function renderTerminalFailure(machineId: string, session: string, detail: strin
   retry.className = "primary retry-terminal";
   retry.textContent = "Try again";
   retry.onclick = () => {
-    renderTerminalConnecting(machineId, session);
+    if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return;
+  renderTerminalConnecting(machineId, session);
     void connections.get(machineId)?.attach(session);
   };
   placeholder.classList.remove("conversation-opening");
@@ -2193,6 +2204,7 @@ function interruptUnavailableReason(): string | undefined {
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedSession;
   if (!machine || !session) return "Open a conversation to interrupt its supervisor.";
+  if (sessions.get(machine.id)?.find((item) => item.name === session)?.ended) return "This session ended. Start or resume a supervisor from New session.";
   const outage = conversationOutageReason(machine, session);
   if (outage) return outage;
   if (conversationConnection(machine.id, session)?.phase !== "live" || !machineInfo.has(machine.id)) return "Interrupt works once the conversation is connected.";
@@ -3216,10 +3228,11 @@ function supervisorSendContext(text: string): Parameters<typeof planSupervisorSe
   const session = machine && selectedSession ? sessions.get(machine.id)?.find((item) => item.name === selectedSession) : undefined;
   return {
     text,
+    ended: Boolean(session?.ended),
     machineLabel: machine?.label,
     session: selectedSession,
     supervisor: supervisorTarget(session),
-    daemonAttach: machine ? hubSupports(machine.id, "daemon_attach") : false,
+    daemonAttach: machine ? machineInfo.get(machine.id)?.capabilities.includes("daemon_attach") : undefined,
     scopes: machine?.scopes ?? [],
     leaseHeldByMe: lease?.held_by_me === true,
     leaseControllerLabel: lease?.held_by_me ? undefined : lease?.controller_label,
@@ -3403,6 +3416,7 @@ function machineWillReconnect(machineId: string): boolean {
  * not: control is taken when it answers, as for any held send (cas-a6f0).
  */
 function sessionIsUp(machineId: string, session: string): boolean {
+  if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return false;
   const connection = connections.get(machineId);
   return attachStates.get(sessionKey(machineId, session))?.phase === "live" && connection?.snapshot().phase === "live" && !connection.holdsMessages();
 }
@@ -4231,7 +4245,7 @@ function render(captureDraft = true): void {
   // Only what the conversation shell shows is built (cas-0546): the thread's
   // grid, the composer, the session's status and its own attention.
   const regions = selectedSession ? conversationRegions(preservedGrid, selectedThreadKey, supervisor) : {};
-  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
+  app.querySelector("#conversation-shell-anchor")!.replaceWith(arrangeConversationShell(document, { selected: Boolean(selectedSession), supervisor, projectDir: selectedHubSession?.project_dir, ended: selectedHubSession?.ended, host: selected?.label, machineId: selectedSession ? selected?.id : undefined, loaded: machineCatalogLoaded, paired: machines.size > 0, searchQuery: conversationSearchQuery, keyboardHint: keyboardHintOffered(), launch: launchAvailability(), explorerHref: explorerBase ? explorerUrl(explorerBase, selectedHubSession?.cloud_project_id) : null }, regions));
   if (preservedAttention) document.querySelector<HTMLElement>("#attention-panel")?.replaceWith(preservedAttention);
   // A toast raised before the shell changed (a conversation opening while
   // "connected" is up) follows the new layout rather than covering a heading.
@@ -4324,6 +4338,7 @@ function renderRegions(context: RegionContext): void {
     const state = sessionStates.get(sessionKey(machineId, session));
     if (state) queueMicrotask(() => void renderSessionState(machineId, session, state));
   }
+  syncEndedComposer(app, context.selected && context.session ? sessions.get(context.selected.id)?.find((item) => item.name === context.session)?.ended : undefined);
   syncPairingCountdown();
 }
 
@@ -4400,7 +4415,7 @@ function conversationNeedsYou(machineId: string, session: string): boolean {
 
 function markConversationEnterTarget(container: HTMLElement): HTMLButtonElement | undefined {
   const search = document.querySelector<HTMLInputElement>("#conversation-search");
-  const target = conversationSearchQuery.trim() ? container.querySelector<HTMLButtonElement>(".conversation-row") ?? undefined : undefined;
+  const target = conversationSearchQuery.trim() ? [...container.querySelectorAll<HTMLButtonElement>(".conversation-row")].find((node) => !node.closest("[hidden]")) : undefined;
   for (const row of container.querySelectorAll<HTMLElement>(".conversation-row[data-enter-target]")) if (row !== target) delete row.dataset.enterTarget;
   if (target) {
     target.dataset.enterTarget = "true";
@@ -4508,7 +4523,14 @@ function renderConversationList(): void {
     // cas-5d2c: the title's activity in plain words, never "supervisor → x".
     const plainLabel = activity?.terminal ? activity.label : plainActivity(activity?.label);
     const activityLabel = active === undefined ? undefined : emptyActivityText({ at: active, ...(active === activity?.at && plainLabel ? { label: plainLabel } : {}) }, Date.now());
-    return { key, machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live") ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
+    const summary = sessionSummaries.get(key);
+    const merge = attention.find((item) => item.machineId === machine.id && item.session === session.name && !item.acknowledgedAt && item.kind === "awaiting_merge");
+    const needsYou = waiting > 0 || Boolean(merge);
+    // A kept catalog can still carry yesterday's positive online bit.
+    const machineOnline = connectionStates.get(machine.id)?.phase === "live" && session.machine_online !== false;
+    const history = conversationHistories.get(key);
+    const working = history && supervisorWorking(history, connectionStates.get(machine.id), [...paneLastActivity].some(([paneId, at]) => paneId.startsWith(`${key}:`) && Date.now() - at < WORKING_WINDOW_MS));
+    return { key, ended: session.ended, harness: session.harness, account_email: session.account_email, project: session.project, machine_online: machineOnline, workerCount: session.workers.length, needsYou, operatorReason: merge ? "Ready for your merge" : waiting > 0 ? "Waiting for your answer" : undefined, supervisorState: needsYou ? "needs-you" : !machineOnline ? "offline" : working || (summary && !["idle", "blocked"].includes(summary.phase)) ? "working" : "idle", machineId: machine.id, session: session.name, supervisor: session.supervisor, projectDir: session.project_dir, host: machine.label, activityAt: active, ...(Number.isFinite(started) ? { startedAt: started } : {}), canEnd: !session.ended && fleetControlGate(machine.scopes, "end-session", location.origin).allowed, freshness: activityLabel ?? "No activity seen yet", when: time?.short, whenSpoken: time?.spoken, preview: conversationHistories.get(key)?.preview(), draft: conversationDrafts.get(key)?.text, activityLine: plainActivity(session.last_activity), unreachable: Boolean(session.unreachable), connection: pendingSessionLabel(session, connectionStates.get(machine.id)?.phase === "live", conversationStatusLabel(machine.id, session.name)) ?? (session.dormant ? "Dormant" : session.liveness === "live" ? `${conversationStatusLabel(machine.id, session.name)}${session.stale ? " · last known" : ""}` : "Session unavailable"), interrupted: session.liveness === "live" && (session.stale === true || INTERRUPTED_LABELS.has(conversationStatusLabel(machine.id, session.name))), attention: waiting, unread: unreadCount, selected };
   }));
   conversationRows = rows;
   // cas-55a4: a project's live sessions on one machine sit together, most
@@ -4524,7 +4546,7 @@ function renderConversationList(): void {
     countUsage(phoneLayout() ? "phone.conversation.open" : "conversation.open");
     if (row.group && row.group.size > 1) countUsage("session.compare");
     landAfterOpen(openSession(row.machineId, row.session), event);
-  }, endConversationSession);
+  }, endConversationSession, { machines: [...machines.values()].map((machine) => ({ id: machine.id, label: machine.label, online: connectionStates.get(machine.id)?.phase === "live" })), searchActive: Boolean(conversationSearchQuery.trim()) });
   markConversationEnterTarget(container);
   // cas-786a: an unread reply or a new wait changes what palette Enter picks.
   refreshPaletteEnterTarget?.();
@@ -4573,7 +4595,8 @@ function keptMessagesLine(): string {
 
 /** The conversation header's connection words; the empty thread reads the same (cas-010f). */
 function conversationHeaderLabel(machineId: string, session: string | undefined): string {
-  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live") ?? conversationStatusLabel(machineId, session);
+  if (sessions.get(machineId)?.find((item) => item.name === session)?.ended) return "Ended";
+  return pendingSessionLabel(visibleSessions(machineId).find((item) => item.name === session), connectionStates.get(machineId)?.phase === "live", conversationStatusLabel(machineId, session)) ?? conversationStatusLabel(machineId, session);
 }
 
 /**
@@ -4923,7 +4946,7 @@ function fleetAnnounce(text: string, options: AnnounceOptions = {}): void {
 function syncFleetSelection(): void {
   const key = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : "";
   if (!fleetOps.select(key)) return;
-  fleetHeaderPanel = undefined; fleetFocusNext = undefined;
+  fleetHeaderPanel = undefined; fleetFocusNext = undefined; revealedPhoneNotice = undefined;
   window.clearTimeout(fleetUndoTimer);
   document.getElementById("fleet-phone-undo")?.remove();
   fleetAnnounce("");
@@ -5075,7 +5098,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   if (!container) return;
   const machine = selectedMachineId ? machines.get(selectedMachineId) : undefined;
   const session = selectedMachineId && selectedSession ? sessions.get(selectedMachineId)?.find(item => item.name === selectedSession) : undefined;
-  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, fleetOpsSignature()]);
+  const signature = JSON.stringify([phoneLayout(), selectedMachineId, selectedSession, session?.ended, session?.workers, status ?? null, machine?.scopes ?? null, selectedMachineId && selectedSession ? sessionSummaries.get(sessionKey(selectedMachineId, selectedSession)) ?? null : null, statusPending.size, allProgressTasks.has(`${selectedMachineId}:${selectedSession}`), fleetOpsSignature()]);
   if (container.dataset.signature === signature && container.isConnected && fleetFocusNext === undefined) return;
   container.dataset.signature = signature;
   // A shell replacement preserves this selection's in-flight request ownership.
@@ -5140,6 +5163,21 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.tabIndex = -1;
     container.focus({ preventScroll: false });
   };
+  if (session?.ended) {
+    contextProgress = true;
+    const receipt = document.createElement("article"); receipt.className = "status-row session-ended-status";
+    const title = document.createElement("strong"); title.textContent = "Session ended";
+    const summary = document.createElement("p"); summary.textContent = sessionEndSummary(session.ended);
+    receipt.append(title, summary);
+    for (const [label, names] of [["Stopped", session.ended.workers_stopped], ["Still alive", session.ended.orphans], ["Stop not verified", session.ended.unverified ?? []]] as const) {
+      if (!names.length) continue;
+      const row = document.createElement("p"); row.textContent = `${label}: ${names.join(", ")}`;
+      if (label !== "Stopped") row.className = "session-end-orphans";
+      receipt.append(row);
+    }
+    container.append(receipt);
+    return;
+  }
   if (!status) {
     container.textContent = selectedSession ? "Waiting for project status…" : "Open a session for project status.";
     // cas-813a: while this session's status is on its way, the rail is open
@@ -5156,7 +5194,12 @@ function renderStatus(status?: Record<string, unknown>): void {
     container.append(row);
   }
   const agents = ((status.agents as FleetAgent[]) ?? []);
-  const tasks = [...((status.tasks_in_progress as FleetTask[]) ?? []), ...((status.tasks_ready as FleetTask[]) ?? [])];
+  const tasks = [...new Map([...((status.tasks_in_progress as ProgressTask[]) ?? []), ...((status.tasks_ready as ProgressTask[]) ?? [])].map(task => [task.id, task])).values()];
+  const epics = ((status.epics as ReleaseEpic[]) ?? []).filter(epic => typeof epic?.id === "string");
+  const focusedEpic = typeof status.focused_epic === "string" ? status.focused_epic : null;
+  const supervisorNames = [session?.supervisor, ...agents.filter(agent => agent.name === session?.supervisor).map(agent => agent.id)].filter((name): name is string => Boolean(name));
+  const release = releaseProgress(epics, focusedEpic, tasks, supervisorNames);
+  container.prepend(releaseHeader(document, release));
   const workers = workerProgress(session?.workers, agents, tasks, session?.supervisor);
   const identifier = (value: unknown): HTMLSpanElement => {
     const span = document.createElement("span");
@@ -5179,6 +5222,7 @@ function renderStatus(status?: Record<string, unknown>): void {
   // Name, state, ticket, then the sentence: the identifiers stay mono and the
   // activity reads as prose, instead of one grey mono line per agent where the
   // eye had to find the dots to tell name from state from task.
+  let revealPhoneNotice = false;
   const ops = fleetOpsContext(status);
   if (ops) {
     fleetAnnouncer();
@@ -5193,15 +5237,23 @@ function renderStatus(status?: Record<string, unknown>): void {
       : offer ? undefined
       : !phoneConversation && fleetOps.currentResult(ops.now) ? resultBar(document, ops)
         : phoneConversation ? phoneFleetNotice(document, ops) : undefined;
-    if (undo && phoneConversation) { undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo(); }
-    else if (undo) container.append(undo);
+    if (undo && phoneConversation) {
+      const identity = offer ?? [...fleetOps.pending.values()].at(-1) ?? [...fleetOps.notes.values()].at(-1);
+      revealPhoneNotice = Boolean(identity && identity !== revealedPhoneNotice);
+      revealedPhoneNotice = identity;
+      undo.id = "fleet-phone-undo"; document.body.append(undo); placeFleetUndo();
+    } else {
+      revealedPhoneNotice = undefined;
+      if (undo) container.append(undo);
+    }
     container.append(headerControls(document, ops, fleetHeaderPanel));
   }
   if (workers.length > 0) container.append(sectionLabel("Workers", workers.length));
   for (const worker of workers) {
     const row = document.createElement("article"); row.className = "status-row status-agent";
     const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(worker.name), chip(worker.agent?.status));
+    const metadata = worker.agent as (FleetAgent & { liveness?: string; latest_activity?: { created_at_rfc3339?: string } }) | undefined;
+    line.append(identifier(worker.name), chip(metadata?.liveness ?? worker.agent?.status));
     row.append(line);
     if (ops && worker.agent) row.append(agentControls(document, ops, worker.agent));
     if (selectedMachineId && selectedSession && worker.name !== session?.supervisor) {
@@ -5210,29 +5262,47 @@ function renderStatus(status?: Record<string, unknown>): void {
       open.type = "button"; open.className = "status-timeline"; open.dataset.worker = worker.name;
       open.setAttribute("aria-haspopup", "dialog");
       open.setAttribute("aria-label", `${worker.name} timeline`);
-      open.textContent = "Timeline";
+      open.textContent = "Activity";
       open.onclick = () => openWorkerTimeline(machineId, sessionName, worker.name);
       line.append(open);
     }
     const work = document.createElement("p"); work.className = "status-activity";
     if (worker.currentTask) work.append(identifier(worker.currentTask), " · ");
     work.append(document.createTextNode(worker.work)); row.append(work);
+    const activity = document.createElement("small"); activity.className = "status-last-activity";
+    const at = metadata?.latest_activity?.created_at_rfc3339 ? Date.parse(metadata.latest_activity.created_at_rfc3339) : NaN;
+    activity.textContent = Number.isFinite(at) ? `Last activity ${new Date(at).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true })}` : "Last activity not reported";
+    row.append(activity);
     container.append(row);
   }
-  if (tasks.length > 0) container.append(sectionLabel("Tasks", tasks.length));
-  for (const task of tasks) {
-    const row = document.createElement("article"); row.className = "status-row status-task";
-    const line = document.createElement("div"); line.className = "status-line";
-    line.append(identifier(task.id), chip(task.status));
-    const title = document.createElement("p");
-    title.className = "status-task-title";
-    title.textContent = String(task.title ?? "");
-    row.append(line, title);
-    const controls = ops ? taskControls(document, ops, task as FleetTask) : undefined;
-    if (controls) row.append(controls);
-    container.append(row);
+  const scopeKey = `${selectedMachineId}:${selectedSession}`;
+  const showAll = allProgressTasks.has(scopeKey);
+  const filter = document.createElement("button"); filter.type = "button"; filter.className = "progress-filter";
+  filter.textContent = showAll ? "Supervisor tasks" : "All tasks";
+  filter.setAttribute("aria-pressed", String(showAll)); filter.dataset.fleetFocus = "tasks:filter";
+  filter.onclick = () => { if (showAll) allProgressTasks.delete(scopeKey); else allProgressTasks.add(scopeKey); renderStatus(status); };
+  container.append(filter);
+  const groups = taskGroups(tasks, epics, workers.map(worker => worker.name), showAll, supervisorNames, focusedEpic);
+  for (const group of groups) {
+    if (!group.tasks.length) continue;
+    container.append(sectionLabel(group.label, group.tasks.length));
+    for (const task of group.tasks) {
+      const row = document.createElement("article"); row.className = "status-row status-task";
+      const line = document.createElement("div"); line.className = "status-line";
+      line.append(identifier(task.id), chip(task.delivery_state === "merged" ? "Merged, closing" : task.status));
+      const title = document.createElement("p"); title.className = "status-task-title"; title.textContent = String(task.title ?? "");
+      row.append(line, title);
+      const controls = task.delivery_state === "merged" ? undefined : ops ? taskControls(document, ops, task) : undefined;
+      if (controls) row.append(controls);
+      container.append(row);
+    }
   }
-  contextProgress = Boolean(summary) || workers.length > 0 || tasks.length > 0;
+  if (!groups.some(group => group.tasks.length)) {
+    const empty = document.createElement("p"); empty.className = "status-empty";
+    empty.textContent = showAll ? "No tasks reported." : "No active tasks for this supervisor. All tasks opens the board.";
+    container.append(empty);
+  }
+  contextProgress = Boolean(release) || Boolean(summary) || workers.length > 0 || tasks.length > 0;
   scheduleConversationLayout();
   if (!contextProgress) {
     const empty = document.createElement("p");
@@ -5243,6 +5313,11 @@ function renderStatus(status?: Record<string, unknown>): void {
   syncWorkerTimeline();
   if (phoneLayout()) presentFleetSheet(container, dismissFleetPanel);
   restoreFocus();
+  // New feedback stays in normal flow after the tasks. Reveal it once, without
+  // pulling the reader back down on a heartbeat or covering a task's controls.
+  if (revealPhoneNotice && phoneLayout() && progressSheetOpen()) {
+    document.getElementById("fleet-phone-undo")?.scrollIntoView({ block: "nearest" });
+  }
 }
 
 /** `event` is the toggle's click; Ctrl/Cmd+K passes none (cas-990d). */
@@ -5829,6 +5904,9 @@ function renderMachineRegister(): void {
   const dialog = document.querySelector<HTMLDialogElement>('#paired-machines-dialog');
   if (!dialog) return;
   const list = dialog.querySelector<HTMLElement>('#paired-machines-list')!;
+  let filters = dialog.querySelector<HTMLElement>("#paired-machine-filters");
+  if (!filters) { filters = document.createElement("div"); filters.id = "paired-machine-filters"; filters.className = "conversation-filters"; list.before(filters); }
+  conversationList.renderMachineFilters(filters, rows.map((row) => ({ id: row.id, label: row.label, online: row.connected })), () => dialog.close());
   // cas-0739: a closed register is kept in order (not connected first) and
   // scrolled to its top, so it opens on the machine the footer names; an open
   // one keeps its order so a status tick never moves a row under the operator.

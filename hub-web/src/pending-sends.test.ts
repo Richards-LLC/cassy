@@ -20,6 +20,35 @@ function unsettledThread(): ConversationHistory {
 }
 
 describe("unsettled messages across a reload (cas-e7b1)", () => {
+  it("settles a lost ACK by durable client_ref across reconnect/reload without merging another send's identical text (cas-d17f)", () => {
+    for (const restored of [false, true]) {
+      let history = new ConversationHistory();
+      history.submit("send-d17f", "sup", "Attachment sent", at(9, 0), 17, "pelican");
+      history.unconfirmInFlight(at(9, 1));
+      if (restored) {
+        const pending = history.pendingSends();
+        history = new ConversationHistory();
+        history.restorePending(pending, at(9, 2));
+      }
+      const row = { notification_id: 21, client_ref: "another-send", target: "sup", text: "Attachment sent", state: "delivered" as const, stamped: true, device_id: "phone", session: "pelican", at: new Date(at(9, 0) + 2_000).toISOString() };
+      history.hydrateSend(row);
+      expect(history.pendingSends().map(send => send.id), `restored=${restored}: a different client_ref is another send`).toEqual(["send-d17f"]);
+      const accepted = { ...row, notification_id: 22, client_ref: "send-d17f", text: "Attachment sent (durable text)", reply_to: 17 };
+      history.hydrateSend(accepted);
+      history.hydrateSend(accepted);
+      history.acknowledge({ client_ref: "send-d17f", notification_id: 22, target: "sup", stamped: true });
+      expect(history.visibleEvents(), `restored=${restored}: history and a late ACK represent the same send`).toHaveLength(2);
+      expect(history.pendingSends()).toEqual([]);
+      const own = history.events.find(event => event.kind === "send" && event.value.id === "send-d17f");
+      expect(own).toMatchObject({ value: { notificationId: 22, state: "delivered", text: accepted.text, replyTo: 17 } });
+      expect(own?.kind === "send" && history.canRetrySend(own.value)).toBe(false);
+      const view = new ConversationView(document, history, { supervisor: "sup", retryMessage: vi.fn() });
+      view.update();
+      expect(view.element.querySelectorAll(".conversation-retry")).toHaveLength(0);
+      expect(view.element.textContent).not.toContain("Not confirmed");
+    }
+  });
+
   it("keeps held, unreceipted, unconfirmed and not-sent messages, never delivered, replaced or dismissed ones", () => {
     const history = new ConversationHistory();
     history.submit("delivered", "sup", "Delivered", at(9, 0));

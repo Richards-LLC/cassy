@@ -103,7 +103,7 @@ impl AuthStore {
         origin: &str,
         now: DateTime<Utc>,
     ) -> Result<bool> {
-        Ok(self.lock()?.pairings.iter().any(|p| {
+        Ok(self.read_lock()?.pairings.iter().any(|p| {
             constant_time_eq(&p.token_hash, token_hash)
                 && p.hub_id == self.0.machine_id
                 && p.controller_origin == origin

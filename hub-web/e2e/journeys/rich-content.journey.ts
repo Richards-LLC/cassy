@@ -11,6 +11,62 @@ const variants = [
   { name: "phone dark", width: 390, height: 844, scheme: "dark" },
 ] as const;
 
+test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", journeyPart, async ({ page, journey }) => {
+  const hub = await journey.hub({ machines: [ATLAS], paired: ["atlas"] });
+  const log = page.getByRole("log");
+  const preview = log.locator('a[data-artifact-id="art-cached-image"] .rich-media');
+  let attempts = 0;
+  let recover = false;
+  let beforeReconnect = 0;
+  await page.route(`**/v1/sessions/${PELICAN}/artifacts/art-cached-image/ticket`, async route => {
+    attempts++;
+    if (!recover) await route.fulfill({ status: 503, json: { error: "temporarily_unavailable" } });
+    else await route.fallback();
+  });
+  await page.route(`**/v1/sessions/${PELICAN}/artifacts/art-cached-image/content?*`, route => route.fulfill({
+    contentType: "image/png", body: readFileSync(new URL("../media/evidence.png", import.meta.url)),
+  }));
+  await journey.stage("A failed image collapses into its own card", async () => {
+    await journey.open();
+    await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
+    await expect(page.locator("#conversation-connection")).toContainText("Live");
+    hub.supervisorSays(PELICAN, "Keep this image while reading later updates.", { attachments: [file("art-cached-image", "Cached image.png", "image/png")] });
+    await expect(preview).toHaveAttribute("data-preview-state", "waiting");
+    await expect(preview).toBeHidden();
+    await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toHaveText("Preview unavailable");
+  });
+  const cached = (await preview.elementHandle())!;
+  await journey.stage("Scroll the failed card out of the DOM, then reconnect the machine", async () => {
+    // More than twenty groups makes the real thread window cache the first
+    // card; fewer than sixty keeps that same node available for restoration.
+    for (let i = 0; i < 84; i++) hub.supervisorSays(PELICAN, `Later update ${i + 1}: the operator is reading the latest work.`);
+    const thread = page.locator(".conversation-reading.thread");
+    await thread.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event("scroll")); });
+    await expect(preview).toHaveCount(0);
+    expect(await cached.evaluate(node => node.isConnected)).toBe(false);
+    beforeReconnect = attempts;
+    expect(beforeReconnect).toBeGreaterThan(0);
+    hub.hold(PELICAN); hub.drop(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
+    hub.release(PELICAN);
+    await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
+    expect(attempts).toBe(beforeReconnect);
+  });
+  await journey.stage("Scroll back to the same cached card and decode its recovered image", async () => {
+    // Keep the failure real until the machine has reconnected offscreen.
+    // Initial catalog paints may reattach the card before it leaves the DOM.
+    recover = true;
+    await page.locator(".conversation-reading.thread").evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
+    await expect(preview).toHaveCount(1);
+    expect(await cached.evaluate(node => node.isConnected)).toBe(true);
+    const image = preview.getByRole("img", { name: "Cached image.png", exact: true });
+    await expect(image).toBeVisible();
+    await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
+    await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toHaveCount(0);
+    expect(attempts).toBe(beforeReconnect + 1);
+  });
+});
+
 for (const [index, variant] of variants.entries()) {
   test.describe(variant.name, () => {
     test.use({ viewport: { width: variant.width, height: variant.height }, colorScheme: variant.scheme });
@@ -37,11 +93,43 @@ for (const [index, variant] of variants.entries()) {
 
       await journey.stage("Open plain text without loading rich renderers", async () => {
         await journey.open();
-        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).click();
+        await page.getByRole("navigation", { name: "Choose a supervisor" }).getByRole("button", { name: /cas-src/ }).and(page.locator(".conversation-row")).click();
         await expect(page.locator("#conversation-connection")).toContainText("Live");
         hub.supervisorSays(PELICAN, "Evidence is ready to inspect.");
         await expect(log.getByText("Evidence is ready to inspect.")).toBeVisible();
         expect(richRequests).toEqual([]);
+      });
+
+      await journey.stage("Copy exact source and wrap a code frame with the keyboard", async () => {
+        const source = `const message = "<script>&amp;雪 ${"long_source_".repeat(18)}";  \n\tconsole.log(message);\n| literal | source |\n| --- | --- |`;
+        hub.supervisorSays(PELICAN, `# Source ready to copy\n\n\`\`\`ts src/example.ts\n${source}\n\`\`\`\n\n~~~unknown\nUnknown languages stay readable.\n~~~`);
+        const frame = log.locator(".code-frame").first();
+        await expect(frame.locator(".code-frame-label")).toHaveText("src/example.ts");
+        await expect(frame.locator("code")).toHaveText(source, { useInnerText: false });
+        const wrap = frame.getByRole("button", { name: "Wrap lines in src/example.ts" });
+        await wrap.focus(); await page.keyboard.press("Enter");
+        await expect(wrap).toHaveAttribute("aria-pressed", "true");
+        await expect(log.locator(".code-frame").nth(1).getByRole("button", { name: "Wrap lines in unknown" })).toHaveAttribute("aria-pressed", "false");
+        expect(await frame.locator("pre").evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        const copy = frame.getByRole("button", { name: "Copy source from src/example.ts" });
+        await copy.focus(); await page.keyboard.press("Enter");
+        await expect(frame.getByRole("status")).toHaveText("Copied");
+        if (index === 0) expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(source);
+        await expect(log.locator(".code-frame-label").nth(1)).toHaveText("unknown");
+        // A refused browser clipboard produces a visible recovery action.
+        await page.evaluate(() => { Object.defineProperty(navigator.clipboard, "writeText", { configurable: true, value: () => Promise.reject(new Error("Permission denied")) }); });
+        await copy.click();
+        await expect(frame.getByRole("status")).toContainText("Copy failed");
+        await expect(copy).toBeEnabled();
+        await page.evaluate(() => { Reflect.deleteProperty(navigator.clipboard, "writeText"); });
+        const statusSource = "const count = 2;\nconsole.log(count);";
+        hub.supervisorSays(PELICAN, `\`\`\`ts smoke.ts\n${statusSource}\n\`\`\``, { kind: "status" });
+        const statusFrame = log.locator(".code-frame").last();
+        await expect(statusFrame.locator(".code-frame-label")).toHaveText("smoke.ts");
+        await statusFrame.getByRole("button", { name: "Copy source from smoke.ts" }).click();
+        await expect(statusFrame.getByRole("status")).toHaveText("Copied");
+        expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(statusSource);
       });
 
       await journey.stage("Read a diagram and inspect its source; bad input stays readable", async () => {
@@ -88,6 +176,9 @@ for (const [index, variant] of variants.entries()) {
         hub.supervisorSays(PELICAN, "The screenshot is attached.", { attachments: [file("art-inline-image", "Evidence screenshot.png", "image/png")] });
         const image = log.getByRole("img", { name: "Evidence screenshot.png", exact: true });
         try {
+          // Preview tickets are visibility-driven; inspect the attachment before
+          // waiting for its request, even after a tall wrapped code block.
+          await log.locator('.rich-attachment:has(a[data-artifact-id="art-inline-image"])').scrollIntoViewIfNeeded();
           await expect.poll(() => attempts).toBe(1);
           hub.hold(PELICAN); hub.drop(PELICAN);
           await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");

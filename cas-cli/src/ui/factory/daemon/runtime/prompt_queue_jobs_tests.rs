@@ -1164,3 +1164,19 @@ fn an_untaken_claim_is_released_after_its_ttl() {
     settle(&mut jobs, |_| claim_source(&cas_dir, row, "worker-a").is_none());
     assert!(!jobs.has_claim(row, "worker-a"));
 }
+
+
+#[test]
+fn cas_afe0_settled_broadcast_member_retires_without_fabricating_a_handoff() {
+    let (_root, cas_dir) = project();
+    let row = enqueue(&cas_dir, "all_workers", "Shared work");
+    let queue = crate::store::open_prompt_queue_store(&cas_dir).unwrap();
+    queue.acknowledge_for_recipients(row, &["worker-a".into()], None).unwrap();
+    let settled = run_claim_for_inject(&cas_dir, "s", row, "worker-a", "all_workers", 1);
+    assert_eq!(settled.outcome, ClaimOutcome::HandedOff);
+    assert_eq!(queue.recipient_receipt(row, "worker-a").unwrap(), None);
+    assert!(!queue.recipient_handed_off(row, "worker-a").unwrap());
+    let peer = run_claim_for_inject(&cas_dir, "s", row, "worker-b", "all_workers", 1);
+    assert!(matches!(peer.outcome, ClaimOutcome::Claimed(_)));
+    assert!(queue.queued_prompt(row).unwrap().unwrap().acked_at.is_none());
+}

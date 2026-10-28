@@ -1,9 +1,11 @@
+import type { SessionEndOutcome } from "./types";
 import { escapeHtml, projectTitle } from "./cloud-brand";
 import { joinSpoken } from "./spoken-names";
 import { machineAccentClass, machineMonogram } from "./machine-accent";
 import { plainTextMarkdown } from "./markdown-renderer";
 
 export interface ConversationRow {
+  ended?: SessionEndOutcome;
   key: string;
   machineId: string;
   session: string;
@@ -44,6 +46,16 @@ export interface ConversationRow {
   activityAt?: number;
   /** When the session started (ms epoch): ranks Most recent when no session of a group has activity (cas-6acf). */
   startedAt?: number;
+  /** Optional additive hub metadata (older hubs omit these fields). */
+  harness?: "claude" | "codex" | "grok" | "opencode";
+  account_email?: string;
+  project?: string;
+  machine_online?: boolean;
+  workerCount?: number;
+  mergesPerHour?: number;
+  needsYou?: boolean;
+  operatorReason?: string;
+  supervisorState?: "working" | "idle" | "needs-you" | "offline";
   /**
    * One of several live sessions of a project on one machine (cas-55a4). The
    * rows sit together under one heading; the most recently active one is
@@ -157,12 +169,12 @@ export function machineName(host: string): string {
 }
 
 /** The words a list search matches: project, machine and supervisor codename. */
-export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "host" | "supervisor">): string {
-  return `${projectTitle(row.projectDir) ?? ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
+export function conversationSearchText(row: Pick<ConversationRow, "projectDir" | "project" | "host" | "supervisor">): string {
+  return `${row.project || projectTitle(row.projectDir) || ""} ${row.host} ${row.supervisor}`.toLocaleLowerCase();
 }
 
 /** Rows whose project, machine or supervisor contains every word of the query (case-insensitive). */
-export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
+export function filterConversationRows<T extends Pick<ConversationRow, "projectDir" | "project" | "host" | "supervisor">>(rows: readonly T[], query: string): T[] {
   const words = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return [...rows];
   return rows.filter((row) => { const text = conversationSearchText(row); return words.every((word) => text.includes(word)); });
@@ -175,13 +187,16 @@ export function filterConversationRows<T extends Pick<ConversationRow, "projectD
  * time in words, unread and waiting.
  */
 export function conversationRowSpokenName(row: ConversationRow): string {
-  const project = projectTitle(row.projectDir);
+  const project = row.project || projectTitle(row.projectDir);
   const fallback = row.group ? row.activityLine || row.connection : row.connection;
   const preview = truncateConversationPreview(plainTextMarkdown(rowPreviewText(row, fallback)));
   const unread = row.unread ?? 0;
   return joinSpoken([
     `${project ?? row.supervisor} on ${machineName(row.host)}`,
     project ? row.supervisor : undefined,
+    row.harness,
+    row.account_email,
+    row.supervisorState === "needs-you" ? "needs you" : row.supervisorState,
     row.group?.active ? "most recent" : undefined,
     preview,
     row.when ? row.whenSpoken ?? row.when : undefined,
@@ -201,6 +216,7 @@ export function conversationRowSpokenName(row: ConversationRow): string {
  * then the last turn.
  */
 function rowPreviewText(row: ConversationRow, fallback: string): string {
+  if (row.ended) return `Ended · ${row.ended.workers_stopped.length} workers stopped${row.ended.orphans.length ? ` · Still alive: ${row.ended.orphans.join(", ")}` : ""}`;
   if (row.unreachable || row.interrupted) return row.connection;
   const draft = row.draft?.trim();
   if (draft && !row.selected) return `Draft: ${draft}`;
@@ -208,7 +224,7 @@ function rowPreviewText(row: ConversationRow, fallback: string): string {
 }
 
 export function conversationRowMarkup(row: ConversationRow): string {
-  const waiting = row.attention > 0;
+  const waiting = !row.ended && row.attention > 0;
   const unread = row.unread ?? 0;
   // cas-5d2c: a grouped row with no turn of its own yet shows what its
   // session last did, so siblings differ before any of them is opened.
@@ -225,7 +241,7 @@ export function conversationRowMarkup(row: ConversationRow): string {
   const flag = waiting ? `<span class="conversation-flag" role="img" aria-label="${row.attention === 1 ? "Waiting for you" : `${row.attention} waiting for you`}"></span>` : "";
   const marks = count || flag ? `<span class="conversation-marks">${count}${flag}</span>` : "";
   // No project named: the codename is the title (cas-1ca1 F03), not a status phrase.
-  const project = projectTitle(row.projectDir);
+  const project = row.project || projectTitle(row.projectDir);
   // The title is "project · machine": the project leads, never a dot (P13);
   // the one separator rides with the machine, so a dot never dangles at a
   // line end when a long project pushes the machine to the next line. The
@@ -235,8 +251,12 @@ export function conversationRowMarkup(row: ConversationRow): string {
   // running under the time stamp (cas-1ca1). The codename sits beneath.
   // cas-55a4: among one project's sessions, the most recently active one says so.
   const mark = row.group?.active ? `<span class="conversation-session-mark">Most recent</span>` : "";
-  return `<span class="conversation-avatar" aria-hidden="true">${escapeHtml(machineMonogram(row.host))}</span>`
-    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}</span>`
+  const harnesses = { claude: "✳", codex: ">_", grok: "/", opencode: "[ ]" };
+  const harness = row.harness && Object.hasOwn(harnesses, row.harness) ? row.harness : undefined;
+  const account = row.account_email ? `<span class="conversation-account" title="${escapeHtml(row.account_email)}">${escapeHtml(row.account_email)}</span>` : "";
+  const state = row.supervisorState ? `<span class="supervisor-state ${row.supervisorState}" title="${row.supervisorState === "needs-you" ? "Needs you" : row.supervisorState}" aria-hidden="true"></span>` : "";
+  return `<span class="conversation-avatar${harness ? " harness-mark" : ""}"${harness ? ` data-harness="${harness}" title="${harness}"` : ""} aria-hidden="true">${escapeHtml(harness ? harnesses[harness] : machineMonogram(row.host))}${state}</span>`
+    + `<span class="conversation-who"><span class="conversation-title"><strong class="conversation-project${project ? "" : " codename"}">${escapeHtml(project ?? row.supervisor)}</strong><span class="conversation-machine" title="${escapeHtml(machineName(row.host))}"><span class="conversation-sep" aria-hidden="true"></span><span class="conversation-machine-name">${escapeHtml(machineName(row.host))}</span></span></span>${project ? `<span class="conversation-supervisor codename">${escapeHtml(row.supervisor)}${mark}</span>` : mark}${account}</span>`
     + time
     + `<span class="conversation-preview${row.unreachable ? " unreachable" : row.interrupted ? " interrupted" : row.draft?.trim() && !row.selected ? " draft" : waiting || unread > 0 ? " bold" : ""}">${escapeHtml(preview)}</span>`
     + marks
@@ -249,7 +269,9 @@ export function conversationRowMarkup(row: ConversationRow): string {
  * Scroll the list by the whole remainder.
  */
 function revealWhole(control: HTMLElement): void {
-  const list = control.parentElement;
+  const parent = control.parentElement;
+  const list = control.closest<HTMLElement>("nav, #conversation-list")
+    ?? (parent?.classList.contains("conversation-group") ? parent.parentElement : parent);
   if (!list) return;
   const edge = list.getBoundingClientRect().bottom;
   const lowest = Math.max(...[...control.querySelectorAll("button")].map((button) => button.getBoundingClientRect().bottom));
@@ -318,10 +340,11 @@ export class ConversationList {
     const ordered: HTMLElement[] = [];
     const current = new Set(rows.map((row) => row.key));
     for (const [key, node] of this.nodes) {
-      if (!current.has(key) || node.parentElement !== container) { node.remove(); this.nodes.delete(key); }
+      if (!current.has(key) || !container.contains(node)) { node.remove(); this.nodes.delete(key); }
     }
     for (const key of this.ending.keys()) if (!current.has(key)) this.ending.delete(key);
     const extrasKept = new Set<string>();
+    const groups = new Map<HTMLElement, HTMLElement>();
     const extra = (key: string, make: () => HTMLElement): HTMLElement => {
       let node = this.extras.get(key);
       if (!node) { node = make(); this.extras.set(key, node); }
@@ -332,6 +355,14 @@ export class ConversationList {
       if (row.group?.first) {
         const head = extra(`group:${row.group.key}`, () => { const node = document.createElement("p"); node.className = "conversation-group-head"; return node; });
         if (head.textContent !== row.group.label) head.textContent = row.group.label;
+        const group = extra(`container:${row.group.key}`, () => {
+          const node = document.createElement("div");
+          node.className = "conversation-group";
+          node.setAttribute("role", "group");
+          return node;
+        });
+        group.setAttribute("aria-label", row.group.label);
+        groups.set(head, group);
         ordered.push(head);
       }
       let node = this.nodes.get(row.key);
@@ -376,9 +407,28 @@ export class ConversationList {
       announcer.setAttribute("role", "status");
       if (container.nextElementSibling !== announcer && container.parentElement) container.after(announcer);
     }
-    ordered.forEach((node, index) => {
-      if (container.children[index] !== node) container.insertBefore(node, container.children[index] ?? null);
+    // Keep the flat row/control order (including ended notices), but give each
+    // project a real boundary. Reuse both containers and buttons so catalog
+    // heartbeats leave keyboard focus and open End confirmations in place.
+    const top: HTMLElement[] = [];
+    const children = new Map<HTMLElement, HTMLElement[]>();
+    let group: HTMLElement | undefined;
+    for (const node of ordered) {
+      if (groups.has(node)) {
+        group = groups.get(node)!;
+        top.push(group);
+        children.set(group, []);
+      } else if (node.classList.contains("conversation-row") && !node.classList.contains("grouped")) {
+        group = undefined;
+      }
+      if (group) children.get(group)!.push(node);
+      else top.push(node);
+    }
+    const place = (parent: HTMLElement, nodes: readonly HTMLElement[]) => nodes.forEach((node, index) => {
+      if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] ?? null);
     });
+    for (const [parent, nodes] of children) place(parent, nodes);
+    place(container, top);
   }
 
   /**

@@ -2484,8 +2484,8 @@ button.chip:disabled { cursor: default; }
   .conversation-identity .host-where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   #conversation-connection { flex: none; white-space: pre; }
   /* Phone composer: the send pill folds to its glyph; the label stays for the reader. */
-  .conversation-composer { column-gap: 5px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
-  .conversation-composer textarea { padding: 12px 18px; }
+  .conversation-composer { column-gap: 2px; padding: 12px 6px 20px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .conversation-composer textarea { padding: 12px 10px; }
   .conversation-composer .composer-actions { gap: 2px; }
   .conversation-composer .composer-clip,
   .conversation-composer #message-mic,

@@ -765,6 +765,30 @@ The opt-in `hub-web/playwright.rich-content-hub.config.ts` repeats this named jo
 - A transient preview failure recovers after the session reconnects, without rebuilding the attachment or moving its caption.
 - SVG from the renderer is sanitized before DOM node insertion; the unit boundary regression supplies script, event-handler and foreignObject payloads.
 
+### HUB-J24 · Paste text, screenshots and files into a supervisor message
+
+- **Entry:** A paired conversation at 1280×800 or 390×844, in light or dark.
+- **Goal:** Pasted text stays inline; long text, screenshots and files have previews and reach the supervisor once with readable local paths.
+- **Touches:** `hub-web/src/composer-uploads.ts`, `hub-web/src/composer-uploads.css`, `hub-web/src/composer-markup.ts`, `hub-web/src/conversation-shell.ts`, `hub-web/src/main.ts`
+- **Suite:** `hub-web/e2e/journeys/paste-content.journey.ts`
+- **Gaps:** Protocol-double upload response loss; real host storage/sniffing is covered by the authenticated Rust route and a fixture-HOME real-hub screenshot walk. Physical iOS/Android clipboards are not automated. Phone scope includes paste from a share sheet and Photos/Files picker; OS share-target installation is deferred to preserve the service-worker-free app.
+
+#### Steps
+
+1. Paste plain text inline
+2. Preview a long paste, screenshot and picked file together
+3. A connection loss keeps the files visibly, then reuses the upload identity
+
+#### Expected experience
+
+- Every attachment is named and removable before sending; long text has a bounded preview and screenshots have thumbnails.
+- Files remain through reconnect and shell replacement, with a visible reminder to send before closing the page.
+
+#### Edge paths
+
+- The hub refuses oversized or unsupported bytes, traversal names stay within host storage, and unsigned or unknown-session requests write nothing.
+- Reusing an upload identity with different bytes is a conflict; replaying the same bytes returns the same artifact.
+
 ### HUB-J25 · See the whole picture of the work
 
 - **Entry:** `/commander/` at 1280 (light) and 390 (dark), one paired machine whose daemon serves work events, a thread with work between two replies, and one worker on a task

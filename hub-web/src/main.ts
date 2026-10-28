@@ -3088,6 +3088,31 @@ function bindSpeechComposer(): void {
   const keyboard = document.querySelector<HTMLButtonElement>("#message-keyboard");
   const mic = document.querySelector<HTMLButtonElement>("#message-mic");
   if (!composer || !keyboard || !mic) return;
+  const uploadThread = composer.dataset.threadKey;
+  if (uploadThread) {
+    const root = composer.closest<HTMLElement>(".message")!;
+    composerUploads?.draftFor(uploadThread).bind(root);
+    const accept = (files: File[], text?: string) => {
+      if (pendingSubmissions.has(uploadThread)) { showComposerStatus("Wait for this send before attaching another file.", "info"); return; }
+      const accepted = (acceptingUploads.get(uploadThread) ?? Promise.resolve()).then(loadComposerUploads).then(module => {
+        const draft = module.draftFor(uploadThread);
+        if (root.isConnected) draft.bind(root);
+        if (files.length) draft.add(files); else if (text) draft.addText(text);
+      }).catch(() => showComposerStatus("Couldn't open attachments. Your paste was not added; try again.", "error"));
+      acceptingUploads.set(uploadThread, accepted);
+      void accepted.finally(() => { if (acceptingUploads.get(uploadThread) === accepted) acceptingUploads.delete(uploadThread); });
+    };
+    const picker = root.querySelector<HTMLInputElement>("#message-files")!;
+    root.querySelector<HTMLButtonElement>("#message-attach")!.onclick = () => picker.click();
+    picker.onchange = () => { accept([...picker.files ?? []]); picker.value = ""; };
+    composer.onpaste = event => {
+      const files = [...event.clipboardData?.files ?? []];
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (files.length || text.length > 12_000) { event.preventDefault(); accept(files, text); }
+    };
+    root.ondragover = event => { if (event.dataTransfer?.types.includes("Files")) event.preventDefault(); };
+    root.ondrop = event => { if (event.dataTransfer?.files.length) { event.preventDefault(); accept([...event.dataTransfer.files]); } };
+  }
   composer.oninput = () => {
     messageDraft = composer.value;
     // Clearing the composer abandons the edit: the next send is a new message.
@@ -3886,20 +3911,31 @@ async function deliverSupervisorMessage(machine: StoredMachine, session: string,
  * A retry of a refused send is also `quick`: it carries the refused send's own
  * in_reply_to (possibly none) and `retryOf`, the refused send it replaces.
  */
+const acceptingUploads = new Map<string, Promise<void>>();
+let composerUploads: typeof import("./composer-uploads") | undefined;
+async function loadComposerUploads(): Promise<typeof import("./composer-uploads")> {
+  return composerUploads ??= await import("./composer-uploads");
+}
+
 async function submitSupervisorMessage(quick?: { text: string; replyTo?: number; retryOf?: string }): Promise<void> {
   const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
   if (!composer) return;
   const renderedThread = composer.dataset.threadKey;
+  if (renderedThread) await acceptingUploads.get(renderedThread);
   const selectedThread = selectedMachineId && selectedSession ? sessionKey(selectedMachineId, selectedSession) : undefined;
   if (renderedThread !== selectedThread) {
     showComposerStatus("The selected conversation changed. Reopen the conversation before sending.", "error");
     return;
   }
-  const text = quick?.text ?? composer.value.trim();
+  let text = quick?.text ?? composer.value.trim();
+  const originalText = composer.value;
+  const uploads = !quick && selectedThread ? composerUploads?.draftFor(selectedThread) : undefined;
+  const hasAttachments = !!uploads?.hasFiles();
   const replyTo = quick ? quick.replyTo : (selectedThread ? conversationHistory(selectedThread).pinnedAsk()?.notification_id : undefined);
   // A composer send in the thread whose refused message Edit reopened is that
   // message's edited version; a chip or a Retry is not.
   const editOf = !quick && editingRefused?.threadKey === selectedThread ? editingRefused?.id : undefined;
+  if (!text && hasAttachments) text = "Attached files";
   const plan = planSupervisorSend(supervisorSendContext(text));
   if (plan.kind === "blocked") {
     showComposerStatus(plan.reason, sendBlockTone(plan.block));
@@ -3917,9 +3953,33 @@ async function submitSupervisorMessage(quick?: { text: string; replyTo?: number;
   // cas-0b3d: a chip answers an ask; a composer send was spoken if dictation
   // wrote its draft. A Retry resends and is not counted again.
   const usageAction: UsageAction | undefined = quick ? (quick.retryOf ? undefined : "ask.answer") : (draftDictated ? "reply.voice" : "reply.typed");
+  if (uploads && hasAttachments) {
+    text = await uploads.prepare(text, async (id, name, data) => {
+      const connection = connections.get(machine.id);
+      if (!connection) throw new Error("The machine is disconnected.");
+      try {
+        return await connection.request<{ path: string; artifact_id: string }>("POST", `/v1/sessions/${encodeURIComponent(session)}/uploads/${id}`, { name, data });
+      } catch (error) {
+        const detail = (error as { detail?: string })?.detail;
+        if (detail) throw new Error(detail);
+        throw error;
+      }
+    });
+  }
   const sent = await deliverSupervisorMessage(machine, session, supervisor, text, replyTo, quick?.retryOf, editOf);
+  if (sent && uploads && hasAttachments) {
+    uploads.clear();
+    if (messageStatus?.session === submissionKey && !messageStatus?.held) clearComposerStatus();
+    if (composer.isConnected && composer.value === originalText) {
+      composer.value = ""; messageDraft = ""; messageDraftSelection = 0;
+      rememberDraft(submissionKey, undefined);
+    }
+  }
   if (sent && usageAction) countUsage(usageAction);
+  if (sent && hasAttachments) countUsage("reply.attachment");
   if (sent && !quick) draftDictated = false;
+  } catch (error) {
+    showComposerStatus(error instanceof Error ? error.message : "Files were not sent. Try again.", "error");
   } finally {
     pendingSubmissions.delete(submissionKey);
   }

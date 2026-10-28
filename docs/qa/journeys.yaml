@@ -254,6 +254,9 @@ invariants:
   HUB-J22-GOAL:
     statement: inspect diagrams, collapsible diffs and inline image, PDF, video and audio evidence while retaining source and original file links
     check: 'Walk HUB-J22 through the committed production bundle; read back the hub double previewTicketRequests for one request per file plus exactly one video renewal and real media decode/playback, and verify source fallback plus stable media bounds.'
+  HUB-J24-GOAL:
+    statement: pasted text, screenshots and files show a preview and reach the supervisor once with readable local paths
+    check: 'Walk HUB-J24 in hub-web/e2e/journeys/paste-content.journey.ts on desktop and phone; read back the accepted message paths and upload identities after a lost response. Verify host MIME sniffing, size and type refusals, and idempotent storage with hub::tests::composer_upload_is_authenticated_bounded_and_idempotent; the real-hub screenshot walk proves the supervisor can describe the stored image.'
 bug_families:
   expired-toast-announcement:
     title: Expired connection notices must leave an empty live region while subsequent notices still announce
@@ -1943,6 +1946,30 @@ journeys:
     basis: New evidence-reading journey; no per-journey usage instrumentation.
   spec: hub-web/e2e/journeys/rich-content.journey.ts
   catalog_gaps: Tickets and proxy bytes are doubled; real PNG/PDF/WebM/WAV decode and playback use the production browser build. Embedded assets and ticket/proxy authorization have separate hub handler tests. Hosted cross-origin media is outside this proof.
+
+- id: HUB-J24
+  name: Paste text, screenshots and files into a supervisor message
+  status: live
+  kind: commander
+  entry:
+    url: /commander/
+    trigger: Open a paired conversation on desktop or phone, in light or dark.
+  steps:
+  - Paste plain text inline.
+  - Preview long pasted text, a screenshot and a picked file in the composer.
+  - Retry a failed upload with the same identity and send the stored paths once.
+  goal: Text plus readable host paths reach the supervisor without duplicate delivery.
+  owner_groups: [commander_runtime, commander_dependencies]
+  owners:
+  - hub-web/src/composer-uploads.ts
+  - hub-web/src/composer-uploads.css
+  - hub-web/e2e/journeys/paste-content.journey.ts
+  invariants: [HUB-J24-GOAL]
+  traffic:
+    share_pct: null
+    basis: New journey; no production traffic attribution yet.
+  spec: hub-web/e2e/journeys/paste-content.journey.ts
+  catalog_gaps: Protocol-double uploads model a lost response; host storage and MIME sniffing are proven by Rust and a fixture-HOME real-hub walk. Physical iOS and Android clipboards are not driven. Native OS share-target installation is a separate follow-up; Commander has no service worker.
 
 - id: HUB-J25
   name: See the whole picture of the work

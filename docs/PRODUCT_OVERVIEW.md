@@ -40,6 +40,8 @@ Every delivery is checked before it merges: tests, the journeys a change touches
 
 ## Primary Journeys
 
+The operator can paste text, screenshots or files into Commander: long text becomes a previewed text attachment, and Send stores files on the session's machine and gives the supervisor readable local paths through the existing durable message lane. Pending files remain through reconnect, with a reminder to send before closing the page.
+
 1. The operator launches `cas`, reviews the active epic and staffs workers for its ready tasks.
 2. A worker starts its lease, commits in its worktree, runs targeted tests and pushes; the supervisor merges on green, and the verifier's verdict at the merge commit closes or reopens the task.
 3. A QA reviewer runs `cas qa impact` on a delivery, walks the touched journeys and records the verdict in the QA ledger.

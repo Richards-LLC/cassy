@@ -38,6 +38,7 @@ export const USAGE_ACTIONS = {
   "write-grant": "HUB-J20",
   "app-switch.explorer": "HUB-J21",
   "rich-content.inspect": "HUB-J22",
+  "reply.attachment": "HUB-J24",
   "show-work.toggle": "HUB-J25",
   "worker.timeline": "HUB-J25",
 } as const;

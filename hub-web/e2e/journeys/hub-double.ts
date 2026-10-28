@@ -1280,11 +1280,12 @@ export class HubDouble {
     const kind = typeof message === "string" ? message : Object.keys(message)[0] ?? "";
     this.frames.push({ machine: machineId, session, kind, body: typeof message === "string" ? message : message[kind] });
     this.observed();
-    if (message.OperatorReplyPersisted) {
-      const id = Number(message.OperatorReplyPersisted.notification_id);
-      this.persistedReplies.push({ session, notification_id: id });
+    if (message.OperatorReplyPersisted || message.OperatorNoticePersisted) {
+      const noticeReceipt = Boolean(message.OperatorNoticePersisted);
+      const id = Number((message.OperatorNoticePersisted ?? message.OperatorReplyPersisted)!.notification_id);
+      if (!noticeReceipt) this.persistedReplies.push({ session, notification_id: id });
       if (this.pendingReplies.has(session)) {
-        this.pendingReplies.set(session, this.pendingReplies.get(session)!.filter(reply => reply.notification_id !== id));
+        this.pendingReplies.set(session, this.pendingReplies.get(session)!.filter(reply => reply.notification_id !== id || Boolean(reply.notice) !== noticeReceipt));
         this.pendingReplyFlights.get(session)?.delete(id);
         this.forwardPendingReplies(session, ws);
       }

@@ -2312,6 +2312,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
 
     let daemon_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let daemon_port = daemon_listener.local_addr().unwrap().port();
+    let (receipt_tx, receipt_rx) = tokio::sync::oneshot::channel();
     let daemon = tokio::spawn(async move {
         let (stream, _) = daemon_listener.accept().await.unwrap();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -2334,6 +2335,8 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
             .send(WsMessage::Binary(serde_json::to_vec(&welcome).unwrap()))
             .await
             .unwrap();
+        let receipt = socket.next().await.unwrap().unwrap();
+        receipt_tx.send(serde_json::from_slice::<serde_json::Value>(&receipt.into_data()).unwrap()).unwrap();
         futures_util::future::pending::<()>().await;
     });
 
@@ -2411,6 +2414,15 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
         socket.next().await,
         Some(Ok(WsMessage::Binary(_)))
     ));
+
+    // A read-only viewer needs no control lease to persist attention. The
+    // authenticated hub replaces a spoofed device before forwarding it.
+    socket.send(WsMessage::Text(serde_json::json!({"OperatorNoticePersisted": {
+        "notification_id": 76, "device_id": "forged-device"
+    }}).to_string().into())).await.unwrap();
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), receipt_rx).await.unwrap().unwrap();
+    assert_eq!(receipt["OperatorNoticePersisted"]["notification_id"], 76);
+    assert_eq!(receipt["OperatorNoticePersisted"]["device_id"], device_id);
 
     cli_auth.revoke_device(&device_id, Utc::now()).unwrap();
     let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -2533,6 +2545,9 @@ fn h2_scope_05_each_mutation_has_an_exact_scope_and_legacy_interrupt_is_forbidde
     assert_eq!(required_scope(&keyframe), Some(Scope::PaneRead));
     assert_eq!(required_scope(&scrollback), Some(Scope::PaneRead));
     assert_eq!(required_scope(&history), Some(Scope::PaneRead));
+    let notice_receipt = ClientMessage::OperatorNoticePersisted { notification_id: 76, device_id: "phone".into() };
+    assert_eq!(required_scope(&notice_receipt), Some(Scope::PaneRead));
+    assert!(super::server::is_pane_read_message(&notice_receipt));
     assert!(super::server::is_pane_read_message(&keyframe));
     assert!(super::server::is_pane_read_message(&scrollback));
     assert!(super::server::is_pane_read_message(&history));

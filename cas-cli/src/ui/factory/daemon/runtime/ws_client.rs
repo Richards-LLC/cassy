@@ -405,6 +405,11 @@ impl FactoryDaemon {
                     let _ = client.sink.feed(frame).now_or_never();
                 }
             }
+            ClientMessage::OperatorNoticePersisted { notification_id, device_id } => {
+                if let Err(error) = self.persist_operator_notice_receipt(notification_id, &device_id) {
+                    tracing::warn!(notification_id, %error, "ignored invalid Commander notice-persisted receipt");
+                }
+            }
             ClientMessage::OperatorReplyPersisted { notification_id, device_id } => {
                 let result = self.persist_operator_reply_receipt(notification_id, &device_id);
                 if let Err(error) = result {

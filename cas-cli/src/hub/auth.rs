@@ -3,18 +3,21 @@
 //! Implements H2-PERM-01 through H2-AUDIT-06 from the binding Commander ADR.
 
 mod account;
+mod audit;
+mod cache;
 mod installation;
 mod media;
-pub(crate) use media::MediaTicket;
 pub use account::{CHALLENGE_TTL_SECONDS, EnrollmentAssertion, EnrollmentRefusal};
 pub use installation::{AccountEnrollment, InstallationAction, InstallationProof};
+pub(crate) use media::MediaTicket;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -590,7 +593,9 @@ struct PersistedState {
     generation_highwater: BTreeMap<String, u64>,
     pairings: Vec<PairingRecord>,
     devices: Vec<DeviceSession>,
+    #[serde(default, skip_serializing)]
     tickets: Vec<TicketRecord>,
+    #[serde(default, skip_serializing)]
     dpop_jtis: Vec<ReplayRecord>,
     source_attempts: Vec<SourceAttempt>,
     leases: BTreeMap<String, LeaseRecord>,
@@ -787,10 +792,14 @@ struct AuthInner {
     machine_id: String,
     gate: Mutex<()>,
     lock_file: File,
+    cache: RwLock<cache::CachedState>,
+    started_at: DateTime<Utc>,
+    last_activity_checkpoint: AtomicI64,
+    audit_writer: audit::AuditWriter,
     revocations: broadcast::Sender<String>,
     /// The writer's failure as last recorded, loaded from AUDIT_HEALTH_FILE at
     /// open so a success after a restart still clears it (cas-0140).
-    audit_health: Mutex<Option<AuditHealth>>,
+    audit_health: Arc<Mutex<Option<AuditHealth>>>,
     // Per-process key: restarting the hub safely invalidates short-lived media tickets.
     media_ticket_key: [u8; 32],
     #[cfg(test)]
@@ -851,6 +860,14 @@ impl AuthStore {
     }
 
     pub fn open(root: impl AsRef<Path>, machine_id: impl Into<String>) -> Result<Self> {
+        Self::open_at(root, machine_id, Utc::now())
+    }
+
+    pub(super) fn open_at(
+        root: impl AsRef<Path>,
+        machine_id: impl Into<String>,
+        started_at: DateTime<Utc>,
+    ) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         super::ensure_private_dir(&root)?;
         let lock_path = root.join("auth.lock");
@@ -867,13 +884,19 @@ impl AuthStore {
         let lock_file = lock_options.open(&lock_path)?;
         secure_regular_file(&lock_path)?;
         let (revocations, _) = broadcast::channel(64);
+        let audit_health = Arc::new(Mutex::new(None));
+        let audit_writer = audit::AuditWriter::start(root.clone(), audit_health.clone())?;
         let store = Self(Arc::new(AuthInner {
             root,
             machine_id: machine_id.into(),
             gate: Mutex::new(()),
             lock_file,
+            cache: RwLock::new(cache::CachedState::default()),
+            started_at,
+            last_activity_checkpoint: AtomicI64::new(started_at.timestamp()),
+            audit_writer,
             revocations,
-            audit_health: Mutex::new(None),
+            audit_health,
             media_ticket_key: rand::random(),
             #[cfg(test)]
             active_context_checks: std::sync::atomic::AtomicUsize::new(0),
@@ -896,7 +919,14 @@ impl AuthStore {
         }
         let state_path = store.0.root.join("auth.json");
         let state = store.lock()?;
-        if !state_path.exists() {
+        if !state_path.exists()
+            || store
+                .0
+                .cache
+                .read()
+                .map_err(|_| anyhow::anyhow!("hub auth state poisoned"))?
+                .needs_compaction
+        {
             store.persist(&state)?;
         }
         drop(state);
@@ -953,8 +983,14 @@ impl AuthStore {
     ) -> std::result::Result<DeviceCredential, PairingExchangeError> {
         if exchange.installation.is_some() {
             return self.prepare_installation(exchange, now).map_err(|error| {
-                if error.is::<installation::InstallationConflict>() { PairingExchangeError::Conflict }
-                else { match error.downcast::<PairingExchangeError>() { Ok(error) => error, Err(error) => error.into() } }
+                if error.is::<installation::InstallationConflict>() {
+                    PairingExchangeError::Conflict
+                } else {
+                    match error.downcast::<PairingExchangeError>() {
+                        Ok(error) => error,
+                        Err(error) => error.into(),
+                    }
+                }
             });
         }
         validate_origin(&exchange.controller_origin)?;
@@ -1048,7 +1084,7 @@ impl AuthStore {
         controller_origin: &str,
     ) -> Result<bool> {
         let token_hash = hash_b64(token.as_bytes());
-        Ok(self.lock()?.pairings.iter().any(|record| {
+        Ok(self.read_lock()?.pairings.iter().any(|record| {
             constant_time_eq(&record.token_hash, &token_hash)
                 && record.hub_id == hub_id
                 && record.controller_origin == controller_origin
@@ -1082,15 +1118,13 @@ impl AuthStore {
             .strip_prefix("DPoP ")
             .ok_or(AuthRefusal::MalformedCredential)?;
         let credential_hash = hash_b64(credential.as_bytes());
-        let mut state = self.lock()?;
-        let device_index = state
+        let device = self
+            .read_lock()?
             .devices
             .iter()
-            .position(|device| constant_time_eq(&device.credential_hash, &credential_hash));
-        let Some(device_index) = device_index else {
-            return Err(AuthRefusal::UnknownCredential.into());
-        };
-        let device = state.devices[device_index].clone();
+            .find(|device| constant_time_eq(&device.credential_hash, &credential_hash))
+            .cloned()
+            .ok_or(AuthRefusal::UnknownCredential)?;
         let context = AuthContext {
             device_id: device.device_id.clone(),
             credential_id: device.credential_id.clone(),
@@ -1114,7 +1148,6 @@ impl AuthStore {
             None
         };
         if let Some(refused) = standing {
-            drop(state);
             self.audit_refusal(&context, "dpop_auth", refused, now)?;
             return Err(refused.into());
         }
@@ -1129,12 +1162,27 @@ impl AuthStore {
         ) {
             Ok(verified) => verified,
             Err(error) => {
-                drop(state);
                 let refused = refusal_of(&error);
                 self.audit_refusal(&context, "dpop_auth", refused, now)?;
                 return Err(refused.into());
             }
         };
+        if let Err(error) = self.ensure_proof_after_start(&verified, &device, now) {
+            self.audit_refusal(&context, "dpop_auth", refusal_of(&error), now)?;
+            return Err(error);
+        }
+        let mut state = self.memory_lock()?;
+        // A CLI may revoke or rotate while signature verification runs.
+        Self::ensure_active_context_in_state(&state, &context, now)
+            .map_err(|_| AuthRefusal::Revoked)?;
+        let device_index = state
+            .devices
+            .iter()
+            .position(|current| {
+                current.device_id == device.device_id
+                    && current.credential_id == device.credential_id
+            })
+            .ok_or(AuthRefusal::UnknownCredential)?;
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
         if state
             .dpop_jtis
@@ -1145,14 +1193,19 @@ impl AuthStore {
             self.audit_refusal(&context, "dpop_replay", AuthRefusal::ProofReplay, now)?;
             return Err(AuthRefusal::ProofReplay.into());
         }
+        anyhow::ensure!(
+            state.dpop_jtis.len() < 16_384,
+            "hub proof replay cache full"
+        );
         state.dpop_jtis.push(ReplayRecord {
             credential_id: context.credential_id.clone(),
             jti: verified.jti,
             expires_at: now + Duration::minutes(DPOP_REPLAY_MINUTES),
         });
-        state.devices[device_index].last_used_at = now;
-        self.persist(&state)?;
+        state.devices[device_index].last_used_at =
+            now.max(state.devices[device_index].last_used_at);
         drop(state);
+        self.checkpoint_activity(now)?;
         self.audit(Some(&context), "allowed", "dpop_auth", None, None, now)?;
         Ok(context)
     }
@@ -1219,6 +1272,7 @@ impl AuthStore {
             now,
         )
         .map_err(|error| anyhow::Error::from(refusal_of(&error)))?;
+        self.ensure_proof_after_start(&verified, &device, now)?;
         state.dpop_jtis.retain(|entry| entry.expires_at >= now);
         if state
             .dpop_jtis
@@ -1269,10 +1323,17 @@ impl AuthStore {
         now: DateTime<Utc>,
     ) -> Result<WsTicket> {
         anyhow::ensure!(context.has(Scope::PaneRead), "authorization refused");
-        let mut state = self.lock()?;
+        let mut state = self.memory_lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         let ticket = random_secret();
         let expires_at = now + Duration::minutes(WS_TICKET_TTL_MINUTES);
+        state
+            .tickets
+            .retain(|ticket| ticket.consumed_at.is_none() && ticket.expires_at >= now);
+        anyhow::ensure!(
+            state.tickets.len() < 4096,
+            "hub websocket ticket cache full"
+        );
         state.tickets.push(TicketRecord {
             ticket_hash: hash_b64(ticket.as_bytes()),
             context: context.clone(),
@@ -1282,7 +1343,6 @@ impl AuthStore {
             expires_at,
             consumed_at: None,
         });
-        self.persist(&state)?;
         Ok(WsTicket { ticket, expires_at })
     }
 
@@ -1295,7 +1355,7 @@ impl AuthStore {
         now: DateTime<Utc>,
     ) -> Result<AuthContext> {
         let hash = hash_b64(ticket.as_bytes());
-        let mut state = self.lock()?;
+        let mut state = self.memory_lock()?;
         let index = state
             .tickets
             .iter()
@@ -1312,8 +1372,7 @@ impl AuthStore {
         );
         let context = record.context.clone();
         Self::ensure_active_context_in_state(&state, &context, now)?;
-        state.tickets[index].consumed_at = Some(now);
-        self.persist(&state)?;
+        state.tickets.remove(index);
         Ok(context)
     }
 
@@ -1323,7 +1382,7 @@ impl AuthStore {
     }
 
     pub fn list_devices(&self) -> Result<Vec<DeviceSummary>> {
-        let state = self.lock()?;
+        let state = self.read_lock()?;
         Ok(state
             .devices
             .iter()
@@ -1411,7 +1470,7 @@ impl AuthStore {
             reason: None,
             detail: None,
         };
-        let written = append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record);
+        let written = self.0.audit_writer.append(&record);
         self.record_audit_outcome(action, now, written.as_ref().err());
         written?;
         device.scopes.insert(scope);
@@ -1421,7 +1480,7 @@ impl AuthStore {
     }
 
     pub fn is_paired_origin(&self, origin: &str, now: DateTime<Utc>) -> Result<bool> {
-        Ok(self.lock()?.devices.iter().any(|device| {
+        Ok(self.read_lock()?.devices.iter().any(|device| {
             device.controller_origin == origin
                 && device.revoked_at.is_none()
                 && device.expires_at >= now
@@ -1471,7 +1530,7 @@ impl AuthStore {
         now: DateTime<Utc>,
         force: bool,
     ) -> Result<DateTime<Utc>> {
-        let mut state = self.lock()?;
+        let mut state = self.memory_lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         anyhow::ensure!(
             !force || context.has(Scope::HubAdmin),
@@ -1491,7 +1550,6 @@ impl AuthStore {
                 expires_at,
             },
         );
-        self.persist(&state)?;
         Ok(expires_at)
     }
 
@@ -1501,7 +1559,7 @@ impl AuthStore {
         session: &str,
         now: DateTime<Utc>,
     ) -> Result<LeaseSummary> {
-        let state = self.lock()?;
+        let state = self.read_lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         let active = state
             .leases
@@ -1528,7 +1586,7 @@ impl AuthStore {
         session: &str,
         now: DateTime<Utc>,
     ) -> Result<()> {
-        let mut state = self.lock()?;
+        let mut state = self.memory_lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         // A departing view may have missed another device's takeover, or
         // already released this lease. Cleanup is idempotent after validating
@@ -1541,7 +1599,7 @@ impl AuthStore {
             return Ok(());
         }
         state.leases.remove(session);
-        self.persist(&state)
+        Ok(())
     }
 
     pub fn has_active_lease(
@@ -1550,7 +1608,7 @@ impl AuthStore {
         session: &str,
         now: DateTime<Utc>,
     ) -> Result<bool> {
-        let state = self.lock()?;
+        let state = self.read_lock()?;
         Self::ensure_active_context_in_state(&state, context, now)?;
         Ok(state
             .leases
@@ -1682,9 +1740,7 @@ impl AuthStore {
             reason: refusal.map(AuthRefusal::code),
             detail: detail.or_else(|| refusal.and_then(AuthRefusal::detail)),
         };
-        let written = self.lock().and_then(|_state_lock| {
-            append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &record)
-        });
+        let written = self.0.audit_writer.append(&record);
         self.record_audit_outcome(action, now, written.as_ref().err());
         written
     }
@@ -1692,14 +1748,22 @@ impl AuthStore {
     /// Content-free connection evidence. Caller supplies fixed route/refusal
     /// categories and a server-generated UUID, never raw headers or paths. The
     /// row names the hub like every other audit row (cas-db44).
-    pub(crate) fn audit_connection(&self, category: &str, preflight: bool, status: u16, request_id: &str, reason: Option<&str>, count: u64) -> Result<()> {
+    pub(crate) fn audit_connection(
+        &self,
+        category: &str,
+        preflight: bool,
+        status: u16,
+        request_id: &str,
+        reason: Option<&str>,
+        count: u64,
+    ) -> Result<()> {
         let now = Utc::now();
         let row = serde_json::json!({
             "timestamp": now, "machine_id": self.0.machine_id, "action": "connection_recovery", "request_id": request_id,
             "category": category, "preflight": preflight, "status": status,
             "reason": reason, "count": count,
         });
-        let written = self.lock().and_then(|_state_lock| append_private_json_line(&self.0.root.join(AUDIT_LOG_FILE), &row));
+        let written = self.0.audit_writer.append(&row);
         self.record_audit_outcome("connection_recovery", now, written.as_ref().err());
         written
     }
@@ -1724,58 +1788,56 @@ impl AuthStore {
         now: DateTime<Utc>,
         error: Option<&anyhow::Error>,
     ) {
-        let Ok(mut health) = self.0.audit_health.lock() else {
-            return;
-        };
-        let path = self.0.root.join(AUDIT_HEALTH_FILE);
-        match error {
-            None => {
-                if health.take().is_some() {
-                    if let Err(remove) = fs::remove_file(&path)
-                        && remove.kind() != std::io::ErrorKind::NotFound
-                    {
-                        tracing::warn!(error = %remove, path = %path.display(), "hub audit writer recovered but its failure record could not be removed");
-                    }
-                    tracing::info!(action, "hub audit writer recovered; rows are being written again");
-                }
-            }
-            Some(error) => {
-                let message = format!("{error:#}");
-                let next = match health.take() {
-                    Some(previous) => AuditHealth {
-                        failing_since: previous.failing_since,
-                        last_failure_at: now,
-                        failures: previous.failures.saturating_add(1),
-                        last_action: action.to_owned(),
-                        last_error: message.clone(),
-                    },
-                    None => AuditHealth {
-                        failing_since: now,
-                        last_failure_at: now,
-                        failures: 1,
-                        last_action: action.to_owned(),
-                        last_error: message.clone(),
-                    },
-                };
-                tracing::error!(action, failures = next.failures, error = %message, "hub audit row could not be written; the audited request is refused");
-                let persisted = serde_json::to_vec_pretty(&next)
-                    .map_err(anyhow::Error::from)
-                    .and_then(|bytes| {
-                        let temporary = self.0.root.join(format!(
-                            ".audit-health.{}.{}.tmp",
-                            std::process::id(),
-                            uuid::Uuid::new_v4()
-                        ));
-                        write_private_file(&temporary, &bytes, true)?;
-                        fs::rename(&temporary, &path)?;
-                        Ok(())
-                    });
-                if let Err(persist) = persisted {
-                    tracing::error!(error = %persist, path = %path.display(), "hub audit failure record could not be written");
-                }
-                *health = Some(next);
-            }
+        record_audit_outcome(&self.0.root, &self.0.audit_health, action, now, error);
+    }
+
+    /// Bound the activity lost on a crash without persisting each proof.
+    fn checkpoint_activity(&self, now: DateTime<Utc>) -> Result<()> {
+        let previous = self.0.last_activity_checkpoint.load(Ordering::Relaxed);
+        if now.timestamp() - previous < 300
+            || self
+                .0
+                .last_activity_checkpoint
+                .compare_exchange(
+                    previous,
+                    now.timestamp(),
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_err()
+        {
+            return Ok(());
         }
+        let checkpoint = self.lock().and_then(|state| self.persist(&state));
+        if checkpoint.is_err() {
+            self.0
+                .last_activity_checkpoint
+                .store(previous, Ordering::Relaxed);
+        }
+        checkpoint
+    }
+
+    fn ensure_proof_after_start(
+        &self,
+        proof: &VerifiedDpop,
+        device: &DeviceSession,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        // Integer iat cannot distinguish either side of a restart inside one
+        // second. Refuse that whole second for existing credentials. A device
+        // paired during this boot could not have authenticated before it.
+        if device.issued_at < self.0.started_at && proof.iat <= self.0.started_at.timestamp() {
+            return Err(AuthRefusal::StaleProof {
+                skew_secs: proof.iat - now.timestamp(),
+            }
+            .into());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn audit_sync_count(&self) -> usize {
+        self.0.audit_writer.syncs.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -1785,8 +1847,10 @@ impl AuthStore {
 
     pub fn ensure_active_context(&self, context: &AuthContext, now: DateTime<Utc>) -> Result<()> {
         #[cfg(test)]
-        self.0.active_context_checks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let state = self.lock().map_err(store_failure)?;
+        self.0
+            .active_context_checks
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let state = self.read_lock().map_err(store_failure)?;
         Self::ensure_active_context_in_state(&state, context, now)
     }
 
@@ -1822,13 +1886,7 @@ impl AuthStore {
         self.0.lock_file.lock_exclusive()?;
         let file_lock = AuthFileLock(&self.0.lock_file);
         let acquired = std::time::Instant::now();
-        let target = self.0.root.join("auth.json");
-        let state = if target.exists() {
-            secure_regular_file(&target)?;
-            serde_json::from_slice(&fs::read(&target)?).context("invalid hub auth state")?
-        } else {
-            PersistedState::default()
-        };
+        let state = (*self.memory_lock()?).clone();
         Ok(LockedState {
             state,
             _file_lock: file_lock,
@@ -1848,6 +1906,7 @@ impl AuthStore {
         write_private_file(&temporary, &serde_json::to_vec_pretty(state)?, true)?;
         fs::rename(&temporary, &target)?;
         secure_regular_file(&target)?;
+        self.publish(state)?;
         tracing::debug!(target: "cas::hub::auth::timing", persist_us = started.elapsed().as_micros() as u64, "hub auth persist histogram observation");
         Ok(())
     }
@@ -1870,6 +1929,7 @@ struct DpopClaims {
 
 struct VerifiedDpop {
     jti: String,
+    iat: i64,
 }
 
 fn verify_dpop(
@@ -1922,7 +1982,10 @@ fn verify_dpop(
     if skew_secs.abs() > DPOP_SKEW_SECONDS {
         return Err(AuthRefusal::StaleProof { skew_secs }.into());
     }
-    Ok(VerifiedDpop { jti: claims.jti })
+    Ok(VerifiedDpop {
+        jti: claims.jti,
+        iat: claims.iat,
+    })
 }
 
 fn validate_origin(origin: &str) -> Result<()> {
@@ -1978,22 +2041,68 @@ fn write_private_file(path: &Path, bytes: &[u8], create_new: bool) -> Result<()>
     Ok(())
 }
 
-fn append_private_json_line<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if path.exists() {
-        secure_regular_file(path)?;
+fn record_audit_outcome(
+    root: &Path,
+    health: &Mutex<Option<AuditHealth>>,
+    action: &str,
+    now: DateTime<Utc>,
+    error: Option<&anyhow::Error>,
+) {
+    let Ok(mut health) = health.lock() else {
+        return;
+    };
+    let path = root.join(AUDIT_HEALTH_FILE);
+    match error {
+        None => {
+            if health.take().is_some() {
+                if let Err(remove) = fs::remove_file(&path)
+                    && remove.kind() != std::io::ErrorKind::NotFound
+                {
+                    tracing::warn!(error = %remove, path = %path.display(), "hub audit writer recovered but its failure record could not be removed");
+                }
+                tracing::info!(
+                    action,
+                    "hub audit writer recovered; rows are being written again"
+                );
+            }
+        }
+        Some(error) => {
+            let message = format!("{error:#}");
+            let next = match health.take() {
+                Some(previous) => AuditHealth {
+                    failing_since: previous.failing_since,
+                    last_failure_at: now,
+                    failures: previous.failures.saturating_add(1),
+                    last_action: action.to_owned(),
+                    last_error: message.clone(),
+                },
+                None => AuditHealth {
+                    failing_since: now,
+                    last_failure_at: now,
+                    failures: 1,
+                    last_action: action.to_owned(),
+                    last_error: message.clone(),
+                },
+            };
+            tracing::error!(action, failures = next.failures, error = %message, "hub audit row could not be written; the audited request is refused");
+            let persisted = serde_json::to_vec_pretty(&next)
+                .map_err(anyhow::Error::from)
+                .and_then(|bytes| {
+                    let temporary = root.join(format!(
+                        ".audit-health.{}.{}.tmp",
+                        std::process::id(),
+                        uuid::Uuid::new_v4()
+                    ));
+                    write_private_file(&temporary, &bytes, true)?;
+                    fs::rename(&temporary, &path)?;
+                    Ok(())
+                });
+            if let Err(persist) = persisted {
+                tracing::error!(error = %persist, path = %path.display(), "hub audit failure record could not be written");
+            }
+            *health = Some(next);
+        }
     }
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    serde_json::to_writer(&mut file, value)?;
-    file.write_all(b"\n")?;
-    file.sync_data()?;
-    Ok(())
 }
 
 fn random_secret() -> String {

@@ -2125,8 +2125,12 @@ fn h2_pair_02_pairing_is_bound_persistent_single_use_and_fragment_only() {
     assert!(!credential.credential.is_empty());
     assert!(auth.exchange_pairing(exchange, now).is_err());
 
-    let reopened = AuthStore::open(&state_dir, "machine-test").unwrap();
+    let boot = now + Duration::seconds(1);
+    let reopened = AuthStore::open_at(&state_dir, "machine-test", boot).unwrap();
     assert_eq!(reopened.list_devices().unwrap().len(), 1);
+    let (_, fresh) = paired_context(&reopened, boot + Duration::milliseconds(1), Scope::default_read_only());
+    assert!(reopened.ensure_active_context(&fresh, boot + Duration::milliseconds(1)).is_ok(),
+        "a credential paired during this boot authenticates immediately");
 
     let expired = reopened
         .mint_pairing(
@@ -2317,6 +2321,12 @@ async fn h2_ws_04_ticket_is_five_minute_bound_single_use_under_race() {
         usize::from(one.unwrap().is_ok()) + usize::from(two.unwrap().is_ok()),
         1
     );
+
+    let before = std::fs::read(temp.path().join("hub/auth.json")).unwrap();
+    let before_restart = auth.issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now).unwrap();
+    let restarted = AuthStore::open(temp.path().join("hub"), "machine-test").unwrap();
+    assert!(restarted.consume_ws_ticket(&before_restart.ticket, "https://controller.example", "factory-a", "/v1/sessions/factory-a/attach", now).is_err());
+    assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), before);
 
     let expired = auth
         .issue_ws_ticket(&context, "factory-a", "/v1/sessions/factory-a/attach", now)
@@ -2577,7 +2587,7 @@ async fn h2_ws_04_cli_revocation_disconnects_a_running_hub_socket() {
     assert_eq!(receipt["OperatorNoticePersisted"]["device_id"], device_id);
 
     cli_auth.revoke_device(&device_id, Utc::now()).unwrap();
-    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    let disconnected = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         loop {
             match socket.next().await {
                 Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
@@ -2639,6 +2649,33 @@ fn h2_audit_06_independent_process_writers_append_complete_records() {
             .count(),
         64
     );
+}
+
+#[test]
+fn hub_audit_group_commit_rotates_and_bounds_retention() {
+    use chrono::Utc;
+    let temp = private_tempdir();
+    let root = temp.path().join("hub");
+    let auth = AuthStore::open(&root, "machine-test").unwrap();
+    for _ in 0..64 {
+        auth.audit(None, "allowed", "batch", None, None, Utc::now()).unwrap();
+    }
+    assert!(auth.audit_sync_count() < 64, "audit rows must share durability commits");
+    let log = root.join(super::AUDIT_LOG_FILE);
+    for _ in 0..4 {
+        // A sparse file stands in for the measured 290 MB legacy log. Rotation
+        // must use metadata and rename; it must not read that history.
+        std::fs::OpenOptions::new().write(true).open(&log).unwrap().set_len(8 * 1024 * 1024).unwrap();
+        auth.audit(None, "allowed", "after-rotation", None, None, Utc::now()).unwrap();
+        let row: serde_json::Value = serde_json::from_slice(&std::fs::read(&log).unwrap()).unwrap();
+        assert_eq!(row["action"], "after-rotation");
+    }
+    assert!(root.join("audit.jsonl.3").is_file());
+    assert!(!root.join("audit.jsonl.4").exists());
+    #[cfg(unix)] {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(root.join("audit.jsonl.3")).unwrap().permissions().mode() & 0o777, 0o600);
+    }
 }
 
 #[test]
@@ -3231,6 +3268,7 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
     exchange.public_key_jwk = public_jwk(&signing);
     let credential = auth.exchange_pairing(exchange, now).unwrap();
     let authorization = format!("DPoP {}", credential.credential);
+    let persisted = std::fs::read(temp.path().join("hub/auth.json")).unwrap();
     let proof = sign_dpop(
         &signing,
         &credential.credential,
@@ -3262,6 +3300,15 @@ fn h2_dpop_03_proof_is_key_method_uri_ath_time_and_replay_bound() {
         .is_err(),
         "a DPoP jti is accepted once"
     );
+    assert_eq!(std::fs::read(temp.path().join("hub/auth.json")).unwrap(), persisted,
+        "ordinary DPoP traffic must not rewrite durable identities");
+    // A pre-boot proof with an unused jti must also be refused: after restart
+    // the previous process's in-memory replay set no longer exists.
+    let pre_boot = sign_dpop(&signing, &credential.credential, "GET", "/v1/sessions", now, "pre-boot-unused");
+    let restarted = AuthStore::open_at(temp.path().join("hub"), "machine-test", now + chrono::Duration::seconds(1)).unwrap();
+    let refused = restarted.authenticate_dpop(&authorization, &pre_boot, "https://controller.example", "GET", "/v1/sessions", now + chrono::Duration::seconds(2)).unwrap_err();
+    assert!(matches!(refused.downcast_ref::<super::AuthRefusal>(), Some(super::AuthRefusal::StaleProof { .. })));
+
     let wrong_method = sign_dpop(
         &signing,
         &credential.credential,

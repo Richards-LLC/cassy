@@ -4,7 +4,7 @@ import { HubDouble } from "./hub-double";
 import { journeyNow, journeyStamp, JOURNEY_TIMEZONE } from "./clock";
 import { readFileSync } from "node:fs";
 
-const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a0l8AAAAASUVORK5CYII=";
+const PNG = readFileSync(new URL("../media/evidence.png", import.meta.url)).toString("base64");
 for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "dark"], [390, 844, "light"], [390, 844, "dark"]] as const) {
   test.describe(`composer paste ${width} ${colorScheme}`, () => {
     test.use({ viewport: { width, height }, colorScheme });
@@ -33,7 +33,7 @@ for (const [width, height, colorScheme] of [[1280, 800, "light"], [1280, 800, "d
         await route.fulfill({ json: { artifact_id: `art-${id}`, path: stored.path, mime: body.name.endsWith("png") ? "image/png" : "text/plain" }, headers: { "access-control-allow-origin": "*" } });
       });
       const contentRoute = "https://*.test/v1/sessions/*/artifacts/*/content?*";
-      const imageBytes = readFileSync(new URL("../media/evidence.png", import.meta.url));
+      const imageBytes = Buffer.from(PNG, "base64");
       const serveImage = (route: import("@playwright/test").Route) => route.fulfill({ contentType: "image/png", body: imageBytes });
       await page.route(contentRoute, serveImage);
       await page.context().route(contentRoute, serveImage);

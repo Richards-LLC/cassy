@@ -16,8 +16,11 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
   const log = page.getByRole("log");
   const preview = log.locator('a[data-artifact-id="art-cached-image"] .rich-media');
   let attempts = 0;
+  let recover = false;
+  let beforeReconnect = 0;
   await page.route(`**/v1/sessions/${PELICAN}/artifacts/art-cached-image/ticket`, async route => {
-    if (++attempts === 1) await route.fulfill({ status: 503, json: { error: "temporarily_unavailable" } });
+    attempts++;
+    if (!recover) await route.fulfill({ status: 503, json: { error: "temporarily_unavailable" } });
     else await route.fallback();
   });
   await page.route(`**/v1/sessions/${PELICAN}/artifacts/art-cached-image/content?*`, route => route.fulfill({
@@ -41,13 +44,18 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
     await thread.evaluate(node => { node.scrollTop = node.scrollHeight; node.dispatchEvent(new Event("scroll")); });
     await expect(preview).toHaveCount(0);
     expect(await cached.evaluate(node => node.isConnected)).toBe(false);
+    beforeReconnect = attempts;
+    expect(beforeReconnect).toBeGreaterThan(0);
     hub.hold(PELICAN); hub.drop(PELICAN);
     await expect(page.locator("#conversation-connection")).toContainText("Reconnecting");
     hub.release(PELICAN);
     await expect(page.locator("#conversation-connection")).toContainText("Live", { timeout: 30_000 });
-    expect(attempts).toBe(1);
+    expect(attempts).toBe(beforeReconnect);
   });
   await journey.stage("Scroll back to the same cached card and decode its recovered image", async () => {
+    // Keep the failure real until the machine has reconnected offscreen.
+    // Initial catalog paints may reattach the card before it leaves the DOM.
+    recover = true;
     await page.locator(".conversation-reading.thread").evaluate(node => { node.scrollTop = 0; node.dispatchEvent(new Event("scroll")); });
     await expect(preview).toHaveCount(1);
     expect(await cached.evaluate(node => node.isConnected)).toBe(true);
@@ -55,7 +63,7 @@ test("HUB-J22 a cached failed thumbnail recovers after an offscreen reconnect", 
     await expect(image).toBeVisible();
     await expect.poll(() => image.evaluate((node: HTMLImageElement) => node.naturalWidth)).toBe(640);
     await expect(log.locator('a[data-artifact-id="art-cached-image"] .preview-note')).toHaveCount(0);
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(beforeReconnect + 1);
   });
 });
 

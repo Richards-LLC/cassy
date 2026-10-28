@@ -428,8 +428,8 @@ for (const [name, viewport, rest] of [
 // docs/design/hub-web/visual-replies-threat-model.md.
 const page = (artifact_id: string, name: string) => ({ artifact_id, name, mime: "text/html", size_bytes: 4_096, sha256: "1a".repeat(32) });
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8DAwMDAxMAAAB7SAwFcCZ+FAAAAAElFTkSuQmCC", "base64");
-const REPORT = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Gate report</title>
-<style>body{font:15px/1.5 system-ui;margin:20px;color:#1b1d24} figure{margin:12px 0} img.chart{width:120px;height:120px;image-rendering:pixelated}</style></head>
+const REPORT = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>Gate report</title>
+<style>body{font:15px/1.5 system-ui;margin:20px;color:#1b1d24} figure{margin:12px 0} img.chart{width:120px;height:120px;image-rendering:pixelated} @media (prefers-color-scheme: dark){body{background:rgb(21,23,29);color:#e9e6e0}}</style></head>
 <body><h1>Gate report</h1><p>All three lanes are green.</p>
 <figure><svg role="img" aria-label="Lane diagram" width="240" height="60" viewBox="0 0 240 60"><rect x="4" y="14" width="64" height="32" rx="6" fill="#2f6fde"/><rect x="88" y="14" width="64" height="32" rx="6" fill="#2f9e5b"/><rect x="172" y="14" width="64" height="32" rx="6" fill="#c9821f"/></svg></figure>
 <figure><img class="chart" alt="Pass rate chart" src="art-chart"><img class="chart" alt="Inline chart" src="data:image/png;base64,${PNG.toString("base64")}"></figure>
@@ -488,6 +488,22 @@ for (const [name, viewport] of [["desktop", { width: 1280, height: 800 }], ["pho
       // No agent markup ever enters Commander's own document.
       await expect(tab.locator("#app h1", { hasText: "Gate report" })).toHaveCount(0);
       await expect(tab.locator("iframe[srcdoc]")).toHaveCount(0);
+    });
+
+    await journey.stage(`In dark mode the page sits in the theme, and a dark-capable page renders dark (${name})`, async () => {
+      // cas-2326: the frame chrome follows Commander's scheme and hands it to
+      // the page (the iframe's color-scheme); a page without dark styles gets
+      // the browser's own opaque backdrop, so it stays legible.
+      await tab.emulateMedia({ colorScheme: "dark" });
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "dark");
+      const card = log.locator('a.sheet[data-artifact-id="art-report"]');
+      const frame = log.locator('.visual-page[data-artifact-id="art-report"] .visual-frame');
+      await expect(frame).toHaveCSS("background-color", await card.evaluate((node) => getComputedStyle(node).backgroundColor));
+      await expect(frame.locator("iframe")).toHaveCSS("color-scheme", "dark");
+      const inside = tab.frameLocator('iframe[title="Gate report.html, a page from the supervisor"]');
+      await expect(inside.locator("body")).toHaveCSS("background-color", "rgb(21, 23, 29)");
+      await tab.emulateMedia({ colorScheme: "light" });
+      await expect(tab.locator("html")).toHaveAttribute("data-scheme", "light");
     });
 
     await journey.stage(`A hostile page can't run script, reach storage, leave its frame or call out (${name})`, async () => {

@@ -186,6 +186,7 @@ fn cas_7e24_duplicate_bodies_pass_and_breach_through_real_drains() {
     assert_eq!(values(&conn).duplicate_body_reads, 0, "references do not repeat the body");
     let named = queue.poll_named_for_recipient("reader", Some(SESSION), &[id]).unwrap();
     assert_eq!(named.len(), 1);
+    // pin: named recovery returns the original body, never the projected repeat notice.
     assert_eq!(named[0].prompt, "body", "explicit named reads recover the actual body");
     assert!(!named[0].reference_only);
     assert_eq!(values(&conn).duplicate_body_reads, 1);

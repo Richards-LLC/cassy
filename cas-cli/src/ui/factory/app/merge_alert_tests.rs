@@ -358,18 +358,84 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         // pin: the supervisor merges directly without a worker relay.
         assert!(prompt.text.contains("worktree_merge"), "{}", prompt.text);
         assert!(f.app.refresh_prompt_for_delivery(prompt));
+        // The actual director producer, park relay and manual worker request
+        // must reserve one shared wake, including before a task can park.
+        let session = "readiness-fixture";
+        let agents = crate::store::open_agent_store(&f.app.cas_dir).unwrap();
+        let mut supervisor = cas_types::Agent::new("lead".into(), prompt.target.clone());
+        supervisor.role = cas_types::AgentRole::Supervisor;
+        supervisor.factory_session = Some(session.into());
+        agents.register(&supervisor).unwrap();
+        let mut worker = agents.get("merge-w").unwrap();
+        worker.factory_session = Some(session.into());
+        agents.update(&worker).unwrap();
+        let queue = crate::store::open_prompt_queue_store(&f.app.cas_dir).unwrap();
+        let director = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(
+            &f.app.cas_dir, session, prompt,
+        ).unwrap();
+        let row = queue.queued_prompt(director).unwrap().unwrap();
+        use crate::ui::factory::daemon::runtime::queue_and_events::{read_row_facts, WakeSender, SupervisorWakeClass};
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(Some(_)))), "unparked green delivery remains actionable through the queue");
+        assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
+            &WakeSender::Daemon, &prompt.target, &row.source, &row.prompt), Some(SupervisorWakeClass::MergeRequest));
+        assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
+            &WakeSender::Unattributed, &prompt.target, &row.source, &row.prompt), None,
+            "the director envelope cannot grant an unauthenticated wake");
+        git(f.remote.path(), &["config", "uploadpack.hideRefs", &format!("refs/heads/{branch}")]);
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Err(_))), "an unavailable source fetch defers the sole action instead of consuming it");
+        git(f.remote.path(), &["config", "--unset", "uploadpack.hideRefs"]);
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(Some(_)))), "source recovery retains the original queued action");
+        let head = &prompt.merge_alert.as_ref().unwrap().factory_tip;
+        task.status = TaskStatus::AwaitingMerge;
+        task.deliverables.factory_branch_anchor = Some(head.clone());
+        store.update(&task).unwrap();
+        let lifecycle = format!(
+            "<task-lifecycle transition=\"task_awaiting_merge\" task_id=\"{}\" old=\"in_progress\" new=\"awaiting_merge\" actor=\"merge-w\" notification_id=\"1\" occurrence=\"{}\" branch_tip=\"{head}\">MERGE REQUIRED</task-lifecycle>",
+            task.id, Utc::now().to_rfc3339(),
+        );
+        queue.enqueue_idempotent("lifecycle-wake:1", &prompt.target, &lifecycle, Some(session), None, None,
+            "park-1", Some(&cas_store::QueueOrigin::Daemon)).unwrap();
+        let manual = format!(
+            "manual proof remains readable\n<cas-merge-request>{{\"task_id\":\"{}\",\"branch_tip\":\"{head}\",\"target_branch\":\"epic/test\",\"target_branch_tip\":\"{}\"}}</cas-merge-request>",
+            task.id, prompt.merge_alert.as_ref().unwrap().epic_sha,
+        );
+        let manual_id = queue.enqueue_urgent_with_outcome("merge-w", &prompt.target, &manual, Some(session), None, None,
+            false, Some(&cas_store::QueueOrigin::RegisteredAgent { agent_id: worker.id.clone() })).unwrap().id();
+        let rows = queue.peek_for_targets(&[&prompt.target], Some(session), 10).unwrap();
+        assert_eq!(rows.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director],
+            "direct readiness and later park/manual evidence must create only one transport");
+        let full = queue.poll_named_for_recipient(&prompt.target, Some(session), &[manual_id]).unwrap();
+        // pin: explicit evidence reads preserve the complete submitted body.
+        assert_eq!(full[0].prompt, manual, "manual evidence survives dedupe");
+        // Restore this test's active-task scenario for its new-tip controls.
+        task.status = status;
+        task.deliverables.factory_branch_anchor = None;
+        store.update(&task).unwrap();
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
         std::fs::write(f.repo.path().join("delivery.rs"), "// next delivery\n").unwrap();
         git(f.repo.path(), &["commit", "-qam", "cas-9efb-test correction"]);
         let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
         assert!(!f.app.refresh_prompt_for_delivery(prompt));
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(None))), "a newer local tip withdraws queued readiness for the old tip");
         git(f.repo.path(), &["push", "-q", "origin", &branch]);
         let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(newer.len(), 1);
+        let next = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(
+            &f.app.cas_dir, session, &newer[0],
+        ).unwrap();
+        assert!(queue.peek_for_targets(&[&prompt.target], Some(session), 10).unwrap().iter().any(|row| row.id == next),
+            "a different pushed tip gets its own action");
+        let next_row = queue.queued_prompt(next).unwrap().unwrap();
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
         git(f.repo.path(), &["push", "-q", "origin", "HEAD:epic/test"]);
         assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &next_row).director_ready,
+            Some(Ok(None))), "integrated delivery must be withdrawn before queue transport");
     }
 }
 

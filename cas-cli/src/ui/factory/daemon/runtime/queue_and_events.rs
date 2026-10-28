@@ -2649,6 +2649,9 @@ pub(crate) struct StallNudgeRead {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
     pub(crate) answered_blocker: bool,
+    /// Daemon green readiness, refreshed off the loop. Ok(None) withdraws a
+    /// positively stale signal; Err retains the action for a later retry.
+    pub(crate) director_ready: Option<Result<Option<crate::ui::factory::director::Prompt>, String>>,
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
@@ -2713,6 +2716,43 @@ pub(crate) fn read_row_facts(
         },
         ..RowFacts::default()
     };
+    if row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && let Some(mut prompt) = super::delivery::parse_merge_ready_prompt(&row.target, &row.prompt)
+    {
+        use crate::mcp::tools::core::task::repo_context::resolve_repo_context;
+        let evidence = prompt.merge_alert.as_ref().expect("parsed readiness evidence").clone();
+        let task = tasks.and_then(|tasks| tasks.get(&evidence.task_id).ok());
+        let repo_root = task.as_ref()
+            .and_then(|task| task.deliverables.work_target.as_ref())
+            .and_then(|target| resolve_repo_context(cas_dir, target).ok())
+            .map(|repo| repo.repo_root)
+            .unwrap_or_else(|| cas_dir.parent().unwrap_or(cas_dir).to_path_buf());
+        facts.director_ready = Some(crate::ui::factory::director::DirectorData::load_with_stores_for_project(
+            cas_dir, None, false, None, None,
+        ).map_err(|error| error.to_string()).and_then(|data| {
+            if crate::ui::factory::director::refresh_ci_merge_signal(
+                &mut prompt, &data, cas_dir, &repo_root,
+            ) {
+                return Ok((!prompt.text.starts_with("Superseded delivery ")).then_some(prompt));
+            }
+            // A failed fetch is not evidence that the merge action went away.
+            // Releasing its episode would leave the later digest copies with
+            // no action to supplement. Only positive live evidence withdraws.
+            if let Some(task) = task {
+                let active = matches!(task.status, cas_types::TaskStatus::InProgress | cas_types::TaskStatus::Blocked);
+                let moved = active && crate::git_evidence::resolve_ref_commit_sha(&repo_root, &evidence.factory_branch)
+                    .is_some_and(|head| head != evidence.factory_tip);
+                let integrated = task.deliverables.work_target.as_ref().is_some_and(|target| matches!(
+                    crate::prompt_revalidation::revalidate_merge_request(&repo_root, &evidence.factory_tip, &target.target_branch),
+                    crate::prompt_revalidation::MergeRequestDecision::AlreadyIntegrated { .. }
+                ));
+                if (!active && task.status != cas_types::TaskStatus::AwaitingMerge) || moved || integrated {
+                    return Ok(None);
+                }
+            }
+            Err("live readiness evidence unavailable; retaining queued action".into())
+        }));
+    }
     if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt)
         && let Some(tasks) = tasks
     {
@@ -6667,6 +6707,9 @@ impl FactoryDaemon {
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
             WakeSender::Daemon => {
+                if super::delivery::parse_merge_ready_prompt(supervisor_name, prompt).is_some() {
+                    return Some(SupervisorWakeClass::MergeRequest);
+                }
                 // cas-8725: the verification-dispatch handoff is composed and
                 // enqueued by the close path itself, so it carries its own
                 // envelope and its own source (`verification-dispatch:<id>`)
@@ -8800,6 +8843,27 @@ impl FactoryDaemon {
             // but replace the envelope's enqueue-time target tip with the
             // ref resolved at this pop/injection point.
             let mut prompt_with_instructions = queued.prompt.clone();
+
+            if let Some(ready) = facts.director_ready.as_ref() {
+                if let Err(error) = ready {
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                            detail: format!("director readiness read unavailable: {error}"),
+                            recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                        });
+                    continue;
+                }
+                let Ok(Some(ready)) = ready else {
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Superseded {
+                            detail: "director readiness withdrawn by live delivery check".into(),
+                        });
+                    self.forget_row_delivery_state(queued.id);
+                    continue;
+                };
+                merge_request_task = ready.retract_task.clone();
+                prompt_with_instructions = ready.text.clone();
+            }
 
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)

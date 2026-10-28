@@ -10,21 +10,26 @@ pub(super) struct MediaQuery {
     t: Option<String>,
 }
 
-fn media_mime(mime: &str) -> Option<&str> {
+const MEDIA_MIME_ALLOWLIST: &[&str] = &["image/*", "video/*", "audio/*", "application/pdf"];
+
+fn mime_allowed(mime: &str, allowlist: &'static [&'static str]) -> bool {
     let valid_token = |part: &str| {
         !part.is_empty()
             && part
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'+'))
     };
-    let (family, subtype) = mime.split_once('/')?;
-    (valid_token(subtype)
-        && (matches!(family, "image" | "video" | "audio") || mime == "application/pdf"))
-        .then_some(mime)
-}
-
-fn accepts_media(mime: &str) -> bool {
-    media_mime(mime).is_some()
+    let Some((family, subtype)) = mime.split_once('/') else {
+        return false;
+    };
+    valid_token(family)
+        && valid_token(subtype)
+        && allowlist.iter().any(|allowed| {
+            *allowed == mime
+                || allowed
+                    .strip_suffix("/*")
+                    .is_some_and(|allowed_family| allowed_family == family)
+        })
 }
 
 /// Fetch no URL until both the session and the thread's published ref match.
@@ -87,14 +92,14 @@ fn refusal(error: &anyhow::Error) -> Response {
 }
 
 /// Issue a reusable ticket only for a live SessionRead context and a committed
-/// ref in that session's thread. `accepts` is a server-owned MIME allowlist,
+/// ref in that session's thread. `allowlist` is a static, server-owned MIME list,
 /// never request input; page routes can admit HTML without relaxing media routes.
 pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
     state: &HubState<R>,
     context: &AuthContext,
     session: &str,
     artifact: &str,
-    accepts: fn(&str) -> bool,
+    allowlist: &'static [&'static str],
 ) -> Result<MediaTicket, Response> {
     let auth = state.auth.as_ref().ok_or_else(unauthorized)?;
     if !context.has(Scope::SessionRead) {
@@ -103,7 +108,7 @@ pub(crate) async fn issue_session_artifact_ticket<R: SessionReadModel>(
     auth.ensure_active_context(context, chrono::Utc::now())
         .map_err(|error| refusal(&error))?;
     let (_, record) = scoped(state, session, artifact).await?;
-    if !accepts(&record.mime) {
+    if !mime_allowed(&record.mime, allowlist) {
         return Err(generic_not_found());
     }
     auth.issue_media_ticket(context, session, artifact, chrono::Utc::now())
@@ -144,7 +149,8 @@ pub(super) async fn ticket<R: SessionReadModel>(
         Ok(None) => return private(unauthorized(), &headers),
         Err(error) => return private(refusal(&error), &headers),
     };
-    match issue_session_artifact_ticket(&state, &context, &session, &artifact, accepts_media).await
+    match issue_session_artifact_ticket(&state, &context, &session, &artifact, MEDIA_MIME_ALLOWLIST)
+        .await
     {
         Ok(ticket) => private(Json(ticket).into_response(), &headers),
         Err(response) => private(response, &headers),
@@ -247,13 +253,27 @@ pub(super) async fn content<R: SessionReadModel>(
             Err(response) => return private(response, &headers),
         }
     };
+    fetch_session_media(&state, context, &session, &artifact, &headers).await
+}
+
+/// Fixed media facade: callers cannot relax image/video/audio/PDF eligibility.
+pub(crate) async fn fetch_session_media<R: SessionReadModel>(
+    state: &HubState<R>,
+    context: AuthContext,
+    session: &str,
+    artifact: &str,
+    headers: &HeaderMap,
+) -> Response {
+    if origin(headers).is_some_and(|origin| origin != context.controller_origin) {
+        return private(unauthorized(), headers);
+    }
     fetch_session_artifact(
-        &state,
+        state,
         context,
-        &session,
-        &artifact,
-        &headers,
-        accepts_media,
+        session,
+        artifact,
+        headers,
+        MEDIA_MIME_ALLOWLIST,
     )
     .await
 }
@@ -261,23 +281,21 @@ pub(super) async fn content<R: SessionReadModel>(
 /// Fetch only a server-resolved, session-referenced artifact. All consumers
 /// retain the 25 MiB ceiling, reusable Range handling, cancellation/backpressure,
 /// no-store caching and no upstream bearer forwarding. A caller admitting HTML
-/// must apply its own sandbox/CSP response policy before returning it.
+/// must apply its own sandbox/CSP and HTTP Origin policy before returning it.
+/// Origin binding for the media route remains in the fixed media facade.
 pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
     state: &HubState<R>,
     context: AuthContext,
     session: &str,
     artifact: &str,
     headers: &HeaderMap,
-    accepts: fn(&str) -> bool,
+    allowlist: &'static [&'static str],
 ) -> Response {
     let Some(auth) = state.auth.clone() else {
         return private(unauthorized(), headers);
     };
     if !context.has(Scope::SessionRead) {
         return private(refusal(&ScopeDenied.into()), headers);
-    }
-    if origin(headers).is_some_and(|origin| origin != context.controller_origin) {
-        return private(unauthorized(), headers);
     }
     if let Err(error) = auth.ensure_active_context(&context, chrono::Utc::now()) {
         return private(refusal(&error), headers);
@@ -286,7 +304,7 @@ pub(crate) async fn fetch_session_artifact<R: SessionReadModel>(
         Ok(found) => found,
         Err(response) => return private(response, headers),
     };
-    if !accepts(&record.mime) || HeaderValue::from_str(&record.mime).is_err() {
+    if !mime_allowed(&record.mime, allowlist) || HeaderValue::from_str(&record.mime).is_err() {
         return private(generic_not_found(), headers);
     }
     let requested = match range(headers, record.size_bytes) {

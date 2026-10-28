@@ -5291,13 +5291,14 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     let mut candidate = fixture_session(OPS_SESSION);
     candidate.project_dir = Some(f.cas_dir.parent().unwrap().display().to_string());
     let events = MachineEventBus::new(4);
-    f.app = router(HubState::new(
+    let media_state = HubState::new(
         SessionCatalog::new(RecordingReadModel::with_sessions(vec![candidate])),
         Arc::new(PreAuthAuthorizer), MachineIdentity { id: "machine-test".into() },
         DaemonConnector::new(SessionMultiplexer::new(4), events.clone()), events,
     ).with_auth(f.auth.clone()).with_artifact_cloud_client(
         crate::artifacts::cloud::ArtifactUploadClient::new(&upstream.uri(), "fixture-cloud-token")
-    ));
+    );
+    f.app = router(media_state.clone());
     let origin = upstream.uri();
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path_regex("^/api/artifacts/"))
@@ -5361,17 +5362,44 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         .body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(upstream.received_requests().await.unwrap().is_empty());
+    let post_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
+    let now = chrono::Utc::now();
+    let context = f.auth.authenticate_dpop(&format!("DPoP {}", f.credential),
+        &sign_dpop(&f.signing, &f.credential, "POST", &post_uri, now, &uuid::Uuid::new_v4().to_string()),
+        "https://controller.example", "POST", &post_uri, now).unwrap();
+    const HTML_MIME_ALLOWLIST: &[&str] = &["text/html"];
+    let html = crate::hub::artifact_proxy::issue_session_artifact_ticket(
+        &media_state, &context, OPS_SESSION, "art-html", HTML_MIME_ALLOWLIST,
+    ).await.unwrap();
+    let (bound, principal) = crate::hub::artifact_proxy::authenticate_session_artifact_ticket(
+        &media_state, &html.ticket, "art-html",
+    ).unwrap();
+    assert_eq!(bound, OPS_SESSION);
+    let page_bytes = crate::hub::artifact_proxy::fetch_session_artifact(
+        &media_state, principal, &bound, "art-html", &axum::http::HeaderMap::new(), HTML_MIME_ALLOWLIST,
+    ).await;
+    assert_eq!(page_bytes.status(), StatusCode::OK);
+    assert_eq!(page_bytes.headers()["content-type"], "text/html");
+    assert_eq!(to_bytes(page_bytes.into_body(), 64).await.unwrap(), &b"abcdef"[..]);
+    tickets.insert("art-html", html.ticket);
     for (id, requested, expected, mime, bytes) in [
         ("art-image", None, StatusCode::OK, "image/png", &b"abcdef"[..]),
         ("art-video", Some("bytes=2-4"), StatusCode::PARTIAL_CONTENT, "video/mp4", &b"cde"[..]),
         ("art-video", Some("bytes=0-0"), StatusCode::PARTIAL_CONTENT, "video/mp4", &b"a"[..]),
         ("art-pdf", None, StatusCode::OK, "application/pdf", &b"abcdef"[..]),
+        // A valid HTML page capability never widens the media facade's fixed MIME list.
+        ("art-html", None, StatusCode::NOT_FOUND, "text/html", &b""[..]),
     ] {
         let uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/{id}/content?t={}", tickets[id]);
         let mut request = Request::get(&uri).header("origin", "https://controller.example");
         if let Some(range) = requested { request = request.header("range", range); }
+        let before = upstream.received_requests().await.unwrap().len();
         let response = f.app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), expected, "{id}");
+        if expected == StatusCode::NOT_FOUND {
+            assert_eq!(upstream.received_requests().await.unwrap().len(), before, "HTML media facade fetched upstream");
+            continue;
+        }
         assert_eq!(response.headers()["content-type"], mime);
         assert_eq!(response.headers()["accept-ranges"], "bytes");
         assert_eq!(response.headers()["cache-control"], "private, no-store");
@@ -5409,11 +5437,6 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     std::fs::write(auth_path, saved).unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
-    let post_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
-    let now = chrono::Utc::now();
-    let context = f.auth.authenticate_dpop(&format!("DPoP {}", f.credential),
-        &sign_dpop(&f.signing, &f.credential, "POST", &post_uri, now, &uuid::Uuid::new_v4().to_string()),
-        "https://controller.example", "POST", &post_uri, now).unwrap();
     let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-image", now - chrono::Duration::minutes(6)).unwrap().ticket;
     let valid = tickets["art-image"].clone();
     let mut tampered = valid.clone();

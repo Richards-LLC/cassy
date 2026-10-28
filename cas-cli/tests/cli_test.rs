@@ -117,6 +117,18 @@ fn qa_impact_legacy_catalog_without_selector_uses_codemap_for_files_and_task() {
             warning.as_str().unwrap_or_default().contains("scripts/journeys-for-diff.py")
         }), "{selector:?}: {impact}");
     }
+
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
+    std::fs::write(root.join("scripts/journeys-for-diff.py"), "raise SystemExit(2)\n").unwrap();
+    git(&["add", "scripts/journeys-for-diff.py"]);
+    let malformed = cas_cmd(root)
+        .current_dir(root)
+        .args(["qa", "impact", "--files", "src/flow.ts", "--json"])
+        .output()
+        .unwrap();
+    assert!(!malformed.status.success(), "malformed selector must fail closed");
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("legacy journey selector failed"));
+    assert!(malformed.stdout.is_empty(), "failed selector must not print impact JSON");
 }
 
 #[test]

@@ -2950,39 +2950,32 @@ function focusJumpedComposer(opened: Promise<void>): void {
   const pickedFrom = document.activeElement;
   const machineId = selectedMachineId;
   const session = selectedSession;
-  // Focus forces layout. Give the completed shell its own task first,
-  // while respecting a newer navigation or focus choice made meanwhile.
-  window.setTimeout(() => {
-    if (selectedMachineId !== machineId || selectedSession !== session) return;
-    const active = document.activeElement;
-    if (active && active !== document.body && active !== pickedFrom && active.isConnected) return;
-    const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
-    composer?.focus();
-    if (composer && document.activeElement === composer) {
-      const landed = composer.value;
-      // A focused composer defers structural rebuilds (cas-8434), so the status
-      // and lease that load after the jump would leave the shell stale — the
-      // control command still offering "Take control" to its holder. Until the
-      // operator types, nothing is lost by flushing that rebuild and landing
-      // back in the fresh composer.
-      void opened.then(() => {
-        if (selectedMachineId !== machineId || selectedSession !== session || !deferredRender.pending) return;
-        const field = document.querySelector<HTMLTextAreaElement>("#message-text");
-        if (!field || document.activeElement !== field || field.value !== landed) return;
-        field.blur();
-        deferredRender.focusLeft();
-        document.querySelector<HTMLTextAreaElement>("#message-text")?.focus();
-      });
-      return;
-    }
+  const composer = document.querySelector<HTMLTextAreaElement>("#message-text");
+  composer?.focus();
+  if (composer && document.activeElement === composer) {
+    const landed = composer.value;
+    // A focused composer defers structural rebuilds (cas-8434), so the status
+    // and lease that load after the jump would leave the shell stale — the
+    // control command still offering "Take control" to its holder. Until the
+    // operator types, nothing is lost by flushing that rebuild and landing
+    // back in the fresh composer.
     void opened.then(() => {
-      if (selectedMachineId !== machineId || selectedSession !== session) return;
-      // The composer or the thread once they are up (attaching takes a
-      // moment): never <body> (cas-7eaf). Focus the operator moved themselves
-      // is kept.
-      landFocus([focusTargets.composer, focusTargets.thread, focusTargets.conversationBack], { keep: true, waitMs: 1_500, since: pickedFrom });
+      if (selectedMachineId !== machineId || selectedSession !== session || !deferredRender.pending) return;
+      const field = document.querySelector<HTMLTextAreaElement>("#message-text");
+      if (!field || document.activeElement !== field || field.value !== landed) return;
+      field.blur();
+      deferredRender.focusLeft();
+      document.querySelector<HTMLTextAreaElement>("#message-text")?.focus();
     });
-  }, 0);
+    return;
+  }
+  void opened.then(() => {
+    if (selectedMachineId !== machineId || selectedSession !== session) return;
+    // The composer or the thread once they are up (attaching takes a
+    // moment): never <body> (cas-7eaf). Focus the operator moved themselves
+    // is kept.
+    landFocus([focusTargets.composer, focusTargets.thread, focusTargets.conversationBack], { keep: true, waitMs: 1_500, since: pickedFrom });
+  });
 }
 
 function syncSpeechComposer(): void {

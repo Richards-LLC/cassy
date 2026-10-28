@@ -682,8 +682,34 @@ pub fn resolve_lane_from_registry(
             continue;
         }
 
-        let identity = recipe_route_identity(recipe, "default");
-        let status = snapshot.status_at(&identity, now_ms);
+        let default_identity = recipe_route_identity(recipe, "default");
+        // A retired/logged-out ~/.codex does not describe the registered
+        // account homes. Accept only fresh evidence for this exact route,
+        // and carry the proven home into the spec used by auth preflight.
+        let identity = if recipe.harness == SupervisorCli::Codex
+            && !snapshot
+                .status_at(&default_identity, now_ms)
+                .is_some_and(|status| status.availability == CapabilityAvailability::Available)
+        {
+            snapshot
+                .availability
+                .keys()
+                .find(|identity| {
+                    identity.account_profile != "default"
+                        && !identity.account_profile.trim().is_empty()
+                        && identity.harness == default_identity.harness
+                        && identity.provider == default_identity.provider
+                        && identity.endpoint == default_identity.endpoint
+                        && identity.model == default_identity.model
+                        && snapshot.status_at(identity, now_ms).is_some_and(|status| {
+                            status.availability == CapabilityAvailability::Available
+                        })
+                })
+                .unwrap_or(&default_identity)
+        } else {
+            &default_identity
+        };
+        let status = snapshot.status_at(identity, now_ms);
         let availability = status
             .as_ref()
             .map_or(CapabilityAvailability::Unknown, |status| {
@@ -702,7 +728,11 @@ pub fn resolve_lane_from_registry(
                             .unwrap_or("capability is unavailable")
                     )]
                 };
-                return Ok(routing_decision(lane_name, recipe_id, recipe, warning));
+                let mut decision = routing_decision(lane_name, recipe_id, recipe, warning);
+                if identity.account_profile != "default" {
+                    decision.spec.config_dir = Some(identity.account_profile.clone());
+                }
+                return Ok(decision);
             }
             CapabilityAvailability::Unavailable => {
                 let reason = status
@@ -736,7 +766,6 @@ pub fn resolve_lane_from_registry(
         lane: lane_name.to_string(),
     })
 }
-
 fn routing_decision(
     lane: &str,
     recipe_id: String,
@@ -1957,6 +1986,50 @@ candidates = ["primary", "fallback"]
         assert_eq!(
             decision.warnings[0],
             "fallback: fallback (primary primary unavailable: Codex account is logged out)"
+        );
+
+        let account = recipe_route_identity(&registry.recipes["primary"], "/accounts/codex");
+        for dimension in [
+            "harness",
+            "provider",
+            "endpoint",
+            "model",
+            "stale",
+            "unavailable",
+            "unknown",
+        ] {
+            let mut identity = account.clone();
+            let mut evidence = CapabilityEvidence::new(CapabilityAvailability::Available, now);
+            match dimension {
+                "harness" => identity.harness = "claude".into(),
+                "provider" => identity.provider = "other".into(),
+                "endpoint" => identity.endpoint = "https://other.example".into(),
+                "model" => identity.model = "other".into(),
+                "stale" => evidence.ttl_ms = 0,
+                "unavailable" => evidence.availability = CapabilityAvailability::Unavailable,
+                "unknown" => evidence.availability = CapabilityAvailability::Unknown,
+                _ => unreachable!(),
+            }
+            let mut candidate = snapshot.clone();
+            candidate.record(identity, evidence);
+            assert_eq!(
+                resolve_lane_from_registry("test", &candidate, &registry)
+                    .unwrap()
+                    .recipe_id,
+                "fallback",
+                "{dimension} account evidence cannot authorize this route"
+            );
+        }
+        snapshot.record(
+            account,
+            CapabilityEvidence::new(CapabilityAvailability::Available, now),
+        );
+        let decision = resolve_lane_from_registry("test", &snapshot, &registry).unwrap();
+        assert_eq!(decision.recipe_id, "primary");
+        assert_eq!(decision.spec.config_dir.as_deref(), Some("/accounts/codex"));
+        assert!(
+            decision.warnings.is_empty(),
+            "another account is still the primary recipe"
         );
     }
 

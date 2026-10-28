@@ -64,7 +64,7 @@ mod init;
 pub(crate) mod project_files;
 pub mod integrate;
 pub mod interactive;
-mod limits;
+pub(crate) mod limits;
 pub(crate) mod accounts;
 mod list;
 pub(crate) mod mcp_cmd;

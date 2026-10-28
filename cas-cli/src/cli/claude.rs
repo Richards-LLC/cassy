@@ -24,8 +24,8 @@
 use std::ffi::OsString;
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args, FromArgMatches, Subcommand};
@@ -129,7 +129,7 @@ fn scan_profiles(home: &Path, active_dir: Option<&Path>) -> io::Result<Vec<Profi
 ///
 /// File existence is not sufficient: macOS normally uses Keychain, and a
 /// stale `.credentials.json` may contain an expired or revoked credential.
-fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
+pub(crate) fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
     let mut command = Command::new("claude");
     configure_profile_command(&mut command, profile, profile_dir);
     command.args(["auth", "status", "--json"]);
@@ -140,30 +140,8 @@ fn probe_login_state(profile: &str, profile_dir: &Path) -> LoginState {
 
 /// Run an auth probe with a hard upper bound, killing and reaping a wedged
 /// provider process before returning `Unknown`.
-fn probe_login_state_command(mut command: Command, timeout: Duration) -> LoginState {
-    let Ok(mut child) = command.spawn() else {
-        return LoginState::Unknown;
-    };
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return LoginState::Unknown;
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return LoginState::Unknown;
-            }
-        }
-    }
-
-    let Ok(output): Result<Output, _> = child.wait_with_output() else {
+fn probe_login_state_command(command: Command, timeout: Duration) -> LoginState {
+    let Some(output) = super::account_picker::probe_output(command, timeout) else {
         return LoginState::Unknown;
     };
     let Ok(status) = serde_json::from_slice::<ClaudeAuthStatus>(&output.stdout) else {
@@ -183,14 +161,9 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
         "Usage: cas claude <profile> [factory-args...]\n\nDetected Claude profiles:\n",
     );
 
-    for profile in with_usage(profiles) {
+    for profile in with_usage(home, profiles) {
         let login = login_state_label(profile.login_state);
         let active = if profile.active { " (active)" } else { "" };
-        let usage = profile
-            .usage
-            .as_deref()
-            .map(|usage| format!(": {usage}"))
-            .unwrap_or_default();
         // cas-e1f4: two short lines per account, so the list fits 80 columns.
         let directory = profile
             .directory
@@ -198,9 +171,18 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
             .map(|rest| format!("~/{}", rest.display()))
             .unwrap_or_else(|_| profile.directory.display().to_string());
         output.push_str(&format!(
-            "  {} ({login}){active}{usage}\n    {directory}\n",
-            profile.name,
+            "  {} ({login}){active}\n    {directory}\n",
+            if profile.display_name == profile.name {
+                profile.name.clone()
+            } else {
+                format!("{} ({})", profile.display_name, profile.name)
+            },
         ));
+        if let Some(usage) = &profile.usage {
+            for line in usage.split("; ") {
+                output.push_str(&format!("    {}\n", line.trim_start()));
+            }
+        }
     }
     output.push('\n');
     output.push_str(&crate::cloud::presence::wrap_line(
@@ -213,21 +195,8 @@ fn profile_listing(home: &Path, active_dir: Option<&Path>) -> Result<String> {
 /// Live usage per logged-in account, fetched in parallel for at most four
 /// seconds, so the picker can mark an account whose limit is used up
 /// (cas-e1f4).
-fn with_usage(mut profiles: Vec<Profile>) -> Vec<Profile> {
-    let accounts = profiles
-        .iter()
-        .filter(|profile| profile.login_state != LoginState::LoggedOut)
-        .map(|profile| (profile.name.clone(), profile.directory.clone()))
-        .collect();
-    let usage = super::limits::usage_summaries(
-        crate::accounts::Provider::Claude,
-        accounts,
-        Duration::from_secs(4),
-    );
-    for profile in &mut profiles {
-        profile.usage = usage.get(&profile.name).cloned();
-    }
-    profiles
+fn with_usage(home: &Path, profiles: Vec<Profile>) -> Vec<Profile> {
+    super::account_picker::with_usage(crate::accounts::Provider::Claude, home, profiles)
 }
 
 /// `<dir> (<email>)` for the launch line, or just the directory.
@@ -285,38 +254,7 @@ fn prompt_for_profile(home: &Path, profiles: &[Profile]) -> Result<String> {
 /// replacing this one, so a successful login lands the operator straight into
 /// the account they just created instead of making them re-run the command.
 fn create_and_log_in_new_profile(home: &Path, profile: &str) -> Result<String> {
-    let profile = profile.to_string();
-    let profile_dir = resolve_profile_dir(home, &profile);
-
-    std::fs::create_dir_all(&profile_dir).with_context(|| {
-        format!(
-            "could not create Claude profile directory {}",
-            profile_dir.display()
-        )
-    })?;
-
-    link_or_seed_new_profile(home, &profile_dir)?;
-
-    eprintln!(
-        "Logging in Claude account config: {}",
-        profile_dir.display()
-    );
-    let mut command = build_claude_command(
-        &profile,
-        &profile_dir,
-        &[OsString::from("auth"), OsString::from("login")],
-    );
-    let status = command
-        .status()
-        .context("failed to run `claude auth login` for the new account")?;
-    if !status.success() {
-        anyhow::bail!(
-            "`claude auth login` did not complete for {}; the profile directory was created and seeded, so `cas claude login {profile}` can finish it",
-            profile_dir.display()
-        );
-    }
-
-    Ok(profile)
+    login_profile(home, profile, &[])
 }
 
 /// Equip a newly created account: link it to the shared base when one exists
@@ -354,9 +292,30 @@ fn link_or_seed_new_profile(home: &Path, profile_dir: &Path) -> Result<()> {
 /// named account, equip it like a picker-created one (cas-f4ea). An existing
 /// account is left as it is, except that it still links to a shared base when
 /// one exists (cas-e1f4 QA F07); `main` is `~/.claude` itself.
-fn prepare_login_profile(home: &Path, profile: &str) -> Result<PathBuf> {
-    let profile_dir = resolve_profile_dir(home, profile);
-    let created = std::fs::symlink_metadata(&profile_dir).is_err();
+fn prepare_login_profile(
+    home: &Path,
+    profile: &str,
+) -> Result<(PathBuf, Option<crate::account_lifecycle::NewLogin>)> {
+    let named = resolve_profile_dir(home, profile);
+    let created = profile != "main"
+        && match std::fs::symlink_metadata(&named) {
+            Ok(_) => false,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => true,
+            Err(e) => return Err(e.into()),
+        };
+    let pending = if created {
+        Some(crate::account_lifecycle::NewLogin::begin(
+            home,
+            crate::accounts::Provider::Claude,
+            profile,
+        )?)
+    } else {
+        None
+    };
+    let profile_dir = pending
+        .as_ref()
+        .map(|login| login.path().to_path_buf())
+        .unwrap_or(named);
     std::fs::create_dir_all(&profile_dir).with_context(|| {
         format!(
             "could not create Claude profile directory {}",
@@ -371,7 +330,30 @@ fn prepare_login_profile(home: &Path, profile: &str) -> Result<PathBuf> {
     if profile != "main" && (created || crate::accounts::Provider::Claude.base_dir(home).is_dir()) {
         link_or_seed_new_profile(home, &profile_dir)?;
     }
-    Ok(profile_dir)
+    Ok((profile_dir, pending))
+}
+
+fn login_profile(home: &Path, profile: &str, args: &[OsString]) -> Result<String> {
+    crate::account_lifecycle::sweep_stale_logins(home);
+    let (profile_dir, pending) = prepare_login_profile(home, profile)?;
+    let login_args = [OsString::from("auth"), OsString::from("login")]
+        .into_iter()
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut command = build_claude_command(profile, &profile_dir, &login_args);
+    let status = match &pending {
+        Some(login) => login.run(&mut command),
+        None => command.status().map_err(Into::into),
+    }
+    .context("failed to run `claude auth login`")?;
+    anyhow::ensure!(
+        status.success(),
+        "Claude login cancelled or failed; account not added"
+    );
+    match pending {
+        Some(login) => login.finish(profile),
+        None => Ok(profile.to_owned()),
+    }
 }
 
 /// Shared configuration surface symlinked into a freshly created profile.
@@ -509,7 +491,14 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
 
     let profile = match args.profile() {
         // An explicitly named account is the no-prompt fast path.
-        Some(profile) => profile.to_string(),
+        Some(profile) => {
+            crate::account_registry::resolve_existing(
+                crate::accounts::Provider::Claude,
+                &home,
+                profile,
+            )?
+            .name
+        }
         None => {
             let active_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
             let profiles = scan_profiles(&home, active_dir.as_deref()).with_context(|| {
@@ -521,14 +510,23 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
                 io::stdin().is_terminal(),
                 io::stdout().is_terminal(),
             ) {
-                let profiles = with_usage(profiles);
+                let profiles = with_usage(&home, profiles);
                 prompt_for_profile(&home, &profiles)?
             } else {
                 // Non-interactive, or only one account exists: leave the
                 // ambient environment exactly as the caller set it, but say
                 // which account that is (cas-e1f4).
                 let ambient = active_dir.clone().unwrap_or_else(|| home.join(".claude"));
-                eprintln!("Claude account (ambient): {}", account_line(&home, &ambient));
+                eprintln!(
+                    "Claude account (ambient): {}",
+                    account_line(&home, &ambient)
+                );
+                crate::account_links::prelaunch(
+                    crate::accounts::Provider::Claude,
+                    &home,
+                    &ambient,
+                    io::stdin().is_terminal() && io::stderr().is_terminal(),
+                );
                 return Ok(());
             }
         }
@@ -536,8 +534,20 @@ pub fn apply_profile_env(args: &ClaudeArgs) -> Result<()> {
 
     let profile_dir = resolve_profile_dir(&home, &profile);
     warn_about_profile_state(&profile, &profile_dir);
-    eprintln!("Using Claude account config: {}", account_line(&home, &profile_dir));
+    eprintln!(
+        "Using Claude account config: {}",
+        account_line(&home, &profile_dir)
+    );
 
+    // cas-05cee: a session on a folder without its shared links has no
+    // skills, agents, hooks or settings. Link empty slots before launch.
+    // The repair never moves the folder; launch what it re-read.
+    let profile_dir = crate::account_links::prelaunch(
+        crate::accounts::Provider::Claude,
+        &home,
+        &profile_dir,
+        io::stdin().is_terminal() && io::stderr().is_terminal(),
+    );
     set_profile_env(&profile, &profile_dir);
     // `execute_bare` runs later in the same process; record the choice so the
     // operator is asked once, not once per launch path.
@@ -578,7 +588,7 @@ pub fn execute(args: &ClaudeArgs, cli: &Cli, cas_root: Option<&Path>) -> Result<
 }
 
 fn factory_profile<'a>(explicit: Option<&'a str>, picked: Option<&'a str>) -> Option<&'a str> {
-    explicit.or(picked)
+    picked.or(explicit)
 }
 
 /// Build the factory handoff after account selection. Both an explicitly named
@@ -624,10 +634,10 @@ fn execute_bare(args: &ClaudeArgs) -> Result<()> {
     // the explicit and the picked case. Only the silent fallback below — no
     // explicit profile and no prompt (non-TTY, or a single account) — still
     // needs its own announcement, which is what it printed before this change.
-    let profile = args
-        .profile()
-        .map(str::to_string)
-        .or_else(|| SELECTED_PROFILE.get().cloned());
+    let profile = SELECTED_PROFILE
+        .get()
+        .cloned()
+        .or_else(|| args.profile().map(str::to_string));
     let Some(profile) = profile else {
         eprintln!(
             "No Claude account override applied; preserving the current environment's account selectors."
@@ -647,14 +657,8 @@ fn execute_command(command: &ClaudeCommand) -> Result<()> {
         ClaudeCommand::Login { profile, args } => {
             let home =
                 dirs::home_dir().context("cannot determine home directory for Claude profiles")?;
-            let profile_dir = prepare_login_profile(&home, profile)?;
-
-            let login_args = std::iter::once(OsString::from("auth"))
-                .chain(std::iter::once(OsString::from("login")))
-                .chain(args.iter().cloned())
-                .collect::<Vec<_>>();
-            let mut command = build_claude_command(profile, &profile_dir, &login_args);
-            exec_claude(&mut command)
+            login_profile(&home, profile, args)?;
+            Ok(())
         }
     }
 }
@@ -679,6 +683,7 @@ fn exec_claude(_command: &mut Command) -> Result<()> {
 mod tests {
     use super::*;
     use std::ffi::OsStr;
+    use std::time::Instant;
 
     #[test]
     fn resolves_main_and_named_profiles_under_home() {
@@ -1030,7 +1035,9 @@ mod tests {
         write(&home.join(".claude/skills/s/SKILL.md"), "shared skill");
         write(&home.join(".claude-old@x.com/commands/finish.md"), "MINE");
 
-        let fresh = prepare_login_profile(&home, "fresh@x.com").unwrap();
+        let (fresh, pending) = prepare_login_profile(&home, "fresh@x.com").unwrap();
+        assert!(pending.is_some());
+        assert!(!home.join(".claude-fresh@x.com").exists());
         assert_eq!(
             std::fs::read_link(fresh.join("skills")).unwrap(),
             home.join(".claude/skills")
@@ -1044,7 +1051,8 @@ mod tests {
                 .content
         );
 
-        let old = prepare_login_profile(&home, "old@x.com").unwrap();
+        let (old, pending_old) = prepare_login_profile(&home, "old@x.com").unwrap();
+        assert!(pending_old.is_none());
         assert_eq!(
             std::fs::read_to_string(old.join("commands/finish.md")).unwrap(),
             "MINE"

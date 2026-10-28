@@ -1187,6 +1187,10 @@ if [[ "$1" == run && "${2:-}" == build ]]; then
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  [[ "$*" != *--package* ]] || {
+    printf 'browser install must use the locked local Playwright CLI\n' >&2
+    exit 1
+  }
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then
@@ -1214,7 +1218,7 @@ output="$(
 )"
 if grep -qF 'PASS hub-web-visual-qa' <<<"$output" && \
    grep -qF 'ci --no-audit --no-fund' "$tmp/npm.log" && \
-   grep -qF 'exec --yes --package=playwright -- node scripts/visual-qa.mjs' "$tmp/npm.log" && \
+   grep -qF 'exec -- node scripts/visual-qa.mjs' "$tmp/npm.log" && \
    [[ -f "$tmp/npm-ci.marker" ]]; then
     ok 'hub-web-visual-qa installs dependencies before invoking the runner'
 else
@@ -1249,6 +1253,10 @@ if [[ "$1" == run && "${2:-}" == build ]]; then
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'playwright install chromium'* ]]; then
+  [[ "$*" != *--package* ]] || {
+    printf 'browser install must use the locked local Playwright CLI\n' >&2
+    exit 1
+  }
   exit 0
 fi
 if [[ "$1" == exec && "$*" == *'node scripts/visual-qa.mjs'* ]]; then

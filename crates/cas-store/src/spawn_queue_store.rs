@@ -4,7 +4,7 @@
 //! Factory TUI polls this queue and processes the requests.
 
 use chrono::{DateTime, TimeZone, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -247,6 +247,16 @@ CREATE TABLE IF NOT EXISTS spawn_queue (
 CREATE INDEX IF NOT EXISTS idx_spawn_queue_pending ON spawn_queue(action) WHERE processed_at IS NULL;
 "#;
 
+/// Durable limit decisions outlive spawn queue cleanup. A refusal is a decision too.
+pub const USAGE_LIMIT_EPISODE_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS usage_limit_episodes (
+    episode TEXT PRIMARY KEY,
+    detail TEXT NOT NULL,
+    request_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
 /// Trait for spawn queue operations
 pub trait SpawnQueueStore: Send + Sync {
     /// Initialize the store (create tables)
@@ -357,6 +367,19 @@ pub trait SpawnQueueStore: Send + Sync {
         spec_json: Option<&str>,
         factory_session: Option<&str>,
     ) -> Result<i64>;
+
+    /// Atomically remember an episode and optionally enqueue its replacement.
+    /// Replays return the original decision and cannot enqueue a second recycle.
+    fn record_limit_episode(
+        &self,
+        episode: &str,
+        worker: &str,
+        session: &str,
+        spec_json: Option<&str>,
+        detail: &str,
+    ) -> Result<(Option<i64>, String)>;
+
+    fn limit_episode(&self, episode: &str) -> Result<Option<(Option<i64>, String)>>;
 
     /// Poll for pending requests owned by this session, plus legacy unscoped rows.
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>>;
@@ -523,6 +546,7 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
     fn init(&self) -> Result<()> {
         let conn = crate::shared_db::lock_connection(&self.conn)?;
         conn.execute_batch(SPAWN_QUEUE_SCHEMA)?;
+        conn.execute_batch(USAGE_LIMIT_EPISODE_SCHEMA)?;
         // Note: force/isolate columns are now in SPAWN_QUEUE_SCHEMA inline.
         // Old DBs are upgraded via migration m193_spawn_queue_force_isolate.
         Ok(())
@@ -678,6 +702,60 @@ impl SpawnQueueStore for SqliteSpawnQueueStore {
             None,
             None,
         )
+    }
+
+    fn record_limit_episode(
+        &self,
+        episode: &str,
+        worker: &str,
+        session: &str,
+        spec_json: Option<&str>,
+        detail: &str,
+    ) -> Result<(Option<i64>, String)> {
+        crate::shared_db::with_write_retry(|| {
+            let mut conn = crate::shared_db::lock_connection(&self.conn)?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let existing = tx
+                .query_row(
+                    "SELECT request_id, detail FROM usage_limit_episodes WHERE episode=?",
+                    [episode],
+                    |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                tx.commit()?;
+                return Ok(existing);
+            }
+            let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM spawn_queue WHERE processed_at IS NULL AND (factory_session=? OR factory_session IS NULL) AND instr(',' || coalesce(worker_names,'') || ',', ',' || ? || ',') > 0)", params![session,worker], |r| r.get(0))?;
+            let detail = if spec_json.is_some() && busy {
+                format!("blocked switch for {worker}: lifecycle request already queued. {detail}")
+            } else {
+                detail.to_owned()
+            };
+            let request_id = if let Some(spec) = spec_json.filter(|_| !busy) {
+                tx.execute("INSERT INTO spawn_queue(action,worker_names,isolate,worker_spec,factory_session,spawn_state,spawn_state_at) VALUES ('recycle',?,1,?,?,'queued',?)", params![worker,spec,session,Utc::now().to_rfc3339()])?;
+                Some(tx.last_insert_rowid())
+            } else {
+                None
+            };
+            tx.execute(
+                "INSERT INTO usage_limit_episodes(episode,detail,request_id) VALUES (?,?,?)",
+                params![episode, detail, request_id],
+            )?;
+            tx.commit()?;
+            Ok((request_id, detail))
+        })
+    }
+
+    fn limit_episode(&self, episode: &str) -> Result<Option<(Option<i64>, String)>> {
+        let conn = crate::shared_db::lock_connection(&self.conn)?;
+        Ok(conn
+            .query_row(
+                "SELECT request_id,detail FROM usage_limit_episodes WHERE episode=?",
+                [episode],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     fn poll(&self, factory_session: &str, limit: usize) -> Result<Vec<SpawnRequest>> {
@@ -914,6 +992,70 @@ mod tests {
         let store = SqliteSpawnQueueStore::open(temp.path()).unwrap();
         store.init().unwrap();
         (temp, store)
+    }
+
+    #[test]
+    fn limit_episode_is_atomic_and_survives_reopen_and_queue_cleanup() {
+        let (dir, store) = create_test_store();
+        let first = store
+            .record_limit_episode(
+                "agent:timestamp",
+                "worker",
+                "session-a",
+                Some("{}"),
+                "old -> next",
+            )
+            .unwrap();
+        assert!(first.0.is_some());
+        assert_eq!(store.peek(10).unwrap().len(), 1);
+        drop(store);
+        let store = SqliteSpawnQueueStore::open(dir.path()).unwrap();
+        store.init().unwrap();
+        assert_eq!(
+            store
+                .record_limit_episode(
+                    "agent:timestamp",
+                    "worker",
+                    "session-a",
+                    Some("{}"),
+                    "changed"
+                )
+                .unwrap(),
+            first
+        );
+        assert_eq!(store.peek(10).unwrap().len(), 1);
+        store
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM spawn_queue", [])
+            .unwrap();
+        assert_eq!(store.limit_episode("agent:timestamp").unwrap(), Some(first));
+        let blocked = store
+            .record_limit_episode(
+                "agent:later",
+                "worker",
+                "session-a",
+                None,
+                "no eligible account until tomorrow",
+            )
+            .unwrap();
+        assert_eq!(blocked.0, None);
+        assert_eq!(
+            store
+                .record_limit_episode("agent:later", "worker", "session-a", Some("{}"), "retry")
+                .unwrap(),
+            blocked
+        );
+        assert!(store.peek(10).unwrap().is_empty());
+        // A failed queue insert must also roll back the episode decision.
+        store.conn.lock().unwrap().execute_batch("CREATE TRIGGER fail_recycle BEFORE INSERT ON spawn_queue BEGIN SELECT RAISE(ABORT, 'fixture'); END").unwrap();
+        assert!(
+            store
+                .record_limit_episode("agent:error", "worker", "session-a", Some("{}"), "switch")
+                .is_err()
+        );
+        assert!(store.limit_episode("agent:error").unwrap().is_none());
     }
 
     #[test]

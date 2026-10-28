@@ -18,7 +18,6 @@ use cas_pty::{Harness, HarnessConformanceReceipt};
 use fs2::FileExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::bounded_process::{BoundedCommandError, Deadline, run_command};
 
@@ -367,16 +366,7 @@ fn ssh_login_keychain_unavailable(
             }
         }
     }
-    // Match Claude's secure-storage selector: hash the NFC selector text, not
-    // a canonicalized path. An unscoped process uses the legacy service.
-    let service = account_dir
-        .filter(|dir| !dir.trim().is_empty())
-        .map(|dir| {
-            let normalized: String = dir.nfc().collect();
-            let hash = format!("{:x}", Sha256::digest(normalized.as_bytes()));
-            format!("Claude Code-credentials-{}", &hash[..8])
-        })
-        .unwrap_or_else(|| "Claude Code-credentials".to_string());
+    let service = crate::claude_credentials::keychain_service(account_dir);
     let mut metadata = Command::new("security");
     metadata.args(["find-generic-password", "-s", &service]);
     matches!(run(&mut metadata, deadline, AUTH_PROBE_TIMEOUT), Ok(output) if output.status.code() == Some(36))
@@ -810,7 +800,10 @@ mod tests {
         env.set("CLAUDE_TEST_STATUS", r#"{"loggedIn":true}"#);
         let after_login = fixture_claude_probe(&env, None, 301_010, false);
         let login_advice_matches = after_login == refreshed
-            && after_login.remediation.as_deref().is_some_and(|advice| advice.contains("one minute"));
+            && after_login
+                .remediation
+                .as_deref()
+                .is_some_and(|advice| advice.contains("one minute"));
         let logged_in = fixture_claude_probe(&env, None, 360_010, false);
         assert_eq!(logged_in.availability, CapabilityAvailability::Available);
         env.set("CLAUDE_TEST_STATUS", "unrecognized failure");
@@ -829,7 +822,9 @@ mod tests {
             .map(|entry| entry.unwrap().path())
             .find(|path| {
                 serde_json::from_slice::<CapabilityEvidence>(&std::fs::read(path).unwrap())
-                    .unwrap().observed_at_ms == failed.observed_at_ms
+                    .unwrap()
+                    .observed_at_ms
+                    == failed.observed_at_ms
             })
             .unwrap();
         let mut forged = failed.clone();

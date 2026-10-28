@@ -216,6 +216,14 @@ notes name the unread message id and summary; the next eligible turn or tool
 boundary retries bodies that did not fit. `message_status` reports
 `recipient_receipt` separately for transport handoff and rendered context.
 
+Delivery status and watchdog notices share the recorded `delivery_attempts`
+and `next_attempt_at`; a completed handoff has no pending transport retry.
+Status uses the watchdog's capped escalation threshold and cites the persisted
+`channel_stalled_notice_id` when further notices are paused. Elapsed time alone
+does not prove that an alert was sent. Missing message-specific receipt remains
+unconfirmed, even when other worker activity is visible; it does not establish
+that no turn started or justify recovery on its own.
+
 Abandoned queue messages report `undelivered` in the `message_status` header
 and JSON `legacy_status`, even though their queue rows are processed. A sender
 notice preserves the wake-gate refusal when one was recorded. Authenticated
@@ -1183,6 +1191,22 @@ the worker still starts. A name also listed in `supervisor_only_env` stays
 denied, with the conflict named in the same warning. An operation needing an
 unavailable credential then fails visibly; one missing token does not stop the
 fleet. Supervisors keep their own credentials and configuration.
+
+With no explicit `config_dir` and no captured requester account, Claude/Codex
+workers use the shared recommendation. The receipt names the account and reason;
+an explicit directory or requester account wins. `cas claude` / `cas codex`
+and Commander's New-session sheet highlight the recommendation but still ask.
+
+`cas config set --global accounts.selection soonest-reset` (default) chooses the earliest
+weekly reset group, within 24 hours of the earliest eligible reset, then the
+most weekly and 5h headroom. `most-headroom` ignores reset proximity. Set
+`accounts.threshold` (default `90`, range `1..100`) to exclude accounts at or
+above that usage in either window. Disabled, logged-out/stale and unknown or
+stale usage accounts are excluded. No eligible account preserves the existing
+default/inherited behavior, with each exclusion explained. Project selection/threshold
+override global policy; Commander uses global policy. `accounts.disabled` retains
+the absolute folder list managed by `cas accounts disable` / `enable` in
+`global_cas_dir()/config.toml` (XDG config on Linux), regardless of project policy.
 
 ### Operator credential stores are masked from workers
 

@@ -1734,6 +1734,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         fmt.info(&format!("Factory lane route: {notice}"))?;
     }
 
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(&mut resolved_worker_specs, &home)?;
+    }
+
     // cas-7199 / cas-a487: any resolved worker spec that landed on Codex
     // (built-in default since cas-fbac, project config, CLI flag, or a
     // per-worker --worker-spec/[[factory.workers]] override — this single
@@ -1803,6 +1807,10 @@ pub fn execute(args: &FactoryArgs, cli: &Cli, cas_root: Option<&std::path::Path>
         normalize_supervisor_spec(&mut spec, &sources)?;
         (spec, fallback_model)
     };
+
+    if let Some(home) = dirs::home_dir() {
+        crate::account_registry::resolve_worker_accounts(std::slice::from_mut(&mut resolved_supervisor_spec), &home)?;
+    }
 
     // cas-7199 / cas-a487: same Codex-availability fallback as
     // resolved_worker_specs above, applied to the supervisor slot too — a

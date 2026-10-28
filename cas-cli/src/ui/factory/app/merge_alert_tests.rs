@@ -373,6 +373,15 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         let director = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(
             &f.app.cas_dir, session, prompt,
         ).unwrap();
+        let row = queue.queued_prompt(director).unwrap().unwrap();
+        use crate::ui::factory::daemon::runtime::queue_and_events::{read_row_facts, WakeSender, SupervisorWakeClass};
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(Some(_)))), "unparked green delivery remains actionable through the queue");
+        assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
+            &WakeSender::Daemon, &prompt.target, &row.source, &row.prompt), Some(SupervisorWakeClass::MergeRequest));
+        assert_eq!(crate::ui::factory::daemon::FactoryDaemon::supervisor_wake_class(
+            &WakeSender::Unattributed, &prompt.target, &row.source, &row.prompt), None,
+            "the director envelope cannot grant an unauthenticated wake");
         let head = &prompt.merge_alert.as_ref().unwrap().factory_tip;
         task.status = TaskStatus::AwaitingMerge;
         task.deliverables.factory_branch_anchor = Some(head.clone());
@@ -405,12 +414,22 @@ fn cas_20d3_green_pushed_tip_signals_once_when_park_was_refused() {
         let (_, unpushed, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert!(unpushed.iter().all(|prompt| prompt.merge_alert.is_none()));
         assert!(!f.app.refresh_prompt_for_delivery(prompt));
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &row).director_ready,
+            Some(Ok(None))), "a newer local tip withdraws queued readiness for the old tip");
         git(f.repo.path(), &["push", "-q", "origin", &branch]);
         let (_, mut newer, _) = f.app.revalidate_and_prompt_for_delivery(&events);
         assert_eq!(newer.len(), 1);
+        let next = crate::ui::factory::daemon::runtime::delivery::enqueue_merge_ready_prompt(
+            &f.app.cas_dir, session, &newer[0],
+        ).unwrap();
+        assert!(queue.peek_for_targets(&[&prompt.target], Some(session), 10).unwrap().iter().any(|row| row.id == next),
+            "a different pushed tip gets its own action");
+        let next_row = queue.queued_prompt(next).unwrap().unwrap();
         assert!(f.app.revalidate_and_prompt_for_delivery(&events).1.is_empty());
         git(f.repo.path(), &["push", "-q", "origin", "HEAD:epic/test"]);
         assert!(!f.app.refresh_prompt_for_delivery(&mut newer[0]));
+        assert!(matches!(read_row_facts(&f.app.cas_dir, queue.as_ref(), Some(store.as_ref()), &[], &next_row).director_ready,
+            Some(Ok(None))), "integrated delivery must be withdrawn before queue transport");
     }
 }
 

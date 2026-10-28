@@ -445,7 +445,32 @@ pub(crate) fn enqueue_merge_ready_prompt(
     factory_session: &str,
     prompt: &crate::ui::factory::director::Prompt,
 ) -> anyhow::Result<i64> {
-    enqueue_director_prompt(cas_dir, factory_session, &prompt.target, &prompt.text)
+    let evidence = prompt.merge_alert.as_ref().ok_or_else(|| anyhow::anyhow!("readiness needs delivery evidence"))?;
+    let text = format!("{}\n\n<cas-director-ready>{}</cas-director-ready>",
+        prompt.text, serde_json::to_string(evidence)?);
+    let queue = crate::store::open_prompt_queue_store(cas_dir)?;
+    let id = queue.enqueue_urgent_with_outcome(
+        super::teams::DIRECTOR_AGENT_NAME, &prompt.target, &text, Some(factory_session),
+        Some("Ready to merge"), None, false, Some(&cas_store::QueueOrigin::Daemon),
+    )?.id();
+    wake_daemon_after_enqueue(cas_dir);
+    Ok(id)
+}
+
+/// Restore the immutable director identity for the queue's final live check.
+/// Callers must require daemon provenance before granting it wake authority.
+pub(crate) fn parse_merge_ready_prompt(
+    target: &str, text: &str,
+) -> Option<crate::ui::factory::director::Prompt> {
+    let (body, json) = text.rsplit_once("\n\n<cas-director-ready>")?;
+    let evidence: crate::ui::factory::director::MergeAlertEvidence =
+        serde_json::from_str(json.strip_suffix("</cas-director-ready>")?).ok()?;
+    Some(crate::ui::factory::director::Prompt {
+        retract_task: Some(evidence.task_id.clone()), merge_alert: Some(evidence),
+        target: target.into(), text: body.into(), stall_nudge_task: None,
+        retract_worker: None, retract_epic: None, drop_if_worker_assigned: None,
+        durable_retry: true,
+    })
 }
 
 /// Stall nudges always enter the durable lane, even for a ready pane.

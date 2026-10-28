@@ -2649,6 +2649,9 @@ pub(crate) struct StallNudgeRead {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RowFacts {
     pub(crate) answered_blocker: bool,
+    /// Daemon green readiness, refreshed off the loop. Some(None) withdraws
+    /// a signal whose original delivery no longer survives the live check.
+    pub(crate) director_ready: Option<Result<Option<crate::ui::factory::director::Prompt>, String>>,
     pub(crate) message_batch: Vec<cas_store::QueuedPrompt>,
     pub(crate) message_senders: Vec<String>,
     /// `wake_gate_state`: consecutive declines and the last wake attempt.
@@ -2713,6 +2716,19 @@ pub(crate) fn read_row_facts(
         },
         ..RowFacts::default()
     };
+    if row.origin == Some(cas_store::QueueOrigin::Daemon)
+        && let Some(mut prompt) = super::delivery::parse_merge_ready_prompt(&row.target, &row.prompt)
+    {
+        let repo_root = cas_dir.parent().unwrap_or(cas_dir);
+        facts.director_ready = Some(crate::ui::factory::director::DirectorData::load_with_stores_for_project(
+            cas_dir, None, false, None, None,
+        ).map(|data| {
+            let current = crate::ui::factory::director::refresh_ci_merge_signal(
+                &mut prompt, &data, cas_dir, repo_root,
+            ) && !prompt.text.starts_with("Superseded delivery ");
+            current.then_some(prompt)
+        }).map_err(|error| error.to_string()));
+    }
     if let Some(envelope) = crate::prompt_revalidation::parse_lifecycle_envelope(&row.prompt)
         && let Some(tasks) = tasks
     {
@@ -6667,6 +6683,9 @@ impl FactoryDaemon {
             // supervisor action. Unchanged in substance — but the authority is
             // now that CAS wrote the row, not that the row says so.
             WakeSender::Daemon => {
+                if super::delivery::parse_merge_ready_prompt(supervisor_name, prompt).is_some() {
+                    return Some(SupervisorWakeClass::MergeRequest);
+                }
                 // cas-8725: the verification-dispatch handoff is composed and
                 // enqueued by the close path itself, so it carries its own
                 // envelope and its own source (`verification-dispatch:<id>`)
@@ -8800,6 +8819,27 @@ impl FactoryDaemon {
             // but replace the envelope's enqueue-time target tip with the
             // ref resolved at this pop/injection point.
             let mut prompt_with_instructions = queued.prompt.clone();
+
+            if let Some(ready) = facts.director_ready.as_ref() {
+                if let Err(error) = ready {
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::ParkBusy {
+                            detail: format!("director readiness read unavailable: {error}"),
+                            recheck_at: chrono::Utc::now() + chrono::Duration::minutes(1),
+                        });
+                    continue;
+                }
+                let Ok(Some(ready)) = ready else {
+                    self.queue_jobs.stamp(self.app.cas_dir(), queued.id, &queued.target,
+                        super::prompt_queue_jobs::QueueStamp::Superseded {
+                            detail: "director readiness withdrawn by live delivery check".into(),
+                        });
+                    self.forget_row_delivery_state(queued.id);
+                    continue;
+                };
+                merge_request_task = ready.retract_task.clone();
+                prompt_with_instructions = ready.text.clone();
+            }
 
             if let Some(envelope) =
                 crate::prompt_revalidation::parse_merge_request_envelope(&queued.prompt)

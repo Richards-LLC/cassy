@@ -5155,7 +5155,13 @@ fn supervisor_delivery_kind(
     }
     let mut boundary = None;
     if daemon {
-        if let Some(event) = cas_types::parse_lifecycle_envelope(prompt)
+        if let Some((_, json)) = prompt.rsplit_once("\n\n<cas-director-ready>")
+            && let Some(json) = json.strip_suffix("</cas-director-ready>")
+            && let Ok(event) = serde_json::from_str::<serde_json::Value>(json)
+            && let (Some(task), Some(head)) = (event["task_id"].as_str(), event["factory_tip"].as_str())
+        {
+            boundary = Some((task.to_string(), head.to_string()));
+        } else if let Some(event) = cas_types::parse_lifecycle_envelope(prompt)
             && event.transition.as_deref() == Some("task_awaiting_merge")
             && let Some(head) = event.branch_tip
         {
@@ -20714,6 +20720,12 @@ mod cas_bf890_notice_digest_tests {
             EnqueueIdempotentResult::Created(id) => id,
             _ => unreachable!(),
         };
+        let director_body = format!(
+            "READY TO MERGE\n\n<cas-director-ready>{{\"task_id\":\"{}\",\"factory_tip\":\"{}\"}}</cas-director-ready>",
+            task.id, "a".repeat(40),
+        );
+        let director_id = store.enqueue_urgent_with_outcome("director", "lead-sup", &director_body,
+            Some(SESSION), None, None, false, Some(&QueueOrigin::Daemon)).unwrap().id();
         let ready = format!(
             "READY TO MERGE\n\n<cas-worker-action kind=\"ready\" worker=\"w\" task_id=\"{}\"></cas-worker-action>",
             task.id
@@ -20791,7 +20803,7 @@ mod cas_bf890_notice_digest_tests {
         selected_ids.sort_unstable();
         assert_eq!(selected_ids, vec![first, fresh, blocker, verdict]);
         let digested = store.surface_for_recipient_within_budget("lead-sup", Some(SESSION), HookDrain::NoticeDigest, 50, 0).unwrap().rows;
-        assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![ready_id, duplicate]);
+        assert_eq!(digested.iter().map(|row| row.id).collect::<Vec<_>>(), vec![director_id, ready_id, duplicate]);
         let evidence = store
             .poll_named_for_recipient("lead-sup", Some(SESSION), &[duplicate])
             .unwrap();

@@ -100,7 +100,7 @@ async function prepare() {
   await writeFile(join(bin, "claude"), `#!/usr/bin/python3\nimport sys,time\nif '--version' in sys.argv: print('2.1.47');sys.exit(0)\nif '--help' in sys.argv: print('--dangerously-skip-permissions --model --agent --mcp-config');sys.exit(0)\nprint('Disposable inbox test supervisor\\n> ',flush=True)\nwhile True:\n sys.stdin.readline()\n time.sleep(.1)\n`, { mode: 0o700 });
   await run("git", ["init", "-q", project], { env });
   await cas(["init", "--yes", "--no-integrations"]);
-  await writeFile(join(project, ".cas/config.toml"), `[factory]\nai_enrichment = false\n[project]\ncanonical_id = "${profile.projectId}"\n`);
+  await writeFile(join(project, ".cas/config.toml"), `[factory.ai_enrichment]\nenabled = false\n[project]\ncanonical_id = "${profile.projectId}"\n`);
   await writeFile(env.CAS_USER_CLOUD_JSON, JSON.stringify({ endpoint: profile.cloudOrigin, token: profile.token, email: profile.email }), { mode: 0o600 });
   // Pinning precedes discovery registration; this is only the private host registry.
   await cas(["init", "--yes", "--no-integrations"]);

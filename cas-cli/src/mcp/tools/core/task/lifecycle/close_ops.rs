@@ -33479,6 +33479,7 @@ esac
         assert!(matches!(&dropped, MergeStateGateOutcome::Reject(reason)
             if reason.contains("DELIVERY CONTENT DROPPED")), "{dropped:?}");
         // Matching bytes after lost ownership are still not delivery.
+        std::fs::create_dir_all(p.join("migrations")).unwrap();
         std::fs::write(p.join(new), "CREATE TABLE watched_creators (id INT);\n").unwrap();
         git(p, &["add", new]);
         git(p, &["commit", "-qm", "unrelated recreation of migration"]);

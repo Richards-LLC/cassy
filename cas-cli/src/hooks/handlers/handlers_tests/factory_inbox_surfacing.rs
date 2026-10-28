@@ -1879,7 +1879,7 @@ fn cas_6ccb_a_reply_to_the_sender_ends_the_repeat() {
 }
 
 /// cas-6ccb review: a polled row that this turn's pointer also names gets one
-/// note. Shown in full as the repeat, it is not also "[already shown]".
+/// note. Its recovery reference is not also labelled "[already shown]".
 #[test]
 fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
     let mut env = TestEnvGuard::new();
@@ -1899,7 +1899,7 @@ fn cas_6ccb_a_repeat_named_by_the_turn_pointer_gets_one_note() {
 
     std::thread::sleep(std::time::Duration::from_millis(20));
     let woken = worker.take_turn(&wake);
-    assert_eq!(woken.matches(body).count(), 1, "{woken}");
+    assert_eq!(woken.matches(body).count(), 0, "{woken}");
     assert!(woken.contains(&format!("[not acknowledged] Message #{id}")), "{woken}");
     assert!(!woken.contains(&format!("[already shown] Message #{id}")), "{woken}");
 }

@@ -6800,7 +6800,8 @@ mod cas_89e1_post_merge_message_type_tests {
                 )
                 .and_then(|out| out.text)
                 .unwrap();
-            assert!(repeated.contains("Another request")); // pin: unacknowledged batch-body recovery stays available.
+            assert!(!repeated.contains("Another request")); // pin: an ordinary polled body is recovered by reference.
+            assert!(repeated.contains(&format!("Message {untouched}:")), "{repeated}");
             assert!(!repeated.contains(&long));
         }
     }

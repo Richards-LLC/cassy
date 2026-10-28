@@ -13971,7 +13971,7 @@ async fn cas_8725_a_workers_close_hands_its_verification_dispatch_to_the_supervi
     );
 
     eprintln!("DISPATCH_REPLAY reason_bytes={} queued_bytes={}", reason.len(), handoff.prompt.len());
-    assert!(!handoff.prompt.contains(&reason), "dispatch must reference its durable evidence");
+    assert!(!handoff.prompt.contains(&reason));
     let artifacts = cas_store::SqliteArtifactStore::open(&env.cas_root).unwrap()
         .list_for_task(&task.id).unwrap();
     let manifest = artifacts.iter().find(|artifact| artifact.name.starts_with("relay-evidence-"))

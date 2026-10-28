@@ -100,6 +100,7 @@ impl CasCore {
         // from ancestry, content, QA, or any later close gate.
         if let Ok(queue) = crate::store::open_prompt_queue_store(&self.cas_root)
             && let Err(error) = super::super::supervisor_push::emit_verification_dispatch_handoff(
+                &self.cas_root,
                 queue.as_ref(),
                 &dispatch.id,
                 &task.id,

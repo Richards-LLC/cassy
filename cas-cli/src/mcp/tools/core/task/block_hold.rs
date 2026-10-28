@@ -320,7 +320,11 @@ mod tests {
         ] {
             let mut task = store.get("cas-9efb-test").unwrap();
             task.status = TaskStatus::Blocked;
-            task.notes = format!("[2026-10-26 21:30] 🚫 BLOCKER {note}");
+            // cas-7fc3: notes count from the dispatch's request minute on.
+            task.notes = format!(
+                "[{}] 🚫 BLOCKER {note}",
+                dispatch.requested_at.format("%Y-%m-%d %H:%M")
+            );
             store.update(&task).unwrap();
             assert_eq!(
                 super::owned_verification_wait(&cas_dir, "cas-9efb-test", "lead-id").is_some(), quiet,

@@ -144,8 +144,8 @@ test("HUB-J4 open reports and recover their notices without moving the reader", 
     await page.context().route("https://store.test/**", (route) => route.fulfill({ contentType: "text/html", body: "<h1>Release report card</h1>" }));
     const report = log.locator('a[data-artifact-id="art-report"]');
     await report.scrollIntoViewIfNeeded();
-    // Inline PDF previews also resolve their signed URLs. Wait for this
-    // fixture's deliberately non-PDF store response before counting Open.
+    // Inline PDF previews request a session ticket, then proxy bytes. Wait
+    // for this fixture's unavailable preview before counting the separate Open URL.
     await expect(log.locator('.rich-attachment:has(a[data-artifact-id="art-report"]) .rich-media')).toContainText("Preview unavailable");
     const reportRequests = hub.artifactRequests.filter((id) => id === "art-report").length;
     const opened = page.waitForEvent("popup");

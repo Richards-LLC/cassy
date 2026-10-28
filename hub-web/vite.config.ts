@@ -18,6 +18,21 @@ import { configDefaults, defineConfig } from "vitest/config";
 export default defineConfig({
   define: { __HUB_BUILD__: JSON.stringify(hubBuild) },
   base: "/commander/",
+  plugins: [{
+    name: "rich-content-licenses",
+    apply: "build",
+    renderChunk: {
+      order: "post",
+      handler(code, chunk) {
+        if (chunk.name !== "rich-diagram") return null;
+        // Append after minification, before hashing: legal text stays in this
+        // lazy chunk and adds no legal-comment bytes to first paint.
+        const notices = ["pele-MIT.txt", "DOMPurify-LICENSE.txt"].map((name) => readFileSync(join(root, "licenses", name), "utf8").trim()).join("\n\n");
+        const header = readFileSync(join(root, "node_modules/dompurify/dist/purify.es.mjs"), "utf8").split("\n")[0];
+        return { code: `${code}\n/*! Pele and DOMPurify notices\n${notices}\n*/\n${header}\n`, map: null };
+      },
+    },
+  }],
   // cas-9b7d: keep @hpke/common's Node-only `import("crypto")` fallback out
   // of the bundle; dist must hold exactly the files the hub embeds.
   resolve: { alias: { crypto: fileURLToPath(new URL("./src/shims/node-crypto-unavailable.ts", import.meta.url)) } },

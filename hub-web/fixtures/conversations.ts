@@ -296,7 +296,8 @@ export function renderConversationFixture(app: HTMLElement, state: string): void
     installAttachmentSheet((sheet, file) => {
       const root = inlineAttachment(sheet, file, () => new Promise(() => {}));
       const image = document.createElement('img'); image.src = evidenceImage; image.alt = file.name; image.width = 640; image.height = 360;
-      root.querySelector('.rich-media')!.replaceChildren(image);
+      const viewport = root.querySelector<HTMLElement>('.rich-media')!;
+      viewport.replaceChildren(image); viewport.dataset.previewState = 'ready';
       return root;
     });
     reply(91, null, '# Evidence flows with the work\n\n```mermaid\nflowchart LR\nA[Build] --> B[Inspect]\nB --> C[Ship]\n```\n\n```diff\n--- a/launch.ts\n+++ b/launch.ts\n@@ -1,25 +1,25 @@\n-launch()\n+launchWithEvidence()\n' + Array.from({ length: 24 }, (_, index) => ` context ${index}`).join('\n') + '\n```', 'answer', at(9, 44), [{ artifact_id: 'rich-visual-image', name: 'Evidence screenshot.png', mime: 'image/png', size_bytes: 1024, sha256: '9f'.repeat(32) }]);

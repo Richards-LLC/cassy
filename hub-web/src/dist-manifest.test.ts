@@ -34,4 +34,13 @@ describe("committed dist", () => {
     }
     expect(app).not.toMatch(/import\(\s*["']crypto["']\s*\)/);
   });
+
+  it("ships the Pele permission notice and DOMPurify license comment in the renderer", () => {
+    const name = readdirSync(dist).find((name) => /^chunk-rich-diagram-.*\.js$/.test(name))!;
+    const renderer = readFileSync(new URL(name, dist), "utf8");
+    expect(renderer).toContain(readFileSync(new URL("../licenses/pele-MIT.txt", import.meta.url), "utf8").trim());
+    expect(renderer).toContain(readFileSync(new URL("../licenses/DOMPurify-LICENSE.txt", import.meta.url), "utf8").trim());
+    expect(renderer).toContain("@license DOMPurify");
+    expect(renderer).toContain("Cure53 and other contributors");
+  });
 });

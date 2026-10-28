@@ -27,6 +27,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Fixed
 
+- **Commander evidence previews** — Retry transient attachment previews after
+  reconnect, keep hunk-less diff snippets as readable code, and include full
+  renderer license notices in the lazy bundle.
+
 - **Commander reply replay** — Accept replies whose optional operator label is
   null, persist them before acknowledging delivery, and let previously pending
   replies drain instead of replaying on every attach. History and live replies

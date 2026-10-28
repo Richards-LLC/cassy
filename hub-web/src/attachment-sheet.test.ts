@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { artifactHref, attachmentSize, attachmentTypeMark, installAttachmentSheet, renderAttachmentSheet, setAttachmentNote, clearTransientAttachmentNotes, restateAttachmentNotes } from "./attachment-sheet";
-import { inlineAttachment } from "./rich-attachment";
+import { inlineAttachment, retryAttachmentPreviews } from "./rich-attachment";
 import { ConversationHistory } from "./conversation-history";
 import { ConversationView, registerTurnRenderer } from "./conversation-view";
 import type { ArtifactRef, OperatorReply } from "./types";
@@ -279,4 +279,26 @@ it("renews a preview once on 401 or expiry, and never retries a refusal in a loo
       } finally { root.remove(); }
     }
   } finally { clock.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+it("retries a disconnected preview when its machine reconnects, preserving cached media", async () => {
+  let live = false;
+  const file = { ...brief, artifact_id: "art-reconnected", mime: "image/png" };
+  const resolve = vi.fn(async () => live ? { ok: true as const, view: { artifact_id: file.artifact_id, url: "https://files.example/reconnected" } } : undefined);
+  const root = inlineAttachment(renderAttachmentSheet(document, file), file, resolve, { machineId: "atlas", available: () => live });
+  document.body.append(root);
+  try {
+    await vi.waitFor(() => expect(root.textContent).toContain("Preview unavailable"));
+    root.querySelector(".rich-media p")!.textContent = "Translated fallback";
+    root.remove(); document.body.append(root);
+    retryAttachmentPreviews(document, "studio");
+    await Promise.resolve(); expect(resolve).toHaveBeenCalledTimes(1);
+    live = true; retryAttachmentPreviews(document, "atlas");
+    await vi.waitFor(() => expect(root.querySelector("img")?.getAttribute("src")).toBe("https://files.example/reconnected"));
+    const image = root.querySelector("img");
+    retryAttachmentPreviews(document, "atlas");
+    root.remove(); document.body.append(root);
+    await Promise.resolve();
+    expect(resolve).toHaveBeenCalledTimes(2); expect(root.querySelector("img")).toBe(image);
+  } finally { root.remove(); }
 });

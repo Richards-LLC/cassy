@@ -9,7 +9,8 @@ export async function enhanceCode(pre: HTMLPreElement, language: string): Promis
       pre.replaceWith(figure);
     } else {
       const { unifiedDiff } = await import("./rich-diff");
-      pre.replaceWith(unifiedDiff(pre.ownerDocument, pre.textContent ?? ""));
+      const diff = unifiedDiff(pre.ownerDocument, pre.textContent ?? "");
+      if (diff) pre.replaceWith(diff);
     }
   } catch {
     pre.dataset.richState = "fallback";

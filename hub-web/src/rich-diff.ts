@@ -1,7 +1,7 @@
 /** A small, semantic unified-diff viewer; no syntax highlighter or HTML parser. */
-export function unifiedDiff(document: Document, source: string): HTMLElement {
+export function unifiedDiff(document: Document, source: string): HTMLElement | undefined {
   const lines = source.split("\n");
-  if (!lines.some((line) => /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line))) throw new Error("Not a unified diff");
+  if (!lines.some((line) => /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/.test(line))) return undefined;
   const root = document.createElement("div"); root.className = "rich-diff";
   const pre = document.createElement("pre"); pre.setAttribute("aria-label", "Unified diff");
   const populate = () => {

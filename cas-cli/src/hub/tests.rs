@@ -5298,6 +5298,8 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     for (id, mime, session, size) in [
         ("art-image", "image/png", OPS_SESSION, 6),
         ("art-video", "video/mp4", OPS_SESSION, 6),
+        ("art-svg", "image/SvG+xMl", OPS_SESSION, 6),
+        ("art-stream", "video/mp4", OPS_SESSION, 2 * 1024 * 1024),
         ("art-pdf", "application/pdf", OPS_SESSION, 6),
         ("art-html", "text/html", OPS_SESSION, 6),
         ("art-large", "image/png", OPS_SESSION, cas_types::ARTIFACT_MAX_BYTES + 1),
@@ -5325,6 +5327,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     ).with_auth(f.auth.clone()).with_artifact_cloud_client(
         crate::artifacts::cloud::ArtifactUploadClient::new(&upstream.uri(), "fixture-cloud-token")
     );
+    let tick = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let start = std::time::Instant::now();
+    let media_state = media_state.with_artifact_stream_clock(Arc::new(move || {
+        // First chunk, half a second, one second, then frozen: no wall-clock wait.
+        let tick = tick.fetch_add(1, std::sync::atomic::Ordering::SeqCst).min(2);
+        start + std::time::Duration::from_millis(tick as u64 * 500)
+    }));
     f.app = router(media_state.clone());
     let origin = upstream.uri();
     wiremock::Mock::given(wiremock::matchers::method("GET"))
@@ -5340,6 +5349,9 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         .and(wiremock::matchers::path_regex("^/blob/"))
         .respond_with(|request: &wiremock::Request| {
             assert!(request.headers.get("authorization").is_none(), "cloud bearer must stay at Cloud");
+            if request.url.path().ends_with("cloud-art-stream") {
+                return wiremock::ResponseTemplate::new(200).set_body_bytes(vec![b'v'; 2 * 1024 * 1024]);
+            }
             match request.headers.get("range").and_then(|value| value.to_str().ok()) {
                 Some("bytes=2-4") => wiremock::ResponseTemplate::new(206)
                     .insert_header("Content-Range", "bytes 2-4/6").set_body_bytes(b"cde"),
@@ -5353,6 +5365,8 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     for (session, artifact, expected) in [
         (OPS_SESSION, "art-image", StatusCode::OK),
         (OPS_SESSION, "art-video", StatusCode::OK),
+        (OPS_SESSION, "art-svg", StatusCode::OK),
+        (OPS_SESSION, "art-stream", StatusCode::OK),
         (OPS_SESSION, "art-pdf", StatusCode::OK),
         (OPS_SESSION, "art-html", StatusCode::NOT_FOUND),
         (OPS_SESSION, "art-large", StatusCode::NOT_FOUND),
@@ -5373,6 +5387,28 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         }
         assert!(upstream.received_requests().await.unwrap().is_empty(), "ticket issuance never fetches upstream");
     }
+    // Count actual auth-store reads through the router, across many body chunks.
+    let before_checks = f.auth.active_context_check_count();
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-stream/content?t={}", tickets["art-stream"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(to_bytes(response.into_body(), 2 * 1024 * 1024).await.unwrap().len(), 2 * 1024 * 1024);
+    let checks = f.auth.active_context_check_count() - before_checks;
+    let mut followup_failures = Vec::new();
+    if checks != 4 { followup_failures.push(format!("auth reads: expected two eager and two timed checks, got {checks}")); }
+    let response = f.app.clone().oneshot(Request::get(format!(
+        "/v1/sessions/{OPS_SESSION}/artifacts/art-svg/content?t={}", tickets["art-svg"]))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/SvG+xMl");
+    if !response.headers().get_all("content-security-policy").iter().any(|value| value == "default-src 'none'; sandbox") {
+        followup_failures.push("SVG response lacks restrictive sandbox CSP".to_owned());
+    }
+    assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), &b"abcdef"[..]);
+    assert!(followup_failures.is_empty(), "{}", followup_failures.join("; "));
+    // The new GET rows fetched upstream; ticket issuance above still did not.
+    let initial_fetches = upstream.received_requests().await.unwrap().len();
     // Same paired origin, independently authenticated device, insufficient scope.
     let denied_key = p256::ecdsa::SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
     let denied_scopes = [Scope::MachineRead].into_iter().collect();
@@ -5388,7 +5424,7 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
         .header("dpop", sign_dpop(&denied_key, &denied.credential, "POST", &uri, now, &uuid::Uuid::new_v4().to_string()))
         .body(Body::empty()).unwrap()).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(upstream.received_requests().await.unwrap().is_empty());
+    assert_eq!(upstream.received_requests().await.unwrap().len(), initial_fetches);
     let post_uri = format!("/v1/sessions/{OPS_SESSION}/artifacts/art-image/ticket");
     let now = chrono::Utc::now();
     let context = f.auth.authenticate_dpop(&format!("DPoP {}", f.credential),
@@ -5464,13 +5500,13 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
     std::fs::write(auth_path, saved).unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "auth storage outage is retryable");
     assert_eq!(upstream.received_requests().await.unwrap().len(), before);
-    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-image", now - chrono::Duration::minutes(6)).unwrap().ticket;
+    let expired = f.auth.issue_media_ticket(&context, OPS_SESSION, "art-video", now - chrono::Duration::minutes(6)).unwrap().ticket;
     let valid = tickets["art-image"].clone();
     let mut tampered = valid.clone();
     tampered.replace_range(3..4, if &tampered[3..4] == "A" { "B" } else { "A" });
     for (case, session, artifact, mut ticket) in [
         ("missing", OPS_SESSION, "art-image", String::new()),
-        ("expired", OPS_SESSION, "art-image", expired),
+        ("expired", OPS_SESSION, "art-video", expired),
         ("tampered", OPS_SESSION, "art-image", tampered),
         ("wrong artifact", OPS_SESSION, "art-pdf", valid.clone()),
         ("wrong session", "another-session", "art-image", valid.clone()),
@@ -5497,5 +5533,15 @@ async fn media_tickets_bind_thread_pairing_and_stream_ranges() {
             .body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{case}");
         assert_eq!(upstream.received_requests().await.unwrap().len(), before, "{case} fetched upstream");
+        if case == "expired" {
+            let (status, fresh) = f.call("POST", &format!("/v1/sessions/{OPS_SESSION}/artifacts/art-video/ticket"), None).await;
+            assert_eq!(status, StatusCode::OK);
+            let response = f.app.clone().oneshot(Request::get(format!(
+                "/v1/sessions/{OPS_SESSION}/artifacts/art-video/content?t={}", fresh["ticket"].as_str().unwrap()))
+                .header("range", "bytes=0-0").body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(response.headers()["content-range"], "bytes 0-0/6");
+            assert_eq!(to_bytes(response.into_body(), 64).await.unwrap(), &b"a"[..]);
+        }
     }
 }
